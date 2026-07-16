@@ -3,6 +3,7 @@
 //! These types are the contract between adapters and the core engine. Keep
 //! them minimal: every field costs every adapter.
 
+use ahash::AHashMap;
 use bonsai_common::{FileId, Precision, Span, SymbolId};
 use serde::{Deserialize, Serialize};
 
@@ -1473,13 +1474,16 @@ pub struct Ref {
     pub resolved: Option<SymbolId>,
 }
 
-/// Exact Tree-sitter relationship between an assignment-shaped syntax node
-/// and its RHS expression node. Consumers may render `value_span` from the
-/// file snapshot, but must not split the surrounding assignment text to
-/// recover expression structure.
+/// Exact Tree-sitter relationship between an assignment-shaped syntax node,
+/// its target/pattern, and its RHS expression. Consumers may render these
+/// spans from the file snapshot, but must not split the surrounding assignment
+/// text to recover expression structure.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssignmentValueFact {
     pub assignment_span: Span,
+    /// Exact parsed target/pattern node, when the grammar exposes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_span: Option<Span>,
     pub value_span: Span,
     /// Exact call-expression nodes whose results participate in the RHS
     /// value. These are extracted from the RHS tree, never recovered from
@@ -1487,6 +1491,108 @@ pub struct AssignmentValueFact {
     /// empty because it denotes a function value rather than an invocation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub call_sites: Vec<Span>,
+}
+
+/// Locate one exact assignment syntax fact in the sorted file-local fact
+/// table emitted by [`crate::kit::extract_assignment_value_facts`].
+#[must_use]
+pub fn assignment_value_fact_for_span(
+    facts: &[AssignmentValueFact],
+    assignment_span: Span,
+) -> Option<&AssignmentValueFact> {
+    let key = |span: Span| (span.file.raw(), span.start, span.end);
+    let wanted = key(assignment_span);
+    let index = facts.partition_point(|fact| key(fact.assignment_span) < wanted);
+    facts
+        .get(index)
+        .filter(|fact| fact.assignment_span == assignment_span)
+}
+
+/// Render the exact RHS expression for one assignment from a sorted syntax
+/// fact table without allocating a per-file lookup index.
+#[must_use]
+pub fn assignment_value_rendering<'a>(
+    facts: &[AssignmentValueFact],
+    assignment_span: Span,
+    source_text: &'a str,
+) -> Option<&'a str> {
+    let fact = assignment_value_fact_for_span(facts, assignment_span)?;
+    render_assignment_syntax_span(fact.value_span, assignment_span, source_text)
+}
+
+/// File-local lookup from an assignment event to the exact Tree-sitter RHS
+/// expression selected by the language frontend. Consumers may inspect text
+/// only through this index, so they cannot accidentally rediscover expression
+/// boundaries by scanning an assignment statement for punctuation.
+#[derive(Clone, Debug, Default)]
+pub struct AssignmentValueIndex {
+    spans: AHashMap<Span, AssignmentSyntaxSpans>,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct AssignmentSyntaxSpans {
+    target: Option<Span>,
+    value: Span,
+}
+
+impl AssignmentValueIndex {
+    #[must_use]
+    pub fn new(facts: &[AssignmentValueFact]) -> Self {
+        let mut spans = AHashMap::with_capacity(facts.len());
+        for fact in facts {
+            spans
+                .entry(fact.assignment_span)
+                .or_insert(AssignmentSyntaxSpans {
+                    target: fact.target_span,
+                    value: fact.value_span,
+                });
+        }
+        Self { spans }
+    }
+
+    #[must_use]
+    pub fn value_span(&self, assignment_span: Span) -> Option<Span> {
+        self.spans.get(&assignment_span).map(|spans| spans.value)
+    }
+
+    #[must_use]
+    pub fn target_span(&self, assignment_span: Span) -> Option<Span> {
+        self.spans.get(&assignment_span)?.target
+    }
+
+    /// Slice the source snapshot at the AST-selected RHS span. This is a
+    /// zero-copy rendering of a compiler fact, not a text parser.
+    #[must_use]
+    pub fn rendering<'a>(&self, assignment_span: Span, source_text: &'a str) -> Option<&'a str> {
+        let value_span = self.value_span(assignment_span)?;
+        render_assignment_syntax_span(value_span, assignment_span, source_text)
+    }
+
+    /// Slice the source snapshot at the AST-selected target/pattern span.
+    #[must_use]
+    pub fn target_rendering<'a>(&self, assignment_span: Span, source_text: &'a str) -> Option<&'a str> {
+        let target_span = self.target_span(assignment_span)?;
+        render_assignment_syntax_span(target_span, assignment_span, source_text)
+    }
+}
+
+fn render_assignment_syntax_span<'a>(
+    syntax_span: Span,
+    assignment_span: Span,
+    source_text: &'a str,
+) -> Option<&'a str> {
+    if syntax_span.file != assignment_span.file
+        || syntax_span.start < assignment_span.start
+        || syntax_span.end > assignment_span.end
+    {
+        return None;
+    }
+    let start = usize::try_from(syntax_span.start).ok()?;
+    let end = usize::try_from(syntax_span.end).ok()?;
+    source_text
+        .get(start..end)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

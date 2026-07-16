@@ -3,8 +3,8 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, DeclIndex, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, Visibility,
+    AdapterContext, AdapterError, AssignmentValueIndex, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -106,24 +106,37 @@ impl LanguageAdapter for ErlangAdapter {
         // Second pass: rewrite flow events using full source text.
         // Record-pattern destructuring, `maps:get` accesses, and tail
         // returns aren't reachable from the tree-walker alone — they
-        // need textual analysis of byte ranges.
+        // need language-specific inspection of parsed expression nodes.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let map_field_assigns =
                 collect_erlang_map_literal_field_assigns(&tree, snapshot.text.as_bytes(), file);
+            let assignment_values = AssignmentValueIndex::new(&decl_index.assignment_values);
             for decl in &mut decl_index.defs {
                 if let Some(params) = erlang_clause_param_slots(snapshot.text.as_ref(), decl.span, &decl.name)
                 {
                     decl.params = params;
                 }
                 augment_erlang_param_pattern_bindings(decl, snapshot.text.as_ref());
-                normalize_erlang_access_events(&mut decl.flow_events, snapshot.text.as_ref());
+                normalize_erlang_access_events(
+                    &mut decl.flow_events,
+                    snapshot.text.as_ref(),
+                    &assignment_values,
+                );
                 bonsai_lang_api::kit::annotate_tuple_call_result_bindings(
                     &mut decl.flow_events,
                     snapshot.text.as_ref(),
                 );
-                augment_erlang_record_flow_events(&mut decl.flow_events, snapshot.text.as_ref());
+                augment_erlang_record_flow_events(
+                    &mut decl.flow_events,
+                    snapshot.text.as_ref(),
+                    &assignment_values,
+                );
                 insert_erlang_map_field_assigns_in_events(&mut decl.flow_events, &map_field_assigns);
-                inject_erlang_fun_ref_aliases(&mut decl.flow_events, snapshot.text.as_ref());
+                inject_erlang_fun_ref_aliases(
+                    &mut decl.flow_events,
+                    snapshot.text.as_ref(),
+                    &assignment_values,
+                );
                 rewrite_erlang_throw_calls(&mut decl.flow_events);
                 augment_erlang_tail_return_event(
                     &mut decl.flow_events,
@@ -142,8 +155,9 @@ impl LanguageAdapter for ErlangAdapter {
         } else {
             // Parser unavailable — degrade gracefully by normalizing
             // events with empty source (no record / map rewrites).
+            let assignment_values = AssignmentValueIndex::default();
             for decl in &mut decl_index.defs {
-                normalize_erlang_access_events(&mut decl.flow_events, "");
+                normalize_erlang_access_events(&mut decl.flow_events, "", &assignment_values);
                 decl.has_implicit_returns = true;
             }
         }
@@ -395,7 +409,11 @@ fn erlang_imported_function_names(import_node: &tree_sitter::Node<'_>, src: &[u8
 /// Rewrite flow events so that `maps:get/2` calls and `Record#tag.field`
 /// accesses surface as place-paths the matcher can reason about. The
 /// walker emits raw textual fragments — this stage canonicalizes them.
-fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
+fn normalize_erlang_access_events(
+    events: &mut [FlowEvent],
+    src: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
     for event in events {
         match event {
             FlowEvent::Call { args, .. } => {
@@ -426,11 +444,11 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
                 source_names,
                 ..
             } => {
-                // The walker may not have populated source_call when the
-                // RHS is a plain function-call expression; reconstruct it
-                // textually from the assignment span.
+                // The walker may not have populated source_call when the RHS
+                // is a plain function-call expression. Recover it from the
+                // exact Tree-sitter RHS node, never the assignment statement.
                 if source_call.is_none() && source_call_args.is_empty() {
-                    if let Some((callee, args)) = erlang_assignment_call_rhs(src, *span) {
+                    if let Some((callee, args)) = erlang_assignment_call_rhs(src, *span, assignment_values) {
                         *source_call = Some(callee);
                         *source_call_args = args;
                     }
@@ -454,7 +472,7 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
                     source_call_args,
                     source_names,
                 );
-                if let Some(rhs_text) = erlang_assignment_rhs_text(src, *span) {
+                if let Some(rhs_text) = assignment_values.rendering(*span, src) {
                     for source in erlang_comprehension_generator_sources(rhs_text) {
                         push_unique_string(source_names, source);
                     }
@@ -476,11 +494,13 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
                         }
                     }
                 }
-                // Any record access mentioned anywhere in the assignment
-                // span counts as a source — covers patterns like
+                // Any record access in the parsed RHS counts as a source —
+                // covers patterns like
                 // `Y = case Rec#tag.f of ... end`.
-                for access in erlang_record_accesses_in_span(src, *span) {
-                    push_unique_string(source_names, access);
+                if let Some(rhs_text) = assignment_values.rendering(*span, src) {
+                    for access in erlang_record_accesses_in_text(rhs_text) {
+                        push_unique_string(source_names, access);
+                    }
                 }
             }
             FlowEvent::Branch {
@@ -488,11 +508,11 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
                 else_events,
                 ..
             } => {
-                normalize_erlang_access_events(then_events, src);
-                normalize_erlang_access_events(else_events, src);
+                normalize_erlang_access_events(then_events, src, assignment_values);
+                normalize_erlang_access_events(else_events, src, assignment_values);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                normalize_erlang_access_events(body, src);
+                normalize_erlang_access_events(body, src, assignment_values);
             }
             FlowEvent::Try {
                 body,
@@ -500,9 +520,9 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
                 finally_events,
                 ..
             } => {
-                normalize_erlang_access_events(body, src);
-                normalize_erlang_access_events(catch_events, src);
-                normalize_erlang_access_events(finally_events, src);
+                normalize_erlang_access_events(body, src, assignment_values);
+                normalize_erlang_access_events(catch_events, src, assignment_values);
+                normalize_erlang_access_events(finally_events, src, assignment_values);
             }
             _ => {}
         }
@@ -574,7 +594,11 @@ fn erlang_pseudo_dot_accesses(text: &str) -> Vec<String> {
 
 /// Add exact callback-alias facts for Erlang's function-reference
 /// syntax: `Cb = fun helper/1`.
-fn inject_erlang_fun_ref_aliases(events: &mut Vec<FlowEvent>, src: &str) {
+fn inject_erlang_fun_ref_aliases(
+    events: &mut Vec<FlowEvent>,
+    src: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
     for event in events.iter_mut() {
         match event {
             FlowEvent::Branch {
@@ -582,11 +606,11 @@ fn inject_erlang_fun_ref_aliases(events: &mut Vec<FlowEvent>, src: &str) {
                 else_events,
                 ..
             } => {
-                inject_erlang_fun_ref_aliases(then_events, src);
-                inject_erlang_fun_ref_aliases(else_events, src);
+                inject_erlang_fun_ref_aliases(then_events, src, assignment_values);
+                inject_erlang_fun_ref_aliases(else_events, src, assignment_values);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                inject_erlang_fun_ref_aliases(body, src);
+                inject_erlang_fun_ref_aliases(body, src, assignment_values);
             }
             FlowEvent::Try {
                 body,
@@ -594,9 +618,9 @@ fn inject_erlang_fun_ref_aliases(events: &mut Vec<FlowEvent>, src: &str) {
                 finally_events,
                 ..
             } => {
-                inject_erlang_fun_ref_aliases(body, src);
-                inject_erlang_fun_ref_aliases(catch_events, src);
-                inject_erlang_fun_ref_aliases(finally_events, src);
+                inject_erlang_fun_ref_aliases(body, src, assignment_values);
+                inject_erlang_fun_ref_aliases(catch_events, src, assignment_values);
+                inject_erlang_fun_ref_aliases(finally_events, src, assignment_values);
             }
             _ => {}
         }
@@ -604,7 +628,7 @@ fn inject_erlang_fun_ref_aliases(events: &mut Vec<FlowEvent>, src: &str) {
 
     let mut rewritten = Vec::with_capacity(events.len());
     for event in events.drain(..) {
-        let alias = erlang_fun_ref_alias_assignment(&event, src);
+        let alias = erlang_fun_ref_alias_assignment(&event, src, assignment_values);
         rewritten.push(event);
         if let Some(alias) = alias {
             rewritten.push(alias);
@@ -695,17 +719,20 @@ fn erlang_throw_from_call(event: &FlowEvent) -> Option<FlowEvent> {
     })
 }
 
-fn erlang_fun_ref_alias_assignment(event: &FlowEvent, src: &str) -> Option<FlowEvent> {
-    let FlowEvent::Assign { span, .. } = event else {
+fn erlang_fun_ref_alias_assignment(
+    event: &FlowEvent,
+    src: &str,
+    assignment_values: &AssignmentValueIndex,
+) -> Option<FlowEvent> {
+    let FlowEvent::Assign { span, target, .. } = event else {
         return None;
     };
-    let span_text = erlang_span_text(src, *span)?;
-    let (lhs, rhs) = split_top_level_match_expr(span_text)?;
-    let target = lhs.trim();
+    let target = target.trim();
     if !erlang_variable_name(target) {
         return None;
     }
-    let source_name = erlang_fun_ref_source(rhs.trim().trim_end_matches('.').trim())?;
+    let rhs = assignment_values.rendering(*span, src)?;
+    let source_name = erlang_fun_ref_source(rhs.trim_end_matches('.').trim())?;
     Some(FlowEvent::Assign {
         span: *span,
         target: target.to_string(),
@@ -811,7 +838,11 @@ fn augment_erlang_param_pattern_bindings(decl: &mut bonsai_lang_api::Decl, src: 
 /// `R = #user{name = N, email = E}` produces synthetic
 /// `R.name = N` and `R.email = E` events alongside the original, which
 /// lets the taint engine track field-level flow.
-fn augment_erlang_record_flow_events(events: &mut Vec<FlowEvent>, src: &str) {
+fn augment_erlang_record_flow_events(
+    events: &mut Vec<FlowEvent>,
+    src: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
     // Recurse into nested events first so child branches/bodies are
     // augmented before we walk the top-level list.
     for event in events.iter_mut() {
@@ -821,11 +852,11 @@ fn augment_erlang_record_flow_events(events: &mut Vec<FlowEvent>, src: &str) {
                 else_events,
                 ..
             } => {
-                augment_erlang_record_flow_events(then_events, src);
-                augment_erlang_record_flow_events(else_events, src);
+                augment_erlang_record_flow_events(then_events, src, assignment_values);
+                augment_erlang_record_flow_events(else_events, src, assignment_values);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                augment_erlang_record_flow_events(body, src);
+                augment_erlang_record_flow_events(body, src, assignment_values);
             }
             FlowEvent::Try {
                 body,
@@ -833,9 +864,9 @@ fn augment_erlang_record_flow_events(events: &mut Vec<FlowEvent>, src: &str) {
                 finally_events,
                 ..
             } => {
-                augment_erlang_record_flow_events(body, src);
-                augment_erlang_record_flow_events(catch_events, src);
-                augment_erlang_record_flow_events(finally_events, src);
+                augment_erlang_record_flow_events(body, src, assignment_values);
+                augment_erlang_record_flow_events(catch_events, src, assignment_values);
+                augment_erlang_record_flow_events(finally_events, src, assignment_values);
             }
             _ => {}
         }
@@ -847,7 +878,7 @@ fn augment_erlang_record_flow_events(events: &mut Vec<FlowEvent>, src: &str) {
         // Only assignments to a record value need expansion — peek at
         // the textual RHS for `#tag{field = value, ...}` initializers.
         if let FlowEvent::Assign { span, target, .. } = &event {
-            if let Some(rhs_text) = erlang_assignment_rhs_text(src, *span) {
+            if let Some(rhs_text) = assignment_values.rendering(*span, src) {
                 for (field_name, field_value) in erlang_record_field_initializers(rhs_text) {
                     synthetic_field_assigns.push(FlowEvent::Assign {
                         span: *span,
@@ -911,18 +942,13 @@ fn augment_erlang_tail_return_event(
 
 /// Parse `Lhs = callee(args, ...)` out of an assignment span and return
 /// `(callee, args)` if the RHS is a clean call expression.
-fn erlang_assignment_call_rhs(src: &str, span: bonsai_common::Span) -> Option<(String, Vec<String>)> {
-    let span_text = erlang_span_text(src, span)?;
-    let (_lhs, rhs_with_dot) = split_top_level_match_expr(span_text)?;
-    erlang_call_expr(rhs_with_dot.trim().trim_end_matches('.').trim())
-}
-
-/// Slice the right-hand side text out of `Lhs = Rhs` for a given span,
-/// stripping trailing `.` and surrounding whitespace.
-fn erlang_assignment_rhs_text(src: &str, span: bonsai_common::Span) -> Option<&str> {
-    let span_text = erlang_span_text(src, span)?;
-    let (_lhs, rhs_with_dot) = split_top_level_match_expr(span_text)?;
-    Some(rhs_with_dot.trim().trim_end_matches('.').trim())
+fn erlang_assignment_call_rhs(
+    src: &str,
+    span: bonsai_common::Span,
+    assignment_values: &AssignmentValueIndex,
+) -> Option<(String, Vec<String>)> {
+    let rhs = assignment_values.rendering(span, src)?;
+    erlang_call_expr(rhs.trim_end_matches('.').trim())
 }
 
 /// Add source operands for Erlang stdlib collection transforms whose
@@ -1701,17 +1727,6 @@ fn erlang_callee_name(text: &str) -> bool {
     }
     text.chars()
         .all(|ch| ch == '_' || ch == ':' || ch == '@' || ch.is_ascii_alphanumeric())
-}
-
-/// Find every `Var#tag.field` access inside the bytes covered by
-/// `span`. Used to populate `source_names` on assignment events.
-fn erlang_record_accesses_in_span(src: &str, span: bonsai_common::Span) -> Vec<String> {
-    let start = usize::try_from(span.start).ok().unwrap_or(0).min(src.len());
-    let end = usize::try_from(span.end).ok().unwrap_or(src.len()).min(src.len());
-    if start >= end || !src.is_char_boundary(start) || !src.is_char_boundary(end) {
-        return Vec::new();
-    }
-    erlang_record_accesses_in_text(&src[start..end])
 }
 
 /// `Some(access)` only when `text` is exactly one record access

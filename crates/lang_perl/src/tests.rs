@@ -8,6 +8,17 @@ fn parse_import_specs(src: &str) -> Vec<ImportSpec> {
     parse_imports(&tree, src.as_bytes(), FileId::new(0))
 }
 
+fn assignment_fixture(src: &str) -> (Span, AssignmentValueIndex) {
+    let language = language_from_pack(PACK_NAME).expect("perl grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set perl grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse perl source");
+    let facts =
+        bonsai_lang_api::extract_assignment_value_facts(&tree, FileId::new(0), &HANDLER, src.as_bytes());
+    let span = facts.first().expect("assignment syntax fact").assignment_span;
+    (span, AssignmentValueIndex::new(&facts))
+}
+
 #[test]
 fn use_qw_exports_emit_resolution_local_member_imports() {
     let imports = parse_import_specs("use AuthService qw(verify_token run_admin_command);\n");
@@ -50,7 +61,7 @@ fn inheritance_pragmas_do_not_emit_callable_member_imports() {
 #[test]
 fn coderef_assignment_emits_clean_callable_alias() {
     let src = "my $cb = \\&helper;";
-    let span = Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+    let (span, assignment_values) = assignment_fixture(src);
     let event = FlowEvent::Assign {
         span,
         target: "$cb".to_string(),
@@ -62,7 +73,7 @@ fn coderef_assignment_emits_clean_callable_alias() {
         value_kind: None,
     };
 
-    let alias = perl_coderef_alias_assignment(&event, src).expect("coderef alias");
+    let alias = perl_coderef_alias_assignment(&event, src, &assignment_values).expect("coderef alias");
 
     assert!(matches!(
         alias,
@@ -79,7 +90,7 @@ fn coderef_assignment_emits_clean_callable_alias() {
 #[test]
 fn direct_array_argv_binding_infers_perl_param() {
     let src = "my @items = @_;";
-    let span = Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+    let (span, assignment_values) = assignment_fixture(src);
     let event = FlowEvent::Assign {
         span,
         target: "items".to_string(),
@@ -91,7 +102,7 @@ fn direct_array_argv_binding_infers_perl_param() {
         value_kind: None,
     };
 
-    let (_, vars) = perl_list_binding_at(&event, src).expect("direct @_ binding");
+    let (_, vars) = perl_list_binding_at(&event, src, &assignment_values).expect("direct @_ binding");
 
     assert_eq!(vars, vec!["@items".to_string()]);
 }
@@ -131,6 +142,7 @@ fn eval_die_dollar_at_rewrites_to_try_throw_alias_catch() {
         .flat_map(|file| global.decls_in(file))
         .find(|decl| decl.name == "handle")
         .expect("handle decl");
+    let (_, assignment_values) = assignment_fixture(src);
 
     let (body, catch_events, catch_param) = handle
         .flow_events
@@ -160,7 +172,8 @@ fn eval_die_dollar_at_rewrites_to_try_throw_alias_catch() {
     assert!(
         catch_events
             .iter()
-            .all(|event| !matches!(event, FlowEvent::Assign { span, .. } if perl_assignment_rhs_is_dollar_at(src, *span))),
+            .all(|event| !matches!(event, FlowEvent::Assign { span, .. }
+                if perl_assignment_rhs_is_dollar_at(src, *span, &assignment_values))),
         "the `$@` alias assignment should become the catch binding: {catch_events:#?}"
     );
     assert!(
@@ -174,7 +187,7 @@ fn eval_die_dollar_at_rewrites_to_try_throw_alias_catch() {
 #[test]
 fn simple_scalar_assignment_rewrites_to_exact_source_name() {
     let src = "my $y = $x;";
-    let span = Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+    let (span, assignment_values) = assignment_fixture(src);
     let mut events = vec![FlowEvent::Assign {
         span,
         target: "$y".to_string(),
@@ -186,7 +199,7 @@ fn simple_scalar_assignment_rewrites_to_exact_source_name() {
         value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
     }];
 
-    normalize_perl_simple_scalar_renames(&mut events, src);
+    normalize_perl_simple_scalar_renames(&mut events, src, &assignment_values);
 
     // Normalizing `my $y = $x` to an EXACT scalar rename rewrites the
     // compound `source_names: ["x"]` shape into `source_name: Some("$x")`
@@ -207,7 +220,7 @@ fn simple_scalar_assignment_rewrites_to_exact_source_name() {
 #[test]
 fn scalar_deref_assignment_stays_compound() {
     let src = "my $y = $obj->{token};";
-    let span = Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+    let (span, assignment_values) = assignment_fixture(src);
     let mut events = vec![FlowEvent::Assign {
         span,
         target: "$y".to_string(),
@@ -219,7 +232,7 @@ fn scalar_deref_assignment_stays_compound() {
         value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
     }];
 
-    normalize_perl_simple_scalar_renames(&mut events, src);
+    normalize_perl_simple_scalar_renames(&mut events, src, &assignment_values);
 
     assert!(matches!(
         &events[0],
@@ -235,7 +248,7 @@ fn scalar_deref_assignment_stays_compound() {
 #[test]
 fn anonymous_hash_assignment_emits_field_scoped_writes() {
     let src = "my $envelope = { kind => 'run', cmd => \"$raw\", user => $user, clean => 'ok' };";
-    let span = Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+    let (span, assignment_values) = assignment_fixture(src);
     let mut events = vec![FlowEvent::Assign {
         span,
         target: "$envelope".to_string(),
@@ -247,7 +260,7 @@ fn anonymous_hash_assignment_emits_field_scoped_writes() {
         value_kind: Some(AssignValueKind::Compound),
     }];
 
-    expand_perl_anonymous_hash_field_assigns(&mut events, src);
+    expand_perl_anonymous_hash_field_assigns(&mut events, src, &assignment_values);
 
     assert!(
         events.iter().any(|event| matches!(

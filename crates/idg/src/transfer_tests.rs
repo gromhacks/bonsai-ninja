@@ -1268,6 +1268,7 @@ fn compound_assignment_binds_ast_indexed_rhs_call_result() {
     ];
     let facts = [AssignmentValueFact {
         assignment_span: assign_span,
+        target_span: Some(span(50, 53)),
         value_span: span(55, 88),
         call_sites: vec![call_expression_span],
     }];

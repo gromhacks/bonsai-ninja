@@ -3,12 +3,12 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_node as ast_call_arg_from_node, collect_kinds, foreach_binding_assigns_from_text,
-        language_from_pack, node_text, parse_with, span_of,
+        call_arg_from_node as ast_call_arg_from_node, collect_kinds, language_from_pack, node_text,
+        parse_with, span_of,
     },
-    AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
-    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
-    LanguageId, ModulePath, Ref, RefKind, TypeAliasBinding,
+    AdapterContext, AdapterError, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, DeclIndex,
+    DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
+    LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind, TypeAliasBinding,
 };
 use tree_sitter::{Language, Tree};
 
@@ -102,6 +102,7 @@ impl LanguageAdapter for PerlAdapter {
             .as_ref()
             .map(|(snapshot, _)| snapshot.text.to_string())
             .unwrap_or_default();
+        let assignment_values = AssignmentValueIndex::new(&idx.assignment_values);
         // Perl's tree-sitter grammar doesn't label subroutine
         // parameters structurally — every sub is parameterless at
         // the grammar level. Real code binds positional args via
@@ -110,8 +111,17 @@ impl LanguageAdapter for PerlAdapter {
         // synthesize `params` so entry-point inference (G5) and
         // taint seeding work.
         for decl in &mut idx.defs {
-            let list_params = rewrite_perl_list_param_bindings(&mut decl.flow_events, &source);
-            let inferred = list_params.unwrap_or_else(|| infer_perl_params_from_body(&decl.flow_events));
+            let consumes_implicit_variadic_args = perl_implicit_args_foreach(&decl.flow_events);
+            let list_params =
+                rewrite_perl_list_param_bindings(&mut decl.flow_events, &source, &assignment_values);
+            let inferred = list_params.unwrap_or_else(|| {
+                if consumes_implicit_variadic_args {
+                    decl.is_variadic = true;
+                    vec!["@_".to_string()]
+                } else {
+                    infer_perl_params_from_body(&decl.flow_events)
+                }
+            });
             if !inferred.is_empty() {
                 decl.params = inferred;
             }
@@ -148,12 +158,12 @@ impl LanguageAdapter for PerlAdapter {
         }
         for decl in &mut idx.defs {
             rewrite_perl_call_arg_texts(&mut decl.flow_events, &source);
-            normalize_perl_hash_deref_flow_events(&mut decl.flow_events, &source);
-            expand_perl_anonymous_hash_field_assigns(&mut decl.flow_events, &source);
-            normalize_perl_simple_scalar_renames(&mut decl.flow_events, &source);
-            augment_perl_collection_flow_events(&mut decl.flow_events, &source);
-            inject_perl_coderef_aliases(&mut decl.flow_events, &source);
-            normalize_perl_eval_exception_flow_events(&mut decl.flow_events, &source);
+            normalize_perl_hash_deref_flow_events(&mut decl.flow_events, &source, &assignment_values);
+            expand_perl_anonymous_hash_field_assigns(&mut decl.flow_events, &source, &assignment_values);
+            normalize_perl_simple_scalar_renames(&mut decl.flow_events, &source, &assignment_values);
+            augment_perl_collection_flow_events(&mut decl.flow_events, &source, &assignment_values);
+            inject_perl_coderef_aliases(&mut decl.flow_events, &source, &assignment_values);
+            normalize_perl_eval_exception_flow_events(&mut decl.flow_events, &source, &assignment_values);
             // L1: lower `die` to Throw across the WHOLE sub body, not
             // just inside an `eval {}; if ($@)` region. This seeds a
             // native `try { die $x; } catch ($e) { ... }` body (the
@@ -383,7 +393,11 @@ fn perl_hash_key_name(raw: &str) -> String {
         .to_string()
 }
 
-fn expand_perl_anonymous_hash_field_assigns(events: &mut Vec<FlowEvent>, source: &str) {
+fn expand_perl_anonymous_hash_field_assigns(
+    events: &mut Vec<FlowEvent>,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
     let mut index = 0usize;
     while index < events.len() {
         match &mut events[index] {
@@ -392,11 +406,11 @@ fn expand_perl_anonymous_hash_field_assigns(events: &mut Vec<FlowEvent>, source:
                 else_events,
                 ..
             } => {
-                expand_perl_anonymous_hash_field_assigns(then_events, source);
-                expand_perl_anonymous_hash_field_assigns(else_events, source);
+                expand_perl_anonymous_hash_field_assigns(then_events, source, assignment_values);
+                expand_perl_anonymous_hash_field_assigns(else_events, source, assignment_values);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                expand_perl_anonymous_hash_field_assigns(body, source);
+                expand_perl_anonymous_hash_field_assigns(body, source, assignment_values);
             }
             FlowEvent::Try {
                 body,
@@ -404,14 +418,14 @@ fn expand_perl_anonymous_hash_field_assigns(events: &mut Vec<FlowEvent>, source:
                 finally_events,
                 ..
             } => {
-                expand_perl_anonymous_hash_field_assigns(body, source);
-                expand_perl_anonymous_hash_field_assigns(catch_events, source);
-                expand_perl_anonymous_hash_field_assigns(finally_events, source);
+                expand_perl_anonymous_hash_field_assigns(body, source, assignment_values);
+                expand_perl_anonymous_hash_field_assigns(catch_events, source, assignment_values);
+                expand_perl_anonymous_hash_field_assigns(finally_events, source, assignment_values);
             }
             _ => {}
         }
 
-        let fields = perl_anonymous_hash_fields_for_event(&events[index], source);
+        let fields = perl_anonymous_hash_fields_for_event(&events[index], source, assignment_values);
         if fields.is_empty() {
             index += 1;
             continue;
@@ -422,7 +436,11 @@ fn expand_perl_anonymous_hash_field_assigns(events: &mut Vec<FlowEvent>, source:
     }
 }
 
-fn perl_anonymous_hash_fields_for_event(event: &FlowEvent, source: &str) -> Vec<FlowEvent> {
+fn perl_anonymous_hash_fields_for_event(
+    event: &FlowEvent,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) -> Vec<FlowEvent> {
     let FlowEvent::Assign { span, target, .. } = event else {
         return Vec::new();
     };
@@ -430,7 +448,7 @@ fn perl_anonymous_hash_fields_for_event(event: &FlowEvent, source: &str) -> Vec<
     if target.is_empty() || target.contains(['.', '{', '[']) {
         return Vec::new();
     }
-    let Some(rhs) = assignment_rhs_text(source, *span) else {
+    let Some(rhs) = assignment_values.rendering(*span, source) else {
         return Vec::new();
     };
     let rhs = rhs.trim();
@@ -612,7 +630,11 @@ fn dedup_perl_type_aliases(aliases: &mut Vec<TypeAliasBinding>) {
 ///
 /// Recurses into branches, loops, defers, using-blocks and try/catch
 /// bodies so deeply-nested transforms still get their sources.
-fn augment_perl_collection_flow_events(events: &mut Vec<FlowEvent>, source: &str) {
+fn augment_perl_collection_flow_events(
+    events: &mut Vec<FlowEvent>,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
     for event in events.iter_mut() {
         match event {
             FlowEvent::Assign {
@@ -621,8 +643,8 @@ fn augment_perl_collection_flow_events(events: &mut Vec<FlowEvent>, source: &str
                 source_names,
                 ..
             } => {
-                if let Some(rhs) = assignment_rhs_text(source, *span) {
-                    add_perl_collection_transform_sources(target, &rhs, source_names);
+                if let Some(rhs) = assignment_values.rendering(*span, source) {
+                    add_perl_collection_transform_sources(target, rhs, source_names);
                 }
             }
             FlowEvent::Branch {
@@ -630,11 +652,11 @@ fn augment_perl_collection_flow_events(events: &mut Vec<FlowEvent>, source: &str
                 else_events,
                 ..
             } => {
-                augment_perl_collection_flow_events(then_events, source);
-                augment_perl_collection_flow_events(else_events, source);
+                augment_perl_collection_flow_events(then_events, source, assignment_values);
+                augment_perl_collection_flow_events(else_events, source, assignment_values);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                augment_perl_collection_flow_events(body, source);
+                augment_perl_collection_flow_events(body, source, assignment_values);
             }
             FlowEvent::Try {
                 body,
@@ -642,37 +664,26 @@ fn augment_perl_collection_flow_events(events: &mut Vec<FlowEvent>, source: &str
                 finally_events,
                 ..
             } => {
-                augment_perl_collection_flow_events(body, source);
-                augment_perl_collection_flow_events(catch_events, source);
-                augment_perl_collection_flow_events(finally_events, source);
+                augment_perl_collection_flow_events(body, source, assignment_values);
+                augment_perl_collection_flow_events(catch_events, source, assignment_values);
+                augment_perl_collection_flow_events(finally_events, source, assignment_values);
             }
             _ => {}
         }
     }
 
-    // Second pass: lower `push @arr, $x` calls into a synthetic
-    // Assign event so taint flowing into `$x` propagates to `@arr`.
+    // Second pass: lower `push @arr, $x` calls into a synthetic Assign
+    // event so taint flowing into `$x` propagates to `@arr`. Foreach
+    // bindings already come from the shared Tree-sitter field lowering.
     let mut rewritten = Vec::with_capacity(events.len());
     for event in events.drain(..) {
-        let foreach_assignments = perl_foreach_binding_assignments(&event, source);
         let push_assignment = perl_push_assignment(&event);
-        rewritten.extend(foreach_assignments);
         rewritten.push(event);
         if let Some(assign) = push_assignment {
             rewritten.push(assign);
         }
     }
     *events = rewritten;
-}
-
-fn perl_foreach_binding_assignments(event: &FlowEvent, source: &str) -> Vec<FlowEvent> {
-    let FlowEvent::Loop { span, .. } = event else {
-        return Vec::new();
-    };
-    let Some(text) = source_span_text(source, *span) else {
-        return Vec::new();
-    };
-    foreach_binding_assigns_from_text(*span, text)
 }
 
 /// Add exact callable-alias facts for Perl coderef assignments such
@@ -683,7 +694,11 @@ fn perl_foreach_binding_assignments(event: &FlowEvent, source: &str) -> Vec<Flow
 /// A clean synthetic alias keeps callback resolution semantic: it is
 /// emitted only when the RHS is Perl's explicit subroutine-reference
 /// syntax and the LHS contains one scalar binding.
-fn inject_perl_coderef_aliases(events: &mut Vec<FlowEvent>, source: &str) {
+fn inject_perl_coderef_aliases(
+    events: &mut Vec<FlowEvent>,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
     for event in events.iter_mut() {
         match event {
             FlowEvent::Branch {
@@ -691,11 +706,11 @@ fn inject_perl_coderef_aliases(events: &mut Vec<FlowEvent>, source: &str) {
                 else_events,
                 ..
             } => {
-                inject_perl_coderef_aliases(then_events, source);
-                inject_perl_coderef_aliases(else_events, source);
+                inject_perl_coderef_aliases(then_events, source, assignment_values);
+                inject_perl_coderef_aliases(else_events, source, assignment_values);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                inject_perl_coderef_aliases(body, source);
+                inject_perl_coderef_aliases(body, source, assignment_values);
             }
             FlowEvent::Try {
                 body,
@@ -703,9 +718,9 @@ fn inject_perl_coderef_aliases(events: &mut Vec<FlowEvent>, source: &str) {
                 finally_events,
                 ..
             } => {
-                inject_perl_coderef_aliases(body, source);
-                inject_perl_coderef_aliases(catch_events, source);
-                inject_perl_coderef_aliases(finally_events, source);
+                inject_perl_coderef_aliases(body, source, assignment_values);
+                inject_perl_coderef_aliases(catch_events, source, assignment_values);
+                inject_perl_coderef_aliases(finally_events, source, assignment_values);
             }
             _ => {}
         }
@@ -713,7 +728,7 @@ fn inject_perl_coderef_aliases(events: &mut Vec<FlowEvent>, source: &str) {
 
     let mut rewritten = Vec::with_capacity(events.len());
     for event in events.drain(..) {
-        let alias = perl_coderef_alias_assignment(&event, source);
+        let alias = perl_coderef_alias_assignment(&event, source, assignment_values);
         rewritten.push(event);
         if let Some(alias) = alias {
             rewritten.push(alias);
@@ -722,14 +737,19 @@ fn inject_perl_coderef_aliases(events: &mut Vec<FlowEvent>, source: &str) {
     *events = rewritten;
 }
 
-fn perl_coderef_alias_assignment(event: &FlowEvent, source: &str) -> Option<FlowEvent> {
+fn perl_coderef_alias_assignment(
+    event: &FlowEvent,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) -> Option<FlowEvent> {
     let FlowEvent::Assign { span, target, .. } = event else {
         return None;
     };
-    let (lhs, rhs) = assignment_lhs_rhs_text(source, *span)?;
-    let target = perl_coderef_lhs_target(&lhs)
+    let lhs = assignment_values.target_rendering(*span, source)?;
+    let rhs = assignment_values.rendering(*span, source)?;
+    let target = perl_coderef_lhs_target(lhs)
         .or_else(|| target.trim().starts_with('$').then(|| target.trim().to_string()))?;
-    let source_name = perl_coderef_rhs_source(&rhs)?;
+    let source_name = perl_coderef_rhs_source(rhs)?;
     Some(FlowEvent::Assign {
         span: *span,
         target,
@@ -780,12 +800,16 @@ fn perl_coderef_rhs_source(rhs: &str) -> Option<String> {
 /// eval block's body as ordinary calls and the `$@` handler as an
 /// unrelated branch, so downstream taint cannot otherwise connect the
 /// thrown value to the handler binding.
-fn normalize_perl_eval_exception_flow_events(events: &mut Vec<FlowEvent>, source: &str) {
+fn normalize_perl_eval_exception_flow_events(
+    events: &mut Vec<FlowEvent>,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
     let eval_blocks = perl_eval_block_ranges(source);
     if eval_blocks.is_empty() {
         return;
     }
-    rewrite_perl_eval_exception_regions(events, source, &eval_blocks);
+    rewrite_perl_eval_exception_regions(events, source, assignment_values, &eval_blocks);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -846,6 +870,7 @@ fn perl_identifier_byte(byte: u8) -> bool {
 fn rewrite_perl_eval_exception_regions(
     events: &mut Vec<FlowEvent>,
     source: &str,
+    assignment_values: &AssignmentValueIndex,
     eval_blocks: &[PerlEvalBlockRange],
 ) {
     for event in events.iter_mut() {
@@ -855,11 +880,11 @@ fn rewrite_perl_eval_exception_regions(
                 else_events,
                 ..
             } => {
-                rewrite_perl_eval_exception_regions(then_events, source, eval_blocks);
-                rewrite_perl_eval_exception_regions(else_events, source, eval_blocks);
+                rewrite_perl_eval_exception_regions(then_events, source, assignment_values, eval_blocks);
+                rewrite_perl_eval_exception_regions(else_events, source, assignment_values, eval_blocks);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                rewrite_perl_eval_exception_regions(body, source, eval_blocks);
+                rewrite_perl_eval_exception_regions(body, source, assignment_values, eval_blocks);
             }
             FlowEvent::Try {
                 body,
@@ -867,9 +892,9 @@ fn rewrite_perl_eval_exception_regions(
                 finally_events,
                 ..
             } => {
-                rewrite_perl_eval_exception_regions(body, source, eval_blocks);
-                rewrite_perl_eval_exception_regions(catch_events, source, eval_blocks);
-                rewrite_perl_eval_exception_regions(finally_events, source, eval_blocks);
+                rewrite_perl_eval_exception_regions(body, source, assignment_values, eval_blocks);
+                rewrite_perl_eval_exception_regions(catch_events, source, assignment_values, eval_blocks);
+                rewrite_perl_eval_exception_regions(finally_events, source, assignment_values, eval_blocks);
             }
             _ => {}
         }
@@ -926,7 +951,7 @@ fn rewrite_perl_eval_exception_regions(
 
         let mut body = events[idx..body_end].to_vec();
         body = lower_perl_die_calls_to_throws(body);
-        let (catch_param, catch_events) = perl_dollar_at_catch_events(then_events, source);
+        let (catch_param, catch_events) = perl_dollar_at_catch_events(then_events, source, assignment_values);
         let file = branch_span.file;
         let try_span = Span::new(
             file,
@@ -1103,11 +1128,15 @@ fn perl_die_value_name(args: &[CallArg]) -> Option<String> {
         .then(|| value.to_string())
 }
 
-fn perl_dollar_at_catch_events(events: &[FlowEvent], source: &str) -> (Option<String>, Vec<FlowEvent>) {
+fn perl_dollar_at_catch_events(
+    events: &[FlowEvent],
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) -> (Option<String>, Vec<FlowEvent>) {
     let mut aliases = Vec::new();
     for event in events {
         if let FlowEvent::Assign { span, target, .. } = event {
-            if perl_assignment_rhs_is_dollar_at(source, *span) {
+            if perl_assignment_rhs_is_dollar_at(source, *span, assignment_values) {
                 push_unique_string(&mut aliases, target.clone());
             }
         }
@@ -1124,7 +1153,8 @@ fn perl_dollar_at_catch_events(events: &[FlowEvent], source: &str) -> (Option<St
         .filter(|event| {
             !matches!(
                 event,
-                FlowEvent::Assign { span, .. } if perl_assignment_rhs_is_dollar_at(source, *span)
+                FlowEvent::Assign { span, .. }
+                    if perl_assignment_rhs_is_dollar_at(source, *span, assignment_values)
             )
         })
         .cloned()
@@ -1132,9 +1162,14 @@ fn perl_dollar_at_catch_events(events: &[FlowEvent], source: &str) -> (Option<St
     (catch_param, catch_events)
 }
 
-fn perl_assignment_rhs_is_dollar_at(source: &str, span: Span) -> bool {
-    assignment_rhs_text(source, span)
-        .map(|rhs| rhs.trim().trim_end_matches(';').trim() == "$@")
+fn perl_assignment_rhs_is_dollar_at(
+    source: &str,
+    span: Span,
+    assignment_values: &AssignmentValueIndex,
+) -> bool {
+    assignment_values
+        .rendering(span, source)
+        .map(|rhs| rhs.trim_end_matches(';').trim() == "$@")
         .unwrap_or(false)
 }
 
@@ -1143,7 +1178,11 @@ fn perl_assignment_rhs_is_dollar_at(source: &str, span: Span) -> bool {
 /// This keeps true compound/deref RHSs (`$obj->{k}`, `$x . $y`,
 /// function calls) on the broader `source_names` path while making the
 /// simple rename case exact.
-fn normalize_perl_simple_scalar_renames(events: &mut [FlowEvent], source: &str) {
+fn normalize_perl_simple_scalar_renames(
+    events: &mut [FlowEvent],
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
     for event in events.iter_mut() {
         match event {
             FlowEvent::Assign {
@@ -1158,8 +1197,9 @@ fn normalize_perl_simple_scalar_renames(events: &mut [FlowEvent], source: &str) 
                 if source_call.is_some() || !source_call_args.is_empty() {
                     continue;
                 }
-                if let Some(rhs) =
-                    assignment_rhs_text(source, *span).and_then(|rhs| perl_exact_variable_rhs(&rhs))
+                if let Some(rhs) = assignment_values
+                    .rendering(*span, source)
+                    .and_then(perl_exact_variable_rhs)
                 {
                     *source_name = Some(rhs);
                     source_names.clear();
@@ -1171,11 +1211,11 @@ fn normalize_perl_simple_scalar_renames(events: &mut [FlowEvent], source: &str) 
                 else_events,
                 ..
             } => {
-                normalize_perl_simple_scalar_renames(then_events, source);
-                normalize_perl_simple_scalar_renames(else_events, source);
+                normalize_perl_simple_scalar_renames(then_events, source, assignment_values);
+                normalize_perl_simple_scalar_renames(else_events, source, assignment_values);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                normalize_perl_simple_scalar_renames(body, source);
+                normalize_perl_simple_scalar_renames(body, source, assignment_values);
             }
             FlowEvent::Try {
                 body,
@@ -1183,9 +1223,9 @@ fn normalize_perl_simple_scalar_renames(events: &mut [FlowEvent], source: &str) 
                 finally_events,
                 ..
             } => {
-                normalize_perl_simple_scalar_renames(body, source);
-                normalize_perl_simple_scalar_renames(catch_events, source);
-                normalize_perl_simple_scalar_renames(finally_events, source);
+                normalize_perl_simple_scalar_renames(body, source, assignment_values);
+                normalize_perl_simple_scalar_renames(catch_events, source, assignment_values);
+                normalize_perl_simple_scalar_renames(finally_events, source, assignment_values);
             }
             _ => {}
         }
@@ -1211,7 +1251,11 @@ fn perl_exact_variable_rhs(rhs: &str) -> Option<String> {
 /// Recurses into nested control-flow event lists; merges adjacent
 /// Assigns that share a span (the grammar can split a single
 /// hash-deref assignment into multiple events).
-fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &str) {
+fn normalize_perl_hash_deref_flow_events(
+    events: &mut Vec<FlowEvent>,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
     for event in events.iter_mut() {
         match event {
             FlowEvent::Assign {
@@ -1230,8 +1274,8 @@ fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &s
                 for name in source_names.iter_mut() {
                     *name = normalize_perl_hash_deref_text(name);
                 }
-                if let Some(rhs) = assignment_rhs_text(source, *span) {
-                    add_perl_hash_deref_sources(&rhs, source_names);
+                if let Some(rhs) = assignment_values.rendering(*span, source) {
+                    add_perl_hash_deref_sources(rhs, source_names);
                 }
             }
             FlowEvent::Call { args, .. } => {
@@ -1256,11 +1300,11 @@ fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &s
                 else_events,
                 ..
             } => {
-                normalize_perl_hash_deref_flow_events(then_events, source);
-                normalize_perl_hash_deref_flow_events(else_events, source);
+                normalize_perl_hash_deref_flow_events(then_events, source, assignment_values);
+                normalize_perl_hash_deref_flow_events(else_events, source, assignment_values);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                normalize_perl_hash_deref_flow_events(body, source);
+                normalize_perl_hash_deref_flow_events(body, source, assignment_values);
             }
             FlowEvent::Try {
                 body,
@@ -1268,9 +1312,9 @@ fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &s
                 finally_events,
                 ..
             } => {
-                normalize_perl_hash_deref_flow_events(body, source);
-                normalize_perl_hash_deref_flow_events(catch_events, source);
-                normalize_perl_hash_deref_flow_events(finally_events, source);
+                normalize_perl_hash_deref_flow_events(body, source, assignment_values);
+                normalize_perl_hash_deref_flow_events(catch_events, source, assignment_values);
+                normalize_perl_hash_deref_flow_events(finally_events, source, assignment_values);
             }
             _ => {}
         }
@@ -1281,7 +1325,9 @@ fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &s
     let mut rewritten = Vec::with_capacity(events.len());
     let mut event_idx = 0usize;
     while event_idx < events.len() {
-        let Some((span, target, rhs)) = perl_hash_deref_assignment(&events[event_idx], source) else {
+        let Some((span, target, rhs)) =
+            perl_hash_deref_assignment(&events[event_idx], source, assignment_values)
+        else {
             rewritten.push(events[event_idx].clone());
             event_idx += 1;
             continue;
@@ -1368,13 +1414,18 @@ fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &s
 
 /// If `event` is an Assign whose LHS is a hash-deref expression,
 /// return the canonical span/target/rhs triple; otherwise `None`.
-fn perl_hash_deref_assignment(event: &FlowEvent, source: &str) -> Option<(Span, String, String)> {
+fn perl_hash_deref_assignment(
+    event: &FlowEvent,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) -> Option<(Span, String, String)> {
     let FlowEvent::Assign { span, .. } = event else {
         return None;
     };
-    let (lhs, rhs) = assignment_lhs_rhs_text(source, *span)?;
-    let target = perl_hash_deref_access(&lhs)?;
-    Some((*span, target, rhs))
+    let lhs = assignment_values.target_rendering(*span, source)?;
+    let rhs = assignment_values.rendering(*span, source)?;
+    let target = perl_hash_deref_access(lhs)?;
+    Some((*span, target, rhs.to_string()))
 }
 
 /// When the LHS of `@arr = map { ... } @other` is a collection and
@@ -1448,48 +1499,6 @@ fn perl_push_assignment(event: &FlowEvent) -> Option<FlowEvent> {
         declares_new_binding: false,
         value_kind: None,
     })
-}
-
-/// Return the trimmed RHS text of an assignment whose textual range
-/// is `span`. Wraps `assignment_lhs_rhs_text` and drops the trailing
-/// semicolon.
-fn assignment_rhs_text(source: &str, span: Span) -> Option<String> {
-    let (_, rhs) = assignment_lhs_rhs_text(source, span)?;
-    Some(rhs.trim().trim_end_matches(';').trim().to_string())
-}
-
-/// Split the source text at `span` into `(lhs, rhs)` around the
-/// top-level `=` (or `=>`). Returns `None` when the span is invalid
-/// or no separator is found.
-fn assignment_lhs_rhs_text(source: &str, span: Span) -> Option<(String, String)> {
-    let start = usize::try_from(span.start).ok()?.min(source.len());
-    let end = usize::try_from(span.end).ok()?.min(source.len());
-    if start >= end || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
-        return None;
-    }
-    let statement = &source[start..end];
-    let (separator_idx, separator_len) = find_top_level_assignment_separator(statement)?;
-    Some((
-        statement[..separator_idx].trim().to_string(),
-        statement[separator_idx + separator_len..].trim().to_string(),
-    ))
-}
-
-fn split_perl_assignment_text(text: &str) -> Option<(&str, &str)> {
-    let (separator_idx, separator_len) = find_top_level_assignment_separator(text)?;
-    Some((
-        text[..separator_idx].trim(),
-        text[separator_idx + separator_len..].trim(),
-    ))
-}
-
-fn source_span_text(source: &str, span: Span) -> Option<&str> {
-    let start = usize::try_from(span.start).ok()?.min(source.len());
-    let end = usize::try_from(span.end).ok()?.min(source.len());
-    if start >= end || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
-        return None;
-    }
-    source.get(start..end)
 }
 
 /// Normalize a hash-deref expression to dotted form, falling back to
@@ -1676,50 +1685,6 @@ fn perl_source_name_is_lhs_artifact(name: &str, target: &str) -> bool {
                     || *candidate == bare_base
                     || *candidate == field)
         })
-}
-
-/// Find the `=` (or `=>`) that separates LHS from RHS in `text`,
-/// skipping over braces/brackets/quotes. Returns `(byte_idx, len)`
-/// where `len` is 1 for `=` and 2 for `=>`. `==` is skipped.
-fn find_top_level_assignment_separator(text: &str) -> Option<(usize, usize)> {
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth = 0usize;
-    let mut iter = text.char_indices().peekable();
-    while let Some((idx, ch)) = iter.next() {
-        if let Some(open_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == open_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => depth = depth.saturating_add(1),
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            '=' if depth == 0 => {
-                let next_ch = iter.peek().map(|(_, next)| *next);
-                // Fat-comma: `=>` is also a valid assignment separator.
-                if matches!(next_ch, Some('>')) {
-                    return Some((idx, 2));
-                }
-                // `==` is a comparison, not assignment.
-                if matches!(next_ch, Some('=')) {
-                    continue;
-                }
-                return Some((idx, 1));
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Scan `text` for sigil'd identifiers (e.g. `$x`, `@arr`, `%h`)
@@ -1985,12 +1950,16 @@ fn skip_balanced_perl_braces(source: &str, open: usize) -> usize {
 ///
 /// Returns `None` when no list binding is found (callers fall back to
 /// `infer_perl_params_from_body`).
-fn rewrite_perl_list_param_bindings(events: &mut Vec<FlowEvent>, source: &str) -> Option<Vec<String>> {
+fn rewrite_perl_list_param_bindings(
+    events: &mut Vec<FlowEvent>,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) -> Option<Vec<String>> {
     let mut rewritten = Vec::with_capacity(events.len());
     let mut inferred_params = None;
     let mut event_idx = 0;
     while event_idx < events.len() {
-        let Some((span, vars)) = perl_list_binding_at(&events[event_idx], source) else {
+        let Some((span, vars)) = perl_list_binding_at(&events[event_idx], source, assignment_values) else {
             rewritten.push(events[event_idx].clone());
             event_idx += 1;
             continue;
@@ -2029,7 +1998,11 @@ fn rewrite_perl_list_param_bindings(events: &mut Vec<FlowEvent>, source: &str) -
 
 /// If `event` is a `my (...) = @_;` destructure, return the span and
 /// the list of bound variable names (with sigils preserved).
-fn perl_list_binding_at(event: &FlowEvent, source: &str) -> Option<(bonsai_common::Span, Vec<String>)> {
+fn perl_list_binding_at(
+    event: &FlowEvent,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) -> Option<(bonsai_common::Span, Vec<String>)> {
     let FlowEvent::Assign {
         span, source_names, ..
     } = event
@@ -2041,54 +2014,24 @@ fn perl_list_binding_at(event: &FlowEvent, source: &str) -> Option<(bonsai_commo
     if !source_names.iter().any(|name| name == "_" || name == "@_") {
         return None;
     }
-    let vars = source
-        .get(span.start as usize..span.end as usize)
-        .and_then(|text| {
-            // Must be a list-context binding against `@_`.
-            if !text.contains("@_") {
+    let vars = assignment_values
+        .target_rendering(*span, source)
+        .zip(assignment_values.rendering(*span, source))
+        .and_then(|(lhs, rhs)| {
+            if !rhs.contains("@_") {
                 return None;
             }
-            let start = text.find('(')?;
-            let end = text[start + 1..].find(')')? + start + 1;
-            let vars = text[start + 1..end]
-                .split(',')
-                .map(str::trim)
-                .filter(|part| part.starts_with(['$', '@', '%']))
-                .map(str::to_string)
+            let vars = perl_sigiled_identifiers(lhs, ['$', '@', '%'])
+                .into_iter()
+                .filter(|var| var != "@_")
                 .collect::<Vec<_>>();
-            if vars.is_empty() {
-                None
-            } else {
-                Some(vars)
-            }
-        })
-        .or_else(|| {
-            source
-                .get(span.start as usize..span.end as usize)
-                .and_then(|text| {
-                    if !text.contains("@_") {
-                        return None;
-                    }
-                    let (lhs, rhs) = split_perl_assignment_text(text)?;
-                    if !rhs.contains("@_") {
-                        return None;
-                    }
-                    let vars = perl_sigiled_identifiers(lhs, ['$', '@', '%'])
-                        .into_iter()
-                        .filter(|var| var != "@_")
-                        .collect::<Vec<_>>();
-                    if vars.is_empty() {
-                        None
-                    } else {
-                        Some(vars)
-                    }
-                })
+            (!vars.is_empty()).then_some(vars)
         })
         .unwrap_or_else(|| {
-            // Fallback for shapes where the source slice is missing —
-            // synthesize from `source_names`, normalizing to `$name`
-            // and reversing because `source_names` is right-to-left
-            // in stack order.
+            // Fallback for synthetic events that have no parsed target fact:
+            // synthesize from `source_names`, normalizing to `$name` and
+            // reversing because `source_names` is right-to-left in stack
+            // order.
             let mut vars = source_names
                 .iter()
                 .filter(|name| name.as_str() != "_" && name.as_str() != "@_")
@@ -2154,6 +2097,89 @@ fn infer_perl_params_from_body(events: &[FlowEvent]) -> Vec<String> {
         }
     }
     params
+}
+
+/// Perl exposes a subroutine's unnamed variadic arguments through `@_`.
+/// When a parsed foreach iterable is exactly that array, model `@_` as the
+/// formal variadic pack rather than misclassifying the loop variable as a
+/// declared parameter. The shared foreach frontend has already attached the
+/// iterable's AST-derived source names to same-span Assign events.
+fn perl_implicit_args_foreach(events: &[FlowEvent]) -> bool {
+    let mut loop_spans = std::collections::HashSet::new();
+    collect_perl_loop_spans(events, &mut loop_spans);
+    event_tree_contains_implicit_args_binding(events, &loop_spans)
+}
+
+fn collect_perl_loop_spans(events: &[FlowEvent], out: &mut std::collections::HashSet<Span>) {
+    for event in events {
+        match event {
+            FlowEvent::Loop { span, body, .. } => {
+                out.insert(*span);
+                collect_perl_loop_spans(body, out);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_perl_loop_spans(then_events, out);
+                collect_perl_loop_spans(else_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_perl_loop_spans(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_perl_loop_spans(body, out);
+                collect_perl_loop_spans(catch_events, out);
+                collect_perl_loop_spans(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn event_tree_contains_implicit_args_binding(
+    events: &[FlowEvent],
+    loop_spans: &std::collections::HashSet<Span>,
+) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Assign {
+            span,
+            source_name,
+            source_names,
+            ..
+        } => {
+            loop_spans.contains(span)
+                && (source_name.as_deref() == Some("@_") || source_names.iter().any(|name| name == "@_"))
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            event_tree_contains_implicit_args_binding(then_events, loop_spans)
+                || event_tree_contains_implicit_args_binding(else_events, loop_spans)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            event_tree_contains_implicit_args_binding(body, loop_spans)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            event_tree_contains_implicit_args_binding(body, loop_spans)
+                || event_tree_contains_implicit_args_binding(catch_events, loop_spans)
+                || event_tree_contains_implicit_args_binding(finally_events, loop_spans)
+        }
+        _ => false,
+    })
 }
 
 /// Synthesize `Ref` records for Perl's implicit taint sources

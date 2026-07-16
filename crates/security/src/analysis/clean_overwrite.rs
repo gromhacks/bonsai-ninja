@@ -1015,7 +1015,7 @@ fn clean_constant_assignment(source_name: Option<&str>, source_names: &[String])
 }
 
 fn assignment_rhs_is_clean_conditional(ws: &Workspace, span: Span) -> bool {
-    let Some(rhs) = assignment_rhs_text(ws, span) else {
+    let Some(rhs) = assignment_rhs_syntax_text(ws, span) else {
         return false;
     };
     if clean_conditional_value_part(&rhs).is_some_and(value_part_contains_only_clean_literals) {
@@ -1035,11 +1035,11 @@ fn assignment_rhs_is_clean_conditional(ws: &Workspace, span: Span) -> bool {
     }
 }
 
-fn assignment_rhs_text(ws: &Workspace, span: Span) -> Option<String> {
+fn assignment_rhs_syntax_text(ws: &Workspace, span: Span) -> Option<String> {
+    let file_index = ws.db().decl_index(span.file)?;
     let snapshot = ws.vfs().snapshot(span.file).ok()?;
-    let raw = snapshot.text.get(span.start as usize..span.end as usize)?;
-    let rhs = raw.split_once('=').map_or(raw, |(_, rhs)| rhs);
-    Some(rhs.trim().trim_end_matches(';').trim().to_string())
+    bonsai_lang_api::assignment_value_rendering(&file_index.assignment_values, span, snapshot.text.as_ref())
+        .map(|rhs| rhs.trim_end_matches(';').trim().to_string())
 }
 
 fn literal_list_get_assignment_is_clean(

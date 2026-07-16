@@ -6,8 +6,9 @@ use bonsai_lang_api::{
         call_arg_from_nodes, collect_kinds, language_from_pack, node_text, normalize_call_name_whitespace,
         parse_with, span_of, GENERIC_HANDLER,
     },
-    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, DeclIndex, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -237,6 +238,7 @@ impl LanguageAdapter for PythonAdapter {
             let property_fn_spans = collect_python_property_function_spans(&tree, file, src);
             let property_aliases = collect_python_property_aliases(&idx, &property_fn_spans);
             let property_aliases_by_decl = python_property_aliases_by_decl(&idx, &property_aliases);
+            let assignment_values = AssignmentValueIndex::new(&idx.assignment_values);
             let callable_spans: Vec<Span> = idx
                 .defs
                 .iter()
@@ -259,13 +261,21 @@ impl LanguageAdapter for PythonAdapter {
                 let comprehension_iterable_calls =
                     collect_python_comprehension_iterable_call_events(&tree, file, src, decl.span);
                 augment_python_match_pattern_flow_events(&mut decl.flow_events, &owned_match_patterns);
-                augment_python_comprehension_flow_events(&mut decl.flow_events, snapshot.text.as_ref());
+                augment_python_comprehension_flow_events(
+                    &mut decl.flow_events,
+                    snapshot.text.as_ref(),
+                    &assignment_values,
+                );
                 insert_python_flow_events_by_span(
                     &mut decl.flow_events,
                     decl.span,
                     &comprehension_iterable_calls,
                 );
-                augment_python_dict_flow_events(&mut decl.flow_events, snapshot.text.as_ref());
+                augment_python_dict_flow_events(
+                    &mut decl.flow_events,
+                    snapshot.text.as_ref(),
+                    &assignment_values,
+                );
                 if let Some(property_aliases_for_decl) = property_aliases_by_decl.get(&decl.symbol) {
                     augment_python_property_flow_events(&mut decl.flow_events, property_aliases_for_decl);
                 }
@@ -694,14 +704,18 @@ fn python_property_alias_source_name(source: &str, alias: &PythonPropertyAlias) 
     Some(format!("{}.{}.{}", alias.receiver_name, alias.target_tail, tail))
 }
 
-fn augment_python_comprehension_flow_events(events: &mut [bonsai_lang_api::FlowEvent], source: &str) {
+fn augment_python_comprehension_flow_events(
+    events: &mut [bonsai_lang_api::FlowEvent],
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
     for event in events {
         match event {
             bonsai_lang_api::FlowEvent::Assign {
                 span, source_names, ..
             } => {
-                if let Some(rhs) = python_assignment_rhs_text(source, *span) {
-                    for iterable in python_comprehension_iterables(&rhs) {
+                if let Some(rhs) = assignment_values.rendering(*span, source) {
+                    for iterable in python_comprehension_iterables(rhs) {
                         push_python_source_name(source_names, iterable);
                     }
                 }
@@ -711,13 +725,13 @@ fn augment_python_comprehension_flow_events(events: &mut [bonsai_lang_api::FlowE
                 else_events,
                 ..
             } => {
-                augment_python_comprehension_flow_events(then_events, source);
-                augment_python_comprehension_flow_events(else_events, source);
+                augment_python_comprehension_flow_events(then_events, source, assignment_values);
+                augment_python_comprehension_flow_events(else_events, source, assignment_values);
             }
             bonsai_lang_api::FlowEvent::Loop { body, .. }
             | bonsai_lang_api::FlowEvent::Defer { body, .. }
             | bonsai_lang_api::FlowEvent::Using { body, .. } => {
-                augment_python_comprehension_flow_events(body, source);
+                augment_python_comprehension_flow_events(body, source, assignment_values);
             }
             bonsai_lang_api::FlowEvent::Try {
                 body,
@@ -725,9 +739,9 @@ fn augment_python_comprehension_flow_events(events: &mut [bonsai_lang_api::FlowE
                 finally_events,
                 ..
             } => {
-                augment_python_comprehension_flow_events(body, source);
-                augment_python_comprehension_flow_events(catch_events, source);
-                augment_python_comprehension_flow_events(finally_events, source);
+                augment_python_comprehension_flow_events(body, source, assignment_values);
+                augment_python_comprehension_flow_events(catch_events, source, assignment_values);
+                augment_python_comprehension_flow_events(finally_events, source, assignment_values);
             }
             _ => {}
         }
@@ -1039,54 +1053,6 @@ fn python_flow_event_same_call(left: &FlowEvent, right: &FlowEvent) -> bool {
             }
         ) if left_span == right_span && left_name == right_name
     )
-}
-
-fn python_assignment_rhs_text(source: &str, span: Span) -> Option<String> {
-    let start = usize::try_from(span.start).ok()?.min(source.len());
-    let end = usize::try_from(span.end).ok()?.min(source.len());
-    if start >= end || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
-        return None;
-    }
-    let statement = &source[start..end];
-    let (idx, separator_len) = python_top_level_assignment_separator(statement)?;
-    Some(statement[idx + separator_len..].trim().to_string())
-}
-
-fn python_top_level_assignment_separator(text: &str) -> Option<(usize, usize)> {
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth = 0usize;
-    let mut iter = text.char_indices().peekable();
-    while let Some((idx, ch)) = iter.next() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => depth = depth.saturating_add(1),
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            '=' if depth == 0 => {
-                let prev = text[..idx].chars().next_back();
-                let next = iter.peek().map(|(_, next)| *next);
-                if matches!(prev, Some('=' | '!' | '<' | '>' | ':')) || matches!(next, Some('=' | '>')) {
-                    continue;
-                }
-                return Some((idx, 1));
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn python_comprehension_iterables(rhs: &str) -> Vec<String> {
@@ -1564,7 +1530,11 @@ fn python_flow_event_span(event: &bonsai_lang_api::FlowEvent) -> Span {
     }
 }
 
-fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>, source: &str) {
+fn augment_python_dict_flow_events(
+    events: &mut Vec<bonsai_lang_api::FlowEvent>,
+    source: &str,
+    assignment_values: &AssignmentValueIndex,
+) {
     for event in events.iter_mut() {
         match event {
             bonsai_lang_api::FlowEvent::Branch {
@@ -1572,13 +1542,13 @@ fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>,
                 else_events,
                 ..
             } => {
-                augment_python_dict_flow_events(then_events, source);
-                augment_python_dict_flow_events(else_events, source);
+                augment_python_dict_flow_events(then_events, source, assignment_values);
+                augment_python_dict_flow_events(else_events, source, assignment_values);
             }
             bonsai_lang_api::FlowEvent::Loop { body, .. }
             | bonsai_lang_api::FlowEvent::Defer { body, .. }
             | bonsai_lang_api::FlowEvent::Using { body, .. } => {
-                augment_python_dict_flow_events(body, source);
+                augment_python_dict_flow_events(body, source, assignment_values);
             }
             bonsai_lang_api::FlowEvent::Try {
                 body,
@@ -1586,9 +1556,9 @@ fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>,
                 finally_events,
                 ..
             } => {
-                augment_python_dict_flow_events(body, source);
-                augment_python_dict_flow_events(catch_events, source);
-                augment_python_dict_flow_events(finally_events, source);
+                augment_python_dict_flow_events(body, source, assignment_values);
+                augment_python_dict_flow_events(catch_events, source, assignment_values);
+                augment_python_dict_flow_events(finally_events, source, assignment_values);
             }
             _ => {}
         }
@@ -1599,8 +1569,8 @@ fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>,
     for event in events.drain(..) {
         let mut synthetic = Vec::new();
         if let bonsai_lang_api::FlowEvent::Assign { span, target, .. } = &event {
-            if let Some(rhs) = python_assignment_rhs_text(source, *span) {
-                for (field, value) in python_dict_field_initializers(&rhs) {
+            if let Some(rhs) = assignment_values.rendering(*span, source) {
+                for (field, value) in python_dict_field_initializers(rhs) {
                     push_python_source_name(known_fields.entry(target.clone()).or_default(), field.clone());
                     let source_names = python_value_source_names(&value);
                     synthetic.push(bonsai_lang_api::FlowEvent::Assign {
@@ -1614,7 +1584,7 @@ fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>,
                         value_kind: None,
                     });
                 }
-                for field_read in python_static_get_field_reads(&rhs) {
+                for field_read in python_static_get_field_reads(rhs) {
                     synthetic.push(bonsai_lang_api::FlowEvent::Assign {
                         span: *span,
                         target: target.clone(),
@@ -1626,7 +1596,7 @@ fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>,
                         value_kind: None,
                     });
                 }
-                for spread in python_dict_spreads(&rhs) {
+                for spread in python_dict_spreads(rhs) {
                     if let Some(fields) = known_fields.get(&spread).cloned() {
                         for field in fields {
                             synthetic.push(bonsai_lang_api::FlowEvent::Assign {

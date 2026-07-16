@@ -22,7 +22,7 @@ def process(value):
     let exported = native_export_json(&ws, dir.path(), false).expect("native export");
 
     assert_eq!(exported["schema"], "bonsai-native-export");
-    assert_eq!(exported["schema_version"], 4);
+    assert_eq!(exported["schema_version"], 5);
     let file = exported["files"]
         .as_array()
         .and_then(|files| {
@@ -42,18 +42,29 @@ def process(value):
     );
     assert!(
         assignment_values.iter().any(|fact| {
-            let (Some(assignment_start), Some(assignment_end), Some(value_start), Some(value_end)) = (
+            let (
+                Some(assignment_start),
+                Some(assignment_end),
+                Some(target_start),
+                Some(target_end),
+                Some(value_start),
+                Some(value_end),
+            ) = (
                 fact["assignment_start_byte"].as_u64(),
                 fact["assignment_end_byte"].as_u64(),
+                fact["target_start_byte"].as_u64(),
+                fact["target_end_byte"].as_u64(),
                 fact["value_start_byte"].as_u64(),
                 fact["value_end_byte"].as_u64(),
-            ) else {
+            )
+            else {
                 return false;
             };
             source.get(assignment_start as usize..assignment_end as usize) == Some("current = value")
+                && source.get(target_start as usize..target_end as usize) == Some("current")
                 && source.get(value_start as usize..value_end as usize) == Some("value")
         }),
-        "exported byte spans must select the exact assignment and RHS nodes"
+        "exported byte spans must select the exact assignment, target, and RHS nodes"
     );
     let ids: std::collections::BTreeSet<u64> = events
         .iter()

@@ -47,8 +47,16 @@ fn fun_ref_assignment_emits_clean_callable_alias() {
         declares_new_binding: true,
         value_kind: None,
     };
+    let value_start = u64::try_from(src.find("fun").expect("RHS start")).unwrap();
+    let facts = [bonsai_lang_api::AssignmentValueFact {
+        assignment_span: span,
+        target_span: Some(bonsai_common::Span::new(FileId::new(0), 0, 2)),
+        value_span: bonsai_common::Span::new(FileId::new(0), value_start, span.end),
+        call_sites: Vec::new(),
+    }];
+    let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&facts);
 
-    let alias = erlang_fun_ref_alias_assignment(&event, src).expect("fun ref alias");
+    let alias = erlang_fun_ref_alias_assignment(&event, src, &assignment_values).expect("fun ref alias");
 
     assert!(matches!(
         alias,
@@ -193,7 +201,7 @@ fn collection_transform_assignments_expose_collection_sources() {
         },
     ];
 
-    normalize_erlang_access_events(&mut events, "");
+    normalize_erlang_access_events(&mut events, "", &AssignmentValueIndex::default());
     bonsai_lang_api::normalize_call_result_assignment_sources(&mut events);
     augment_erlang_collection_transform_flow_events(&mut events);
 
@@ -221,8 +229,20 @@ fn list_comprehension_assignment_exposes_generator_sources() {
         declares_new_binding: true,
         value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
     }];
+    let value_start = u64::try_from(src.find('[').expect("RHS start")).unwrap();
+    let facts = [bonsai_lang_api::AssignmentValueFact {
+        assignment_span: span,
+        target_span: Some(bonsai_common::Span::new(
+            FileId::new(0),
+            0,
+            u64::try_from("RawTokens".len()).unwrap(),
+        )),
+        value_span: bonsai_common::Span::new(FileId::new(0), value_start, span.end),
+        call_sites: Vec::new(),
+    }];
+    let assignment_values = AssignmentValueIndex::new(&facts);
 
-    normalize_erlang_access_events(&mut events, src);
+    normalize_erlang_access_events(&mut events, src, &assignment_values);
 
     let FlowEvent::Assign { source_names, .. } = &events[0] else {
         panic!("expected assign");

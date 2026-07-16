@@ -35,10 +35,10 @@ use std::{
     time::Duration,
 };
 
-const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v11.json";
-const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v11.meta.json";
+const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v12.json";
+const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v12.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
-const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v12";
+const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v13";
 const CACHE_MANIFEST_FILE: &str = "manifest.json";
 const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const RETRIEVAL_NO_CANDIDATES_FILTER: &str = "/__bonsai_no_retrieval_candidates__/__none__";
