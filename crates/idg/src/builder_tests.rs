@@ -74,6 +74,10 @@ impl MockResolver {
         self.callback_bindings.insert((host, param_idx), callees);
     }
 
+    fn add_callable_arg(&mut self, caller: FuncId, arg_text: &str, callees: Vec<FuncId>) {
+        self.callable_args.insert((caller, arg_text.to_string()), callees);
+    }
+
     fn add_callable_arg_span(&mut self, caller: FuncId, arg_span: Span, callees: Vec<FuncId>) {
         self.callable_arg_spans.insert((caller, arg_span), callees);
     }
@@ -410,6 +414,65 @@ fn callable_argument_routes_method_receiver_to_callback_without_outer_callee() {
         }),
         "AST-resolved callable arguments must route the collection receiver to the callback parameter without resolving the outer library method: {:#?}",
         segment.edges
+    );
+}
+
+#[test]
+fn same_named_value_argument_is_not_invented_as_a_callback() {
+    let mut host = empty_decl(1, "host");
+    host.params = vec!["payload".to_string(), "text".to_string()];
+    host.flow_events = vec![FlowEvent::Call {
+        span: span(20, 40),
+        name: "client.send".to_string(),
+        receiver: Some("client".to_string()),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Method,
+        args: vec![
+            CallArg {
+                passing_mode: Default::default(),
+                span: span(28, 31),
+                name: None,
+                value_text: "payload".to_string(),
+                place: Some("payload".to_string()),
+                source_names: Vec::new(),
+            },
+            CallArg {
+                passing_mode: Default::default(),
+                span: span(33, 37),
+                name: None,
+                value_text: "text".to_string(),
+                place: Some("text".to_string()),
+                source_names: Vec::new(),
+            },
+        ],
+    }];
+    let mut same_named_method = empty_decl(2, "text");
+    same_named_method.params = vec!["value".to_string()];
+
+    let mut resolver = MockResolver::new();
+    resolver.add_callable_arg(FuncId::new(1), "text", vec![FuncId::new(2)]);
+    let ws = stitch_idg(
+        vec![
+            transfer_function_for(&host),
+            transfer_function_for(&same_named_method),
+        ],
+        &resolver,
+        &StaticF2S(AHashMap::from([
+            (FuncId::new(1), SegmentId(0)),
+            (FuncId::new(2), SegmentId(1)),
+        ])),
+    );
+
+    assert!(
+        ws.cross_file().edges.iter().all(|edge| {
+            edge.edge.meta.kind != IdgEdgeKind::InterCallArg
+                || ws
+                    .segment(edge.to_segment)
+                    .and_then(|segment| segment.nodes.get(edge.edge.to))
+                    .is_none_or(|node| node.func != FuncId::new(2))
+        }),
+        "ordinary values need AST/type evidence before they can invoke a same-named declaration: {:#?}",
+        ws.cross_file().edges
     );
 }
 

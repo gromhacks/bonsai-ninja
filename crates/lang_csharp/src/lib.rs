@@ -114,6 +114,10 @@ impl LanguageAdapter for CSharpAdapter {
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+        let mut class_member_names_by_symbol: std::collections::HashMap<
+            bonsai_common::SymbolId,
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
             // Phase-6 return-type extraction: `T Method() {}` populates
@@ -159,6 +163,22 @@ impl LanguageAdapter for CSharpAdapter {
                 .filter(|candidate| is_class_like(candidate.kind))
                 .map(|candidate| (candidate.symbol, candidate.span))
                 .collect();
+            for (class_symbol, class_span) in &class_span_for_parent {
+                let Some(field_aliases) = class_field_aliases
+                    .iter()
+                    .find_map(|(span, aliases)| (*span == *class_span).then_some(aliases))
+                else {
+                    continue;
+                };
+                let names = class_member_names_by_symbol.entry(*class_symbol).or_default();
+                names.extend(
+                    field_aliases
+                        .iter()
+                        .map(|alias| alias.name.trim())
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string),
+                );
+            }
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
                     decl.visibility = vis;
@@ -252,7 +272,7 @@ impl LanguageAdapter for CSharpAdapter {
         // `Data = data;` inside constructors. Rewrite those implicit
         // receiver accesses so the IDG can stitch property returns and
         // constructor field writes onto object instances.
-        qualify_csharp_implicit_member_accesses(&mut idx);
+        qualify_csharp_implicit_member_accesses(&mut idx, &class_member_names_by_symbol);
         for decl in &mut idx.defs {
             enrich_csharp_receiver_field_writes(decl);
         }
@@ -739,16 +759,36 @@ fn csharp_enclosing_type_decl(
 /// bare RHS name matches a zero-arg member decl in this file and is NOT
 /// a local/param of the method, convert it into a `source_call` so the
 /// IDG resolves the getter and forwards its return into the assignment.
-fn qualify_csharp_implicit_member_accesses(index: &mut DeclIndex) {
-    use std::collections::HashSet;
-    let getter_names: HashSet<String> = index
-        .defs
-        .iter()
-        .filter(|d| matches!(d.kind, DeclKind::Method) && d.params.is_empty() && !d.name.is_empty())
-        .map(|d| d.name.clone())
-        .collect();
-    if getter_names.is_empty() {
-        return;
+fn qualify_csharp_implicit_member_accesses(
+    index: &mut DeclIndex,
+    class_member_names_by_symbol: &std::collections::HashMap<
+        bonsai_common::SymbolId,
+        std::collections::HashSet<String>,
+    >,
+) {
+    use std::collections::{HashMap, HashSet};
+    // Member lookup is lexical: a getter in another class or a typed local
+    // that happens to share a field's type is not an implicit `this` member.
+    // Keep the declaration owner's symbol in the key instead of building a
+    // file-wide name inventory.
+    let mut getter_names_by_parent: HashMap<Option<bonsai_common::SymbolId>, HashSet<String>> =
+        HashMap::new();
+    let mut class_symbols_by_name: HashMap<String, Vec<bonsai_common::SymbolId>> = HashMap::new();
+    let mut class_bases_by_symbol: HashMap<bonsai_common::SymbolId, Vec<String>> = HashMap::new();
+    for decl in &index.defs {
+        if matches!(decl.kind, DeclKind::Method) && decl.params.is_empty() && !decl.name.is_empty() {
+            getter_names_by_parent
+                .entry(decl.parent)
+                .or_default()
+                .insert(decl.name.clone());
+        }
+        if is_class_like(decl.kind) {
+            class_symbols_by_name
+                .entry(decl.name.clone())
+                .or_default()
+                .push(decl.symbol);
+            class_bases_by_symbol.insert(decl.symbol, decl.bases.clone());
+        }
     }
     for decl in &mut index.defs {
         if decl.flow_events.is_empty() {
@@ -758,8 +798,34 @@ fn qualify_csharp_implicit_member_accesses(index: &mut DeclIndex) {
         // member, so those names must keep their plain-read semantics.
         let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
         collect_assign_targets(&decl.flow_events, &mut locals);
-        let mut member_names = getter_names.clone();
-        member_names.extend(decl.type_aliases.iter().map(|alias| alias.name.clone()));
+        let mut getter_names = HashSet::new();
+        let mut member_names = HashSet::new();
+        let mut owner_stack: Vec<bonsai_common::SymbolId> = decl.parent.into_iter().collect();
+        let mut seen_owners = HashSet::new();
+        while let Some(owner) = owner_stack.pop() {
+            if !seen_owners.insert(owner) {
+                continue;
+            }
+            if let Some(names) = getter_names_by_parent.get(&Some(owner)) {
+                getter_names.extend(names.iter().cloned());
+            }
+            if let Some(names) = class_member_names_by_symbol.get(&owner) {
+                member_names.extend(names.iter().cloned());
+            }
+            for base in class_bases_by_symbol.get(&owner).into_iter().flatten() {
+                if let Some(symbols) = class_symbols_by_name.get(base) {
+                    owner_stack.extend(symbols.iter().copied());
+                }
+            }
+        }
+        // File-level functions have no class owner. Preserve ordinary
+        // top-level getter semantics without mixing them into class methods.
+        if decl.parent.is_none() {
+            if let Some(names) = getter_names_by_parent.get(&None) {
+                getter_names.extend(names.iter().cloned());
+            }
+        }
+        member_names.extend(getter_names.iter().cloned());
         let params: HashSet<String> = decl.params.iter().cloned().collect();
         rewrite_csharp_member_accesses(
             &mut decl.flow_events,

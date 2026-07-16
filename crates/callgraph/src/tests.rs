@@ -2859,6 +2859,65 @@ fn object_constructor_assignment_is_not_callback_binding() {
 }
 
 #[test]
+fn parameter_argument_is_not_same_named_constructor_callback() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl_with(file, 0, "Envelope", DeclKind::Constructor, None, Vec::new()),
+            with_params(
+                decl(
+                    file,
+                    1,
+                    "persist",
+                    vec![FlowEvent::Call {
+                        span: Span::new(file, 20, 40),
+                        name: "AuditedRepository".to_string(),
+                        receiver: None,
+                        receiver_types: Vec::new(),
+                        call_kind: CallKind::Constructor,
+                        args: vec![CallArg {
+                            passing_mode: Default::default(),
+                            span: Span::new(file, 30, 38),
+                            name: None,
+                            value_text: "envelope".to_string(),
+                            place: Some("envelope".to_string()),
+                            source_names: vec!["envelope".to_string()],
+                        }],
+                    }],
+                ),
+                &["envelope"],
+            ),
+            decl_with(
+                file,
+                2,
+                "AuditedRepository",
+                DeclKind::Constructor,
+                None,
+                Vec::new(),
+            ),
+        ],
+    );
+
+    let cg = build_graph(&global, |_| Some("dart"));
+    let persist = FuncId::new(global.find_by_name("persist")[0].raw());
+    let envelope_ctor = FuncId::new(global.find_by_name("Envelope")[0].raw());
+    let audited_ctor = FuncId::new(global.find_by_name("AuditedRepository")[0].raw());
+    let edges = cg.callees_of(persist).collect::<Vec<_>>();
+
+    assert!(
+        edges.iter().any(|edge| edge.to == audited_ctor),
+        "the AST call target must resolve to its constructor: {edges:#?}"
+    );
+    assert!(
+        edges.iter().all(|edge| edge.to != envelope_ctor),
+        "the lexical parameter must shadow the same-spelled constructor in callback lookup: {edges:#?}"
+    );
+}
+
+#[test]
 fn assign_source_call_emits_edge_at_assignment_span_for_bare_call() {
     let file = FileId::new(1);
     let mut global = GlobalIndex::new();

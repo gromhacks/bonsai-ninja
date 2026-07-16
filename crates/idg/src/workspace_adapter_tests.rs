@@ -595,6 +595,89 @@ fn constructor_fallback_indexes_structs_by_scope_without_sibling_fanout() {
 }
 
 #[test]
+fn nested_indirect_constructor_edge_does_not_replace_outer_class_call() {
+    let call_span = span(0, 20, 45);
+    let arg_span = span(0, 38, 44);
+    let module = ModulePath::from_segments(["storage"]);
+    let mut caller = empty_decl(1, 0, "persist");
+    caller.module_path = module.clone();
+    caller.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "AuditedRepository".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
+            span: arg_span,
+            name: None,
+            value_text: "envelope".to_string(),
+            place: Some("envelope".to_string()),
+            source_names: vec!["envelope".to_string()],
+        }],
+    }];
+
+    let mut audited_class = empty_decl(2, 1, "AuditedRepository");
+    audited_class.kind = DeclKind::Class;
+    audited_class.module_path = module.clone();
+    let mut audited_ctor = empty_decl(3, 1, "AuditedRepository");
+    audited_ctor.kind = DeclKind::Constructor;
+    audited_ctor.module_path = module.clone();
+    audited_ctor.parent = Some(audited_class.symbol);
+    audited_ctor.params = vec!["data".to_string()];
+
+    let mut unrelated_class = empty_decl(4, 2, "Envelope");
+    unrelated_class.kind = DeclKind::Class;
+    unrelated_class.module_path = module.clone();
+    let mut unrelated_ctor = empty_decl(5, 2, "Envelope");
+    unrelated_ctor.kind = DeclKind::Constructor;
+    unrelated_ctor.module_path = module;
+    unrelated_ctor.parent = Some(unrelated_class.symbol);
+    unrelated_ctor.params = vec!["cmd".to_string()];
+
+    let idx = build_index(vec![
+        caller,
+        audited_class,
+        audited_ctor,
+        unrelated_class,
+        unrelated_ctor,
+    ]);
+    let caller_id = func_id(&idx, "persist");
+    let audited_ctor_id = func_id_in_file(&idx, 1, "AuditedRepository");
+    let unrelated_ctor_id = func_id_in_file(&idx, 2, "Envelope");
+    let mut cg = CallGraph::new();
+    cg.add_edge(CallEdge {
+        from: caller_id,
+        to: unrelated_ctor_id,
+        span: arg_span,
+        kind: EdgeKind::Indirect,
+        precision: Precision::Narrowed,
+        provenance: EdgeProvenance::callable_value("nested callable argument"),
+    });
+    let ws = build(&idx, &ResolvedCallGraph::from_call_graph(cg));
+    let caller_segment = ws.segment_for_func(caller_id).expect("caller segment");
+    let audited_segment = ws
+        .segment_for_func(audited_ctor_id)
+        .expect("audited constructor segment");
+    let unrelated_segment = ws
+        .segment_for_func(unrelated_ctor_id)
+        .expect("unrelated constructor segment");
+
+    assert!(ws.cross_file().edges.iter().any(|cross| {
+        cross.from_segment == caller_segment
+            && cross.to_segment == audited_segment
+            && cross.edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg
+            && cross.edge.meta.via_span == call_span
+    }));
+    assert!(ws.cross_file().edges.iter().all(|cross| {
+        cross.from_segment != caller_segment
+            || cross.to_segment != unrelated_segment
+            || cross.edge.meta.kind != crate::edge::IdgEdgeKind::InterCallArg
+            || cross.edge.meta.via_span != call_span
+    }));
+}
+
+#[test]
 fn higher_order_callback_binding_stays_in_same_directory_scope() {
     let mut entry_a = empty_decl(1, 0, "entry");
     entry_a.flow_events = vec![FlowEvent::Call {
@@ -673,10 +756,41 @@ fn higher_order_callback_binding_stays_in_same_directory_scope() {
     let entry_b_id = func_id_in_file(&idx, 3, "entry");
     let run_cb_b_id = func_id_in_file(&idx, 4, "runCb");
     let executor_b_id = func_id_in_file(&idx, 5, "executor");
-    let cg = resolved_graph([
-        (entry_a_id, run_cb_a_id, span(0, 20, 30)),
-        (entry_b_id, run_cb_b_id, span(3, 20, 30)),
-    ]);
+    let mut cg = CallGraph::new();
+    for (from, to, call_span, callback, callback_span) in [
+        (
+            entry_a_id,
+            run_cb_a_id,
+            span(0, 20, 30),
+            executor_a_id,
+            span(0, 21, 29),
+        ),
+        (
+            entry_b_id,
+            run_cb_b_id,
+            span(3, 20, 30),
+            executor_b_id,
+            span(3, 21, 29),
+        ),
+    ] {
+        cg.add_edge(CallEdge {
+            from,
+            to,
+            span: call_span,
+            kind: EdgeKind::Direct,
+            precision: Precision::Narrowed,
+            provenance: EdgeProvenance::direct_symbol(),
+        });
+        cg.add_edge(CallEdge {
+            from,
+            to: callback,
+            span: callback_span,
+            kind: EdgeKind::Indirect,
+            precision: Precision::Narrowed,
+            provenance: EdgeProvenance::callable_value("argument resolved as callable reference"),
+        });
+    }
+    let cg = ResolvedCallGraph::from_call_graph(cg);
 
     let ws = build_with_file_info_and_paths(
         &idx,
@@ -769,7 +883,24 @@ fn higher_order_callback_stitches_invocation_arg_to_bound_function_param() {
     let entry_id = func_id(&idx, "entry");
     let run_cb_id = func_id(&idx, "runCb");
     let executor_id = func_id(&idx, "executor");
-    let cg = resolved_graph([(entry_id, run_cb_id, span(0, 20, 30))]);
+    let mut cg = CallGraph::new();
+    cg.add_edge(CallEdge {
+        from: entry_id,
+        to: run_cb_id,
+        span: span(0, 20, 30),
+        kind: EdgeKind::Direct,
+        precision: Precision::Narrowed,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+    cg.add_edge(CallEdge {
+        from: entry_id,
+        to: executor_id,
+        span: span(0, 21, 29),
+        kind: EdgeKind::Indirect,
+        precision: Precision::Narrowed,
+        provenance: EdgeProvenance::callable_value("argument resolved as callable reference"),
+    });
+    let cg = ResolvedCallGraph::from_call_graph(cg);
 
     let ws = build(&idx, &cg);
     let run_cb_segment = ws.segment_for_func(run_cb_id).expect("runCb segment");
@@ -790,6 +921,74 @@ fn higher_order_callback_stitches_invocation_arg_to_bound_function_param() {
     assert_eq!(
         callback_arg_edges, 1,
         "callback invocation `cb(value)` must pass invocation arg `value` into bound function `executor(cmd)`"
+    );
+}
+
+#[test]
+fn ordinary_object_parameter_is_not_reinterpreted_as_same_named_callback() {
+    let module = ModulePath::from_segments(["analysis"]);
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.module_path = module.clone();
+    entry.flow_events = vec![FlowEvent::Call {
+        span: span(0, 20, 40),
+        name: "simpleAnalyze".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
+            span: span(0, 30, 38),
+            name: None,
+            value_text: "analyzer".to_string(),
+            place: Some("analyzer".to_string()),
+            source_names: vec!["analyzer".to_string()],
+        }],
+    }];
+
+    let mut simple_analyze = empty_decl(2, 1, "simpleAnalyze");
+    simple_analyze.module_path = module.clone();
+    simple_analyze.params = vec!["analyzer".to_string()];
+    simple_analyze.flow_events = vec![FlowEvent::Call {
+        span: span(1, 120, 150),
+        name: "analyzer.tokenStream".to_string(),
+        receiver: Some("analyzer".to_string()),
+        receiver_types: vec!["Analyzer".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
+            span: span(1, 140, 145),
+            name: None,
+            value_text: "text".to_string(),
+            place: Some("text".to_string()),
+            source_names: vec!["text".to_string()],
+        }],
+    }];
+
+    let mut same_named_method = empty_decl(3, 2, "analyzer");
+    same_named_method.module_path = module;
+    same_named_method.params = vec!["value".to_string()];
+
+    let idx = build_index(vec![entry, simple_analyze, same_named_method]);
+    let entry_id = func_id(&idx, "entry");
+    let simple_analyze_id = func_id(&idx, "simpleAnalyze");
+    let same_named_method_id = func_id(&idx, "analyzer");
+    let cg = resolved_graph([(entry_id, simple_analyze_id, span(0, 20, 40))]);
+    let ws = build(&idx, &cg);
+    let simple_analyze_segment = ws
+        .segment_for_func(simple_analyze_id)
+        .expect("simpleAnalyze segment");
+    let same_named_segment = ws
+        .segment_for_func(same_named_method_id)
+        .expect("same-named method segment");
+
+    assert!(
+        ws.cross_file().edges.iter().all(|cross| {
+            cross.from_segment != simple_analyze_segment
+                || cross.to_segment != same_named_segment
+                || cross.edge.meta.kind != crate::edge::IdgEdgeKind::InterCallArg
+        }),
+        "member access on an object parameter is not a callback invocation without an indirect callgraph edge: {:#?}",
+        ws.cross_file().edges
     );
 }
 

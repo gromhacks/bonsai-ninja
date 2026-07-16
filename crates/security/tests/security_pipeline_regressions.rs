@@ -1772,6 +1772,93 @@ fn rust_mega_flow_preserves_nested_field_projection_through_newtype_factory() {
 }
 
 #[test]
+fn dart_mega_flow_stitches_repository_argument_into_execute_parameter() {
+    let ws = index_real_fixture("dart", "mega_flow");
+    let global = ws.db().global_index();
+    let idg = ensure_idg_service(ws.db());
+    let execute = ws.lookup_function("execute").expect("Dart executor function");
+    let (repository_run, execute_span) = ws
+        .vfs()
+        .all_files()
+        .into_iter()
+        .flat_map(|file| global.decls_in(file).iter())
+        .filter(|decl| decl.name == "run")
+        .find_map(|decl| {
+            decl.flow_events.iter().find_map(|event| match event {
+                FlowEvent::Call { span, name, .. } if name == "execute" => {
+                    Some((bonsai_common::FuncId::new(decl.symbol.raw()), *span))
+                }
+                _ => None,
+            })
+        })
+        .expect("Repository.run execute call");
+    let call_nodes = idg.nodes_at_span(repository_run, execute_span);
+    let params = idg.param_nodes_of(execute);
+    let sink_span = global
+        .decl_of(bonsai_common::SymbolId::new(execute.raw()))
+        .expect("execute declaration")
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { span, name, .. } if name == "Process.runSync" => Some(*span),
+            _ => None,
+        })
+        .expect("Process.runSync sink call");
+    let sink_nodes = idg.nodes_at_span(execute, sink_span);
+
+    assert!(
+        call_nodes.iter().any(|source| {
+            idg.resolve_point(*source)
+                .is_some_and(|point| point.kind == PointKind::CallArg)
+                && params.iter().any(|target| idg.reaches(*source, *target))
+        }),
+        "the resolved execute(c) call must stitch its AST CallArg to execute(cmd); call_nodes={:#?}; params={:#?}",
+        call_nodes
+            .iter()
+            .filter_map(|node| idg.resolve_point(*node))
+            .collect::<Vec<_>>(),
+        params
+            .iter()
+            .filter_map(|node| idg.resolve_point(*node))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        params
+            .iter()
+            .any(|source| sink_nodes.iter().any(|target| idg.reaches(*source, *target))),
+        "execute(cmd) must flow through the AST argument expression into Process.runSync; params={:#?}; sink_nodes={:#?}",
+        params
+            .iter()
+            .filter_map(|node| idg.resolve_point(*node))
+            .collect::<Vec<_>>(),
+        sink_nodes
+            .iter()
+            .filter_map(|node| idg.resolve_point(*node))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dart_mega_flow_security_source_reaches_process_sink() {
+    let report = run_taint_analysis(
+        &index_real_fixture("dart", "mega_flow"),
+        &bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads"),
+        TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..Default::default()
+        },
+    )
+    .expect("Dart mega-flow taint analysis");
+
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "stdin.readLineSync must reach Process.runSync through the scoped semantic IDG: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
 fn mega_flow_taint_output_does_not_surface_known_overclaims() {
     let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads");
 

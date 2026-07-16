@@ -744,21 +744,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
     }
 
     fn callable_args_in_span(&self, caller: FuncId, arg_span: bonsai_common::Span) -> Vec<ResolvedCallee> {
-        let mut out = Vec::new();
-        let mut seen = ahash::AHashSet::new();
-        for edge in self.call_graph.callees_of(caller) {
-            if edge.kind != bonsai_callgraph::EdgeKind::Indirect
-                || edge.span.file != arg_span.file
-                || edge.span.start < arg_span.start
-                || edge.span.end > arg_span.end
-                || !edge.precision.is_semantic()
-                || !self.funcs_share_language(caller, edge.to)
-            {
-                continue;
-            }
-            Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind, edge.precision);
-        }
-        out
+        self.callable_args_in_span_indexed(caller, arg_span)
     }
 
     fn receiver_type_for(&self, func: FuncId) -> Option<String> {
@@ -789,6 +775,34 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         self.local_callable_bindings
             .get(&caller)
             .is_some_and(|bindings| bindings.values().any(|bound| *bound == callee))
+    }
+}
+
+impl WorkspaceCalleeResolver<'_> {
+    /// Return only compiler-resolved callable values whose indirect call edge
+    /// is contained by this AST argument. A textual identifier is not proof:
+    /// an ordinary object variable can share its spelling with an unrelated
+    /// method elsewhere in the workspace.
+    fn callable_args_in_span_indexed(
+        &self,
+        caller: FuncId,
+        arg_span: bonsai_common::Span,
+    ) -> Vec<ResolvedCallee> {
+        let mut out = Vec::new();
+        let mut seen = ahash::AHashSet::new();
+        for edge in self.call_graph.callees_of(caller) {
+            if edge.kind != bonsai_callgraph::EdgeKind::Indirect
+                || edge.span.file != arg_span.file
+                || edge.span.start < arg_span.start
+                || edge.span.end > arg_span.end
+                || !edge.precision.is_semantic()
+                || !self.funcs_share_language(caller, edge.to)
+            {
+                continue;
+            }
+            Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind, edge.precision);
+        }
+        out
     }
 }
 
@@ -875,12 +889,15 @@ impl WorkspaceCalleeResolver<'_> {
                 matched = call_names.iter().any(|n| names_match_for_callee(n, callee_name));
             }
         }
-        // A site-specific semantic callgraph edge to a declaration already
-        // is the compiler's resolution result. Constructor declarations are
-        // commonly named `__init__`/`initialize` while the call expression is
-        // spelled with the owning type, so textual name equality is neither
-        // necessary nor correct here.
-        if !matched && self.is_constructor_func(to) {
+        // A site-specific direct/constructor callgraph edge already is the
+        // compiler's resolution result. Constructor declarations are commonly
+        // named `__init__`/`initialize` while the call expression is spelled
+        // with the owning type, so textual equality is unnecessary there.
+        // An Indirect edge can instead belong to a callable argument nested in
+        // the host call. It must retain the name gate or an argument that
+        // happens to resolve to any constructor will replace the host's real
+        // target and suppress scoped constructor fallback.
+        if !matched && edge_kind != bonsai_callgraph::EdgeKind::Indirect && self.is_constructor_func(to) {
             matched = true;
         }
         if matched {
@@ -931,61 +948,38 @@ impl WorkspaceCalleeResolver<'_> {
         if let Some(cached) = self.callback_cache.read().get(&cache_key).cloned() {
             return cached;
         }
-        // For every caller of `host`, walk its flow events looking
-        // for Call sites that resolve to `host`, and pick the
-        // argument at `param_idx`. The arg's text might be a
-        // function name (e.g., `run(executor, t)` → arg 0 text is
-        // "executor"). Resolve that name through the workspace's
-        // callback-name index to get the bound FuncId. Each
-        // resolution becomes a callback ResolvedCallee that the
-        // IDG stitcher can use to wire CallArg(callback-call) →
-        // bound-func.Param edges.
-        let host_name = match self.func_to_name.get(&host) {
-            Some(n) => n.clone(),
-            None => return Vec::new(),
-        };
+        // For every caller of `host`, find AST Call events whose exact-site
+        // callgraph target is `host`, then inspect the requested argument's
+        // span. The callgraph emits an Indirect edge inside that span when
+        // the argument is a function pointer, method reference, lambda, or
+        // other callable value. This is the semantic proof that the host
+        // parameter may later be invoked; resolving the argument's text by
+        // name would misclassify ordinary values such as `Analyzer analyzer`
+        // when some unrelated declaration is also named `analyzer`.
         let mut out: Vec<ResolvedCallee> = Vec::new();
         let mut seen: ahash::AHashSet<FuncId> = ahash::AHashSet::new();
-        let bare_host = host_name
-            .rsplit_once(['.', ':'])
-            .map(|(_, tail)| tail.to_string())
-            .unwrap_or_else(|| host_name.clone());
+        let mut seen_callers = ahash::AHashSet::new();
         for edge in self.call_graph.callers_of(host) {
             let caller = edge.from;
+            if !seen_callers.insert(caller) {
+                continue;
+            }
             let Some(caller_decl) = self.global.decl_of(bonsai_common::SymbolId::new(caller.raw())) else {
                 continue;
             };
-            // Find Call events in caller's flow events whose name
-            // matches host's name (or its bare suffix); take the
-            // arg at param_idx.
-            let mut found_args: Vec<String> = Vec::new();
-            collect_arg_text_for_callee(
+            let mut arg_spans = Vec::new();
+            collect_arg_spans_for_resolved_callee(
                 &caller_decl.flow_events,
-                &host_name,
-                &bare_host,
+                caller,
+                host,
                 param_idx as usize,
-                &mut found_args,
+                self.call_edges_by_site,
+                &mut arg_spans,
             );
-            for arg_text in found_args {
-                // Use the same syntax-derived callable-reference variants
-                // as the callgraph instead of maintaining a second list of
-                // wrapper/API spellings in the IDG.
-                for bound_name in callable_reference_variants(&arg_text) {
-                    for candidate_func in
-                        self.callback_candidate_funcs_for_bound_name(&bound_name, caller, host)
-                    {
-                        if !self.funcs_share_language(host, candidate_func)
-                            || !self.funcs_share_language(caller, candidate_func)
-                        {
-                            continue;
-                        }
-                        if seen.insert(candidate_func) {
-                            out.push(ResolvedCallee {
-                                func: candidate_func,
-                                edge_kind: bonsai_callgraph::EdgeKind::Indirect,
-                                precision: bonsai_common::Precision::Narrowed,
-                            });
-                        }
+            for arg_span in arg_spans {
+                for candidate in self.callable_args_in_span_indexed(caller, arg_span) {
+                    if self.funcs_share_language(host, candidate.func) && seen.insert(candidate.func) {
+                        out.push(candidate);
                     }
                 }
             }
@@ -1867,55 +1861,29 @@ fn names_match_for_callee(decl_name: &str, event_name: &str) -> bool {
     matches_qualified_tail(decl_name, tail)
 }
 
-/// Walk `events`, find every Call event whose callee name matches
-/// `host_name` or its bare suffix `bare_host`, and append the
-/// `arg_idx`-th argument's `value_text` plus every `source_names`
-/// entry to `out`. Both are surfaced because adapters express
-/// callback bindings differently — perl `\&executor` lands in
-/// `value_text` only, ruby `:foo` lands in both, java `Cls::m`
-/// lands in `value_text` while the bare name is in `source_names`.
-/// Adding all candidate textual handles keeps callback resolution
-/// adapter-agnostic.
-fn collect_arg_text_for_callee(
+/// Walk `events` and collect the requested argument span only from Call
+/// events that the target-aware callgraph index resolves to `host`. Callback
+/// discovery then consumes indirect callgraph edges inside these AST spans;
+/// source spelling is never reinterpreted as a symbol here.
+fn collect_arg_spans_for_resolved_callee(
     events: &[bonsai_lang_api::FlowEvent],
-    host_name: &str,
-    bare_host: &str,
+    caller: FuncId,
+    host: FuncId,
     arg_idx: usize,
-    out: &mut Vec<String>,
+    call_edges_by_site: &AHashMap<CallSiteEdgeKey, Vec<IndexedCallEdge>>,
+    out: &mut Vec<bonsai_common::Span>,
 ) {
     use bonsai_lang_api::FlowEvent;
-    let push_arg = |arg: &bonsai_lang_api::CallArg, out: &mut Vec<String>| {
-        out.push(arg.value_text.clone());
-        for name in &arg.source_names {
-            if !name.is_empty() {
-                out.push(name.clone());
-            }
-        }
-        if let Some(place) = arg.place.as_deref() {
-            if !place.is_empty() {
-                out.push(place.to_string());
-            }
-        }
-    };
     for event in events {
         match event {
-            FlowEvent::Call { name, args, .. } => {
-                if name == host_name || matches_qualified_tail(name, bare_host) {
+            FlowEvent::Call { span, args, .. } => {
+                let key = CallSiteEdgeKey { caller, site: *span };
+                if call_edges_by_site
+                    .get(&key)
+                    .is_some_and(|edges| edges.iter().any(|edge| edge.to == host))
+                {
                     if let Some(arg) = args.get(arg_idx) {
-                        push_arg(arg, out);
-                    }
-                }
-            }
-            FlowEvent::Assign {
-                source_call,
-                source_call_args,
-                ..
-            } => {
-                if let Some(callee) = source_call {
-                    if callee == host_name || matches_qualified_tail(callee, bare_host) {
-                        if let Some(text) = source_call_args.get(arg_idx) {
-                            out.push(text.clone());
-                        }
+                        out.push(arg.span);
                     }
                 }
             }
@@ -1924,8 +1892,22 @@ fn collect_arg_text_for_callee(
                 else_events,
                 ..
             } => {
-                collect_arg_text_for_callee(then_events, host_name, bare_host, arg_idx, out);
-                collect_arg_text_for_callee(else_events, host_name, bare_host, arg_idx, out);
+                collect_arg_spans_for_resolved_callee(
+                    then_events,
+                    caller,
+                    host,
+                    arg_idx,
+                    call_edges_by_site,
+                    out,
+                );
+                collect_arg_spans_for_resolved_callee(
+                    else_events,
+                    caller,
+                    host,
+                    arg_idx,
+                    call_edges_by_site,
+                    out,
+                );
             }
             FlowEvent::Try {
                 body,
@@ -1933,12 +1915,26 @@ fn collect_arg_text_for_callee(
                 finally_events,
                 ..
             } => {
-                collect_arg_text_for_callee(body, host_name, bare_host, arg_idx, out);
-                collect_arg_text_for_callee(catch_events, host_name, bare_host, arg_idx, out);
-                collect_arg_text_for_callee(finally_events, host_name, bare_host, arg_idx, out);
+                collect_arg_spans_for_resolved_callee(body, caller, host, arg_idx, call_edges_by_site, out);
+                collect_arg_spans_for_resolved_callee(
+                    catch_events,
+                    caller,
+                    host,
+                    arg_idx,
+                    call_edges_by_site,
+                    out,
+                );
+                collect_arg_spans_for_resolved_callee(
+                    finally_events,
+                    caller,
+                    host,
+                    arg_idx,
+                    call_edges_by_site,
+                    out,
+                );
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_arg_text_for_callee(body, host_name, bare_host, arg_idx, out);
+                collect_arg_spans_for_resolved_callee(body, caller, host, arg_idx, call_edges_by_site, out);
             }
             _ => {}
         }
