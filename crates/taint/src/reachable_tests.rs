@@ -37,6 +37,58 @@ fn call_summary_cache_for(
 }
 
 #[test]
+fn sentinel_argument_uses_ast_receiver_but_return_does_not() {
+    let call_span = Span::new(FileId::new(0), 10, 20);
+    let summary = CallEventSummary {
+        name: "persist".to_string(),
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args_value_text: Vec::new(),
+        args_span: Vec::new(),
+        args_place: Vec::new(),
+        args_source_names: Vec::new(),
+        receiver: Some("repo".to_string()),
+        receiver_types: vec!["Repository".to_string()],
+    };
+    let mut edge = bonsai_idg::CrossCallEdge {
+        caller: FuncId::new(1),
+        callee: FuncId::new(2),
+        call_span,
+        arg_idx: u32::MAX,
+        param_idx: 0,
+        precision: Precision::Narrowed,
+        call_kind: bonsai_callgraph::EdgeKind::Direct,
+        relation: bonsai_idg::CrossCallRelation::Argument,
+    };
+
+    let args = tainted_args_for_cross_call_edge(&edge, None, Some(&summary));
+    assert_eq!(args.len(), 1);
+    assert_eq!(args[0].value_text, "repo");
+    assert_eq!(args[0].param_name, SYNTHETIC_RECEIVER_PARAM_NAME);
+
+    edge.relation = bonsai_idg::CrossCallRelation::Capture;
+    let captured_receiver = tainted_args_for_cross_call_edge(&edge, None, Some(&summary));
+    assert_eq!(captured_receiver[0].value_text, "repo");
+    assert_eq!(captured_receiver[0].param_name, SYNTHETIC_RECEIVER_PARAM_NAME);
+
+    edge.relation = bonsai_idg::CrossCallRelation::Return;
+    assert!(tainted_args_for_cross_call_edge(&edge, None, Some(&summary)).is_empty());
+
+    edge.relation = bonsai_idg::CrossCallRelation::Argument;
+    edge.param_idx = u32::MAX;
+    let explicit_arg_summary = CallEventSummary {
+        args_value_text: vec!["payload".to_string()],
+        args_span: vec![Span::new(FileId::new(0), 15, 18)],
+        args_place: vec![Some("payload".to_string())],
+        args_source_names: vec![vec!["payload".to_string()]],
+        ..summary
+    };
+    assert!(
+        tainted_args_for_cross_call_edge(&edge, None, Some(&explicit_arg_summary)).is_empty(),
+        "an unknown symbolic slot must not be mislabeled as receiver taint"
+    );
+}
+
+#[test]
 fn call_event_summaries_are_shared_across_source_queries() {
     let func = FuncId::new(7);
     let global = bonsai_index::GlobalIndex::new();

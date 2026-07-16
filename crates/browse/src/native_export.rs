@@ -44,11 +44,11 @@ struct ExportOut<'a> {
     /// User-visible analysis facts are semantic only: exact or narrowed
     /// resolver evidence, never broad unresolved fan-out.
     analysis_scope: ExportAnalysisScope,
-    /// Whole-document completeness. `false` means parser coverage was
-    /// incomplete or one or more exported evidence sections is intentionally
-    /// omitted or capped; the exact missing scope is listed in
-    /// `analysis_incomplete_reasons` and in the relevant section-level
-    /// metadata.
+    /// Whole-document completeness. `false` means parser or semantic call
+    /// resolution coverage was incomplete, or one or more exported evidence
+    /// sections is intentionally omitted or capped. The exact missing scope
+    /// is listed in `analysis_incomplete_reasons` and in the relevant
+    /// section-level metadata.
     analysis_complete: bool,
     analysis_incomplete_reasons: Vec<String>,
     summary: ExportSummary,
@@ -661,14 +661,14 @@ fn native_export(
     ));
     let phase_started = Instant::now();
     let taint_graph = build_taint_graph(ws, &spans, config, chain_limits, &chain_cache);
-    let parser_incomplete_reasons = ws.parser_incomplete_reasons_for_files(&ws.vfs().all_files());
+    let workspace_incomplete_reasons = export_workspace_incomplete_reasons(ws);
     let completeness = export_analysis_completeness(
         config,
         flow_sections.flow_chains_truncated_targets,
         taint_graph.chains_truncated_targets,
         taint_graph.flow_id_labels_truncated_functions,
         chain_limits,
-        &parser_incomplete_reasons,
+        &workspace_incomplete_reasons,
     );
     export_phase_log(format_args!(
         "taint graph: {:.3}s total={:.3}s",
@@ -763,14 +763,14 @@ fn write_native_export_streaming<W: Write + ?Sized>(
         &functions,
         config.complete_chains,
     );
-    let parser_incomplete_reasons = ws.parser_incomplete_reasons_for_files(&ws.vfs().all_files());
+    let workspace_incomplete_reasons = export_workspace_incomplete_reasons(ws);
     let completeness = export_analysis_completeness(
         config,
         flow_chains_truncated_targets,
         chain_rows.chains_truncated_targets,
         chain_rows.flow_id_labels_truncated_functions,
         chain_limits,
-        &parser_incomplete_reasons,
+        &workspace_incomplete_reasons,
     );
     map.serialize_entry("analysis_complete", &completeness.complete)?;
     map.serialize_entry("analysis_incomplete_reasons", &completeness.incomplete_reasons)?;
@@ -1104,9 +1104,9 @@ fn export_analysis_completeness(
     taint_chains_truncated_targets: usize,
     flow_id_labels_truncated_functions: usize,
     chain_limits: ExportChainLimits,
-    parser_incomplete_reasons: &[String],
+    workspace_incomplete_reasons: &[String],
 ) -> ExportCompleteness {
-    let mut incomplete_reasons = parser_incomplete_reasons.to_vec();
+    let mut incomplete_reasons = workspace_incomplete_reasons.to_vec();
     if let Some(reason) = propagation_omitted_reason(config) {
         incomplete_reasons.push(format!("taint_graph.propagations: {reason}"));
     }
@@ -1135,6 +1135,14 @@ fn export_analysis_completeness(
         complete: incomplete_reasons.is_empty(),
         incomplete_reasons,
     }
+}
+
+fn export_workspace_incomplete_reasons(ws: &Workspace) -> Vec<String> {
+    let mut reasons = ws.parser_incomplete_reasons_for_files(&ws.vfs().all_files());
+    reasons.extend(crate::resolution::resolution_incomplete_reasons(ws));
+    reasons.sort();
+    reasons.dedup();
+    reasons
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -2292,13 +2300,49 @@ fn export_taint_record_from_cross_call(
     let caller = cached_export_func_render(cache, global, edge.caller)?;
     let callee = cached_export_func_render(cache, global, edge.callee)?;
     let call_line = cached_export_call_line(cache, spans, edge.call_span);
-    let value_text = cached_export_call_arg_text(cache, global, edge.caller, edge.call_span, edge.arg_idx)
-        .unwrap_or_default();
     let param_name = callee
         .params
         .get(edge.param_idx as usize)
         .cloned()
         .unwrap_or_default();
+    let tainted_args = if edge.arg_idx != u32::MAX {
+        vec![ExportTaintedArg {
+            index: edge.arg_idx as usize,
+            value_text: cached_export_call_arg_text(cache, global, edge.caller, edge.call_span, edge.arg_idx)
+                .unwrap_or_default(),
+            param_name,
+        }]
+    } else if matches!(
+        edge.relation,
+        bonsai_idg::CrossCallRelation::Argument | bonsai_idg::CrossCallRelation::Capture
+    ) {
+        if let Some(receiver) =
+            cached_export_call_arg_text(cache, global, edge.caller, edge.call_span, u32::MAX)
+                .filter(|receiver| !receiver.trim().is_empty())
+        {
+            vec![ExportTaintedArg {
+                index: usize::MAX,
+                value_text: receiver,
+                param_name,
+            }]
+        } else if edge.relation == bonsai_idg::CrossCallRelation::Capture && edge.param_idx != u32::MAX {
+            vec![ExportTaintedArg {
+                index: edge.param_idx as usize,
+                value_text: param_name.clone(),
+                param_name,
+            }]
+        } else {
+            Vec::new()
+        }
+    } else if edge.relation == bonsai_idg::CrossCallRelation::Callback && edge.param_idx != u32::MAX {
+        vec![ExportTaintedArg {
+            index: edge.param_idx as usize,
+            value_text: param_name.clone(),
+            param_name,
+        }]
+    } else {
+        Vec::new()
+    };
 
     Some(ExportTaintRecord {
         caller: caller.name,
@@ -2306,11 +2350,7 @@ fn export_taint_record_from_cross_call(
         call_line,
         edge_kind: export_edge_kind_label(edge.call_kind),
         edge_precision: export_precision_label(edge.precision),
-        tainted_args: vec![ExportTaintedArg {
-            index: edge.arg_idx as usize,
-            value_text,
-            param_name,
-        }],
+        tainted_args,
     })
 }
 
@@ -2375,7 +2415,16 @@ fn export_call_arg_texts_for_func(
 fn collect_export_call_arg_texts(events: &[FlowEvent], out: &mut ahash::AHashMap<(Span, u32), String>) {
     for event in events {
         match event {
-            FlowEvent::Call { span, args, .. } => {
+            FlowEvent::Call {
+                span, receiver, args, ..
+            } => {
+                if let Some(receiver) = receiver
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|receiver| !receiver.is_empty())
+                {
+                    out.insert((*span, u32::MAX), receiver.to_string());
+                }
                 for (idx, arg) in args.iter().enumerate() {
                     let Ok(idx) = u32::try_from(idx) else {
                         continue;

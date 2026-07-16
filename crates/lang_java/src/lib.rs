@@ -156,6 +156,27 @@ impl LanguageAdapter for JavaAdapter {
                 decl.type_aliases = aliases.clone();
             }
         }
+        // Resolve generic type variables from their Tree-sitter type bounds.
+        // `T data` in `class Box<T extends App.Envelope>` carries both the
+        // declared `T` identity and the compiler-proven `App.Envelope` upper
+        // bound, so receiver dispatch on `data.method()` can resolve against
+        // the bound without any method-name inventory.
+        let class_type_bounds = collect_java_class_type_parameter_bounds(&tree, file, src);
+        let bounds_by_parent: std::collections::HashMap<_, _> = index
+            .defs
+            .iter()
+            .filter(|decl| is_class_like(decl.kind))
+            .filter_map(|decl| {
+                class_type_bounds
+                    .iter()
+                    .find_map(|(span, bounds)| (*span == decl.span).then(|| (decl.symbol, bounds.clone())))
+            })
+            .collect();
+        for decl in &mut index.defs {
+            if let Some(bounds) = decl.parent.and_then(|parent| bounds_by_parent.get(&parent)) {
+                expand_java_type_parameter_aliases(&mut decl.type_aliases, bounds);
+            }
+        }
         // Per-class `bases`: `class C extends B implements I, J` →
         // ["B", "I", "J"]. Lets `kind: param` rules require an
         // ancestor type (`in_class: [WebSocketHandler]` matching a
@@ -264,10 +285,100 @@ fn collect_java_method_type_aliases(
         method_aliases.extend(collect_java_vertx_route_handler_aliases(method_node, src));
         method_aliases.extend(collect_java_webflux_route_handler_aliases(method_node, src));
         method_aliases.extend(collect_java_graphql_datafetcher_aliases(method_node, src));
+        let method_type_bounds = java_type_parameter_bounds(method_node, src);
+        expand_java_type_parameter_aliases(&mut method_aliases, &method_type_bounds);
         dedup_type_aliases(&mut method_aliases);
         aliases_by_method.push((span_of(file, &method_node), method_aliases));
     }
     aliases_by_method
+}
+
+type JavaTypeParameterBounds = Vec<(String, Vec<String>)>;
+
+fn collect_java_class_type_parameter_bounds(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, JavaTypeParameterBounds)> {
+    collect_kinds(
+        tree,
+        &[
+            "class_declaration",
+            "interface_declaration",
+            "record_declaration",
+            "enum_declaration",
+            "annotation_type_declaration",
+        ],
+    )
+    .into_iter()
+    .filter_map(|node| {
+        let bounds = java_type_parameter_bounds(node, src);
+        (!bounds.is_empty()).then(|| (span_of(file, &node), bounds))
+    })
+    .collect()
+}
+
+fn java_type_parameter_bounds(node: Node<'_>, src: &[u8]) -> JavaTypeParameterBounds {
+    let Some(parameters) = node.child_by_field_name("type_parameters") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut parameter_cursor = parameters.walk();
+    for parameter in parameters.named_children(&mut parameter_cursor) {
+        if parameter.kind() != "type_parameter" {
+            continue;
+        }
+        let mut child_cursor = parameter.walk();
+        let children = parameter.named_children(&mut child_cursor).collect::<Vec<_>>();
+        let Some(name) = children
+            .iter()
+            .find(|child| child.kind() == "type_identifier")
+            .map(|child| node_text(child, src).trim().to_string())
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let mut bounds = Vec::new();
+        for bound in children.iter().filter(|child| child.kind() == "type_bound") {
+            let mut bound_cursor = bound.walk();
+            for bound_type in bound.named_children(&mut bound_cursor) {
+                let text = node_text(&bound_type, src).trim();
+                if !text.is_empty() && !bounds.iter().any(|existing| existing == text) {
+                    bounds.push(text.to_string());
+                }
+            }
+        }
+        if !bounds.is_empty() {
+            out.push((name, bounds));
+        }
+    }
+    out
+}
+
+fn expand_java_type_parameter_aliases(aliases: &mut Vec<TypeAliasBinding>, bounds: &JavaTypeParameterBounds) {
+    if aliases.is_empty() || bounds.is_empty() {
+        return;
+    }
+    loop {
+        let before = aliases.len();
+        let current = aliases.clone();
+        for alias in current {
+            let alias_type = canonical_java_type_name(&alias.type_name)
+                .unwrap_or_else(|| alias.type_name.trim().to_string());
+            for (_, upper_bounds) in bounds.iter().filter(|(parameter, _)| parameter == &alias_type) {
+                for upper_bound in upper_bounds {
+                    if let Some(canonical) = canonical_java_type_name(upper_bound) {
+                        let qualified = qualified_java_type_name(upper_bound);
+                        push_java_type_alias(aliases, &alias.name, &canonical, qualified.as_deref());
+                    }
+                }
+            }
+        }
+        dedup_type_aliases(aliases);
+        if aliases.len() == before {
+            break;
+        }
+    }
 }
 
 /// Vert.x route handlers commonly omit the lambda parameter type:
@@ -933,7 +1044,14 @@ fn rewrite_java_explicit_constructor_invocations_in_events(
                     name.push_str(replacement);
                     *receiver = Some(replacement_receiver.to_string());
                     receiver_types.clear();
-                    *call_kind = bonsai_lang_api::CallKind::Method;
+                    // Tree-sitter classifies `this(...)` / `super(...)` as
+                    // `explicit_constructor_invocation`. Preserve that AST
+                    // fact through HIR instead of disguising the edge as an
+                    // ordinary receiver method call. Constructor identity is
+                    // what lets the semantic resolver select the class-named
+                    // declaration and lets the IDG carry receiver state
+                    // through an inheritance chain.
+                    *call_kind = bonsai_lang_api::CallKind::Constructor;
                 }
             }
             FlowEvent::Branch {

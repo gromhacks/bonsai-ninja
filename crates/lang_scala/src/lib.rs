@@ -1446,6 +1446,31 @@ fn rewrite_scala_member_access_accessors(index: &mut DeclIndex) {
         let Some((call_receiver, call_name)) = scala_dotted_member_access_parts(projection) else {
             continue;
         };
+        // A primary-constructor `val`/`var` is an instance field even when
+        // Scala source refers to it without `this.`. Preserve that compiler
+        // place explicitly so constructor state and later accessor reads use
+        // the same IDG storage identity. The decision comes from the
+        // adapter's typed class-field aliases, not from a field-name list.
+        if !call_receiver.contains('.')
+            && decl.implicit_receiver_names.iter().any(|name| name == "this")
+            && decl.type_aliases.iter().any(|alias| alias.name == call_receiver)
+        {
+            // This is a field projection, not a method invocation. Keep it as
+            // an exact compiler place so `this.data` written by the primary
+            // constructor and `this.data.cmd` read here share the same IDG
+            // storage prefix. Synthesizing a zero-argument call would make
+            // the result depend on an accessor declaration and split the
+            // projected field state at that artificial call boundary.
+            let place = format!("this.{call_name}");
+            let body_span = *span;
+            decl.flow_events = vec![FlowEvent::Return {
+                span: body_span,
+                value_text: Some(place.clone()),
+                value_name: Some(place.clone()),
+                value_flow: bonsai_lang_api::ExpressionFlow::from_place(&place),
+            }];
+            continue;
+        }
         let body_span = *span;
         decl.flow_events = vec![
             FlowEvent::Call {

@@ -96,9 +96,11 @@ pub struct CrossCallEdge {
     pub callee: FuncId,
     /// Call-site span.
     pub call_span: Span,
-    /// Zero-based argument position, or `u32::MAX` for outbound state.
+    /// Zero-based argument position, or `u32::MAX` when the relation is
+    /// carried by a receiver, callback, capture, or outbound state.
     pub arg_idx: u32,
-    /// Zero-based formal position, or `u32::MAX` for outbound state.
+    /// Zero-based formal position, or `u32::MAX` when no scalar formal slot
+    /// represents the relation.
     pub param_idx: u32,
     /// Resolver/evidence precision.
     pub precision: Precision,
@@ -108,15 +110,30 @@ pub struct CrossCallEdge {
     pub relation: CrossCallRelation,
 }
 
+/// One exact forward-closure result together with the symbolic call-boundary
+/// transitions that fired while computing it.
+///
+/// Ordinary scalar call edges remain available through
+/// [`IdgQueryService::cross_call_edges_in_reachable_nodes`]. Symbolic
+/// transitions are returned here because access-path transforms are composed
+/// on demand and therefore do not exist as eagerly materialized graph edges.
+#[derive(Clone, Debug, Default)]
+pub struct IdgClosureEvidence {
+    /// Workspace nodes reached by the compiler fixed point.
+    pub nodes: Vec<WsNodeId>,
+    /// Cross-function symbolic transforms proven by that same fixed point.
+    pub symbolic_cross_calls: Vec<CrossCallEdge>,
+}
+
 /// Provenance of a cross-function IDG propagation.
 ///
 /// The distinction is semantic, not presentational: projected heap state can
 /// connect functions without proving that one calls the other. Consumers may
 /// use those links for reachability and lineage, but must not render them as
 /// resolved call records.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CrossCallRelation {
-    /// Scalar `CallArg -> Param` boundary.
+    /// Resolved scalar or projected `CallArg -> Param` boundary.
     Argument,
     /// External/source callback result entering a callback parameter.
     Callback,
@@ -167,6 +184,15 @@ struct SymbolicRuntimeIndex {
     exact_reads: AHashMap<u64, Vec<WsNodeId>>,
     bare_reads: AHashMap<u32, Vec<WsNodeId>>,
     scalar_writes: AHashMap<(u32, Span), Vec<WsNodeId>>,
+    /// AST-derived `(argument, formal)` slots for each persisted symbolic
+    /// transform. Keeping only two integers avoids duplicating the complete
+    /// transform relation in memory on large workspaces.
+    cross_call_slots: Vec<(u32, u32)>,
+}
+
+#[derive(Clone, Debug)]
+struct SymbolicCallShape {
+    arg_places: Vec<Option<String>>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -419,6 +445,167 @@ fn symbolic_transform_boundary(
     ))
 }
 
+fn record_symbolic_cross_call(
+    graph: &crate::symbolic::SymbolicFieldGraph,
+    transform: &crate::symbolic::SymbolicFieldTransform,
+    runtime: &SymbolicRuntimeIndex,
+    transform_index: u32,
+    out: Option<&mut Vec<CrossCallEdge>>,
+) {
+    let Some(out) = out else {
+        return;
+    };
+    let Some(source) = graph.bases().get(transform.source as usize) else {
+        return;
+    };
+    let Some(target) = graph.bases().get(transform.target as usize) else {
+        return;
+    };
+    if source.func == target.func {
+        return;
+    }
+    let Some(relation) = symbolic_cross_call_relation(transform.kind) else {
+        return;
+    };
+    let (arg_idx, param_idx) = runtime
+        .cross_call_slots
+        .get(transform_index as usize)
+        .copied()
+        .unwrap_or((u32::MAX, u32::MAX));
+    out.push(CrossCallEdge {
+        caller: source.func,
+        callee: target.func,
+        call_span: transform.call_span,
+        arg_idx,
+        param_idx,
+        precision: transform.precision,
+        call_kind: transform.call_kind,
+        relation,
+    });
+}
+
+fn symbolic_cross_call_relation(kind: SymbolicFieldTransformKind) -> Option<CrossCallRelation> {
+    match kind {
+        SymbolicFieldTransformKind::Argument => Some(CrossCallRelation::Argument),
+        SymbolicFieldTransformKind::Return | SymbolicFieldTransformKind::ScalarReturn => {
+            Some(CrossCallRelation::Return)
+        }
+        SymbolicFieldTransformKind::ConstructorReturn | SymbolicFieldTransformKind::ReceiverMutation => {
+            Some(CrossCallRelation::FieldState)
+        }
+        SymbolicFieldTransformKind::Copy => None,
+    }
+}
+
+fn storage_is_same_or_descendant(storage: &str, base: &str) -> bool {
+    let storage = storage.trim();
+    let base = base.trim();
+    storage == base
+        || (!base.is_empty()
+            && storage
+                .strip_prefix(base)
+                .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with('[')))
+}
+
+fn symbolic_call_shape(events: &[bonsai_lang_api::FlowEvent], span: Span) -> Option<SymbolicCallShape> {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span: call_span,
+                args,
+                ..
+            } if *call_span == span => {
+                return Some(SymbolicCallShape {
+                    arg_places: args.iter().map(|arg| arg.place.clone()).collect(),
+                });
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(shape) =
+                    symbolic_call_shape(then_events, span).or_else(|| symbolic_call_shape(else_events, span))
+                {
+                    return Some(shape);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(shape) = symbolic_call_shape(body, span) {
+                    return Some(shape);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(shape) = symbolic_call_shape(body, span)
+                    .or_else(|| symbolic_call_shape(catch_events, span))
+                    .or_else(|| symbolic_call_shape(finally_events, span))
+                {
+                    return Some(shape);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn symbolic_cross_call_slots(
+    global: &bonsai_index::GlobalIndex,
+    graph: &crate::symbolic::SymbolicFieldGraph,
+    transform: &crate::symbolic::SymbolicFieldTransform,
+    call_shapes: &mut AHashMap<(FuncId, Span), Option<SymbolicCallShape>>,
+) -> (u32, u32) {
+    if transform.kind != SymbolicFieldTransformKind::Argument {
+        return (u32::MAX, u32::MAX);
+    }
+    let Some(source) = graph.bases().get(transform.source as usize) else {
+        return (u32::MAX, u32::MAX);
+    };
+    let Some(target) = graph.bases().get(transform.target as usize) else {
+        return (u32::MAX, u32::MAX);
+    };
+    let Some(source_storage) = graph.string(source.storage) else {
+        return (u32::MAX, u32::MAX);
+    };
+    let Some(target_storage) = graph.string(target.storage) else {
+        return (u32::MAX, u32::MAX);
+    };
+    let shape = call_shapes
+        .entry((source.func, transform.call_span))
+        .or_insert_with(|| {
+            global
+                .decl_of(bonsai_common::SymbolId::new(source.func.raw()))
+                .and_then(|decl| symbolic_call_shape(&decl.flow_events, transform.call_span))
+        })
+        .as_ref();
+    let arg_idx = shape
+        .and_then(|shape| {
+            shape.arg_places.iter().position(|place| {
+                place
+                    .as_deref()
+                    .is_some_and(|place| storage_is_same_or_descendant(source_storage, place))
+            })
+        })
+        .and_then(|idx| u32::try_from(idx).ok())
+        .unwrap_or(u32::MAX);
+    let param_idx = global
+        .decl_of(bonsai_common::SymbolId::new(target.func.raw()))
+        .and_then(|decl| {
+            decl.params
+                .iter()
+                .position(|param| storage_is_same_or_descendant(target_storage, param))
+        })
+        .and_then(|idx| u32::try_from(idx).ok())
+        .unwrap_or(u32::MAX);
+    (arg_idx, param_idx)
+}
+
 /// Service handle for IDG queries. Wraps an [`IdgWorkspace`] and a
 /// reference to the workspace's [`GlobalIndex`] (needed to
 /// translate IDG nodes back to source spans).
@@ -577,6 +764,7 @@ impl IdgQueryService {
             Some(allowed_funcs),
             Some(contextual),
             false,
+            None,
         )
         .into_iter()
         .map(|node| WsNodeId(node.0))
@@ -608,6 +796,12 @@ impl IdgQueryService {
         Some(self.build_point_ref(idg_node.func, place))
     }
 
+    /// Owning compiler function for one workspace-global IDG node.
+    #[must_use]
+    pub fn func_of_node(&self, ws_node: WsNodeId) -> Option<FuncId> {
+        self.ensure_unified().node_funcs.get(ws_node.0 as usize).copied()
+    }
+
     /// Semantic forward closure: which nodes are reachable from `seeds`
     /// through exact or narrowed edges?
     ///
@@ -633,6 +827,7 @@ impl IdgQueryService {
             None,
             Some(contextual.as_ref()),
             true,
+            None,
         )
         .into_iter()
         .map(|n| WsNodeId(n.0))
@@ -666,10 +861,59 @@ impl IdgQueryService {
             None,
             Some(contextual.as_ref()),
             true,
+            None,
         )
         .into_iter()
         .map(|n| WsNodeId(n.0))
         .collect()
+    }
+
+    /// Compute the semantic forward closure and retain the symbolic
+    /// cross-function transitions that actually fired while solving it.
+    ///
+    /// This is the provenance-preserving query used by taint/reporting
+    /// consumers. It runs the same finite compiler fixed point as
+    /// [`Self::forward_closure_with_max_precision`]; it does not perform a
+    /// second graph traversal or infer transitions from identifier text.
+    pub fn forward_closure_evidence_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        max_precision: Option<Precision>,
+    ) -> IdgClosureEvidence {
+        let unified = self.ensure_unified();
+        let seed_nodes: Vec<NodeId> = seeds.iter().map(|node| NodeId(node.0)).collect();
+        let contextual = self.ensure_contextual_summary_runtime(&unified, max_precision);
+        let mut symbolic_cross_calls = Vec::new();
+        let nodes = self
+            .symbolic_forward_closure_nodes(
+                &unified,
+                &contextual.reach,
+                &seed_nodes,
+                max_precision,
+                None,
+                Some(contextual.as_ref()),
+                true,
+                Some(&mut symbolic_cross_calls),
+            )
+            .into_iter()
+            .map(|node| WsNodeId(node.0))
+            .collect();
+        symbolic_cross_calls.sort_unstable_by_key(|edge| {
+            (
+                edge.caller.raw(),
+                edge.callee.raw(),
+                edge.call_span,
+                edge.arg_idx,
+                edge.param_idx,
+                edge.precision,
+                edge.relation,
+            )
+        });
+        symbolic_cross_calls.dedup();
+        IdgClosureEvidence {
+            nodes,
+            symbolic_cross_calls,
+        }
     }
 
     /// Exact forward closure restricted to nodes owned by `func`.
@@ -1712,8 +1956,23 @@ impl IdgQueryService {
         seeds: &[WsNodeId],
         max_precision: Option<Precision>,
     ) -> Vec<CrossCallEdge> {
-        let closure = self.forward_closure_with_max_precision(seeds, max_precision);
-        self.cross_call_edges_in_reachable_nodes_with_max_precision(&closure, max_precision)
+        let evidence = self.forward_closure_evidence_with_max_precision(seeds, max_precision);
+        let mut edges =
+            self.cross_call_edges_in_reachable_nodes_with_max_precision(&evidence.nodes, max_precision);
+        edges.extend(evidence.symbolic_cross_calls);
+        edges.sort_unstable_by_key(|edge| {
+            (
+                edge.caller.raw(),
+                edge.callee.raw(),
+                edge.call_span,
+                edge.arg_idx,
+                edge.param_idx,
+                edge.precision,
+                edge.relation,
+            )
+        });
+        edges.dedup();
+        edges
     }
 
     /// Same as [`Self::cross_call_edges_in_closure`], but consumes a
@@ -2171,6 +2430,7 @@ impl IdgQueryService {
         allowed_funcs: Option<&AHashSet<FuncId>>,
         contextual: Option<&ContextualSummaryRuntime>,
         activate_seed_callers: bool,
+        mut symbolic_cross_calls: Option<&mut Vec<CrossCallEdge>>,
     ) -> Vec<NodeId> {
         let symbolic = self.workspace.symbolic_field();
         if symbolic.transforms().is_empty() && contextual.is_none() {
@@ -2384,6 +2644,15 @@ impl IdgQueryService {
                                 .scalar_writes
                                 .get(&(transform.target, transform.write_span))
                             {
+                                if !nodes.is_empty() {
+                                    record_symbolic_cross_call(
+                                        symbolic,
+                                        transform,
+                                        runtime,
+                                        *transform_index,
+                                        symbolic_cross_calls.as_deref_mut(),
+                                    );
+                                }
                                 for node in nodes {
                                     let node = NodeId(node.0);
                                     if allowed_funcs.is_some_and(|allowed| {
@@ -2421,6 +2690,13 @@ impl IdgQueryService {
                     }) {
                         continue;
                     }
+                    record_symbolic_cross_call(
+                        symbolic,
+                        transform,
+                        runtime,
+                        *transform_index,
+                        symbolic_cross_calls.as_deref_mut(),
+                    );
                     let next = SymbolicNodeFact {
                         base: transform.target,
                         field: fact.field,
@@ -2506,6 +2782,12 @@ impl IdgQueryService {
     fn build_symbolic_runtime_index(&self, unified: &UnifiedAddressSpace) -> SymbolicRuntimeIndex {
         let symbolic = self.workspace.symbolic_field();
         let mut out = SymbolicRuntimeIndex::default();
+        let mut call_shapes = AHashMap::new();
+        out.cross_call_slots = symbolic
+            .transforms()
+            .iter()
+            .map(|transform| symbolic_cross_call_slots(&self.global, symbolic, transform, &mut call_shapes))
+            .collect();
         for (segment_id, segment) in self.workspace.segments() {
             for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
                 let Some(place) = segment.places.get(node.place) else {
@@ -2731,7 +3013,10 @@ impl IdgQueryService {
                 if let Some(row) =
                     lift_call_arg_edge(seg_id, segment, seg_id, segment, edge, &mut field_index)
                 {
-                    cross_calls_by_from.entry(from_ws).or_default().push(row);
+                    cross_calls_by_from
+                        .entry(from_ws)
+                        .or_default()
+                        .push(self.normalize_receiver_arg_index(row));
                 }
             }
         }
@@ -2775,10 +3060,33 @@ impl IdgQueryService {
                 &cfe.edge,
                 &mut field_index,
             ) {
-                cross_calls_by_from.entry(from_ws).or_default().push(row);
+                cross_calls_by_from
+                    .entry(from_ws)
+                    .or_default()
+                    .push(self.normalize_receiver_arg_index(row));
             }
         }
         cross_calls_by_from
+    }
+
+    /// Canonicalize older adapter receiver slots that were represented as
+    /// argument zero. The AST call shape is authoritative: an argument-less
+    /// call with an explicit receiver has no positional argument zero, so the
+    /// cross-call carrier is the receiver sentinel.
+    fn normalize_receiver_arg_index(&self, mut edge: CrossCallEdge) -> CrossCallEdge {
+        if edge.arg_idx == 0
+            && matches!(
+                edge.relation,
+                CrossCallRelation::Argument | CrossCallRelation::Capture
+            )
+            && self
+                .global
+                .decl_of(bonsai_common::SymbolId::new(edge.caller.raw()))
+                .is_some_and(|decl| call_event_is_argumentless_receiver(&decl.flow_events, edge.call_span))
+        {
+            edge.arg_idx = u32::MAX;
+        }
+        edge
     }
 
     /// Translate `(func, place)` to a [`PointRef`] by looking up the
@@ -2839,6 +3147,56 @@ impl IdgQueryService {
             kind,
         }
     }
+}
+
+fn call_event_is_argumentless_receiver(events: &[bonsai_lang_api::FlowEvent], span: Span) -> bool {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span: call_span,
+                receiver,
+                args,
+                ..
+            } if *call_span == span => {
+                return receiver
+                    .as_deref()
+                    .is_some_and(|receiver| !receiver.trim().is_empty())
+                    && args.is_empty();
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if call_event_is_argumentless_receiver(then_events, span)
+                    || call_event_is_argumentless_receiver(else_events, span)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if call_event_is_argumentless_receiver(body, span) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if call_event_is_argumentless_receiver(body, span)
+                    || call_event_is_argumentless_receiver(catch_events, span)
+                    || call_event_is_argumentless_receiver(finally_events, span)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Expand bare container seed names with their descendant wildcard:
@@ -3022,8 +3380,12 @@ fn lift_call_arg_edge(
             param_idx,
             precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
+            // InterFieldCallArg is still anchored to a resolved AST call
+            // boundary; only its carried value is projected. It is therefore
+            // renderable call evidence, unlike allocation-insensitive
+            // cross-method field-state links synthesized below.
             relation: if edge.meta.kind == crate::edge::IdgEdgeKind::InterFieldCallArg {
-                CrossCallRelation::FieldState
+                CrossCallRelation::Argument
             } else {
                 CrossCallRelation::Capture
             },
@@ -3064,11 +3426,7 @@ fn lift_call_arg_edge(
             param_idx: u32::MAX,
             precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
-            relation: if edge.meta.kind == crate::edge::IdgEdgeKind::InterFieldReturn {
-                CrossCallRelation::FieldState
-            } else {
-                CrossCallRelation::Return
-            },
+            relation: CrossCallRelation::Return,
         });
     }
     None

@@ -1251,7 +1251,9 @@ fn expected_default_mega_flow_findings(lang: &str) -> usize {
         // superglobal_server → echo (CWE-79).
         "php" => 2,
         "python" => 1,
-        "ruby" => 2,
+        // One distinct stdin_gets -> Kernel.system vulnerability. Older
+        // baselines counted an equivalent receiver-derived chain twice.
+        "ruby" => 1,
         // stdin.lock().read_line is a concrete CLI source and reaches the
         // command argument sink through the full mega-flow chain.
         "rust" => 1,

@@ -31,7 +31,7 @@ fn main() {
     let head = run_git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "ungitted".to_string());
     let dirty = run_git(&["status", "--porcelain"]).map_or(String::new(), |out| out);
     let dirty_marker = if dirty.trim().is_empty() { "clean" } else { "dirty" };
-    let dirty_hash = fnv1a64(dirty.as_bytes());
+    let dirty_hash = dirty_content_hash(&dirty);
     let fingerprint = format!("{}@{}:{}:{:016x}", pkg_version, head, dirty_marker, dirty_hash);
     emit_fingerprint(&fingerprint);
 }
@@ -55,12 +55,39 @@ fn emit_fingerprint(value: &str) {
 }
 
 fn run_git(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok()?;
+    let mut command = Command::new("git");
+    command.args(args);
+    if let Some(root) = repo_root() {
+        command.current_dir(root);
+    }
+    let out = command.output().ok()?;
     if !out.status.success() {
         return None;
     }
     let stdout = String::from_utf8(out.stdout).ok()?;
     Some(stdout.trim().to_string())
+}
+
+fn dirty_content_hash(status: &str) -> u64 {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(status.as_bytes());
+    if let Some(diff) = run_git(&["diff", "--binary", "HEAD", "--", "."]) {
+        bytes.extend_from_slice(diff.as_bytes());
+    }
+    if let (Some(root), Some(untracked)) = (
+        repo_root(),
+        run_git(&["ls-files", "--others", "--exclude-standard"]),
+    ) {
+        for relative in untracked.lines().filter(|path| !path.is_empty()) {
+            bytes.extend_from_slice(relative.as_bytes());
+            bytes.push(0);
+            if let Ok(contents) = std::fs::read(root.join(relative)) {
+                bytes.extend_from_slice(&contents);
+            }
+            bytes.push(0xff);
+        }
+    }
+    fnv1a64(&bytes)
 }
 
 fn locate_git_dir() -> Option<std::path::PathBuf> {

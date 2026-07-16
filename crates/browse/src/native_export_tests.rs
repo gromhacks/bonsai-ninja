@@ -69,6 +69,33 @@ fn parser_gaps_make_buffered_and_streaming_exports_incomplete() {
 }
 
 #[test]
+fn unresolved_calls_make_native_export_incomplete() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("app.py"),
+        "def entry(value):\n    return unresolved_dependency(value)\n",
+    )
+    .expect("write fixture");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+    let exported = native_export_json_with_config(
+        &ws,
+        dir.path(),
+        NativeExportConfig {
+            full_propagations: true,
+            complete_chains: true,
+            compiled_propagations: false,
+        },
+    )
+    .expect("native export");
+
+    assert_eq!(exported["analysis_complete"], false);
+    assert_eq!(
+        exported["analysis_incomplete_reasons"],
+        serde_json::json!(["unresolved-call-sites:1"])
+    );
+}
+
+#[test]
 fn decorator_entrypoints_do_not_attach_across_function_body() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(

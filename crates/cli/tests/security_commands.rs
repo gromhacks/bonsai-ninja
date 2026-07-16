@@ -215,7 +215,9 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
         "perl" => 2,
         "php" => 2,
         "python" => 1,
-        "ruby" => 2,
+        // One distinct stdin_gets -> Kernel.system vulnerability; equivalent
+        // receiver-derived evidence is grouped into the same finding.
+        "ruby" => 1,
         "rust" => 1,
         "scala" => 1,
         "solidity" => 2,

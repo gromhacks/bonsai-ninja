@@ -90,7 +90,7 @@ pub use csr::EdgeCsr;
 pub use query::ReachabilityIndex;
 pub use service::{
     expand_bare_seed_names_with_descendants, CallRetAssignmentTarget, CrossCallEdge, CrossCallRelation,
-    IdgQueryService, PointKind, PointRef, WsNodeId,
+    IdgClosureEvidence, IdgQueryService, PointKind, PointRef, WsNodeId,
 };
 pub use symbolic::{
     SymbolicFieldBase, SymbolicFieldGraph, SymbolicFieldTransform, SymbolicFieldTransformKind,

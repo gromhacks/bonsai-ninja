@@ -1050,10 +1050,19 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
         // Body shape: Call+Return when it's a dotted member access,
         // else single Return with the body text.
         let flow_events =
-            if let Some((call_receiver, call_name)) = swift_dotted_member_access_parts(&body_text) {
-                let receiver_types = swift_lookup_member_type(prop, &call_receiver, src)
-                    .into_iter()
-                    .collect();
+            if let Some((mut call_receiver, mut call_name)) = swift_dotted_member_access_parts(&body_text) {
+                let receiver_type = swift_lookup_member_type(prop, &call_receiver, src);
+                // A sibling stored property is an instance field even when
+                // Swift source omits `self.`. Keep the explicit compiler
+                // place so the constructor's `self.<field>` write and this
+                // later read share one IDG identity. The enclosing AST's
+                // property declaration proves membership; no field spelling
+                // is special-cased.
+                if receiver_type.is_some() && !call_receiver.starts_with("self.") {
+                    call_receiver = format!("self.{call_receiver}");
+                    call_name = format!("self.{call_name}");
+                }
+                let receiver_types = receiver_type.into_iter().collect();
                 vec![
                     FlowEvent::Call {
                         span: body_span,

@@ -95,6 +95,66 @@ struct EdgeCounts {
     indirect: usize,
 }
 
+/// Workspace-wide indexes shared by detailed and aggregate resolution
+/// coverage. Both are built once per report instead of re-scanning the
+/// workspace for every call site.
+struct ResolutionIndex {
+    resolved: std::sync::Arc<bonsai_callgraph::ResolvedCallGraph>,
+    workspace_module_tails: AHashSet<String>,
+}
+
+impl ResolutionIndex {
+    fn new(ws: &Workspace) -> Self {
+        let resolved = ws.cached_resolved_call_graph();
+
+        // `module_may_target_workspace` only compares the final normalized
+        // module segment. Precompute that exact relation once. The previous
+        // implementation walked every workspace file for every imported call
+        // site, which made coverage superlinear on large repositories.
+        let global = ws.db().global_index();
+        let workspace_module_tails = global
+            .all_files()
+            .into_iter()
+            .filter_map(|file| ws.vfs().path(file).ok())
+            .filter_map(|path| {
+                normalize_file_key(&path.to_string_lossy())
+                    .rsplit('/')
+                    .next()
+                    .map(str::to_string)
+            })
+            .filter(|tail| !tail.is_empty())
+            .collect();
+
+        Self {
+            resolved,
+            workspace_module_tails,
+        }
+    }
+
+    /// Materialize resolution counts only for the callable currently being
+    /// scanned. The resolved graph already owns a per-caller adjacency index;
+    /// re-indexing every workspace edge into another multi-million-entry map
+    /// made export completeness needlessly memory-heavy on large projects.
+    fn resolved_sites_for_decl(&self, decl: &Decl) -> AHashMap<CallSiteKey, EdgeCounts> {
+        let caller = bonsai_common::FuncId::new(decl.symbol.raw());
+        let mut sites: AHashMap<CallSiteKey, EdgeCounts> = AHashMap::new();
+        for edge in self
+            .resolved
+            .callees_of(caller)
+            .filter(|edge| edge.precision.is_semantic())
+        {
+            let counts = sites.entry(CallSiteKey::new(caller, edge.span)).or_default();
+            match edge.kind {
+                EdgeKind::Direct => counts.direct += 1,
+                EdgeKind::Virtual => counts.virtual_edges += 1,
+                EdgeKind::Indirect => counts.indirect += 1,
+                EdgeKind::Unknown => {}
+            }
+        }
+        sites
+    }
+}
+
 /// Build per-file/per-decl call resolution coverage from shared HIR
 /// call-site facts and the canonical resolved call graph.
 #[must_use]
@@ -103,23 +163,7 @@ pub fn resolution_coverage(
     filters: &ResolutionCoverageFilters<'_>,
 ) -> Vec<ResolutionCoverageFileRow> {
     let global = ws.db().global_index();
-    let resolved = ws.resolved_call_graph();
-    let mut resolved_sites: AHashMap<CallSiteKey, EdgeCounts> = AHashMap::new();
-    for edge in resolved
-        .inner()
-        .edges
-        .iter()
-        .filter(|edge| edge.precision.is_semantic())
-    {
-        let key = CallSiteKey::new(edge.from, edge.span);
-        let counts = resolved_sites.entry(key).or_default();
-        match edge.kind {
-            EdgeKind::Direct => counts.direct += 1,
-            EdgeKind::Virtual => counts.virtual_edges += 1,
-            EdgeKind::Indirect => counts.indirect += 1,
-            EdgeKind::Unknown => {}
-        }
-    }
+    let index = ResolutionIndex::new(ws);
 
     let mut rows = Vec::new();
     for file in global.all_files() {
@@ -145,7 +189,7 @@ pub fn resolution_coverage(
             if !is_callable_decl(decl.kind) {
                 continue;
             }
-            let decl_row = coverage_for_decl(ws, decl, &resolved_sites, &file_alias_targets);
+            let decl_row = coverage_for_decl(ws, decl, &index, &file_alias_targets);
             file_row.functions += 1;
             file_row.call_sites += decl_row.call_sites;
             file_row.resolved_call_sites += decl_row.resolved_call_sites;
@@ -173,29 +217,81 @@ pub fn resolution_coverage(
     rows
 }
 
+/// Aggregate semantic-resolution gaps for whole-workspace consumers such as
+/// native export. This intentionally avoids retaining the detailed per-file
+/// and per-declaration rows produced by [`resolution_coverage`].
+pub(crate) fn resolution_incomplete_reasons(ws: &Workspace) -> Vec<String> {
+    let global = ws.db().global_index();
+    let index = ResolutionIndex::new(ws);
+    let mut unresolved_call_sites = 0usize;
+    let mut dynamic_call_sites = 0usize;
+    let mut macro_call_sites = 0usize;
+    let mut receiver_type_gaps = 0usize;
+
+    for file in global.all_files() {
+        let file_alias_targets: AHashMap<String, AliasTarget> =
+            bonsai_lang_api::alias_map_from_import_specs(&ws.db().imports_for(file))
+                .into_iter()
+                .collect();
+        for decl in global.decls_in(file) {
+            if !is_callable_decl(decl.kind) {
+                continue;
+            }
+            let row = coverage_counts_for_decl(decl, &index, &file_alias_targets);
+            unresolved_call_sites += row.unresolved_call_sites;
+            dynamic_call_sites += row.dynamic_call_sites;
+            macro_call_sites += row.macro_call_sites;
+            receiver_type_gaps += row.receiver_type_gaps;
+        }
+    }
+
+    let mut reasons = Vec::new();
+    if unresolved_call_sites > 0 {
+        reasons.push(format!("unresolved-call-sites:{unresolved_call_sites}"));
+    }
+    if dynamic_call_sites > 0 {
+        reasons.push(format!("dynamic-call-sites:{dynamic_call_sites}"));
+    }
+    if macro_call_sites > 0 {
+        reasons.push(format!("macro-call-sites:{macro_call_sites}"));
+    }
+    if receiver_type_gaps > 0 {
+        reasons.push(format!("receiver-type-gaps:{receiver_type_gaps}"));
+    }
+    reasons
+}
+
 fn coverage_for_decl(
     ws: &Workspace,
     decl: &Decl,
-    resolved_sites: &AHashMap<CallSiteKey, EdgeCounts>,
+    index: &ResolutionIndex,
     file_alias_targets: &AHashMap<String, AliasTarget>,
 ) -> ResolutionCoverageDeclRow {
     let (_, line, _) = format_span(&decl.name_span, ws);
-    let mut row = ResolutionCoverageDeclRow {
-        name: decl.name.clone(),
-        kind: format!("{:?}", decl.kind).to_lowercase(),
-        line,
-        ..ResolutionCoverageDeclRow::default()
-    };
+    let mut row = coverage_counts_for_decl(decl, index, file_alias_targets);
+    row.name.clone_from(&decl.name);
+    row.kind = format!("{:?}", decl.kind).to_lowercase();
+    row.line = line;
+    row
+}
+
+fn coverage_counts_for_decl(
+    decl: &Decl,
+    index: &ResolutionIndex,
+    file_alias_targets: &AHashMap<String, AliasTarget>,
+) -> ResolutionCoverageDeclRow {
+    let mut row = ResolutionCoverageDeclRow::default();
+    let resolved_sites = index.resolved_sites_for_decl(decl);
     let mut alias_targets = file_alias_targets.clone();
     bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_targets, &decl.flow_events);
     let mut seen_sites: AHashSet<CallSiteKey> = AHashSet::default();
     let mut external_receivers: AHashSet<String> = AHashSet::default();
     collect_decl_call_sites(
-        ws,
         decl,
         &decl.flow_events,
-        resolved_sites,
+        &resolved_sites,
         &alias_targets,
+        &index.workspace_module_tails,
         &mut external_receivers,
         &mut seen_sites,
         &mut row,
@@ -206,11 +302,11 @@ fn coverage_for_decl(
 
 #[allow(clippy::too_many_arguments)] // cohesive per-decl call-site scan state
 fn collect_decl_call_sites(
-    ws: &Workspace,
     decl: &Decl,
     events: &[FlowEvent],
     resolved_sites: &AHashMap<CallSiteKey, EdgeCounts>,
     alias_targets: &AHashMap<String, AliasTarget>,
+    workspace_module_tails: &AHashSet<String>,
     external_receivers: &mut AHashSet<String>,
     seen_sites: &mut AHashSet<CallSiteKey>,
     row: &mut ResolutionCoverageDeclRow,
@@ -233,10 +329,10 @@ fn collect_decl_call_sites(
                 let resolved_counts = resolved_sites.get(&key);
                 let known_external = resolved_counts.is_none()
                     && known_external_call_site(
-                        ws,
                         name,
                         receiver.as_deref(),
                         alias_targets,
+                        workspace_module_tails,
                         external_receivers,
                     );
                 if matches!(call_kind, CallKind::Indirect) {
@@ -274,10 +370,10 @@ fn collect_decl_call_sites(
                 if let Some(target) = simple_local_target(target) {
                     let external_source_call = source_call.as_deref().is_some_and(|call| {
                         known_external_call_site(
-                            ws,
                             call,
                             receiver_name_from_call_name(call),
                             alias_targets,
+                            workspace_module_tails,
                             external_receivers,
                         )
                     });
@@ -303,22 +399,22 @@ fn collect_decl_call_sites(
             } => {
                 let mut then_external = external_receivers.clone();
                 collect_decl_call_sites(
-                    ws,
                     decl,
                     then_events,
                     resolved_sites,
                     alias_targets,
+                    workspace_module_tails,
                     &mut then_external,
                     seen_sites,
                     row,
                 );
                 let mut else_external = external_receivers.clone();
                 collect_decl_call_sites(
-                    ws,
                     decl,
                     else_events,
                     resolved_sites,
                     alias_targets,
+                    workspace_module_tails,
                     &mut else_external,
                     seen_sites,
                     row,
@@ -327,11 +423,11 @@ fn collect_decl_call_sites(
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 let mut body_external = external_receivers.clone();
                 collect_decl_call_sites(
-                    ws,
                     decl,
                     body,
                     resolved_sites,
                     alias_targets,
+                    workspace_module_tails,
                     &mut body_external,
                     seen_sites,
                     row,
@@ -345,33 +441,33 @@ fn collect_decl_call_sites(
             } => {
                 let mut body_external = external_receivers.clone();
                 collect_decl_call_sites(
-                    ws,
                     decl,
                     body,
                     resolved_sites,
                     alias_targets,
+                    workspace_module_tails,
                     &mut body_external,
                     seen_sites,
                     row,
                 );
                 let mut catch_external = external_receivers.clone();
                 collect_decl_call_sites(
-                    ws,
                     decl,
                     catch_events,
                     resolved_sites,
                     alias_targets,
+                    workspace_module_tails,
                     &mut catch_external,
                     seen_sites,
                     row,
                 );
                 let mut finally_external = external_receivers.clone();
                 collect_decl_call_sites(
-                    ws,
                     decl,
                     finally_events,
                     resolved_sites,
                     alias_targets,
+                    workspace_module_tails,
                     &mut finally_external,
                     seen_sites,
                     row,
@@ -471,10 +567,10 @@ fn is_callable_decl(kind: DeclKind) -> bool {
 }
 
 fn known_external_call_site(
-    ws: &Workspace,
     name: &str,
     receiver: Option<&str>,
     alias_targets: &AHashMap<String, AliasTarget>,
+    workspace_module_tails: &AHashSet<String>,
     external_receivers: &AHashSet<String>,
 ) -> bool {
     if receiver
@@ -486,55 +582,46 @@ fn known_external_call_site(
     if receiver
         .and_then(|receiver| receiver_alias_head(receiver, name))
         .or_else(|| call_alias_head(name))
-        .is_some_and(|head| alias_target_is_external_workspace_miss(ws, head, alias_targets))
+        .is_some_and(|head| {
+            alias_target_is_external_workspace_miss(head, alias_targets, workspace_module_tails)
+        })
     {
         return true;
     }
     call_alias_head(name).is_some_and(|head| {
         alias_targets
             .get(head)
-            .is_some_and(|target| alias_target_is_external(ws, target))
+            .is_some_and(|target| alias_target_is_external(target, workspace_module_tails))
     })
 }
 
 fn alias_target_is_external_workspace_miss(
-    ws: &Workspace,
     head: &str,
     alias_targets: &AHashMap<String, AliasTarget>,
+    workspace_module_tails: &AHashSet<String>,
 ) -> bool {
     alias_targets
         .get(head)
-        .is_some_and(|target| alias_target_is_external(ws, target))
+        .is_some_and(|target| alias_target_is_external(target, workspace_module_tails))
 }
 
-fn alias_target_is_external(ws: &Workspace, target: &AliasTarget) -> bool {
+fn alias_target_is_external(target: &AliasTarget, workspace_module_tails: &AHashSet<String>) -> bool {
     match target {
-        AliasTarget::Namespace { module } => !module_may_target_workspace(ws, module),
+        AliasTarget::Namespace { module } => !module_may_target_workspace(workspace_module_tails, module),
         AliasTarget::Member { module, member } => {
-            !module_may_target_workspace(ws, module) && !module_may_target_workspace(ws, member)
+            !module_may_target_workspace(workspace_module_tails, module)
+                && !module_may_target_workspace(workspace_module_tails, member)
         }
         AliasTarget::Type { .. } => false,
     }
 }
 
-fn module_may_target_workspace(ws: &Workspace, module: &str) -> bool {
+fn module_may_target_workspace(workspace_module_tails: &AHashSet<String>, module: &str) -> bool {
     let Some(module_key) = normalize_module_key(module) else {
         return false;
     };
     let module_tail = module_key.rsplit('/').next().unwrap_or(module_key.as_str());
-    for file in ws.db().global_index().all_files() {
-        let Ok(path) = ws.vfs().path(file) else {
-            continue;
-        };
-        let file_key = normalize_file_key(&path.to_string_lossy());
-        if file_key == module_key
-            || file_key.ends_with(&format!("/{module_key}"))
-            || (!module_tail.is_empty() && file_key.rsplit('/').next() == Some(module_tail))
-        {
-            return true;
-        }
-    }
-    false
+    !module_tail.is_empty() && workspace_module_tails.contains(module_tail)
 }
 
 fn normalize_module_key(module: &str) -> Option<String> {
@@ -705,6 +792,11 @@ def load():
             "known external calls are not incomplete workspace resolution: {row:#?}"
         );
         assert!((row.coverage_percent - 100.0).abs() < f64::EPSILON);
+        assert_eq!(
+            resolution_incomplete_reasons(&ws),
+            Vec::<String>::new(),
+            "aggregate export coverage must use the same external-call classification"
+        );
     }
 
     #[test]
@@ -739,5 +831,13 @@ def local_gap(obj):
             "true receiver-type gaps must keep analysis_complete false: {row:#?}"
         );
         assert!((row.coverage_percent - 0.0).abs() < f64::EPSILON);
+        assert_eq!(
+            resolution_incomplete_reasons(&ws),
+            vec![
+                "unresolved-call-sites:1".to_string(),
+                "receiver-type-gaps:1".to_string(),
+            ],
+            "aggregate export coverage must match the detailed report"
+        );
     }
 }

@@ -166,12 +166,13 @@ abstract class BaseRepository(val data: Envelope) {
         .flat_map(|file| global.decls_in(file))
         .find(|decl| decl.name == "command")
         .expect("command accessor");
-    let mut calls = Vec::new();
-    collect_calls(&command.flow_events, &mut calls);
+    let projected_place = command.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Return { value_flow, .. } => value_flow.place.as_deref(),
+        _ => None,
+    });
     assert!(
-        calls
-            .iter()
-            .any(|(name, receiver_types)| name == "data.cmd" && receiver_types == &["Envelope"]),
-        "constructor `val data: Envelope` must type the rewritten accessor call: {calls:?}"
+        projected_place.is_some_and(|place| place == "this.data.cmd"),
+        "constructor `val data: Envelope` must keep the implicit-this compiler place on the exact projected field read: {:?}",
+        command.flow_events
     );
 }
