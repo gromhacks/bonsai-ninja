@@ -606,6 +606,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
                 constraint_regexes: &prepared.constraint_regexes,
                 receiver_call_count,
                 assignment_texts: Some(&facts.assignment_map),
+                ast_arg_values: None,
                 mode: ConstraintMode::Strict,
                 taint_view: Some(taint_view),
                 enclosing_decorators: Some(facts.decl_decorators.as_slice()),
@@ -628,7 +629,10 @@ fn write_rule_match_passes_constraints_at_expected_hit(
 ) -> bool {
     let file = expected.span.file;
     let global = ws.db().global_index();
-    let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
+    let file_index = global.file_index(file);
+    let nested_ast_values = file_index
+        .map(|index| NestedAstValueIndex::new(&index.defs))
+        .unwrap_or_default();
     let file_packages =
         file_package_set_with_workspace_context(ws, file, prepared.needs_workspace_package_context());
     let alias_map = file_alias_map(ws, file);
@@ -641,33 +645,36 @@ fn write_rule_match_passes_constraints_at_expected_hit(
         {
             continue;
         }
-        for (target, span) in collect_writes(&decl.flow_events) {
-            if span != expected.span {
+        for mut write in collect_writes(&decl.flow_events) {
+            if write.span != expected.span {
                 continue;
             }
+            write.extend_with_nested_ast_values(&nested_ast_values);
             if !callee_matches(
-                &target,
+                &write.target,
                 prepared.name,
                 prepared.attribute,
                 prepared.regex.as_ref(),
             ) {
                 continue;
             }
-            if !prepared.call_context_allows(&target, &[], &alias_map, file_packages.as_ref()) {
+            if !prepared.call_context_allows(&write.target, &[], &alias_map, file_packages.as_ref()) {
                 continue;
             }
-            let args = write_args_from_source_text(source_text.as_deref(), span);
+            let args = [write.argument.clone()];
+            let ast_arg_values = [write.ast_values];
             if constraints_pass(ConstraintEval {
                 rule_id: &prepared.rule.id,
-                callee: &target,
+                callee: &write.target,
                 args: &args,
                 receiver_types: &[],
-                span,
+                span: write.span,
                 call_origin: Some(CallFactOrigin::SyntheticWrite),
                 constraints: &prepared.rule.constraints.0,
                 constraint_regexes: &prepared.constraint_regexes,
                 receiver_call_count: None,
                 assignment_texts: None,
+                ast_arg_values: Some(&ast_arg_values),
                 mode: ConstraintMode::Strict,
                 taint_view: Some(taint_view),
                 enclosing_decorators: None,
@@ -680,7 +687,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
         }
     }
 
-    let Some(idx) = global.file_index(file) else {
+    let Some(idx) = file_index else {
         return false;
     };
     for r in &idx.refs {
@@ -695,11 +702,10 @@ fn write_rule_match_passes_constraints_at_expected_hit(
         ) {
             continue;
         }
-        let args = write_args_from_source_text(source_text.as_deref(), r.span);
         if constraints_pass(ConstraintEval {
             rule_id: &prepared.rule.id,
             callee: &r.name,
-            args: &args,
+            args: &[],
             receiver_types: &[],
             span: r.span,
             call_origin: Some(CallFactOrigin::SyntheticWrite),
@@ -707,6 +713,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
             constraint_regexes: &prepared.constraint_regexes,
             receiver_call_count: None,
             assignment_texts: None,
+            ast_arg_values: None,
             mode: ConstraintMode::Strict,
             taint_view: Some(taint_view),
             enclosing_decorators: None,
@@ -718,67 +725,6 @@ fn write_rule_match_passes_constraints_at_expected_hit(
         }
     }
     false
-}
-
-fn write_args_from_source_text(source_text: Option<&str>, span: Span) -> Vec<CallArg> {
-    source_text
-        .and_then(|text| {
-            write_statement_text(text, span).or_else(|| text.get(span.start as usize..span.end as usize))
-        })
-        .map(|value_text| {
-            vec![CallArg {
-                passing_mode: Default::default(),
-                span,
-                name: None,
-                place: None,
-                source_names: Vec::new(),
-                value_text: value_text.to_string(),
-            }]
-        })
-        .unwrap_or_default()
-}
-
-fn write_statement_text(source_text: &str, span: Span) -> Option<&str> {
-    let start = usize::try_from(span.start).ok()?;
-    if start >= source_text.len() {
-        return None;
-    }
-    let line_start = source_text[..start].rfind('\n').map_or(0, |idx| idx + 1);
-    let first_line_end = source_text[start..]
-        .find('\n')
-        .map_or(source_text.len(), |idx| start + idx);
-    let first_line = source_text.get(line_start..first_line_end)?;
-    if !first_line.contains('=') {
-        return source_text.get(line_start..first_line_end).map(str::trim);
-    }
-    let mut end = first_line_end;
-    let mut depth = 0isize;
-    let mut saw_open = false;
-    for (offset, ch) in source_text[line_start..].char_indices() {
-        match ch {
-            '{' | '(' | '[' => {
-                saw_open = true;
-                depth += 1;
-            }
-            '}' | ')' | ']' if saw_open => {
-                depth -= 1;
-            }
-            '\n' if !saw_open => {
-                end = line_start + offset;
-                break;
-            }
-            '\n' if depth <= 0 => {
-                end = line_start + offset;
-                break;
-            }
-            _ => {}
-        }
-        end = line_start + offset + ch.len_utf8();
-    }
-    source_text
-        .get(line_start..end)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
 }
 
 pub(crate) fn rule_example_has_arg_index(ws: &Workspace, rule: &Rule, wanted_index: u32) -> bool {
@@ -2714,6 +2660,7 @@ fn scan_params_batch(
                     constraint_regexes: &prepared.constraint_regexes,
                     receiver_call_count: None,
                     assignment_texts: None,
+                    ast_arg_values: None,
                     mode: ConstraintMode::Strict,
                     taint_view: None,
                     enclosing_decorators: Some(decl_decorators.as_slice()),
@@ -3078,6 +3025,7 @@ fn scan_calls_batch(
                     constraint_regexes: &prepared.constraint_regexes,
                     receiver_call_count,
                     assignment_texts: Some(&facts.assignment_map),
+                    ast_arg_values: None,
                     mode,
                     taint_view,
                     enclosing_decorators: Some(facts.decl_decorators.as_slice()),
@@ -3147,6 +3095,7 @@ fn scan_calls_batch(
                 constraint_regexes: &prepared.constraint_regexes,
                 receiver_call_count: None,
                 assignment_texts: None,
+                ast_arg_values: None,
                 mode,
                 taint_view,
                 enclosing_decorators: None,
@@ -3316,6 +3265,7 @@ fn scan_missing_batch(
                 constraint_regexes: &prepared.constraint_regexes,
                 receiver_call_count: None,
                 assignment_texts: Some(&facts.assignment_map),
+                ast_arg_values: None,
                 mode,
                 taint_view,
                 enclosing_decorators: Some(facts.decl_decorators.as_slice()),
@@ -5527,6 +5477,19 @@ fn arg_regex_texts(
     candidates
 }
 
+fn constraint_regex_texts(ctx: &ConstraintEval<'_, '_>, index: usize, arg: &CallArg) -> Vec<String> {
+    let mut candidates = arg_regex_texts(arg, ctx.assignment_texts, 4, true);
+    if let Some(values) = ctx.ast_arg_values.and_then(|all| all.get(index)) {
+        for value in values {
+            let value = value.trim();
+            if !value.is_empty() && !candidates.iter().any(|candidate| candidate == value) {
+                candidates.push(value.to_string());
+            }
+        }
+    }
+    candidates
+}
+
 /// True when `text` is a single identifier token (alpha / `_` / `$`
 /// start; alnum / `_` / `$` body). Used to detect arg expressions
 /// that might match a tainted value's identifier directly.
@@ -5573,7 +5536,6 @@ fn scan_writes_batch(
     let mode = ctx.mode;
     let taint_view = ctx.taint_view;
     let retention = ctx.retention;
-    let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     let file_packages = file_package_set_with_workspace_context_and_retention(
         ws,
         file,
@@ -5581,53 +5543,44 @@ fn scan_writes_batch(
         retention,
     );
     let alias_map = file_alias_map_with_retention(ws, file, retention);
+    let nested_ast_values = NestedAstValueIndex::new(&file_index.defs);
     for decl in &file_index.defs {
         let writes = collect_writes(&decl.flow_events);
-        for (target, span) in writes {
-            let args = source_text
-                .as_deref()
-                .and_then(|text| text.get(span.start as usize..span.end as usize))
-                .map(|value_text| {
-                    vec![CallArg {
-                        passing_mode: Default::default(),
-                        span,
-                        name: None,
-                        place: None,
-                        source_names: Vec::new(),
-                        value_text: value_text.to_string(),
-                    }]
-                })
-                .unwrap_or_default();
+        for mut write in writes {
+            write.extend_with_nested_ast_values(&nested_ast_values);
+            let args = [write.argument.clone()];
+            let ast_arg_values = [write.ast_values];
             for prepared in rules {
                 if !callee_matches(
-                    &target,
+                    &write.target,
                     prepared.name,
                     prepared.attribute,
                     prepared.regex.as_ref(),
                 ) {
                     continue;
                 }
-                if !prepared.base_name_allows(&target) {
+                if !prepared.base_name_allows(&write.target) {
                     continue;
                 }
                 // Same package-signal gate the call/read scanners use —
                 // a receiver-agnostic write target like
                 // `^[A-Za-z_$]\w*\.headers$` would otherwise fire on
                 // any file regardless of the rule's `packages` list.
-                if !prepared.call_context_allows(&target, &[], &alias_map, file_packages.as_ref()) {
+                if !prepared.call_context_allows(&write.target, &[], &alias_map, file_packages.as_ref()) {
                     continue;
                 }
                 if !constraints_pass(ConstraintEval {
                     rule_id: &prepared.rule.id,
-                    callee: &target,
+                    callee: &write.target,
                     args: &args,
                     receiver_types: &[],
-                    span,
+                    span: write.span,
                     call_origin: Some(CallFactOrigin::SyntheticWrite),
                     constraints: &prepared.rule.constraints.0,
                     constraint_regexes: &prepared.constraint_regexes,
                     receiver_call_count: None,
                     assignment_texts: None,
+                    ast_arg_values: Some(&ast_arg_values),
                     mode,
                     taint_view,
                     enclosing_decorators: None,
@@ -5637,15 +5590,15 @@ fn scan_writes_batch(
                 }) {
                     continue;
                 }
-                let (file_path, line, col) = resolve_span(ws, file, span);
+                let (file_path, line, col) = resolve_span(ws, file, write.span);
                 out.push(RuleMatch {
                     rule_id: prepared.rule.id.clone(),
                     language: prepared.rule.language.clone(),
                     file: file_path,
                     line,
                     column: col,
-                    span,
-                    match_text: target.clone(),
+                    span: write.span,
+                    match_text: write.target.clone(),
                     enclosing_fn: Some(decl.name.clone()),
                 });
             }
@@ -5666,7 +5619,6 @@ fn scan_ref_writes_batch(
     let taint_view = ctx.taint_view;
     let retention = ctx.retention;
     let decls = file_index.defs.as_slice();
-    let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     let file_packages = file_package_set_with_workspace_context_and_retention(
         ws,
         file,
@@ -5678,20 +5630,6 @@ fn scan_ref_writes_batch(
         if r.kind != RefKind::Write {
             continue;
         }
-        let args = source_text
-            .as_deref()
-            .and_then(|text| text.get(r.span.start as usize..r.span.end as usize))
-            .map(|value_text: &str| {
-                vec![CallArg {
-                    passing_mode: Default::default(),
-                    span: r.span,
-                    name: None,
-                    place: None,
-                    source_names: Vec::new(),
-                    value_text: value_text.to_string(),
-                }]
-            })
-            .unwrap_or_default();
         for prepared in rules {
             if !callee_matches(
                 &r.name,
@@ -5710,7 +5648,7 @@ fn scan_ref_writes_batch(
             if !constraints_pass(ConstraintEval {
                 rule_id: &prepared.rule.id,
                 callee: &r.name,
-                args: &args,
+                args: &[],
                 receiver_types: &[],
                 span: r.span,
                 call_origin: Some(CallFactOrigin::SyntheticWrite),
@@ -5718,6 +5656,7 @@ fn scan_ref_writes_batch(
                 constraint_regexes: &prepared.constraint_regexes,
                 receiver_call_count: None,
                 assignment_texts: None,
+                ast_arg_values: None,
                 mode,
                 taint_view,
                 enclosing_decorators: None,
@@ -5752,9 +5691,9 @@ fn scan_ref_writes_batch(
 fn matching_write_exists(ws: &Workspace, file: FileId, prepared: &PreparedRule<'_>) -> bool {
     let global = ws.db().global_index();
     for decl in global.decls_in(file) {
-        for (target, _) in collect_writes(&decl.flow_events) {
+        for write in collect_writes(&decl.flow_events) {
             if callee_matches(
-                &target,
+                &write.target,
                 prepared.name,
                 prepared.attribute,
                 prepared.regex.as_ref(),
@@ -6600,18 +6539,153 @@ fn split_balanced_args(text: &str) -> Vec<String> {
     args
 }
 
-fn collect_writes(events: &[FlowEvent]) -> Vec<(String, Span)> {
+#[derive(Clone, Debug)]
+struct WriteFact {
+    target: String,
+    span: Span,
+    argument: CallArg,
+    /// Rule-visible renderings that came from parsed expression/control-flow
+    /// nodes. This is deliberately separate from `CallArg::value_text`: the
+    /// matcher may compare a rule-owned regex with these facts, but it must
+    /// never rediscover assignment structure by scanning a source line.
+    ast_values: Vec<String>,
+}
+
+impl WriteFact {
+    fn from_assign(
+        target: &str,
+        span: Span,
+        source_name: Option<&str>,
+        source_call: Option<&str>,
+        source_call_args: &[String],
+        source_names: &[String],
+    ) -> Self {
+        let mut ast_values = Vec::new();
+        let mut dependencies = Vec::new();
+        let push_unique = |values: &mut Vec<String>, value: &str| {
+            let value = value.trim();
+            if !value.is_empty() && !values.iter().any(|existing| existing == value) {
+                values.push(value.to_string());
+            }
+        };
+        if let Some(value) = source_name {
+            push_unique(&mut ast_values, value);
+            push_unique(&mut dependencies, value);
+        }
+        if let Some(value) = source_call {
+            push_unique(&mut ast_values, value);
+        }
+        for value in source_call_args {
+            push_unique(&mut ast_values, value);
+            push_unique(&mut dependencies, value);
+        }
+        for value in source_names {
+            push_unique(&mut ast_values, value);
+            push_unique(&mut dependencies, value);
+        }
+        let value_text = source_name.unwrap_or_default().trim().to_string();
+        Self {
+            target: target.to_string(),
+            span,
+            argument: CallArg {
+                passing_mode: Default::default(),
+                span,
+                name: None,
+                place: source_name
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+                source_names: dependencies,
+                value_text,
+            },
+            ast_values,
+        }
+    }
+
+    fn extend_with_nested_ast_values(&mut self, index: &NestedAstValueIndex) {
+        index.extend_values_within(self.span, &mut self.ast_values);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NestedAstValueEntry {
+    span: Span,
+    values: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct NestedAstValueIndex {
+    entries: Vec<NestedAstValueEntry>,
+}
+
+impl NestedAstValueIndex {
+    fn new(decls: &[Decl]) -> Self {
+        let mut entries = decls
+            .iter()
+            .filter_map(|decl| {
+                let mut values = Vec::new();
+                collect_branch_condition_values(&decl.flow_events, &mut values);
+                values.sort();
+                values.dedup();
+                (!values.is_empty()).then_some(NestedAstValueEntry {
+                    span: decl.span,
+                    values,
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| (entry.span.file.raw(), entry.span.start, entry.span.end));
+        Self { entries }
+    }
+
+    fn extend_values_within(&self, outer: Span, out: &mut Vec<String>) {
+        let mut seen = out.iter().cloned().collect::<AHashSet<_>>();
+        let start = self.entries.partition_point(|entry| {
+            entry.span.file.raw() < outer.file.raw()
+                || (entry.span.file == outer.file && entry.span.start <= outer.start)
+        });
+        for entry in self.entries[start..]
+            .iter()
+            .take_while(|entry| entry.span.file == outer.file && entry.span.start < outer.end)
+        {
+            if entry.span.end > outer.end {
+                continue;
+            }
+            for value in &entry.values {
+                if seen.insert(value.clone()) {
+                    out.push(value.clone());
+                }
+            }
+        }
+    }
+}
+
+fn collect_writes(events: &[FlowEvent]) -> Vec<WriteFact> {
     let mut out = Vec::new();
     collect_writes_into(events, &mut out);
     out
 }
 
-fn collect_writes_into(events: &[FlowEvent], out: &mut Vec<(String, Span)>) {
+fn collect_writes_into(events: &[FlowEvent], out: &mut Vec<WriteFact>) {
     for event in events {
         match event {
-            FlowEvent::Assign { target, span, .. } => {
+            FlowEvent::Assign {
+                target,
+                span,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                ..
+            } => {
                 if !target.is_empty() {
-                    out.push((target.clone(), *span));
+                    out.push(WriteFact::from_assign(
+                        target,
+                        *span,
+                        source_name.as_deref(),
+                        source_call.as_deref(),
+                        source_call_args,
+                        source_names,
+                    ));
                 }
             }
             FlowEvent::Branch {
@@ -6635,6 +6709,43 @@ fn collect_writes_into(events: &[FlowEvent], out: &mut Vec<(String, Span)>) {
                 collect_writes_into(body, out);
                 collect_writes_into(catch_events, out);
                 collect_writes_into(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_branch_condition_values(events: &[FlowEvent], out: &mut Vec<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Branch {
+                condition,
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(value) = condition
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    out.push(value.to_string());
+                }
+                collect_branch_condition_values(then_events, out);
+                collect_branch_condition_values(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_branch_condition_values(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_branch_condition_values(body, out);
+                collect_branch_condition_values(catch_events, out);
+                collect_branch_condition_values(finally_events, out);
             }
             _ => {}
         }
@@ -6859,6 +6970,10 @@ struct ConstraintEval<'a, 't> {
     constraint_regexes: &'a [Option<Regex>],
     receiver_call_count: Option<u32>,
     assignment_texts: Option<&'a AHashMap<String, String>>,
+    /// Additional argument values emitted by parsed AST facts. Write rules
+    /// use this for RHS operands and nested callable branch conditions;
+    /// source snapshots are never scanned to reconstruct them.
+    ast_arg_values: Option<&'a [Vec<String>]>,
     mode: ConstraintMode,
     taint_view: Option<&'a InterTaintView<'t>>,
     /// Decorator names on the enclosing decl, for `EnclosingDecoratorIn`.
@@ -7059,7 +7174,7 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 let Some(Some(re)) = ctx.constraint_regexes.get(constraint_index) else {
                     return false;
                 };
-                let candidates = arg_regex_texts(arg, ctx.assignment_texts, 4, true);
+                let candidates = constraint_regex_texts(ctx, idx, arg);
                 if !candidates.iter().any(|value| re.is_match(value.trim())) {
                     return false;
                 }
@@ -7074,7 +7189,7 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 let Some(Some(re)) = ctx.constraint_regexes.get(constraint_index) else {
                     return false;
                 };
-                let candidates = arg_regex_texts(arg, ctx.assignment_texts, 4, true);
+                let candidates = constraint_regex_texts(ctx, idx, arg);
                 if candidates.iter().any(|value| re.is_match(value.trim())) {
                     return false;
                 }
@@ -7083,8 +7198,8 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 let Some(Some(re)) = ctx.constraint_regexes.get(constraint_index) else {
                     return false;
                 };
-                let matched = ctx.args.iter().any(|arg| {
-                    let candidates = arg_regex_texts(arg, ctx.assignment_texts, 4, true);
+                let matched = ctx.args.iter().enumerate().any(|(index, arg)| {
+                    let candidates = constraint_regex_texts(ctx, index, arg);
                     candidates.iter().any(|value| re.is_match(value.trim()))
                 });
                 if !matched {

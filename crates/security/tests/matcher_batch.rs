@@ -993,11 +993,11 @@ class App {
 }
 
 #[test]
-fn write_rules_match_attribute_write_refs_with_constraints() {
+fn write_rules_match_structured_attribute_assignments_with_constraints() {
     let ws = ruby_ws(
         r"
-def handler(response)
-  response.headers['Transfer-Encoding'] = 'chunked'
+def handler(response, value)
+  response.headers = value
 end
 ",
     );
@@ -1008,13 +1008,13 @@ end
     );
     rule.language = "ruby".to_string();
     rule.constraints = RuleConstraint(vec![ConstraintKind::AnyArgMatchesRegex {
-        any_arg_matches_regex: "Transfer-Encoding".to_string(),
+        any_arg_matches_regex: "^value$".to_string(),
     }]);
 
     let matches = match_rule_against_facts(&ws, &rule);
     assert!(
         matches.iter().any(|m| m.match_text == "response.headers"),
-        "expected write-ref match for response.headers assignment, got {matches:?}"
+        "expected structured response.headers assignment match, got {matches:?}"
     );
 }
 
