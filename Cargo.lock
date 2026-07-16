@@ -755,6 +755,7 @@ dependencies = [
  "bonsai_security",
  "bonsai_trace",
  "bonsai_workspace",
+ "fs2",
  "rayon",
  "regex",
  "serde",

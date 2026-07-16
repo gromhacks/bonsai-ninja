@@ -23,6 +23,7 @@ bonsai_trace = { workspace = true }
 bonsai_workspace = { workspace = true }
 ahash = { workspace = true }
 anyhow = { workspace = true }
+fs2 = { workspace = true }
 regex = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }

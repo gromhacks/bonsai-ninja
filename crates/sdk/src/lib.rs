@@ -20,6 +20,7 @@ use bonsai_common::{
 };
 use bonsai_lang_api::{Decl, LanguageRegistry};
 use bonsai_workspace::{FileRefreshKind, WorkspaceOpenOptions};
+use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -2344,6 +2345,100 @@ fn unique_default_export_tmp_path(cache: &Path) -> PathBuf {
     cache.with_file_name(name)
 }
 
+fn default_export_lock_path(cache: &Path) -> PathBuf {
+    let mut name = cache
+        .file_name()
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from(DEFAULT_EXPORT_CACHE_FILE));
+    name.push(".lock");
+    cache.with_file_name(name)
+}
+
+struct ExportCacheWriteLock {
+    file: fs::File,
+}
+
+impl Drop for ExportCacheWriteLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
+/// Serialize default-export cache replacement with an OS file lock. The lock
+/// is released by the kernel when a process is interrupted, so once acquired
+/// every matching temp sibling is known to be abandoned by a previous writer
+/// and can be removed without racing another current bonsai process.
+fn lock_default_export_cache(cache: &Path) -> Result<ExportCacheWriteLock> {
+    let lock_path = default_export_lock_path(cache);
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    file.lock_exclusive()?;
+    cleanup_default_export_temp_files(cache)?;
+    Ok(ExportCacheWriteLock { file })
+}
+
+fn cleanup_default_export_temp_files(target: &Path) -> Result<usize> {
+    let Some(parent) = target.parent() else {
+        return Ok(0);
+    };
+    let Some(file_name) = target.file_name().and_then(|name| name.to_str()) else {
+        return Ok(0);
+    };
+    let prefix = format!("{file_name}.tmp.");
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    let mut removed = 0usize;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        match fs::remove_file(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(removed)
+}
+
+struct PendingExportTemp {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl PendingExportTemp {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingExportTemp {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkspaceContentFingerprint {
     pub files: usize,
@@ -2377,24 +2472,27 @@ fn write_default_export_cache(
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent)?;
     }
+    let _lock = lock_default_export_cache(cache)?;
+    cleanup_default_export_temp_files(&default_export_cache_metadata_path(root))?;
     let cache_bytes = out
         .len()
         .checked_add(1)
         .context("export cache output too large to write")? as u64;
     let metadata = build_export_cache_metadata(root, rulepack_root, workspace_sources, cache_bytes)?;
-    let tmp = unique_default_export_tmp_path(cache);
+    let mut tmp = PendingExportTemp::new(unique_default_export_tmp_path(cache));
     {
-        let file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp.path)?;
         let mut writer = io::BufWriter::with_capacity(1024 * 1024, file);
         writer.write_all(out.as_bytes())?;
         writeln!(writer)?;
         writer.flush()?;
         writer.get_ref().sync_all()?;
     }
-    if let Err(err) = fs::rename(&tmp, cache) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err.into());
-    }
+    fs::rename(&tmp.path, cache)?;
+    tmp.commit();
     let mut metadata_bytes = serde_json::to_vec_pretty(&metadata)?;
     metadata_bytes.push(b'\n');
     write_atomic_bytes(&default_export_cache_metadata_path(root), &metadata_bytes)?;
@@ -2415,21 +2513,24 @@ where
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = unique_default_export_tmp_path(cache);
+    let _lock = lock_default_export_cache(cache)?;
+    cleanup_default_export_temp_files(&default_export_cache_metadata_path(root))?;
+    let mut tmp = PendingExportTemp::new(unique_default_export_tmp_path(cache));
     {
-        let file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp.path)?;
         let mut writer = io::BufWriter::with_capacity(1024 * 1024, file);
         write_json(&mut writer)?;
         writeln!(writer)?;
         writer.flush()?;
         writer.get_ref().sync_all()?;
     }
-    let cache_bytes = fs::metadata(&tmp)?.len();
+    let cache_bytes = fs::metadata(&tmp.path)?.len();
     let metadata = build_export_cache_metadata(root, rulepack_root, workspace_sources, cache_bytes)?;
-    if let Err(err) = fs::rename(&tmp, cache) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err.into());
-    }
+    fs::rename(&tmp.path, cache)?;
+    tmp.commit();
     let mut metadata_bytes = serde_json::to_vec_pretty(&metadata)?;
     metadata_bytes.push(b'\n');
     write_atomic_bytes(&default_export_cache_metadata_path(root), &metadata_bytes)?;
@@ -2441,18 +2542,19 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = unique_default_export_tmp_path(path);
+    let mut tmp = PendingExportTemp::new(unique_default_export_tmp_path(path));
     {
-        let file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp.path)?;
         let mut writer = io::BufWriter::with_capacity(64 * 1024, file);
         writer.write_all(bytes)?;
         writer.flush()?;
         writer.get_ref().sync_all()?;
     }
-    if let Err(err) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err.into());
-    }
+    fs::rename(&tmp.path, path)?;
+    tmp.commit();
     sync_parent_dir(path);
     Ok(())
 }
