@@ -22,7 +22,7 @@ pub fn expression_flow_from_node(node: Node<'_>, file: FileId, src: &[u8]) -> Ex
         place,
         projection,
         source_names: scalar_source_names(node, src),
-        call_sites: top_level_call_spans(node, file),
+        call_sites: expression_call_spans(node, file),
         ..ExpressionFlow::default()
     };
 
@@ -153,7 +153,7 @@ fn is_call_node(kind: &str) -> bool {
         )
 }
 
-fn top_level_call_spans(node: Node<'_>, file: FileId) -> Vec<Span> {
+pub(super) fn expression_call_spans(node: Node<'_>, file: FileId) -> Vec<Span> {
     fn collect(node: Node<'_>, file: FileId, out: &mut Vec<Span>) {
         if is_call_node(node.kind()) {
             out.push(span_of(file, &node));

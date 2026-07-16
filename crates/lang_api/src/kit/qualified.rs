@@ -48,40 +48,6 @@ pub(super) fn binary_operator_is_assignment(node: &Node<'_>, src: &[u8]) -> bool
     false
 }
 
-/// Extract the RHS text of an assignment-shape expression by
-/// finding the first un-paired `=` outside string literals. Skips
-/// `==` comparisons and `=>` arrows. Returns `None` if no `=`
-/// separator is found at top level.
-pub(super) fn assignment_rhs_text(text: &str) -> Option<&str> {
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut chars = text.char_indices().peekable();
-    while let Some((idx, ch)) = chars.next() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '"' | '\'' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        if ch != '=' {
-            continue;
-        }
-        if matches!(chars.peek(), Some((_, '=' | '>'))) {
-            continue;
-        }
-        return text.get(idx + ch.len_utf8()..).map(str::trim);
-    }
-    None
-}
-
 /// True when the node is a declaration that did not surface a
 /// `value` / `right` field — typed declarations without an
 /// initializer (`int x;`, `let x: T;`). Used to suppress noisy

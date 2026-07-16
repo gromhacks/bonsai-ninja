@@ -1,10 +1,11 @@
 use super::{
     annotate_tuple_call_result_bindings, apply_assign_call_result_types, apply_call_receiver_types,
-    apply_constructor_result_type_aliases, argument_place, build_call_event, canonical_simple_type_name,
-    collect_kinds, expression_flow_from_node, extract_assignment_value_facts, extract_return_value_name,
-    extract_rhs_expr_operands, language_from_pack, node_text, normalize_call_name_whitespace,
-    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
-    receiver_projected_alias_matches, span_of, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
+    apply_constructor_result_type_aliases, argument_place, assignment_value_node, build_call_event,
+    callable_reference_name, canonical_simple_type_name, collect_kinds, expression_flow_from_node,
+    extract_assignment_value_facts, extract_return_value_name, extract_rhs_expr_operands, language_from_pack,
+    node_text, normalize_call_name_whitespace, normalize_call_result_assignment_sources,
+    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, span_of,
+    walk_flow_events, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
     AssignValueKind, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ModulePath, Visibility,
@@ -211,6 +212,54 @@ fn assignment_value_fact_uses_exact_rhs_node_span() {
     assert_eq!(facts[0].assignment_span, assignment_span);
     let value = &src[facts[0].value_span.start as usize..facts[0].value_span.end as usize];
     assert_eq!(value, b"\"left=right\"");
+}
+
+#[test]
+fn callable_assignment_references_are_lowered_from_ast_shapes() {
+    fn reference(pack: &str, source: &str, assignment_kinds: &[&str]) -> Option<String> {
+        let language = language_from_pack(pack).expect("grammar");
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set grammar");
+        let tree = parser.parse(source, None).expect("parse source");
+        collect_kinds(&tree, assignment_kinds)
+            .into_iter()
+            .find_map(|assignment| {
+                let value = assignment_value_node(assignment, None)?;
+                callable_reference_name(&value, source.as_bytes())
+            })
+    }
+
+    assert_eq!(
+        reference(
+            "java",
+            "class C { void f() { Consumer<String> cb = this::helper; } }",
+            &["variable_declarator"],
+        )
+        .as_deref(),
+        Some("helper")
+    );
+    assert_eq!(
+        reference("elixir", "cb = &helper/1", &["binary_operator"]).as_deref(),
+        Some("helper")
+    );
+    assert_eq!(
+        reference("ruby", "cb = method(:helper)", &["assignment"]).as_deref(),
+        Some("helper")
+    );
+    assert_eq!(
+        reference(
+            "php",
+            "<?php function f() { $cb = system(...); }",
+            &["assignment_expression"],
+        )
+        .as_deref(),
+        Some("system")
+    );
+    assert_eq!(
+        reference("python", "cb = 'helper'", &["assignment"]),
+        None,
+        "data literals must not be promoted to callable aliases"
+    );
 }
 
 #[test]
@@ -607,6 +656,60 @@ fn rust_match_result_dependencies_come_from_arm_ast_values() {
     assert!(
         operands.iter().any(|operand| operand == "joined"),
         "both macro-token-tree and method-receiver arm values must retain the joined dependency: {operands:?}"
+    );
+}
+
+#[test]
+fn perl_list_expression_dependencies_come_from_scalar_ast_values() {
+    let source = "sub entry { my ($a, $b) = ($args, 'ok'); }";
+    let language = language_from_pack("perl").expect("Perl language pack");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set Perl language");
+    let tree = parser.parse(source, None).expect("parse Perl list assignment");
+    let list = collect_kinds(&tree, &["list_expression"])
+        .into_iter()
+        .next()
+        .expect("list expression");
+
+    let operands = extract_rhs_expr_operands(&list, source.as_bytes());
+    assert_eq!(operands, vec!["$args".to_string(), "args".to_string()]);
+
+    let assignment = collect_kinds(&tree, &["assignment_expression"])
+        .into_iter()
+        .next()
+        .expect("assignment expression");
+    let selected_rhs = assignment_value_node(assignment, assignment.child_by_field_name("left"))
+        .expect("selected assignment RHS");
+    let field_kinds = ["right", "rhs", "value", "result"]
+        .into_iter()
+        .map(|field| {
+            (
+                field,
+                assignment.child_by_field_name(field).map(|node| node.kind()),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected_rhs.kind(),
+        "list_expression",
+        "assignment value fields: {field_kinds:?}"
+    );
+    assert_eq!(
+        extract_rhs_expr_operands(&selected_rhs, source.as_bytes()),
+        vec!["$args".to_string(), "args".to_string()]
+    );
+
+    let body = collect_kinds(&tree, &["block"])
+        .into_iter()
+        .next()
+        .expect("subroutine body");
+    let events = walk_flow_events(body, FileId::new(0), source.as_bytes(), &GENERIC_HANDLER, &[]);
+    assert!(
+        events.iter().any(|event| {
+            matches!(event, FlowEvent::Assign { span, source_names, .. }
+                if span.start == 12 && source_names.iter().any(|source| source == "args"))
+        }),
+        "generic AST lowering must retain the tuple RHS carrier: {events:?}"
     );
 }
 

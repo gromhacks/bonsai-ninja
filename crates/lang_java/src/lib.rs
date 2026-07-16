@@ -135,10 +135,6 @@ impl LanguageAdapter for JavaAdapter {
         for decl in &mut index.defs {
             populate_java_exception_types(&mut decl.flow_events, &tree, src);
             rewrite_java_reflection_chain(&mut decl.flow_events);
-            bonsai_lang_api::kit::inject_callable_reference_aliases_from_source(
-                &mut decl.flow_events,
-                snapshot.text.as_ref(),
-            );
         }
         let field_aliases = collect_java_type_aliases(tree.root_node(), src, &["field_declaration"]);
         let mut method_aliases = collect_java_method_type_aliases(&tree, file, src, &field_aliases);

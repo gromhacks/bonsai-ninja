@@ -680,6 +680,7 @@ struct ExportAssignmentValue {
     value_start: u64,
     #[serde(rename = "value_end_byte")]
     value_end: u64,
+    call_sites: Vec<Span>,
 }
 
 #[derive(Serialize)]
@@ -849,7 +850,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let mut map = serializer.serialize_map(None)?;
 
     map.serialize_entry("schema", "bonsai-native-export")?;
-    map.serialize_entry("schema_version", &3_u32)?;
+    map.serialize_entry("schema_version", &4_u32)?;
     map.serialize_entry("engine_version", env!("CARGO_PKG_VERSION"))?;
     map.serialize_entry("workspace_root", &root.display().to_string())?;
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
@@ -1223,6 +1224,7 @@ fn build_export_file<'a>(
             assignment_end: fact.assignment_span.end,
             value_start: fact.value_span.start,
             value_end: fact.value_span.end,
+            call_sites: fact.call_sites.clone(),
         })
         .collect();
     let strings = index
