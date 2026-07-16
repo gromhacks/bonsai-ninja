@@ -1233,7 +1233,7 @@
   constraints:
   - arg_matches_regex:
       index: 0
-      regex: "=\\s*true\\b"
+      regex: "^true$"
   match_examples:
   - name: xml decoder strict true
     code: |

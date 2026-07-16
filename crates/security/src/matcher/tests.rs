@@ -709,6 +709,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         constraint_regexes: &constraint_regexes,
         receiver_call_count: Some(2),
         assignment_texts: None,
+        ast_arg_values: None,
         mode: ConstraintMode::Strict,
         taint_view: None,
         enclosing_decorators: None,
@@ -727,6 +728,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         constraint_regexes: &constraint_regexes,
         receiver_call_count: Some(1),
         assignment_texts: None,
+        ast_arg_values: None,
         mode: ConstraintMode::Strict,
         taint_view: None,
         enclosing_decorators: None,
@@ -745,6 +747,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         constraint_regexes: &constraint_regexes,
         receiver_call_count: None,
         assignment_texts: None,
+        ast_arg_values: None,
         mode: ConstraintMode::Strict,
         taint_view: None,
         enclosing_decorators: None,
@@ -945,14 +948,40 @@ fn arg_int_compare_out_of_bounds_fails() {
 }
 
 #[test]
-fn write_statement_text_has_no_hidden_byte_limit() {
-    let long_value = "x".repeat(8_192);
-    let source = format!("result = build(\n    {long_value}\n)\nafter()\n");
-    let span = Span::new(FileId::new(0), 0, 6);
-    let statement = super::write_statement_text(&source, span).expect("multiline assignment");
-    assert!(statement.ends_with(')'));
-    assert!(statement.contains(&long_value));
-    assert!(!statement.contains("after()"));
+fn write_fact_uses_structured_assignment_operands() {
+    let events = vec![FlowEvent::Assign {
+        span: span(),
+        target: "decoder.Strict".to_string(),
+        source_name: Some("false".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec!["false".to_string()],
+        declares_new_binding: false,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Literal),
+    }];
+
+    let writes = super::collect_writes(&events);
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].target, "decoder.Strict");
+    assert_eq!(writes[0].argument.value_text, "false");
+    assert_eq!(writes[0].argument.source_names, ["false"]);
+    assert_eq!(writes[0].ast_values, ["false"]);
+}
+
+#[test]
+fn branch_condition_ast_values_have_no_hidden_cap() {
+    let events = (0..8_192)
+        .map(|index| FlowEvent::Branch {
+            span: span(),
+            condition: Some(format!("allowed[{index}]")),
+            then_events: Vec::new(),
+            else_events: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut values = Vec::new();
+    super::collect_branch_condition_values(&events, &mut values);
+    assert_eq!(values.len(), events.len());
+    assert_eq!(values.last().map(String::as_str), Some("allowed[8191]"));
 }
 
 // audit re-apply: R5 RED-before/GREEN-after: before the Yield arm, collect_cal

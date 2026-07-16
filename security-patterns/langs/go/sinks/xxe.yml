@@ -56,7 +56,7 @@
   constraints:
   - arg_not_matches_regex:
       index: 0
-      regex: "\\bif\\s+!\\s*[A-Za-z_][A-Za-z0-9_]*\\s*\\[\\s*charset\\s*\\]"
+      regex: "^!\\s*[A-Za-z_][A-Za-z0-9_]*\\s*\\[\\s*charset\\s*\\]$"
   match_examples:
   - name: xml decoder charset reader assignment
     code: |
@@ -104,7 +104,7 @@
   constraints:
   - arg_matches_regex:
       index: 0
-      regex: "\\.Strict\\s*=\\s*false\\b"
+      regex: "^false$"
   match_examples:
   - name: xml decoder strict disabled
     code: |
