@@ -80,7 +80,9 @@ EXPECTED_FINDINGS = {
     "perl": 2,
     "php": 2,
     "python": 1,
-    "ruby": 2,
+    # Equivalent receiver-derived evidence is grouped into the one distinct
+    # stdin_gets -> Kernel.system vulnerability.
+    "ruby": 1,
     "rust": 1,
     "scala": 1,
     "solidity": 2,

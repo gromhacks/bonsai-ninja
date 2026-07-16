@@ -451,7 +451,7 @@ fn read_cache(workspace: &Path) -> anyhow::Result<Option<PageCacheFile>> {
 }
 
 fn binary_cache_fingerprint() -> &'static str {
-    option_env!("BONSAI_BUILD_FINGERPRINT").unwrap_or(env!("CARGO_PKG_VERSION"))
+    bonsai_sdk::analyzer_build_fingerprint()
 }
 
 fn current_exe_is_newer_than_cache(cache_metadata: &std::fs::Metadata) -> bool {

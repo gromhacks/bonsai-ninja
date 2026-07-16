@@ -3150,7 +3150,12 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // v39 (2026-07-15): lexical parameters/locals shadow same-spelled
     // callable declarations, and Dart's ambiguous bare call syntax is
     // refined against scoped class declarations before IDG stitching.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 39;
+    // v40 (2026-07-15): demanded symbolic access-path call boundaries retain
+    // closure provenance, and resolved projected call arguments are distinct
+    // from synthetic allocation-insensitive field-state links.
+    // v41 (2026-07-15): symbolic call provenance retains AST argument and
+    // formal slots without materializing access-path edges.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 41;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
@@ -3167,6 +3172,19 @@ pub(crate) fn build_fingerprint_hash() -> u64 {
         "build.rs must emit BONSAI_BUILD_FINGERPRINT_HASH"
     );
     u64::from_str_radix(FINGERPRINT_HEX, 16).unwrap_or(0)
+}
+
+/// Analyzer build identity shared by semantic and presentation caches.
+///
+/// The workspace build script binds this to the git commit plus the actual
+/// tracked/untracked dirty payload, so rebuilding after another local source
+/// edit cannot reuse artifacts produced by an older analyzer binary.
+#[must_use]
+pub fn analyzer_build_fingerprint() -> &'static str {
+    env!(
+        "BONSAI_BUILD_FINGERPRINT",
+        "build.rs must emit BONSAI_BUILD_FINGERPRINT"
+    )
 }
 
 fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {

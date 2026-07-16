@@ -3177,6 +3177,191 @@ fn constructor_call_resolves_by_kind_and_class_parent_not_method_spelling() {
 }
 
 #[test]
+fn receiverless_ast_constructor_call_resolves_named_parent_before_member_lookup() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let mut base_class = decl_with(file, 1, "Base", DeclKind::Class, None, Vec::new());
+    let mut repository_class = decl_with(file, 2, "Repository", DeclKind::Class, None, Vec::new());
+    repository_class.bases = vec!["Base".to_string()];
+    let mut audited_class = decl_with(file, 3, "Audited", DeclKind::Class, None, Vec::new());
+    audited_class.bases = vec!["Repository".to_string()];
+    base_class.body_span = Some(Span::new(file, 0, 100));
+    repository_class.body_span = Some(Span::new(file, 100, 200));
+    audited_class.body_span = Some(Span::new(file, 200, 400));
+
+    let base_ctor = with_params(
+        decl_with(file, 4, "Base", DeclKind::Constructor, Some(1), Vec::new()),
+        &["data"],
+    );
+    let repository_ctor = with_params(
+        decl_with(file, 5, "Repository", DeclKind::Constructor, Some(2), Vec::new()),
+        &["data"],
+    );
+    let audited_ctor = with_params(
+        decl_with(
+            file,
+            6,
+            "Audited",
+            DeclKind::Constructor,
+            Some(3),
+            vec![FlowEvent::Call {
+                span: Span::new(file, 260, 280),
+                name: "Repository".to_string(),
+                receiver: None,
+                receiver_types: vec!["Repository".to_string(), "Base".to_string()],
+                call_kind: CallKind::Constructor,
+                args: vec![CallArg {
+                    passing_mode: Default::default(),
+                    span: Span::new(file, 270, 274),
+                    name: None,
+                    value_text: "data".to_string(),
+                    place: Some("data".to_string()),
+                    source_names: vec!["data".to_string()],
+                }],
+            }],
+        ),
+        &["data"],
+    );
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            base_class,
+            repository_class,
+            audited_class,
+            base_ctor,
+            repository_ctor,
+            audited_ctor,
+        ],
+    );
+
+    let graph = build_graph(&global, |_| Some("scala"));
+    let audited = func_id_by_name_and_parent(&global, "Audited", "Audited");
+    let repository = func_id_by_name_and_parent(&global, "Repository", "Repository");
+    let base = func_id_by_name_and_parent(&global, "Base", "Base");
+    let targets = graph.callees_of(audited).map(|edge| edge.to).collect::<Vec<_>>();
+    assert_eq!(targets, vec![repository]);
+    assert!(!targets.contains(&base), "{targets:?}");
+}
+
+#[test]
+fn super_constructor_resolves_direct_parent_not_transitive_ancestors() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let mut base_class = decl_with(file, 1, "Base", DeclKind::Class, None, Vec::new());
+    let mut repo_class = decl_with(file, 2, "Repository", DeclKind::Class, None, Vec::new());
+    repo_class.bases = vec!["Base".to_string()];
+    let mut audited_class = decl_with(file, 3, "Audited", DeclKind::Class, None, Vec::new());
+    audited_class.bases = vec!["Repository".to_string()];
+    base_class.body_span = Some(Span::new(file, 0, 100));
+    repo_class.body_span = Some(Span::new(file, 100, 200));
+    audited_class.body_span = Some(Span::new(file, 200, 400));
+
+    let mut base_ctor = with_params(
+        decl_with(file, 4, "Base", DeclKind::Constructor, Some(1), Vec::new()),
+        &["data"],
+    );
+    base_ctor.span = Span::new(file, 20, 80);
+    base_ctor.name_span = Span::new(file, 20, 24);
+    base_ctor.body_span = Some(Span::new(file, 24, 80));
+    let mut repo_ctor = with_params(
+        decl_with(file, 5, "Repository", DeclKind::Constructor, Some(2), Vec::new()),
+        &["data"],
+    );
+    repo_ctor.span = Span::new(file, 120, 180);
+    repo_ctor.name_span = Span::new(file, 120, 130);
+    repo_ctor.body_span = Some(Span::new(file, 130, 180));
+    let mut audited_ctor = with_params(
+        decl_with(
+            file,
+            6,
+            "Audited",
+            DeclKind::Constructor,
+            Some(3),
+            vec![FlowEvent::Call {
+                span: Span::new(file, 260, 280),
+                name: "Repository".to_string(),
+                receiver: Some("super".to_string()),
+                receiver_types: vec!["Repository".to_string(), "Base".to_string()],
+                call_kind: CallKind::Constructor,
+                args: vec![CallArg {
+                    passing_mode: Default::default(),
+                    span: Span::new(file, 270, 274),
+                    name: None,
+                    value_text: "data".to_string(),
+                    place: Some("data".to_string()),
+                    source_names: vec!["data".to_string()],
+                }],
+            }],
+        ),
+        &["data"],
+    );
+    audited_ctor.implicit_receiver_names = vec!["this".to_string(), "super".to_string()];
+    audited_ctor.span = Span::new(file, 240, 300);
+    audited_ctor.name_span = Span::new(file, 240, 247);
+    audited_ctor.body_span = Some(Span::new(file, 247, 300));
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            base_class,
+            repo_class,
+            audited_class,
+            base_ctor,
+            repo_ctor,
+            audited_ctor,
+        ],
+    );
+
+    let graph = ResolvedCallGraph::build_with_file_info_and_super_tokens(
+        &global,
+        |_| AHashMap::new(),
+        |_| AHashMap::new(),
+        |_| None,
+        |_| &[],
+        |_| Some("java"),
+        |_| &["super"],
+        |_| false,
+    );
+    let audited = func_id_by_name_and_parent(&global, "Audited", "Audited");
+    let repository = func_id_by_name_and_parent(&global, "Repository", "Repository");
+    let base = func_id_by_name_and_parent(&global, "Base", "Base");
+    let caller_decl = global
+        .decl_of(SymbolId::new(audited.raw()))
+        .expect("audited constructor");
+    let FlowEvent::Call {
+        name,
+        receiver,
+        receiver_types,
+        call_kind,
+        span,
+        args,
+    } = &caller_decl.flow_events[0]
+    else {
+        panic!("expected constructor call");
+    };
+    let helper_targets = collect_call_event_targets_with_context_aliases_and_super_tokens(
+        &global,
+        name,
+        receiver.as_deref(),
+        receiver_types,
+        *call_kind,
+        *span,
+        args,
+        caller_decl,
+        &AHashMap::new(),
+        &|_| None,
+        &[],
+        &["super"],
+    );
+    let targets = graph.callees_of(audited).map(|edge| edge.to).collect::<Vec<_>>();
+
+    assert_eq!(helper_targets, vec![repository]);
+    assert!(targets.contains(&repository), "{targets:?}");
+    assert!(!targets.contains(&base), "{targets:?}");
+}
+
+#[test]
 fn class_shaped_function_call_does_not_infer_a_constructor() {
     let file = FileId::new(1);
     let mut global = GlobalIndex::new();

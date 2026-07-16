@@ -1328,6 +1328,10 @@ fn add_resolved_call_edges(
                     )
                 });
                 let semantic_receiver = receiver.as_deref().or(folded_receiver);
+                let explicit_ancestor_constructor = *call_kind == CallKind::Constructor
+                    && semantic_receiver.is_some_and(|receiver| {
+                        is_super_receiver_with_tokens(receiver, caller_super_receiver_tokens)
+                    });
                 let local_value_shadow = semantic_receiver.is_none()
                     && local_value_binding_shadows_callable(&caller_decl.flow_events, short, *span);
                 let mut candidates = collect_local_callable_binding_targets(
@@ -1340,6 +1344,44 @@ fn add_resolved_call_edges(
                 let mut candidates_from_dynamic_param_receiver = false;
                 if candidates.is_empty() && semantic_receiver.is_none() && !alias_qualified_call {
                     candidates = collect_nested_local_callable_targets(global, caller_decl, name, *span);
+                }
+                if candidates.is_empty() && explicit_ancestor_constructor {
+                    // An AST-classified `super(...)` constructor invocation
+                    // names the direct parent constructor. Receiver-type
+                    // enrichment also carries transitive ancestors for
+                    // ordinary virtual dispatch; consulting that entire set
+                    // here would incorrectly admit grandparent constructors
+                    // with the same arity. Resolve the rewritten direct-base
+                    // callee identity before the generic receiver pipeline.
+                    candidates = collect_constructor_targets_for_class_call(
+                        global,
+                        caller_decl,
+                        alias_targets,
+                        path_for_file,
+                        name,
+                        None,
+                        &[],
+                        false,
+                        Some(constructor_index),
+                    );
+                }
+                if candidates.is_empty() && *call_kind == CallKind::Constructor {
+                    // Constructor-ness is an AST fact. Resolve the named class
+                    // and its declared initializer before ordinary member
+                    // lookup, which may otherwise mistake a same-named
+                    // companion/member for the constructor and prevent the
+                    // exact class edge from being considered.
+                    candidates = collect_constructor_targets_for_class_call(
+                        global,
+                        caller_decl,
+                        alias_targets,
+                        path_for_file,
+                        name,
+                        receiver.as_deref(),
+                        receiver_types,
+                        true,
+                        Some(constructor_index),
+                    );
                 }
                 if candidates.is_empty() {
                     candidates = collect_receiver_method_targets(
@@ -1364,19 +1406,6 @@ fn add_resolved_call_edges(
                         path_for_file,
                         name,
                         method_candidate_cache,
-                    );
-                }
-                if candidates.is_empty() && *call_kind == CallKind::Constructor {
-                    candidates = collect_constructor_targets_for_class_call(
-                        global,
-                        caller_decl,
-                        alias_targets,
-                        path_for_file,
-                        name,
-                        receiver.as_deref(),
-                        receiver_types,
-                        true,
-                        Some(constructor_index),
                     );
                 }
                 if candidates.is_empty() {
@@ -3913,13 +3942,11 @@ fn collect_constructor_targets_for_class_call(
         .with_file_path_lookup(path_for_file);
     let mut class_candidates = Vec::new();
     let mut seen_classes = AHashSet::new();
-    for type_name in receiver_types {
-        for class_sym in resolve_class(global, type_name, &ctx) {
-            if seen_classes.insert(class_sym) {
-                class_candidates.push(class_sym);
-            }
-        }
-    }
+    // Prefer the class named by the AST constructor expression. Adapter
+    // receiver types may include its complete ancestry for later virtual
+    // dispatch; treating that enrichment as co-equal constructor targets
+    // would fan one `Repository(...)` expression out to `Repository` and
+    // every base initializer.
     for candidate in receiver.into_iter().chain(std::iter::once(call_name)) {
         for type_name in receiver_type_names_for_expr(caller_decl, alias_targets, candidate) {
             for class_sym in resolve_class(global, &type_name, &ctx) {
@@ -3931,6 +3958,15 @@ fn collect_constructor_targets_for_class_call(
         for class_sym in resolve_class(global, candidate, &ctx) {
             if seen_classes.insert(class_sym) {
                 class_candidates.push(class_sym);
+            }
+        }
+    }
+    if class_candidates.is_empty() {
+        for type_name in receiver_types {
+            for class_sym in resolve_class(global, type_name, &ctx) {
+                if seen_classes.insert(class_sym) {
+                    class_candidates.push(class_sym);
+                }
             }
         }
     }
@@ -5733,6 +5769,9 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         folded_call_name_receiver_is_instance(candidate, caller_decl, caller_super_receiver_tokens)
     });
     let semantic_receiver = receiver.or(folded_receiver);
+    let explicit_ancestor_constructor = call_kind == CallKind::Constructor
+        && semantic_receiver
+            .is_some_and(|receiver| is_super_receiver_with_tokens(receiver, caller_super_receiver_tokens));
     let local_value_shadow = semantic_receiver.is_none()
         && local_value_binding_shadows_callable(&caller_decl.flow_events, name, call_span);
     let mut targets = if semantic_receiver.is_none() {
@@ -5744,6 +5783,32 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
     let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
     let mut callable_target_cache = CallableTargetCache::default();
     let file_path_parts: AHashMap<FileId, Vec<String>> = AHashMap::new();
+    if targets.is_empty() && explicit_ancestor_constructor {
+        targets = collect_constructor_targets_for_class_call(
+            global,
+            caller_decl,
+            alias_targets,
+            path_for_file,
+            name,
+            None,
+            &[],
+            false,
+            None,
+        );
+    }
+    if targets.is_empty() && call_kind == CallKind::Constructor {
+        targets = collect_constructor_targets_for_class_call(
+            global,
+            caller_decl,
+            alias_targets,
+            path_for_file,
+            name,
+            receiver,
+            receiver_types,
+            true,
+            None,
+        );
+    }
     if targets.is_empty() {
         targets = collect_receiver_method_targets(
             global,
@@ -5767,19 +5832,6 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             path_for_file,
             name,
             &mut method_candidate_cache,
-        );
-    }
-    if targets.is_empty() && call_kind == CallKind::Constructor {
-        targets = collect_constructor_targets_for_class_call(
-            global,
-            caller_decl,
-            alias_targets,
-            path_for_file,
-            name,
-            receiver,
-            receiver_types,
-            true,
-            None,
         );
     }
     if targets.is_empty()

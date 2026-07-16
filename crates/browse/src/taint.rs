@@ -307,15 +307,26 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         None,
     );
 
-    let closure_nodes =
-        idg.forward_closure_with_max_precision(&seed_nodes, Some(SEMANTIC_FLOW_MAX_PRECISION));
-    let cross_calls = idg
-        .cross_call_edges_in_reachable_nodes_with_max_precision(
-            &closure_nodes,
-            Some(SEMANTIC_FLOW_MAX_PRECISION),
+    let closure_evidence =
+        idg.forward_closure_evidence_with_max_precision(&seed_nodes, Some(SEMANTIC_FLOW_MAX_PRECISION));
+    let closure_nodes = closure_evidence.nodes;
+    let mut cross_calls = idg.cross_call_edges_in_reachable_nodes_with_max_precision(
+        &closure_nodes,
+        Some(SEMANTIC_FLOW_MAX_PRECISION),
+    );
+    cross_calls.extend(closure_evidence.symbolic_cross_calls);
+    cross_calls.sort_unstable_by_key(|edge| {
+        (
+            edge.caller.raw(),
+            edge.callee.raw(),
+            edge.call_span,
+            edge.arg_idx,
+            edge.param_idx,
+            edge.precision,
+            edge.relation,
         )
-        .into_iter()
-        .collect::<Vec<_>>();
+    });
+    cross_calls.dedup();
     let tainted_arg_sites = idg.tainted_call_args_in_reachable_nodes(&closure_nodes);
     // Legacy worklist knobs have no exactness-preserving surface on
     // the IDG path: the closure is a complete bitset walk rather than
@@ -668,15 +679,52 @@ fn tainted_args_from_cross_call(
     global: &bonsai_index::GlobalIndex,
 ) -> Option<Vec<TaintedArgRecord>> {
     if ce.arg_idx == u32::MAX {
-        return caller_call_receiver(global, ce.caller, ce.call_span)
-            .filter(|receiver| !receiver.trim().is_empty())
-            .map(|receiver| {
-                vec![TaintedArgRecord {
-                    index: usize::MAX,
+        if matches!(
+            ce.relation,
+            bonsai_idg::CrossCallRelation::Argument | bonsai_idg::CrossCallRelation::Capture
+        ) {
+            if let Some((receiver, arg_count)) =
+                caller_call_receiver_and_arg_count(global, ce.caller, ce.call_span)
+                    .filter(|(receiver, _)| !receiver.trim().is_empty())
+            {
+                let (index, param_name) = if arg_count == 0 {
+                    (usize::MAX, "receiver".to_string())
+                } else if ce.param_idx != u32::MAX {
+                    (
+                        ce.param_idx as usize,
+                        callee_decl
+                            .params
+                            .get(ce.param_idx as usize)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                } else {
+                    return Some(Vec::new());
+                };
+                return Some(vec![TaintedArgRecord {
+                    index,
                     value_text: receiver,
-                    param_name: "receiver".to_string(),
-                }]
-            });
+                    param_name,
+                }]);
+            }
+        }
+        if matches!(
+            ce.relation,
+            bonsai_idg::CrossCallRelation::Callback | bonsai_idg::CrossCallRelation::Capture
+        ) && ce.param_idx != u32::MAX
+        {
+            let param_name = callee_decl
+                .params
+                .get(ce.param_idx as usize)
+                .cloned()
+                .unwrap_or_default();
+            return Some(vec![TaintedArgRecord {
+                index: ce.param_idx as usize,
+                value_text: param_name.clone(),
+                param_name,
+            }]);
+        }
+        return Some(Vec::new());
     }
     let value_text = caller_arg_value_text(global, ce.caller, ce.call_span, ce.arg_idx).unwrap_or_default();
     let param_name = if ce.param_idx == u32::MAX {
@@ -758,17 +806,19 @@ fn caller_arg_value_text(
     Some(arg.value_text.clone())
 }
 
-fn caller_call_receiver(
+fn caller_call_receiver_and_arg_count(
     global: &bonsai_index::GlobalIndex,
     caller: bonsai_common::FuncId,
     call_span: bonsai_common::Span,
-) -> Option<String> {
+) -> Option<(String, usize)> {
     let decl = global.decl_of(bonsai_common::SymbolId::new(caller.raw()))?;
-    fn find_call_receiver(events: &[FlowEvent], target_span: bonsai_common::Span) -> Option<&str> {
+    fn find_call_receiver(events: &[FlowEvent], target_span: bonsai_common::Span) -> Option<(&str, usize)> {
         for event in events {
             match event {
-                FlowEvent::Call { span, receiver, .. } if *span == target_span => {
-                    return receiver.as_deref();
+                FlowEvent::Call {
+                    span, receiver, args, ..
+                } if *span == target_span => {
+                    return receiver.as_deref().map(|receiver| (receiver, args.len()));
                 }
                 FlowEvent::Branch {
                     then_events,
@@ -808,7 +858,8 @@ fn caller_call_receiver(
         }
         None
     }
-    find_call_receiver(&decl.flow_events, call_span).map(str::to_string)
+    find_call_receiver(&decl.flow_events, call_span)
+        .map(|(receiver, arg_count)| (receiver.to_string(), arg_count))
 }
 
 fn caller_call_name(

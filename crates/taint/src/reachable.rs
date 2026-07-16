@@ -1735,7 +1735,7 @@ pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision_a
         lineage_funcs,
     );
     let transfers_added_seeds = seed_nodes.len() != seed_count_before_transfers;
-    let closure_nodes = if transfers_added_seeds {
+    let closure_evidence = if transfers_added_seeds {
         // Query-time declarative transfers add a derived output node as a
         // seed instead of mutating the immutable IDG. A target cut starting
         // at that derived node would omit the source-to-transfer prefix and
@@ -1743,18 +1743,31 @@ pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision_a
         // derived function corridor whenever a transfer fired; it is still
         // scoped to `lineage_funcs`, and every retained edge is followed to
         // the exact precision fixpoint.
-        closure_with_func_filter(&seed_nodes, idg, max_precision, lineage_funcs)
+        closure_evidence_with_targets(&seed_nodes, idg, max_precision, None, lineage_funcs)
     } else if let Some(targets) = target_funcs {
-        idg.forward_target_func_cut_with_max_precision(&seed_nodes, targets, max_precision)
+        closure_evidence_with_targets(&seed_nodes, idg, max_precision, None, Some(targets))
     } else {
-        idg.forward_closure_with_max_precision(&seed_nodes, max_precision)
+        closure_evidence_with_targets(&seed_nodes, idg, max_precision, None, None)
     };
+    let bonsai_idg::IdgClosureEvidence {
+        nodes: closure_nodes,
+        symbolic_cross_calls,
+    } = closure_evidence;
     let cross_calls = {
         let mut edges = idg.cross_call_edges_in_reachable_nodes_filtered_with_max_precision(
             &closure_nodes,
             max_precision,
             lineage_funcs,
         );
+        edges.extend(symbolic_cross_calls.into_iter().filter(|edge| {
+            lineage_funcs.is_none_or(|funcs| funcs.contains(&edge.caller) && funcs.contains(&edge.callee))
+        }));
+        // Allocation-insensitive projected heap state is valid closure
+        // evidence, but it does not prove that one function calls another.
+        // The closure above has already consumed those links to fixpoint;
+        // keep them out of the compatibility call-record surface so callers
+        // never receive a fabricated call edge.
+        edges.retain(|edge| edge.relation.is_renderable_call());
         if bonsai_diagnostics::debug::is_enabled("idg-closure") {
             let all_edges =
                 idg.cross_call_edges_in_reachable_nodes_with_max_precision(&closure_nodes, max_precision);
@@ -1809,7 +1822,7 @@ pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision_a
         let trace_id = next_trace_id;
         next_trace_id = next_trace_id.saturating_add(1);
         let parent_trace_id = first_inflow.get(&ce.caller).copied();
-        let is_synthetic_return = ce.arg_idx == u32::MAX;
+        let is_synthetic_return = ce.relation == bonsai_idg::CrossCallRelation::Return;
         let synthetic_back_to_source = is_synthetic_return && ce.callee == source_func;
         if !synthetic_back_to_source {
             first_inflow.entry(ce.callee).or_insert(trace_id);
@@ -2129,27 +2142,22 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
     } else {
         target_funcs
     };
-    let closure_nodes = if transfers_added_seeds {
+    let closure_evidence = if transfers_added_seeds {
         // See the call-record-only variant above. Derived transfer seeds must
         // retain the source prefix so terminal calls receive an evidenced
         // parent trace instead of an orphaned sink-local tail.
-        closure_with_func_filter(&seed_nodes, idg, max_precision, lineage_funcs)
+        closure_evidence_with_targets(&seed_nodes, idg, max_precision, None, lineage_funcs)
     } else if let Some(target_nodes) = target_nodes {
-        if let Some(targets) = target_funcs.filter(|targets| !targets.is_empty()) {
-            idg.forward_target_nodes_and_funcs_cut_with_max_precision(
-                &seed_nodes,
-                target_nodes,
-                targets,
-                max_precision,
-            )
-        } else {
-            idg.forward_target_nodes_cut_with_max_precision(&seed_nodes, target_nodes, max_precision)
-        }
+        closure_evidence_with_targets(&seed_nodes, idg, max_precision, Some(target_nodes), target_funcs)
     } else if let Some(targets) = target_funcs {
-        idg.forward_target_func_cut_with_max_precision(&seed_nodes, targets, max_precision)
+        closure_evidence_with_targets(&seed_nodes, idg, max_precision, None, Some(targets))
     } else {
-        idg.forward_closure_with_max_precision(&seed_nodes, max_precision)
+        closure_evidence_with_targets(&seed_nodes, idg, max_precision, None, None)
     };
+    let bonsai_idg::IdgClosureEvidence {
+        nodes: closure_nodes,
+        symbolic_cross_calls,
+    } = closure_evidence;
     if closure_nodes.is_empty() {
         return graph;
     }
@@ -2167,6 +2175,12 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
             max_precision,
             lineage_funcs,
         );
+        edges.extend(symbolic_cross_calls.into_iter().filter(|edge| {
+            lineage_funcs.is_none_or(|funcs| funcs.contains(&edge.caller) && funcs.contains(&edge.callee))
+        }));
+        // See the call-record-only path above. Field-state links are
+        // compiler dataflow evidence, not source-level calls.
+        edges.retain(|edge| edge.relation.is_renderable_call());
         if bonsai_diagnostics::debug::is_enabled("idg-closure") {
             let all_edges =
                 idg.cross_call_edges_in_reachable_nodes_with_max_precision(&closure_nodes, max_precision);
@@ -2203,10 +2217,14 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
             (
                 call_order.get(&ce.caller).copied().unwrap_or(u32::MAX),
                 ce.caller.raw(),
+                ce.callee.raw(),
                 ce.call_span.start,
                 ce.arg_idx,
+                ce.param_idx,
+                ce.precision,
             )
         });
+        edges.dedup();
         edges
     };
     let mut next_trace_id: u64 = 1;
@@ -2242,7 +2260,7 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
         // OWN first_inflow remains None, the *other* function's
         // first_inflow gets set), while the intra-function case
         // (g1_c_return pattern) avoids the cycle entirely.
-        let is_synthetic_return = ce.arg_idx == u32::MAX;
+        let is_synthetic_return = ce.relation == bonsai_idg::CrossCallRelation::Return;
         let synthetic_back_to_source = is_synthetic_return && ce.callee == source_func;
         if !synthetic_back_to_source {
             first_inflow.entry(ce.callee).or_insert(trace_id);
@@ -2775,6 +2793,37 @@ fn closure_with_func_filter(
     } else {
         idg.forward_closure_with_max_precision(seed_nodes, max_precision)
     }
+}
+
+/// Run one provenance-preserving compiler closure and apply the same
+/// target-presence contract as the IDG target-cut helpers. Target queries do
+/// not truncate the closure: they retain the complete realizable path only
+/// when at least one requested target is reached.
+fn closure_evidence_with_targets(
+    seed_nodes: &[bonsai_idg::WsNodeId],
+    idg: &bonsai_idg::IdgQueryService,
+    max_precision: Option<Precision>,
+    target_nodes: Option<&[bonsai_idg::WsNodeId]>,
+    target_funcs: Option<&AHashSet<FuncId>>,
+) -> bonsai_idg::IdgClosureEvidence {
+    let mut evidence = idg.forward_closure_evidence_with_max_precision(seed_nodes, max_precision);
+    let target_nodes = target_nodes.filter(|nodes| !nodes.is_empty());
+    let target_funcs = target_funcs.filter(|funcs| !funcs.is_empty());
+    if target_nodes.is_none() && target_funcs.is_none() {
+        return evidence;
+    }
+    let target_node_set: ahash::AHashSet<bonsai_idg::WsNodeId> =
+        target_nodes.into_iter().flatten().copied().collect();
+    let reached = evidence.nodes.iter().any(|node| {
+        target_node_set.contains(node)
+            || target_funcs
+                .is_some_and(|funcs| idg.func_of_node(*node).is_some_and(|func| funcs.contains(&func)))
+    });
+    if !reached {
+        evidence.nodes.clear();
+        evidence.symbolic_cross_calls.clear();
+    }
+    evidence
 }
 
 /// Walk every call-arg site reached by the current closure and
@@ -3958,7 +4007,42 @@ fn tainted_args_for_cross_call_edge(
     call_summary: Option<&CallEventSummary>,
 ) -> Vec<crate::inter::TaintedArg> {
     if edge.arg_idx == u32::MAX {
-        if edge.param_idx != u32::MAX {
+        if matches!(
+            edge.relation,
+            bonsai_idg::CrossCallRelation::Argument | bonsai_idg::CrossCallRelation::Capture
+        ) {
+            if let Some((summary, receiver)) = call_summary
+                .and_then(|summary| summary.receiver.as_deref().map(|receiver| (summary, receiver)))
+                .map(|(summary, receiver)| (summary, receiver.trim()))
+                .filter(|(_, receiver)| !receiver.is_empty())
+            {
+                let (index, param_name) = if summary.args_value_text.is_empty() {
+                    (usize::MAX, SYNTHETIC_RECEIVER_PARAM_NAME.to_string())
+                } else if edge.param_idx != u32::MAX {
+                    (
+                        edge.param_idx as usize,
+                        callee_decl
+                            .and_then(|decl| decl.params.get(edge.param_idx as usize).cloned())
+                            .unwrap_or_default(),
+                    )
+                } else {
+                    // A sentinel with explicit arguments but no formal slot
+                    // is provenance-only. Do not relabel the receiver as the
+                    // tainted actual when the compiler could not prove that.
+                    return Vec::new();
+                };
+                return vec![crate::inter::TaintedArg {
+                    index,
+                    value_text: receiver.to_string(),
+                    param_name,
+                }];
+            }
+        }
+        if matches!(
+            edge.relation,
+            bonsai_idg::CrossCallRelation::Callback | bonsai_idg::CrossCallRelation::Capture
+        ) && edge.param_idx != u32::MAX
+        {
             let param_name = callee_decl
                 .and_then(|decl| decl.params.get(edge.param_idx as usize).cloned())
                 .unwrap_or_default();
@@ -3973,19 +4057,7 @@ fn tainted_args_for_cross_call_edge(
                 param_name,
             }];
         }
-        return call_summary
-            .and_then(|summary| summary.receiver.as_ref())
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|receiver| !receiver.is_empty())
-            .map(|receiver| {
-                vec![crate::inter::TaintedArg {
-                    index: usize::MAX,
-                    value_text: receiver.to_string(),
-                    param_name: SYNTHETIC_RECEIVER_PARAM_NAME.to_string(),
-                }]
-            })
-            .unwrap_or_default();
+        return Vec::new();
     }
     let value_text = call_summary
         .and_then(|summary| summary.args_value_text.get(edge.arg_idx as usize).cloned())

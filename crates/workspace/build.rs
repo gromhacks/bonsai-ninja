@@ -84,7 +84,12 @@ fn emit_fingerprint(value: &str) {
 /// (git missing, non-zero exit, non-UTF-8 output) so the caller can
 /// fall back to a non-git fingerprint without aborting the build.
 fn run_git(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok()?;
+    let mut command = Command::new("git");
+    command.args(args);
+    if let Some(root) = repo_root() {
+        command.current_dir(root);
+    }
+    let out = command.output().ok()?;
     if !out.status.success() {
         return None;
     }

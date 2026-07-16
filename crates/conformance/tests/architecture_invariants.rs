@@ -2265,10 +2265,12 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     );
     assert!(
         call_records_body.contains("apply_configured_transfer_fixpoint")
-            && call_records_body.contains("forward_target_func_cut_with_max_precision")
+            && call_records_body.contains("closure_evidence_with_targets")
+            && call_records_body.contains("symbolic_cross_calls")
             && call_records_body.contains("cross_call_edges_in_reachable_nodes_filtered_with_max_precision")
+            && call_records_body.contains("is_renderable_call")
             && call_records_body.contains("lineage_funcs"),
-        "IDG call-record export used by source-analysis must support target/lineage cuts and configured transfer summaries"
+        "IDG call-record export used by source-analysis must preserve symbolic provenance, support target/lineage cuts and configured transfers, and never render projected heap state as a call"
     );
 
     let trace_call_body = function_body(&workspace_trace, "emit_call");
@@ -2371,9 +2373,10 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
 
     let dump_taint_body = function_body(&browse_taint, "dump_taint");
     assert!(
-        dump_taint_body.contains("forward_closure_with_max_precision")
+        dump_taint_body.contains("forward_closure_evidence_with_max_precision")
+            && dump_taint_body.contains("symbolic_cross_calls")
             && dump_taint_body.contains("Some(SEMANTIC_FLOW_MAX_PRECISION)"),
-        "dump-taint must compute its seed closure inside the semantic precision scope"
+        "dump-taint must compute its seed closure and symbolic provenance inside the semantic precision scope"
     );
     assert!(
         dump_taint_body.contains("cross_call_edges_in_reachable_nodes_with_max_precision")

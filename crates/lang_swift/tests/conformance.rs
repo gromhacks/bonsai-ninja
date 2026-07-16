@@ -481,7 +481,7 @@ class Repository {
                 && decl
                     .flow_events
                     .iter()
-                    .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == "data.cmd"))
+                    .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == "self.data.cmd"))
         })
         .expect("computed cmd getter");
     assert!(

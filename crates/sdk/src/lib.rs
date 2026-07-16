@@ -37,7 +37,7 @@ use std::{
 const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v8.json";
 const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v8.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
-const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v8";
+const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v9";
 const CACHE_MANIFEST_FILE: &str = "manifest.json";
 const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const RETRIEVAL_NO_CANDIDATES_FILTER: &str = "/__bonsai_no_retrieval_candidates__/__none__";
@@ -94,6 +94,7 @@ pub use bonsai_workspace::value_flow::{
     ValueFlowCache, ValueFlowEdge, ValueFlowGraph, ValueFlowNode, ValueFlowNodeKind,
 };
 pub use bonsai_workspace::{
+    analyzer_build_fingerprint,
     flow_query::{
         EntryTaintGraph, SyntaxFlowBackend, SyntaxFlowCacheStatus, SyntaxFlowGraph, SyntaxFlowPlan,
         SyntaxFlowQuery, TaintedCall, TaintedCallEdge, TaintedCallKind,
@@ -2519,7 +2520,7 @@ fn build_export_cache_metadata(
 }
 
 fn export_cache_build_fingerprint() -> &'static str {
-    option_env!("BONSAI_BUILD_FINGERPRINT").unwrap_or(env!("CARGO_PKG_VERSION"))
+    analyzer_build_fingerprint()
 }
 
 fn current_exe_is_newer_than_cache(cache_metadata: &fs::Metadata) -> bool {

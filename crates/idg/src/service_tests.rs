@@ -68,6 +68,56 @@ fn call_context_tabulation_is_finite_and_replays_recursive_returns() {
     assert_eq!(replayed, vec![returned]);
 }
 
+#[test]
+fn symbolic_call_provenance_uses_ast_argument_and_formal_slots() {
+    let call_span = span(0, 20, 40);
+    let mut caller_decl = empty_decl(1, 0, "caller");
+    caller_decl.params = vec!["box".to_string()];
+    caller_decl.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "forward".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
+            span: span(0, 28, 31),
+            name: None,
+            value_text: "box".to_string(),
+            place: Some("box".to_string()),
+            source_names: vec!["box".to_string()],
+        }],
+    }];
+    let mut callee_decl = empty_decl(2, 1, "forward");
+    callee_decl.params = vec!["payload".to_string()];
+    let global = build_index(vec![caller_decl, callee_decl]);
+    let caller = func_id(&global, "caller");
+    let callee = func_id(&global, "forward");
+
+    let mut graph = SymbolicFieldGraph::new();
+    let source = graph.intern_base(crate::workspace::SegmentId(0), caller, "box");
+    let target = graph.intern_base(crate::workspace::SegmentId(1), callee, "payload");
+    let transform = SymbolicFieldTransform {
+        source,
+        target,
+        exact_field: NO_SYMBOLIC_STRING,
+        call_span,
+        write_span: call_span,
+        precision: Precision::Exact,
+        call_kind: EdgeKind::Direct,
+        kind: SymbolicFieldTransformKind::Argument,
+        allow_out_of_order_source: false,
+    };
+    let (arg_idx, param_idx) = symbolic_cross_call_slots(&global, &graph, &transform, &mut AHashMap::new());
+
+    assert_eq!(arg_idx, 0);
+    assert_eq!(param_idx, 0);
+    assert_eq!(
+        symbolic_cross_call_relation(transform.kind),
+        Some(CrossCallRelation::Argument)
+    );
+}
+
 fn payload_map_flow() -> bonsai_lang_api::ExpressionFlow {
     bonsai_lang_api::ExpressionFlow {
         aggregate_fields: vec![
@@ -277,6 +327,8 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
 
     let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
     let params = service.param_nodes_of(caller);
+    let evidence =
+        service.forward_closure_evidence_with_max_precision(&[params[0]], Some(Precision::Narrowed));
     let reached: AHashSet<WsNodeId> = service.forward_closure(&[params[0]]).into_iter().collect();
     let unrelated_reached: AHashSet<WsNodeId> = service.forward_closure(&[params[1]]).into_iter().collect();
     let callee_return = service.return_node_of(callee).expect("callee return");
@@ -287,6 +339,18 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
     assert!(
         !unrelated_reached.contains(&callee_return),
         "symbolic access paths must not promote the unrelated sibling field"
+    );
+    assert_eq!(
+        evidence
+            .symbolic_cross_calls
+            .iter()
+            .map(|edge| (edge.caller, edge.callee, edge.relation))
+            .collect::<Vec<_>>(),
+        vec![
+            (caller, middle, CrossCallRelation::Argument),
+            (middle, callee, CrossCallRelation::Argument),
+        ],
+        "closure evidence must preserve every fired AST access-path boundary in dataflow order"
     );
 }
 
@@ -1179,6 +1243,40 @@ fn cross_call_edges_in_closure_reports_callarg_to_param() {
 }
 
 #[test]
+fn argumentless_receiver_shape_canonicalizes_legacy_argument_zero() {
+    let call_span = span(0, 20, 30);
+    let receiver_call = FlowEvent::Call {
+        span: call_span,
+        name: "repo.persist".to_string(),
+        receiver: Some("repo".to_string()),
+        receiver_types: vec!["Repository".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: Vec::new(),
+    };
+    assert!(call_event_is_argumentless_receiver(&[receiver_call], call_span));
+
+    let explicit_arg_call = FlowEvent::Call {
+        span: call_span,
+        name: "repo.persist".to_string(),
+        receiver: Some("repo".to_string()),
+        receiver_types: vec!["Repository".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
+            span: span(0, 25, 28),
+            name: None,
+            value_text: "data".to_string(),
+            place: Some("data".to_string()),
+            source_names: vec!["data".to_string()],
+        }],
+    };
+    assert!(!call_event_is_argumentless_receiver(
+        &[explicit_arg_call],
+        call_span
+    ));
+}
+
+#[test]
 fn cross_call_edges_skip_unreachable_calls() {
     // Closure starting from a node unrelated to any call site
     // returns an empty list — proves the closure filter is wired.
@@ -1407,10 +1505,11 @@ fn field_argument_forwarding_preserves_sibling_fields_through_passthrough_calls(
     let cross_calls = svc.cross_call_edges_in_closure(&cmd_seed);
     assert!(
         cross_calls.iter().any(|edge| {
-            edge.relation == crate::service::CrossCallRelation::FieldState
-                && !edge.relation.is_renderable_call()
+            edge.call_span == span(1, 60, 70)
+                && edge.relation == crate::service::CrossCallRelation::Argument
+                && edge.relation.is_renderable_call()
         }),
-        "projected field flow must retain non-call provenance: {cross_calls:?}"
+        "a projected value crossing a resolved AST call must retain renderable argument provenance: {cross_calls:?}"
     );
 }
 
