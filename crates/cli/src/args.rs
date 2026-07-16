@@ -2295,7 +2295,7 @@ pub(crate) enum Cmd {
         display_order = 12,
         long_about = themed_subcommand_long_about("Dump a semantic analyzed workspace as a single JSON document: \
                       every file's decls / refs / imports / strings / classes, \
-                      the per-function flow-event tree, the resolved semantic \
+                      the file-local flat flow-event IR, the resolved semantic \
                       call-graph edge list, workspace-wide flow chains with \
                       explicit completeness metadata, and a `taint_graph` \
                       section that materializes the analyzer's \

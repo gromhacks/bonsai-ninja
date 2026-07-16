@@ -9,11 +9,11 @@ use crate::ClassOut;
 use bonsai_common::{FileId, FuncId, Precision, Span, SpanMap, SymbolId};
 use bonsai_idg::CrossCallEdge;
 use bonsai_inspect::{chain_to_names, func_display_name, ChainCache};
-use bonsai_lang_api::{DeclKind, FlowEvent};
+use bonsai_lang_api::{AssignValueKind, CallArg, CallKind, DeclKind, ExpressionFlow, FlowEvent, LoopKind};
 use bonsai_workspace::{decl_decorator_names, flow_ids::FlowIdLabelOptions, Workspace};
-use serde::ser::SerializeMap;
+use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -35,59 +35,6 @@ pub struct NativeExportConfig {
     pub compiled_propagations: bool,
 }
 
-#[derive(Serialize)]
-struct ExportOut<'a> {
-    engine_version: &'a str,
-    workspace_root: String,
-    generated_at_unix_ms: u128,
-    /// Declares the exact analysis scope represented by this export.
-    /// User-visible analysis facts are semantic only: exact or narrowed
-    /// resolver evidence, never broad unresolved fan-out.
-    analysis_scope: ExportAnalysisScope,
-    /// Whole-document completeness. `false` means parser or semantic call
-    /// resolution coverage was incomplete, or one or more exported evidence
-    /// sections is intentionally omitted or capped. The exact missing scope
-    /// is listed in `analysis_incomplete_reasons` and in the relevant
-    /// section-level metadata.
-    analysis_complete: bool,
-    analysis_incomplete_reasons: Vec<String>,
-    summary: ExportSummary,
-    files: Vec<ExportFile>,
-    classes: Vec<ClassOut>,
-    /// Resolved semantic workspace call edges. Unresolved external
-    /// lexical call sites are counted in `summary.call_site_count`
-    /// and remain visible in per-file refs/flow events, but they are
-    /// not exported as analysis callgraph facts.
-    callgraph: Vec<CallEdgeOut>,
-    /// Workspace-wide flow chains: for every decl that is reachable from
-    /// some entry point, the list of chains that lead to it. Each chain
-    /// reads top-down `[entry, …, target]` — the same data `inspect`
-    /// renders inline. Enables downstream tooling / dashboards to reason
-    /// about reachable sinks without re-running the tracer.
-    flow_chains: Vec<ExportFlowChain>,
-    /// Whether `flow_chains` itself materialized every upstream chain.
-    /// `false` means rows were capped or complete mode represented the exact
-    /// chain language in `compressed_callgraph` form instead.
-    flow_chains_complete: bool,
-    /// `enumerated_paths` means `flow_chains` contains concrete
-    /// entry-to-target paths. `compressed_callgraph` means the exact
-    /// chain language is represented by the semantic `callgraph` /
-    /// `flow_graph` sections rather than materializing every path.
-    flow_chains_mode: &'static str,
-    flow_chains_truncated_targets: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    flow_chains_incomplete_reason: Option<String>,
-    /// Workspace flow graph summary: one entry per callable decl with
-    /// caller / callee counts and an `entry_point` flag. Analogous to
-    /// `dump-callgraph` but structured for programmatic consumption.
-    flow_graph: Vec<ExportFlowNode>,
-    /// Taint graph — the engine's taint-analysis state materialised
-    /// as a document for the requested export scope. Section-level
-    /// completeness fields state whether optional or capped evidence is
-    /// exhaustive.
-    taint_graph: ExportTaintGraph,
-}
-
 #[derive(Copy, Clone, Debug, Serialize)]
 struct ExportAnalysisScope {
     semantic_max_precision: &'static str,
@@ -99,104 +46,6 @@ struct ExportAnalysisScope {
 struct ExportCompleteness {
     complete: bool,
     incomplete_reasons: Vec<String>,
-}
-
-/// Taint/dataflow document for the workspace. Interprocedural answers and
-/// assignment projections come from the canonical IDG. Stable compatibility
-/// sections backed by another compiler-local representation identify that
-/// backend explicitly; optional and rendered evidence sections carry
-/// completeness metadata.
-#[derive(Serialize)]
-struct ExportTaintGraph {
-    /// Every callable decl's FuncId → display name + file/line.
-    /// The single authoritative mapping other sections (edges,
-    /// propagations, chains) reference by `func_id`. Raw `u32`
-    /// FuncId preserved so graph consumers can rebuild the adjacency
-    /// structure without re-resolving names.
-    functions: Vec<ExportTaintFunction>,
-    /// Resolved workspace call graph. Every edge is a concrete
-    /// `FuncId → FuncId` link with the resolver's precision /
-    /// kind tag. Consumers rebuild reachability / chain
-    /// enumeration from this slice.
-    call_edges: Vec<ExportCallEdge>,
-    /// Per-function return-value taint summaries (G1): which
-    /// parameter indices transit to the return, so downstream
-    /// `y = f(tainted)` propagation is a table lookup.
-    function_summaries: Vec<ExportFunctionSummary>,
-    /// Per-function kinded taint reachability facts — every token
-    /// each function contributes to a chain's visible-name set,
-    /// split by `FactKind` (decl, call, read, write, arg,
-    /// string_lit, import, class). This is the raw reachability
-    /// pass output `inspect --from` / `--to` filters consult.
-    reachable_facts: Vec<ExportReachableFacts>,
-    /// Per-function assign-chain expansion: every identifier that
-    /// becomes tainted when each individual parameter is seeded.
-    /// Projected from a per-parameter, function-local IDG closure.
-    assign_chains: Vec<ExportAssignChain>,
-    /// Per-function local CFG presentation: per-block in/out taint
-    /// state when each parameter is seeded. This compatibility section
-    /// is explicitly labelled `cfg_local`; it is not a second
-    /// interprocedural engine or a claim that IDG nodes carry block ids.
-    intra_taint: Vec<ExportIntraTaint>,
-    /// Per-file alias resolution: `local_name → { module, member? }`
-    /// derived from the adapter's `ImportIndex`. Matches the
-    /// resolver's alias map — so a consumer reading `Call.name`
-    /// through this table resolves callees identically to the
-    /// resolved call graph.
-    alias_maps: Vec<ExportAliasMap>,
-    /// Per-class field-taint (G3 cross-method): adapter-declared
-    /// receiver-field writes from method params collected across a
-    /// class's methods. A sibling method's read of the same field
-    /// inherits this taint.
-    class_fields: Vec<ExportClassFields>,
-    /// Inferred entry-point sources — every seed the security
-    /// matcher feeds into the interprocedural pass. G5 framework
-    /// decorators, unreferenced public functions, and G3 class-
-    /// field inheritance. The same set `security taint-analysis`
-    /// augments its rule-derived sources with, so a consumer replaying
-    /// the pipeline produces the same findings.
-    entry_points: Vec<ExportEntryPoint>,
-    /// Per-entry interprocedural propagation: every
-    /// caller→callee taint edge the `interprocedural_taint` pass
-    /// records for each inferred entry. Raw output of the cross-
-    /// function pass — `security taint-analysis` is this plus
-    /// rule-pattern filtering, `inspect` is this plus `--from`/`--to` text
-    /// filtering.
-    propagations: Vec<ExportTaintPropagations>,
-    /// Whether `propagations` is exhaustive. When false, the export
-    /// either omitted concrete rows or represents the exact relation in
-    /// compiler form, as declared by `propagations_mode`.
-    propagations_complete: bool,
-    /// `materialized_entries` contains every derived per-entry row;
-    /// `compiled_idg` keeps the exact relation in the function, call-edge,
-    /// summary, assignment, field, and entry-point compiler tables without
-    /// expanding their transitive product; `omitted` is the bounded default.
-    propagations_mode: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    propagations_omitted_reason: Option<String>,
-    /// Per-target resolved chains (FuncId list per chain). Same
-    /// structure rendered by `inspect --query` — surfaced here so
-    /// tooling doesn't have to re-run chain enumeration.
-    chains: Vec<ExportChain>,
-    /// Whether `chains` itself materialized every path. `false` means rows
-    /// were capped or exact complete mode used the compressed call graph.
-    chains_complete: bool,
-    chains_mode: &'static str,
-    chains_truncated_targets: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chains_incomplete_reason: Option<String>,
-    /// Per-function flow-id labels (`F:<16-hex>` / `G:<16-hex>`).
-    /// The stable identifiers `inspect` prints and `security`
-    /// joins on. Reusing these verbatim in tooling keeps cross-
-    /// invocation references stable.
-    flow_id_labels: Vec<ExportFlowIdLabels>,
-    /// Whether every concrete flow-id label was materialized. `false` means
-    /// rows were capped or exact complete mode used the compressed relation.
-    flow_id_labels_complete: bool,
-    flow_id_labels_mode: &'static str,
-    flow_id_labels_truncated_functions: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    flow_id_labels_incomplete_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -355,19 +204,6 @@ struct ExportEntryPoint {
 }
 
 #[derive(Serialize)]
-struct ExportTaintPropagations {
-    entry: String,
-    entry_file: String,
-    entry_line: u32,
-    /// Worst precision observed across any traversed resolver edge
-    /// during the interprocedural pass from this entry.
-    precision: String,
-    pairs_analyzed: u32,
-    saturated: bool,
-    records: Vec<ExportTaintRecord>,
-}
-
-#[derive(Serialize)]
 struct ExportTaintPropagationsRef<'a> {
     entry: &'a str,
     entry_file: &'a str,
@@ -438,30 +274,376 @@ struct ExportSummary {
 }
 
 #[derive(Serialize)]
-struct ExportFile {
+struct ExportFile<'a> {
     path: String,
     language: String,
-    decls: Vec<ExportDecl>,
+    decls: Vec<ExportDecl<'a>>,
+    /// File-local, flat flow-event table. Declarations reference their root
+    /// events by id; every nested event references its parent and region.
+    /// This is compiler IR rather than a recursively nested presentation, so
+    /// standard JSON consumers can process arbitrary control-flow depth.
+    flow_events: Vec<ExportFlowEvent<'a>>,
     imports: Vec<ExportImport>,
     refs: Vec<ExportRef>,
     strings: Vec<ExportString>,
 }
 
 #[derive(Serialize)]
-struct ExportDecl {
+struct ExportDecl<'a> {
     symbol_id: u32,
-    name: String,
-    qualified_name: Option<String>,
+    name: &'a str,
+    qualified_name: Option<&'a str>,
     kind: String,
     visibility: String,
     line: u32,
     column: u32,
     end_line: u32,
-    params: Vec<String>,
-    /// Nested control-flow tree (calls, branches, loops, assigns, returns,
-    /// throws). Consumers can walk this directly to reconstruct traces.
-    flow_events: Vec<bonsai_lang_api::FlowEvent>,
+    params: &'a [String],
+    /// Root ids in this file's `flow_events` table, in source order.
+    flow_event_ids: Vec<u64>,
     parent_symbol_id: Option<u32>,
+}
+
+#[derive(Copy, Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ExportFlowRegion {
+    Root,
+    Then,
+    Else,
+    Body,
+    Catch,
+    Finally,
+}
+
+/// One normalized AST-derived event in a file-local compiler table.
+#[derive(Serialize)]
+struct ExportFlowEvent<'a> {
+    event_id: u64,
+    owner_symbol_id: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_event_id: Option<u64>,
+    region: ExportFlowRegion,
+    ordinal: usize,
+    #[serde(flatten)]
+    payload: ExportFlowEventPayload<'a>,
+}
+
+/// Recursive child vectors are deliberately absent. All semantic payload
+/// fields are borrowed directly from the adapter-produced flow event; child
+/// relationships live in `ExportFlowEvent::{parent_event_id,region,ordinal}`.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ExportFlowEventPayload<'a> {
+    Call {
+        span: Span,
+        name: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        receiver: Option<&'a str>,
+        #[serde(skip_serializing_if = "<[String]>::is_empty")]
+        receiver_types: &'a [String],
+        call_kind: CallKind,
+        #[serde(skip_serializing_if = "<[CallArg]>::is_empty")]
+        args: &'a [CallArg],
+    },
+    Branch {
+        span: Span,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        condition: Option<&'a str>,
+    },
+    Loop {
+        span: Span,
+        loop_kind: LoopKind,
+    },
+    Assign {
+        span: Span,
+        target: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_name: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_call: Option<&'a str>,
+        #[serde(skip_serializing_if = "<[String]>::is_empty")]
+        source_call_args: &'a [String],
+        #[serde(skip_serializing_if = "<[String]>::is_empty")]
+        source_names: &'a [String],
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        declares_new_binding: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_kind: Option<AssignValueKind>,
+    },
+    AggregateAssign {
+        span: Span,
+        target: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        type_name: Option<&'a str>,
+        #[serde(skip_serializing_if = "ExpressionFlow::is_empty")]
+        value_flow: &'a ExpressionFlow,
+    },
+    Return {
+        span: Span,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_text: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_name: Option<&'a str>,
+        #[serde(skip_serializing_if = "ExpressionFlow::is_empty")]
+        value_flow: &'a ExpressionFlow,
+    },
+    Throw {
+        span: Span,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_name: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thrown_type: Option<&'a str>,
+    },
+    Try {
+        span: Span,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        catch_param: Option<&'a str>,
+        #[serde(skip_serializing_if = "<[String]>::is_empty")]
+        catch_types: &'a [String],
+    },
+    Break {
+        span: Span,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<&'a str>,
+    },
+    Continue {
+        span: Span,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<&'a str>,
+    },
+    Yield {
+        span: Span,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_text: Option<&'a str>,
+        #[serde(skip_serializing_if = "ExpressionFlow::is_empty")]
+        value_flow: &'a ExpressionFlow,
+    },
+    Await {
+        span: Span,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_name: Option<&'a str>,
+    },
+    Defer {
+        span: Span,
+    },
+    Using {
+        span: Span,
+    },
+    Lifecycle {
+        span: Span,
+        name: &'a str,
+        transition: &'a str,
+    },
+}
+
+#[derive(Copy, Clone)]
+struct PendingFlowEvent<'a> {
+    event: &'a FlowEvent,
+    parent_event_id: Option<u64>,
+    region: ExportFlowRegion,
+    ordinal: usize,
+}
+
+fn push_flow_region<'a>(
+    stack: &mut Vec<PendingFlowEvent<'a>>,
+    events: &'a [FlowEvent],
+    parent_event_id: u64,
+    region: ExportFlowRegion,
+) {
+    stack.extend(
+        events
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(ordinal, event)| PendingFlowEvent {
+                event,
+                parent_event_id: Some(parent_event_id),
+                region,
+                ordinal,
+            }),
+    );
+}
+
+fn flatten_flow_events<'a>(
+    events: &'a [FlowEvent],
+    owner_symbol_id: u32,
+    out: &mut Vec<ExportFlowEvent<'a>>,
+) -> Vec<u64> {
+    let mut root_ids = Vec::with_capacity(events.len());
+    let mut stack: Vec<PendingFlowEvent<'a>> = events
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(ordinal, event)| PendingFlowEvent {
+            event,
+            parent_event_id: None,
+            region: ExportFlowRegion::Root,
+            ordinal,
+        })
+        .collect();
+
+    while let Some(pending) = stack.pop() {
+        let event_id = out.len() as u64;
+        if pending.parent_event_id.is_none() {
+            root_ids.push(event_id);
+        }
+
+        let payload = match pending.event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                receiver_types,
+                call_kind,
+                args,
+            } => ExportFlowEventPayload::Call {
+                span: *span,
+                name,
+                receiver: receiver.as_deref(),
+                receiver_types,
+                call_kind: *call_kind,
+                args,
+            },
+            FlowEvent::Branch {
+                span,
+                condition,
+                then_events,
+                else_events,
+            } => {
+                push_flow_region(&mut stack, else_events, event_id, ExportFlowRegion::Else);
+                push_flow_region(&mut stack, then_events, event_id, ExportFlowRegion::Then);
+                ExportFlowEventPayload::Branch {
+                    span: *span,
+                    condition: condition.as_deref(),
+                }
+            }
+            FlowEvent::Loop {
+                span,
+                loop_kind,
+                body,
+            } => {
+                push_flow_region(&mut stack, body, event_id, ExportFlowRegion::Body);
+                ExportFlowEventPayload::Loop {
+                    span: *span,
+                    loop_kind: *loop_kind,
+                }
+            }
+            FlowEvent::Assign {
+                span,
+                target,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                declares_new_binding,
+                value_kind,
+            } => ExportFlowEventPayload::Assign {
+                span: *span,
+                target,
+                source_name: source_name.as_deref(),
+                source_call: source_call.as_deref(),
+                source_call_args,
+                source_names,
+                declares_new_binding: *declares_new_binding,
+                value_kind: *value_kind,
+            },
+            FlowEvent::AggregateAssign {
+                span,
+                target,
+                type_name,
+                value_flow,
+            } => ExportFlowEventPayload::AggregateAssign {
+                span: *span,
+                target,
+                type_name: type_name.as_deref(),
+                value_flow,
+            },
+            FlowEvent::Return {
+                span,
+                value_text,
+                value_name,
+                value_flow,
+            } => ExportFlowEventPayload::Return {
+                span: *span,
+                value_text: value_text.as_deref(),
+                value_name: value_name.as_deref(),
+                value_flow,
+            },
+            FlowEvent::Throw {
+                span,
+                value_name,
+                thrown_type,
+            } => ExportFlowEventPayload::Throw {
+                span: *span,
+                value_name: value_name.as_deref(),
+                thrown_type: thrown_type.as_deref(),
+            },
+            FlowEvent::Try {
+                span,
+                body,
+                catch_events,
+                finally_events,
+                catch_param,
+                catch_types,
+            } => {
+                push_flow_region(&mut stack, finally_events, event_id, ExportFlowRegion::Finally);
+                push_flow_region(&mut stack, catch_events, event_id, ExportFlowRegion::Catch);
+                push_flow_region(&mut stack, body, event_id, ExportFlowRegion::Body);
+                ExportFlowEventPayload::Try {
+                    span: *span,
+                    catch_param: catch_param.as_deref(),
+                    catch_types,
+                }
+            }
+            FlowEvent::Break { span, label } => ExportFlowEventPayload::Break {
+                span: *span,
+                label: label.as_deref(),
+            },
+            FlowEvent::Continue { span, label } => ExportFlowEventPayload::Continue {
+                span: *span,
+                label: label.as_deref(),
+            },
+            FlowEvent::Yield {
+                span,
+                value_text,
+                value_flow,
+            } => ExportFlowEventPayload::Yield {
+                span: *span,
+                value_text: value_text.as_deref(),
+                value_flow,
+            },
+            FlowEvent::Await { span, value_name } => ExportFlowEventPayload::Await {
+                span: *span,
+                value_name: value_name.as_deref(),
+            },
+            FlowEvent::Defer { span, body } => {
+                push_flow_region(&mut stack, body, event_id, ExportFlowRegion::Body);
+                ExportFlowEventPayload::Defer { span: *span }
+            }
+            FlowEvent::Using { span, body } => {
+                push_flow_region(&mut stack, body, event_id, ExportFlowRegion::Body);
+                ExportFlowEventPayload::Using { span: *span }
+            }
+            FlowEvent::Lifecycle {
+                span,
+                name,
+                transition,
+            } => ExportFlowEventPayload::Lifecycle {
+                span: *span,
+                name,
+                transition,
+            },
+        };
+        out.push(ExportFlowEvent {
+            event_id,
+            owner_symbol_id,
+            parent_event_id: pending.parent_event_id,
+            region: pending.region,
+            ordinal: pending.ordinal,
+            payload,
+        });
+    }
+    root_ids
 }
 
 #[derive(Serialize)]
@@ -589,7 +771,9 @@ pub fn native_export_json_with_config(
     root: &Path,
     config: NativeExportConfig,
 ) -> serde_json::Result<serde_json::Value> {
-    serde_json::to_value(native_export(ws, root, config)?)
+    let mut bytes = Vec::new();
+    write_native_export_streaming(ws, root, config, &mut bytes)?;
+    serde_json::from_slice(&bytes)
 }
 
 /// Render the native `export` JSON document from an indexed workspace.
@@ -616,7 +800,14 @@ pub fn render_native_export_json_with_config(
     root: &Path,
     config: NativeExportConfig,
 ) -> serde_json::Result<String> {
-    serde_json::to_string(&native_export(ws, root, config)?)
+    let mut bytes = Vec::new();
+    write_native_export_streaming(ws, root, config, &mut bytes)?;
+    String::from_utf8(bytes).map_err(|error| {
+        serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("JSON serializer emitted invalid UTF-8: {error}"),
+        ))
+    })
 }
 
 /// Stream the native `export` JSON document to a writer. This serializes
@@ -629,72 +820,6 @@ pub fn write_native_export_json_with_config<W: Write + ?Sized>(
     writer: &mut W,
 ) -> serde_json::Result<()> {
     write_native_export_streaming(ws, root, config, writer)
-}
-
-fn native_export(
-    ws: &Workspace,
-    root: &Path,
-    config: NativeExportConfig,
-) -> serde_json::Result<ExportOut<'static>> {
-    let total_started = Instant::now();
-    let global = ws.db().global_index();
-    let spans = ExportSpanCache::new(ws);
-    let structural = build_export_structural_sections(ws, global.as_ref(), &spans, &total_started)?;
-
-    let chain_cache = ChainCache::new(ws);
-    let phase_started = Instant::now();
-    let chain_limits = ExportChainLimits::bounded_materialization();
-    let flow_sections = build_export_flow_sections(
-        ws,
-        global.as_ref(),
-        &chain_cache,
-        chain_limits,
-        config.complete_chains,
-    );
-    export_phase_log(format_args!(
-        "flow sections: {:.3}s chains={} graph_nodes={} truncated_targets={} mode={}",
-        phase_started.elapsed().as_secs_f64(),
-        flow_sections.flow_chains.len(),
-        flow_sections.flow_graph.len(),
-        flow_sections.flow_chains_truncated_targets,
-        flow_sections.flow_chains_mode
-    ));
-    let phase_started = Instant::now();
-    let taint_graph = build_taint_graph(ws, &spans, config, chain_limits, &chain_cache);
-    let workspace_incomplete_reasons = export_workspace_incomplete_reasons(ws);
-    let completeness = export_analysis_completeness(
-        config,
-        flow_sections.flow_chains_truncated_targets,
-        taint_graph.chains_truncated_targets,
-        taint_graph.flow_id_labels_truncated_functions,
-        chain_limits,
-        &workspace_incomplete_reasons,
-    );
-    export_phase_log(format_args!(
-        "taint graph: {:.3}s total={:.3}s",
-        phase_started.elapsed().as_secs_f64(),
-        total_started.elapsed().as_secs_f64()
-    ));
-
-    Ok(ExportOut {
-        engine_version: env!("CARGO_PKG_VERSION"),
-        workspace_root: root.display().to_string(),
-        generated_at_unix_ms: generated_at_unix_ms(),
-        analysis_scope: export_analysis_scope(config),
-        analysis_complete: completeness.complete,
-        analysis_incomplete_reasons: completeness.incomplete_reasons,
-        summary: structural.summary,
-        files: structural.files,
-        classes: structural.classes,
-        callgraph: structural.callgraph,
-        flow_chains: flow_sections.flow_chains,
-        flow_chains_complete: flow_sections.flow_chains_complete,
-        flow_chains_mode: flow_sections.flow_chains_mode,
-        flow_chains_truncated_targets: flow_sections.flow_chains_truncated_targets,
-        flow_chains_incomplete_reason: flow_sections.flow_chains_incomplete_reason,
-        flow_graph: flow_sections.flow_graph,
-        taint_graph,
-    })
 }
 
 fn write_native_export_streaming<W: Write + ?Sized>(
@@ -710,14 +835,23 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let mut serializer = serde_json::Serializer::new(writer);
     let mut map = serializer.serialize_map(None)?;
 
+    map.serialize_entry("schema", "bonsai-native-export")?;
+    map.serialize_entry("schema_version", &2_u32)?;
     map.serialize_entry("engine_version", env!("CARGO_PKG_VERSION"))?;
     map.serialize_entry("workspace_root", &root.display().to_string())?;
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
     map.serialize_entry("analysis_scope", &export_analysis_scope(config))?;
 
-    let structural = build_export_structural_sections(ws, global.as_ref(), &spans, &total_started)?;
+    let structural = build_export_structural_metadata(ws, global.as_ref(), &spans, &total_started)?;
     map.serialize_entry("summary", &structural.summary)?;
-    map.serialize_entry("files", &structural.files)?;
+    map.serialize_entry(
+        "files",
+        &ExportFilesStreaming {
+            ws,
+            global: global.as_ref(),
+            spans: &spans,
+        },
+    )?;
     map.serialize_entry("classes", &structural.classes)?;
     map.serialize_entry("callgraph", &structural.callgraph)?;
     drop(structural);
@@ -787,24 +921,22 @@ fn write_native_export_streaming<W: Write + ?Sized>(
         phase_started.elapsed().as_secs_f64(),
         total_started.elapsed().as_secs_f64()
     ));
-    map.end()
+    SerializeMap::end(map)
 }
 
-struct ExportStructuralSections {
+struct ExportStructuralMetadata {
     summary: ExportSummary,
-    files: Vec<ExportFile>,
     classes: Vec<ClassOut>,
     callgraph: Vec<CallEdgeOut>,
 }
 
-fn build_export_structural_sections(
+fn build_export_structural_metadata(
     ws: &Workspace,
     global: &bonsai_index::GlobalIndex,
     spans: &ExportSpanCache,
     total_started: &Instant,
-) -> serde_json::Result<ExportStructuralSections> {
-    let mut files: Vec<ExportFile> = Vec::new();
-    let mut classes: Vec<ClassOut> = Vec::new();
+) -> serde_json::Result<ExportStructuralMetadata> {
+    let mut classes = Vec::new();
     let mut languages_set: ahash::AHashSet<String> = ahash::AHashSet::new();
     let mut function_count = 0usize;
     let mut method_count = 0usize;
@@ -818,39 +950,9 @@ fn build_export_structural_sections(
     // and break Stable-IDs-From-Content for `export` JSON.
     let mut by_cat: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
-    // Iterate VFS files in path-sorted order so the JSON `files`
-    // array is deterministic across runs (matches the sibling
-    // sections `decls`/`callgraph` which iterate
-    // `global.all_files()` — itself path-sorted because
-    // `ingest_dir` allocates FileIds in path order).
-    //
-    // Materialise `(FileId, path_string)` once instead of
-    // re-resolving `vfs.path()` inside the cmp closure — the
-    // closure runs O(N log N) times and would otherwise hit the
-    // VFS read lock 2N log N times on every export.
-    let mut all_files: Vec<(FileId, String)> = ws
-        .vfs()
-        .all_files()
-        .into_iter()
-        .map(|f| {
-            let path = ws
-                .vfs()
-                .path(f)
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            (f, path)
-        })
-        .collect();
-    all_files.sort_by(|a, b| a.1.cmp(&b.1));
-    for (file, materialised_path) in all_files {
-        // Reuse the path string we already resolved for the sort
-        // key. Empty paths fall back to `<unknown>` so JSON rows
-        // never carry an empty string for the file column.
-        let path = if materialised_path.is_empty() {
-            "<unknown>".to_string()
-        } else {
-            materialised_path
-        };
+    let all_files = export_files_in_path_order(ws);
+    let file_count = all_files.len();
+    for (file, path) in all_files {
         let language = ws
             .db()
             .adapter_for(file)
@@ -861,18 +963,9 @@ fn build_export_structural_sections(
         }
 
         let Some(idx) = global.file_index(file) else {
-            files.push(ExportFile {
-                path,
-                language,
-                decls: Vec::new(),
-                imports: Vec::new(),
-                refs: Vec::new(),
-                strings: Vec::new(),
-            });
             continue;
         };
 
-        let mut decls_out: Vec<ExportDecl> = Vec::with_capacity(idx.defs.len());
         for d in &idx.defs {
             decl_count += 1;
             match d.kind {
@@ -880,22 +973,8 @@ fn build_export_structural_sections(
                 DeclKind::Method | DeclKind::Constructor => method_count += 1,
                 _ => {}
             }
-            let (_, line, col) = spans.format(d.name_span);
-            let end_line = spans.end_line(d.body_span.unwrap_or(d.span));
+            let (_, line, _) = spans.format(d.name_span);
             count_call_sites_for_export(&d.flow_events, &mut call_site_count);
-            decls_out.push(ExportDecl {
-                symbol_id: d.symbol.raw(),
-                name: d.name.clone(),
-                qualified_name: d.qualified_name.clone(),
-                kind: format!("{:?}", d.kind).to_lowercase(),
-                visibility: format!("{:?}", d.visibility).to_lowercase(),
-                line,
-                column: col,
-                end_line,
-                params: d.params.clone(),
-                flow_events: d.flow_events.clone(),
-                parent_symbol_id: d.parent.map(|s| s.raw()),
-            });
             if matches!(
                 d.kind,
                 DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
@@ -923,108 +1002,18 @@ fn build_export_structural_sections(
             }
         }
 
-        let imports_vec = ws
-            .db()
-            .import_index(file)
-            .map(|i| i.imports.clone())
-            .filter(|i| !i.is_empty())
-            .unwrap_or_else(|| {
-                ws.db()
-                    .parse(file)
-                    .ok()
-                    .and_then(|parsed| {
-                        ws.vfs().snapshot(file).ok().map(|snap| {
-                            bonsai_lang_api::kit::extract_generic_imports(
-                                &parsed.tree,
-                                file,
-                                snap.text.as_bytes(),
-                            )
-                        })
-                    })
-                    .unwrap_or_default()
-            });
-        let mut local_bindings_by_span: ahash::AHashMap<u64, Vec<String>> = ahash::AHashMap::default();
-        for imp in &imports_vec {
-            if !imp.scope.is_local() {
-                continue;
-            }
-            let Some(name) = imp.alias.as_deref().or(imp.original_name.as_deref()) else {
-                continue;
-            };
-            if name.is_empty() {
-                continue;
-            }
-            let bindings = local_bindings_by_span.entry(imp.span.start).or_default();
-            if !bindings.iter().any(|existing| existing == name) {
-                bindings.push(name.to_string());
-            }
-        }
+        let imports_vec = export_import_specs(ws, file);
         import_count += imports_vec.iter().filter(|imp| !imp.scope.is_local()).count();
-        let imports_out: Vec<ExportImport> = imports_vec
-            .iter()
-            .filter(|imp| !imp.scope.is_local())
-            .map(|imp| {
-                let (_, line, _) = spans.format(imp.span);
-                ExportImport {
-                    module: imp.module.clone(),
-                    alias: imp.alias.clone(),
-                    original_name: imp.original_name.clone(),
-                    is_wildcard: imp.is_wildcard,
-                    scope: (!imp.scope.is_module()).then(|| format!("{:?}", imp.scope).to_lowercase()),
-                    line,
-                    local_bindings: local_bindings_by_span
-                        .get(&imp.span.start)
-                        .cloned()
-                        .unwrap_or_default(),
-                }
-            })
-            .collect();
-
-        let refs_out: Vec<ExportRef> = idx
-            .refs
-            .iter()
-            .map(|r| {
-                let (_, line, col) = spans.format(r.span);
-                ExportRef {
-                    name: r.name.clone(),
-                    kind: format!("{:?}", r.kind).to_lowercase(),
-                    line,
-                    column: col,
-                    resolved_symbol_id: r.resolved.map(|s| s.raw()),
-                }
-            })
-            .collect();
-
-        let strings_out: Vec<ExportString> = idx
-            .strings
-            .iter()
-            .map(|s| {
-                let (_, line, col) = spans.format(s.span);
-                let cat = format!("{:?}", s.category).to_lowercase();
-                *by_cat.entry(cat.clone()).or_insert(0) += 1;
-                string_count += 1;
-                ExportString {
-                    text: s.text.clone(),
-                    category: cat,
-                    line,
-                    column: col,
-                }
-            })
-            .collect();
-
-        files.push(ExportFile {
-            path,
-            language,
-            decls: decls_out,
-            imports: imports_out,
-            refs: refs_out,
-            strings: strings_out,
-        });
+        for string in &idx.strings {
+            let category = format!("{:?}", string.category).to_lowercase();
+            *by_cat.entry(category).or_insert(0) += 1;
+            string_count += 1;
+        }
     }
     export_phase_log(format_args!(
         "files/classes/callgraph: {:.3}s files={} decls={} calls={}",
         total_started.elapsed().as_secs_f64(),
-        files.len(),
+        file_count,
         decl_count,
         call_site_count
     ));
@@ -1034,7 +1023,7 @@ fn build_export_structural_sections(
     let mut languages: Vec<String> = languages_set.into_iter().collect();
     languages.sort();
     let summary = ExportSummary {
-        file_count: files.len(),
+        file_count,
         decl_count,
         class_count: classes.len(),
         function_count,
@@ -1047,12 +1036,194 @@ fn build_export_structural_sections(
         languages,
     };
 
-    Ok(ExportStructuralSections {
+    Ok(ExportStructuralMetadata {
         summary,
-        files,
         classes,
         callgraph,
     })
+}
+
+fn export_files_in_path_order(ws: &Workspace) -> Vec<(FileId, String)> {
+    let mut files: Vec<_> = ws
+        .vfs()
+        .all_files()
+        .into_iter()
+        .map(|file| {
+            let path = ws
+                .vfs()
+                .path(file)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            (file, path)
+        })
+        .collect();
+    files.sort_by(|left, right| left.1.cmp(&right.1));
+    files
+}
+
+fn export_import_specs(ws: &Workspace, file: FileId) -> Vec<bonsai_lang_api::ImportSpec> {
+    ws.db()
+        .import_index(file)
+        .map(|index| index.imports.clone())
+        .filter(|imports| !imports.is_empty())
+        .unwrap_or_else(|| {
+            ws.db()
+                .parse(file)
+                .ok()
+                .and_then(|parsed| {
+                    ws.vfs().snapshot(file).ok().map(|snapshot| {
+                        bonsai_lang_api::kit::extract_generic_imports(
+                            &parsed.tree,
+                            file,
+                            snapshot.text.as_bytes(),
+                        )
+                    })
+                })
+                .unwrap_or_default()
+        })
+}
+
+struct ExportFilesStreaming<'a> {
+    ws: &'a Workspace,
+    global: &'a bonsai_index::GlobalIndex,
+    spans: &'a ExportSpanCache,
+}
+
+impl Serialize for ExportFilesStreaming<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let files = export_files_in_path_order(self.ws);
+        let mut sequence = serializer.serialize_seq(Some(files.len()))?;
+        for (file, path) in files {
+            let export_file = build_export_file(self.ws, self.global, self.spans, file, path);
+            sequence.serialize_element(&export_file)?;
+        }
+        SerializeSeq::end(sequence)
+    }
+}
+
+fn build_export_file<'a>(
+    ws: &Workspace,
+    global: &'a bonsai_index::GlobalIndex,
+    spans: &ExportSpanCache,
+    file: FileId,
+    path: String,
+) -> ExportFile<'a> {
+    let language = ws
+        .db()
+        .adapter_for(file)
+        .map(|adapter| adapter.language_id().as_str().to_string())
+        .unwrap_or_default();
+    let Some(index) = global.file_index(file) else {
+        return ExportFile {
+            path,
+            language,
+            decls: Vec::new(),
+            flow_events: Vec::new(),
+            imports: Vec::new(),
+            refs: Vec::new(),
+            strings: Vec::new(),
+        };
+    };
+
+    let mut flow_events = Vec::new();
+    let decls = index
+        .defs
+        .iter()
+        .map(|decl| {
+            let (_, line, column) = spans.format(decl.name_span);
+            let flow_event_ids = flatten_flow_events(&decl.flow_events, decl.symbol.raw(), &mut flow_events);
+            ExportDecl {
+                symbol_id: decl.symbol.raw(),
+                name: &decl.name,
+                qualified_name: decl.qualified_name.as_deref(),
+                kind: format!("{:?}", decl.kind).to_lowercase(),
+                visibility: format!("{:?}", decl.visibility).to_lowercase(),
+                line,
+                column,
+                end_line: spans.end_line(decl.body_span.unwrap_or(decl.span)),
+                params: &decl.params,
+                flow_event_ids,
+                parent_symbol_id: decl.parent.map(SymbolId::raw),
+            }
+        })
+        .collect();
+
+    let imports_vec = export_import_specs(ws, file);
+    let mut local_bindings_by_span: ahash::AHashMap<u64, Vec<String>> = ahash::AHashMap::default();
+    for import in &imports_vec {
+        if !import.scope.is_local() {
+            continue;
+        }
+        let Some(name) = import.alias.as_deref().or(import.original_name.as_deref()) else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let bindings = local_bindings_by_span.entry(import.span.start).or_default();
+        if !bindings.iter().any(|existing| existing == name) {
+            bindings.push(name.to_string());
+        }
+    }
+    let imports = imports_vec
+        .iter()
+        .filter(|import| !import.scope.is_local())
+        .map(|import| {
+            let (_, line, _) = spans.format(import.span);
+            ExportImport {
+                module: import.module.clone(),
+                alias: import.alias.clone(),
+                original_name: import.original_name.clone(),
+                is_wildcard: import.is_wildcard,
+                scope: (!import.scope.is_module()).then(|| format!("{:?}", import.scope).to_lowercase()),
+                line,
+                local_bindings: local_bindings_by_span
+                    .get(&import.span.start)
+                    .cloned()
+                    .unwrap_or_default(),
+            }
+        })
+        .collect();
+    let refs = index
+        .refs
+        .iter()
+        .map(|reference| {
+            let (_, line, column) = spans.format(reference.span);
+            ExportRef {
+                name: reference.name.clone(),
+                kind: format!("{:?}", reference.kind).to_lowercase(),
+                line,
+                column,
+                resolved_symbol_id: reference.resolved.map(SymbolId::raw),
+            }
+        })
+        .collect();
+    let strings = index
+        .strings
+        .iter()
+        .map(|string| {
+            let (_, line, column) = spans.format(string.span);
+            ExportString {
+                text: string.text.clone(),
+                category: format!("{:?}", string.category).to_lowercase(),
+                line,
+                column,
+            }
+        })
+        .collect();
+
+    ExportFile {
+        path,
+        language,
+        decls,
+        flow_events,
+        imports,
+        refs,
+        strings,
+    }
 }
 
 /// Wall-clock unix-ms timestamp for the export header. Falls back
@@ -1345,60 +1516,6 @@ fn build_export_flow_sections(
     }
 }
 
-fn build_taint_graph(
-    ws: &Workspace,
-    spans: &ExportSpanCache,
-    config: NativeExportConfig,
-    chain_limits: ExportChainLimits,
-    chain_cache: &ChainCache<'_>,
-) -> ExportTaintGraph {
-    let functions = export_taint_functions(ws, spans);
-    let call_edges = export_taint_call_edges(ws);
-    let projection_idg = export_projection_idg_service(ws);
-    let function_summaries = export_function_summaries_from_idg(&projection_idg, &functions);
-    let reachable_facts = export_reachable_facts(ws, &functions);
-    let assign_chains = export_assign_chains_from_idg(&projection_idg, &functions);
-    let intra_taint = export_intra_taint(ws, &functions);
-    let alias_maps = export_alias_maps(ws);
-    let class_fields = export_class_fields(ws, spans);
-    let entry_points = export_entry_points(ws, spans);
-    let propagation_rows =
-        export_taint_propagations_from_idg(ws, spans, &projection_idg, &entry_points, config);
-    let chain_rows = export_taint_chains_and_flow_labels(
-        ws,
-        chain_limits,
-        chain_cache,
-        &functions,
-        config.complete_chains,
-    );
-
-    ExportTaintGraph {
-        functions,
-        call_edges,
-        function_summaries,
-        reachable_facts,
-        assign_chains,
-        intra_taint,
-        alias_maps,
-        class_fields,
-        entry_points,
-        propagations: propagation_rows.propagations,
-        propagations_complete: propagation_rows.complete,
-        propagations_mode: propagation_rows.mode,
-        propagations_omitted_reason: propagation_rows.omitted_reason,
-        chains: chain_rows.chains,
-        chains_complete: chain_rows.chains_complete,
-        chains_mode: chain_rows.chains_mode,
-        chains_truncated_targets: chain_rows.chains_truncated_targets,
-        chains_incomplete_reason: chain_rows.chains_incomplete_reason,
-        flow_id_labels: chain_rows.flow_id_labels,
-        flow_id_labels_complete: chain_rows.flow_id_labels_complete,
-        flow_id_labels_mode: chain_rows.flow_id_labels_mode,
-        flow_id_labels_truncated_functions: chain_rows.flow_id_labels_truncated_functions,
-        flow_id_labels_incomplete_reason: chain_rows.flow_id_labels_incomplete_reason,
-    }
-}
-
 struct ExportTaintGraphStreaming<'a> {
     ws: &'a Workspace,
     spans: &'a ExportSpanCache,
@@ -1486,13 +1603,6 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
 
         map.end()
     }
-}
-
-struct ExportTaintPropagationsSection {
-    propagations: Vec<ExportTaintPropagations>,
-    complete: bool,
-    mode: &'static str,
-    omitted_reason: Option<String>,
 }
 
 struct ExportTaintPropagationsStreaming<'a> {
@@ -2074,38 +2184,6 @@ fn export_entry_points(ws: &Workspace, spans: &ExportSpanCache) -> Vec<ExportEnt
     entry_points
 }
 
-fn export_taint_propagations_from_idg(
-    ws: &Workspace,
-    spans: &ExportSpanCache,
-    idg: &bonsai_idg::IdgQueryService,
-    entry_points: &[ExportEntryPoint],
-    config: NativeExportConfig,
-) -> ExportTaintPropagationsSection {
-    let db = ws.db();
-    let global = db.global_index();
-    let should_materialize_propagations = config.full_propagations;
-    let propagation_omitted_reason = propagation_omitted_reason(config);
-    let phase_started = Instant::now();
-    let mut propagations: Vec<ExportTaintPropagations> = if should_materialize_propagations {
-        export_taint_propagation_rows(spans, global.as_ref(), idg, entry_points)
-    } else {
-        Vec::new()
-    };
-    sort_taint_propagations(&mut propagations);
-    export_phase_log(format_args!(
-        "taint.propagations: {:.3}s count={} complete={}",
-        phase_started.elapsed().as_secs_f64(),
-        propagations.len(),
-        should_materialize_propagations
-    ));
-    ExportTaintPropagationsSection {
-        propagations,
-        complete: should_materialize_propagations,
-        mode: propagation_mode(config),
-        omitted_reason: propagation_omitted_reason,
-    }
-}
-
 fn propagation_mode(config: NativeExportConfig) -> &'static str {
     if config.full_propagations {
         "materialized_entries"
@@ -2120,32 +2198,6 @@ fn propagation_omitted_reason(config: NativeExportConfig) -> Option<String> {
     (propagation_mode(config) == "omitted").then(|| {
         "interprocedural propagation records are omitted by default; rerun export --full-propagations for exhaustive propagation records".to_string()
     })
-}
-
-fn export_taint_propagation_rows(
-    spans: &ExportSpanCache,
-    global: &bonsai_index::GlobalIndex,
-    idg: &bonsai_idg::IdgQueryService,
-    entry_points: &[ExportEntryPoint],
-) -> Vec<ExportTaintPropagations> {
-    let mut render_cache = ExportTaintRecordRenderCache::default();
-    let mut rows: Vec<_> = entry_points
-        .iter()
-        .map(|ep| {
-            export_taint_propagation_row(spans, global, idg, &mut render_cache, ep, FuncId::new(ep.func_id))
-        })
-        .collect();
-    sort_taint_propagations(&mut rows);
-    rows
-}
-
-fn sort_taint_propagations(rows: &mut [ExportTaintPropagations]) {
-    rows.sort_by(|a, b| {
-        a.entry
-            .cmp(&b.entry)
-            .then_with(|| a.entry_line.cmp(&b.entry_line))
-            .then_with(|| a.entry_file.cmp(&b.entry_file))
-    });
 }
 
 #[derive(Clone)]
@@ -2163,40 +2215,6 @@ struct ExportTaintRecordRenderCache {
 }
 
 type CallArgTextBySite = ahash::AHashMap<(Span, u32), String>;
-
-fn export_taint_propagation_row(
-    spans: &ExportSpanCache,
-    global: &bonsai_index::GlobalIndex,
-    idg: &bonsai_idg::IdgQueryService,
-    render_cache: &mut ExportTaintRecordRenderCache,
-    ep: &ExportEntryPoint,
-    entry_func: bonsai_common::FuncId,
-) -> ExportTaintPropagations {
-    let seed_nodes = canonical_legacy_seed_nodes(idg, entry_func, &ep.params, global);
-    let mut cross_calls = idg.cross_call_edges_in_closure_with_max_precision(
-        &seed_nodes,
-        Some(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
-    );
-    sort_cross_call_edges_for_export(&mut cross_calls);
-    let records: Vec<ExportTaintRecord> = cross_calls
-        .iter()
-        .filter_map(|ce| cached_export_taint_record(render_cache, ce, global, spans))
-        .collect();
-    let aggregate_precision =
-        crate::taint::aggregate_flow_precision(cross_calls.iter().map(|ce| ce.precision));
-    let unique_pairs: ahash::AHashSet<(bonsai_common::FuncId, bonsai_common::FuncId)> =
-        cross_calls.iter().map(|ce| (ce.caller, ce.callee)).collect();
-    let pairs_analyzed = std::cmp::max(1, unique_pairs.len());
-    ExportTaintPropagations {
-        entry: ep.function.clone(),
-        entry_file: ep.file.clone(),
-        entry_line: ep.line,
-        precision: crate::taint::precision_display(aggregate_precision),
-        pairs_analyzed: u32::try_from(pairs_analyzed).unwrap_or(u32::MAX),
-        saturated: false,
-        records,
-    }
-}
 
 fn export_taint_propagation_row_ref<'a>(
     spans: &ExportSpanCache,
@@ -2260,17 +2278,6 @@ fn sort_cross_call_edges_for_export(cross_calls: &mut [CrossCallEdge]) {
             ce.param_idx,
         )
     });
-}
-
-fn cached_export_taint_record(
-    cache: &mut ExportTaintRecordRenderCache,
-    edge: &CrossCallEdge,
-    global: &bonsai_index::GlobalIndex,
-    spans: &ExportSpanCache,
-) -> Option<ExportTaintRecord> {
-    ensure_cached_export_taint_record(cache, edge, global, spans)
-        .then(|| cache.records.get(edge).cloned().flatten())
-        .flatten()
 }
 
 fn ensure_cached_export_taint_record(
