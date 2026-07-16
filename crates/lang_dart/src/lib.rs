@@ -95,6 +95,11 @@ impl LanguageAdapter for DartAdapter {
         LanguageCapabilities {
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+            // Dart permits `Widget(...)` without `new`, and Tree-sitter
+            // therefore lowers class construction through the same call
+            // expression shape as a function call. The resolver must refine
+            // that ambiguous syntax from the scoped class declaration.
+            bare_call_constructor_syntax: true,
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()

@@ -2144,10 +2144,13 @@ fn stitch_source_callback_args(
 }
 
 /// Route the data operands of an AST-proven indirect callback invocation to
-/// its first parameter. The callable argument is identified by resolver
-/// evidence, not by a table of library method names. For a method call the
-/// receiver is also a data operand; for a free call every non-callback
-/// source-level argument is a candidate input.
+/// its first parameter. Only indirect callgraph evidence contained by an
+/// explicit source argument proves that the argument is callable. Textual
+/// name lookup is reserved for rulepack-declared callback positions; using it
+/// here would reinterpret an ordinary value such as `text` as any same-named
+/// method in the workspace. For a method call the receiver is also a data
+/// operand; for a free call every non-callback source-level argument is a
+/// candidate input.
 #[allow(clippy::too_many_arguments)]
 fn stitch_indirect_callback_inputs(
     caller: FuncId,
@@ -2161,11 +2164,13 @@ fn stitch_indirect_callback_inputs(
     let mut callback_arg_indices = AHashSet::new();
     let mut callback_candidates = Vec::new();
     let mut seen_candidates = AHashSet::new();
-    for (idx, value) in site.call_arg_values.iter().enumerate() {
-        let mut resolved = resolver.callable_arg(caller, value);
-        if let Some(&arg_span) = site.call_arg_spans.get(idx) {
-            resolved.extend(resolver.callable_args_in_span(caller, arg_span));
-        }
+    for idx in 0..site.explicit_args_count as usize {
+        let resolved = site
+            .call_arg_spans
+            .get(idx)
+            .into_iter()
+            .flat_map(|arg_span| resolver.callable_args_in_span(caller, *arg_span))
+            .collect::<Vec<_>>();
         if resolved.is_empty() {
             continue;
         }

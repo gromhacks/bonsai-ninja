@@ -3085,7 +3085,17 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // edge provenance, so it cannot be decoded as a scalar call boundary.
     // v35 (2026-07-15): a resolved nested-expression edge is indexed only on
     // the Tree-sitter call event that owns its resolved target.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 35;
+    // v36 (2026-07-15): implicit higher-order flow requires an indirect
+    // callgraph edge inside an explicit argument; name equality is not type
+    // evidence that an ordinary value is callable.
+    // v37 (2026-07-15): callback-parameter binding likewise requires an
+    // indirect callgraph edge inside the exact AST argument span.
+    // v38 (2026-07-15): a nested indirect callable-argument edge cannot use
+    // the constructor-name exception to replace its enclosing call target.
+    // v39 (2026-07-15): lexical parameters/locals shadow same-spelled
+    // callable declarations, and Dart's ambiguous bare call syntax is
+    // refined against scoped class declarations before IDG stitching.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 39;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 

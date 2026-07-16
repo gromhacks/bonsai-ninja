@@ -2064,6 +2064,7 @@ fn add_callback_arg_edges(
             alias_targets,
             local_bindings,
             &arg.value_text,
+            arg.span,
             caller_decl,
             caller_language,
             path_for_file,
@@ -2753,6 +2754,7 @@ fn resolve_callable_arg(
     alias_targets: &AHashMap<String, AliasTarget>,
     local_bindings: &AHashMap<String, FuncId>,
     raw: &str,
+    arg_span: Span,
     caller_decl: &Decl,
     caller_language: Option<&'static str>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
@@ -2795,6 +2797,18 @@ fn resolve_callable_arg(
         );
         if !local_targets.is_empty() {
             return local_targets;
+        }
+        // Lexical values shadow same-spelled declarations. A simple argument
+        // such as `analyzer` or `envelope` is not a callable merely because a
+        // workspace method or constructor has a matching name; the compiler
+        // resolves the parameter/local binding first. Explicit callable
+        // bindings above remain eligible, while ordinary parameters and
+        // earlier value assignments stop global callable lookup here.
+        if !alias_qualified_reference
+            && (caller_decl.params.iter().any(|param| param == trimmed)
+                || local_value_binding_shadows_callable(&caller_decl.flow_events, trimmed, arg_span))
+        {
+            continue;
         }
         let mut targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
             global,
