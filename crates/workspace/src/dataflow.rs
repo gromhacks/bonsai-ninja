@@ -9,7 +9,7 @@
 //! Keyed by [`FuncId`]; built in parallel via rayon while each query runs the
 //! canonical cap-free IDG closure; incremental
 //! invalidation on file edits via content hash + matcher policy
-//! fingerprint; persistable via [`DataFlowCache::save_to_disk`] for
+//! fingerprint; persistable via [`DataFlowCache::prewarm_to_disk`] for
 //! near-instant warm reopens.
 
 use crate::cache_fingerprint::{
@@ -28,13 +28,8 @@ use parking_lot::RwLock;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
-    ffi::OsString,
     path::{Path, PathBuf},
-    process::{self, Command, Stdio},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
 };
 
 /// Monotonic bump. Increment every time the on-disk format changes
@@ -50,7 +45,6 @@ use std::{
 // containment, service.rs return-position source-seeding fallback) and
 // adapter member synthesis alter propagated taint facts.
 pub const DATAFLOW_CACHE_VERSION: u32 = 31;
-static SIDECAR_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 type DataFlowMemoryEntry = (FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>, AHashSet<FileId>);
 
@@ -317,10 +311,10 @@ impl DataFlowCache {
         if inner.matcher_policy_fingerprint == 0 {
             inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
         }
-        // `KindedTokens` and dependency sets are small (a few KB each)
-        // and the snapshot() / save_to_disk() bincode round-trip relies
-        // on `inner.facts` being populated, so we always cache those
-        // back. `inner.graphs`, on the other hand, holds an
+        // `KindedTokens` and dependency sets are small (a few KB each),
+        // and in-memory snapshot consumers rely on `inner.facts` being
+        // populated, so we always cache those back. `inner.graphs`, on
+        // the other hand, holds an
         // `Arc<EntryTaintGraph>` per function — those can be tens of
         // KB to MB on big functions and were the linear-growth source
         // that OOM'd Redis. Returning the freshly decoded graph
@@ -558,24 +552,20 @@ impl DataFlowCache {
                 true
             })
             .collect();
-        if todo.is_empty() {
-            // Open the existing sidecar if any so subsequent queries
-            // hit disk; treat absent file as "nothing on disk."
-            if path.exists() {
-                let _ = self.load_factstore_sidecar(path, db);
-            }
-            return Ok(0);
-        }
         // Channel-based writer: workers push entries to a queue
         // drained by a dedicated I/O thread, so file writes never
         // block the rayon worker pool.
+        let expected_entries = todo
+            .len()
+            .saturating_add(memory_entries.len())
+            .saturating_add(disk_clone.as_ref().map_or(0, |reader| reader.len()));
         let writer = bonsai_factstore::FactStoreWriter::create_with_capacity(
             path,
             DATAFLOW_FACTSTORE_TABLE_ID,
             dataflow_pipeline_hash(db, path),
-            todo.len(),
-            todo.len().saturating_mul(1024),
-            todo.len().saturating_mul(64),
+            expected_entries,
+            expected_entries.saturating_mul(1024),
+            expected_entries.saturating_mul(64),
         )
         .map_err(map_factstore_io)?;
         let call_graph = self.call_graph_for(db);
@@ -975,63 +965,15 @@ impl DataFlowCache {
         *self.disk.write() = None;
     }
 
-    /// Persist the cache to `path` as a `bincode`-encoded
-    /// [`SerializableSnapshot`]. Atomic-and-durable:
-    ///
-    /// 1. Acquire an exclusive lockfile next to `path` so two
-    ///    concurrent `bonsai-ninja index` invocations cannot race
-    ///    on the rename. Stale lockfiles (orphaned by a crashed
-    ///    process) are reclaimed when their pid is no longer alive.
-    /// 2. Write to a uniquely-named tmp file in the same directory.
-    /// 3. `sync_all()` the tmp file so its bytes hit storage.
-    /// 4. `rename()` the tmp file over `path` (atomic on every
-    ///    POSIX filesystem and ReFS/NTFS via MoveFileEx).
-    /// 5. `sync_all()` the parent directory so the rename itself
-    ///    is durable across power loss.
-    ///
-    /// Per `docs/contributing/design-patterns.mdx::Lossless Caches` — a partially
-    /// written sidecar must not survive a crash and contradict the
-    /// content-addressed contract.
-    pub fn save_to_disk(&self, path: &Path, db: &AnalyzerDb) -> std::io::Result<()> {
-        let mut snap = self.snapshot(db);
-        snap.dependency_metadata_fingerprint = dependency_metadata_fingerprint_for_sidecar(path);
-        let bytes =
-            bincode::serialize(&snap).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        let _lock = SidecarWriteLock::acquire(path)?;
-        let tmp = unique_sidecar_tmp_path(path);
-        {
-            let mut tmp_file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)?;
-            use std::io::Write;
-            tmp_file.write_all(&bytes)?;
-            tmp_file.sync_all()?;
-        }
-        if let Err(err) = std::fs::rename(&tmp, path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(err);
-        }
-        // Sync the parent directory so the rename's metadata reaches
-        // disk. On Windows the open-directory dance isn't supported
-        // by std; the journaled filesystem there makes the rename
-        // durable on its own.
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                if let Ok(dir) = std::fs::File::open(parent) {
-                    let _ = dir.sync_all();
-                }
-            }
-        }
-        Ok(())
+    /// Persist the complete canonical cache through the same streaming,
+    /// atomic factstore writer used by explicit prewarm.
+    pub fn save_factstore(&self, path: &Path, db: &AnalyzerDb) -> std::io::Result<()> {
+        self.prewarm_to_disk(path, db, |_| {}).map(|_| ())
     }
 
-    /// Load from a sidecar written by [`Self::save_to_disk`].
+    /// Load a legacy bincode sidecar written by pre-factstore releases.
+    /// New writers exclusively use [`Self::prewarm_to_disk`]; this reader
+    /// remains as a migration fallback until old workspace caches age out.
     /// Returns the number of entries that survived version / content
     /// validation. Non-existent sidecar returns `Ok(0)` — nothing to
     /// load, not an error.
@@ -1163,122 +1105,6 @@ fn snapshot_version_prefix(bytes: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes(raw))
 }
 
-/// Inter-process lock for `dataflow.v2.bin` writes. Implemented as an
-/// atomic `O_CREAT | O_EXCL` lockfile next to the sidecar — two
-/// concurrent `bonsai-ninja index` runs cannot both acquire it.
-///
-/// Stale lockfiles (left behind when a previous writer crashed) are
-/// detected by reading the pid stored in the file and checking
-/// whether that process is still alive; if not, the lockfile is
-/// removed and acquisition is retried once.
-struct SidecarWriteLock {
-    path: PathBuf,
-}
-
-impl SidecarWriteLock {
-    fn lock_path(sidecar: &Path) -> PathBuf {
-        let mut path = sidecar.to_path_buf();
-        let mut name: OsString = path
-            .file_name()
-            .map(OsString::from)
-            .unwrap_or_else(|| OsString::from("dataflow"));
-        name.push(".lock");
-        path.set_file_name(name);
-        path
-    }
-
-    fn acquire(sidecar: &Path) -> std::io::Result<Self> {
-        let lock_path = Self::lock_path(sidecar);
-        match Self::try_create(&lock_path) {
-            Ok(lock) => Ok(lock),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if Self::reclaim_if_stale(&lock_path) {
-                    Self::try_create(&lock_path)
-                } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        format!(
-                            "another bonsai-ninja process is writing the dataflow sidecar (lock: {})",
-                            lock_path.display()
-                        ),
-                    ))
-                }
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    fn try_create(lock_path: &Path) -> std::io::Result<Self> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(lock_path)?;
-        use std::io::Write;
-        let _ = writeln!(file, "{}", process::id());
-        let _ = file.sync_all();
-        Ok(Self {
-            path: lock_path.to_path_buf(),
-        })
-    }
-
-    fn reclaim_if_stale(lock_path: &Path) -> bool {
-        let Ok(text) = std::fs::read_to_string(lock_path) else {
-            return false;
-        };
-        let Ok(pid) = text.trim().parse::<u32>() else {
-            // Unreadable pid → conservative: treat as live.
-            return false;
-        };
-        if process_is_alive(pid) {
-            return false;
-        }
-        std::fs::remove_file(lock_path).is_ok()
-    }
-}
-
-impl Drop for SidecarWriteLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-#[cfg(unix)]
-fn process_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return true;
-    }
-    let path = format!("/proc/{pid}");
-    if std::path::Path::new(&path).exists() {
-        return true;
-    }
-    if cfg!(target_os = "linux") {
-        return false;
-    }
-    // macOS / BSD do not expose Linux-style /proc. Use the POSIX
-    // `kill -0` probe through the system utility so this crate can keep
-    // `unsafe_code = "forbid"` and avoid a libc call. This path only
-    // runs when a lockfile already exists, so the process-spawn cost is
-    // outside the normal sidecar write path.
-    match Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    {
-        Ok(status) => status.success(),
-        Err(_) => true,
-    }
-}
-
-#[cfg(not(unix))]
-fn process_is_alive(_pid: u32) -> bool {
-    // Conservative on Windows: don't reclaim stale locks. Crashed
-    // processes leave a manual-cleanup case; safer than racing a
-    // running writer.
-    true
-}
-
 fn content_hash(bytes: &[u8]) -> u64 {
     bonsai_hash::fnv1a_bytes64(bytes)
 }
@@ -1340,16 +1166,6 @@ fn dependency_files(
         }
     }
     out
-}
-
-fn unique_sidecar_tmp_path(path: &Path) -> PathBuf {
-    let counter = SIDECAR_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut name = path
-        .file_name()
-        .map(OsString::from)
-        .unwrap_or_else(|| OsString::from("dataflow.v2.bin"));
-    name.push(format!(".tmp.{}.{}", process::id(), counter));
-    path.with_file_name(name)
 }
 
 #[cfg(test)]

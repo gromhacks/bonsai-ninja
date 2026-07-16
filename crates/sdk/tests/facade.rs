@@ -115,17 +115,19 @@ fn facade_indexes_and_exposes_workspace_basics() {
         !stats.dataflow_sidecar_exists && !stats.dataflow_factstore_sidecar_exists,
         "SDK structural index should avoid dataflow sidecars"
     );
+    std::fs::create_dir_all(root.join(".bonsai")).expect("create legacy cache dir");
+    std::fs::write(root.join(".bonsai/dataflow.v2.bin"), b"legacy").expect("write legacy cache");
     project.cache().rebuild_dataflow().expect("rebuild dataflow");
     assert!(project.load_dataflow_sidecar().expect("load sidecar") > 0);
     let stats = project.cache().stats().expect("cache stats");
     assert!(stats.bonsai_dir_exists);
     assert!(
-        stats.dataflow_sidecar_exists,
-        "explicit cache rebuild should write the legacy SDK dataflow sidecar"
+        stats.dataflow_factstore_sidecar_exists,
+        "explicit cache rebuild should write the canonical dataflow factstore"
     );
     assert!(
-        !stats.dataflow_factstore_sidecar_exists,
-        "cache rebuild should not imply the streaming full-prewarm factstore path"
+        !stats.dataflow_sidecar_exists,
+        "cache rebuild must not create a legacy bincode dataflow sidecar"
     );
     project.cache().clear_dataflow_only().expect("clear dataflow");
     let stats = project.cache().stats().expect("cache stats after clear");
@@ -137,7 +139,7 @@ fn facade_indexes_and_exposes_workspace_basics() {
             .cache()
             .stats()
             .expect("cache stats after rebuild")
-            .dataflow_sidecar_exists
+            .dataflow_factstore_sidecar_exists
     );
     project
         .export()

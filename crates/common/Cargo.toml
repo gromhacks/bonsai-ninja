@@ -10,6 +10,7 @@ description = "Shared IDs, spans, and precision model for bonsai-ninja."
 [dependencies]
 bonsai_hash = { workspace = true }
 serde = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

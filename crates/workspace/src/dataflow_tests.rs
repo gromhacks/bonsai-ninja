@@ -1,22 +1,9 @@
-use super::{
-    process_is_alive, unique_sidecar_tmp_path, DataFlowCache, SidecarWriteLock, DATAFLOW_FACTSTORE_TABLE_ID,
-};
+use super::{DataFlowCache, DATAFLOW_FACTSTORE_TABLE_ID};
 use bonsai_common::FuncId;
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::{AdapterArc, DeclKind, LanguageRegistry};
 use bonsai_vfs::Vfs;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-fn tempdir(name: &str) -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("bonsai-dataflow-{name}-{}-{stamp}", std::process::id()));
-    std::fs::create_dir(&path).expect("create temp dir");
-    path
-}
 
 fn build_db_with(files: &[(&str, &str)], adapter: AdapterArc) -> AnalyzerDb {
     let vfs = Arc::new(Vfs::new());
@@ -62,20 +49,6 @@ fn callable_func_ids(db: &AnalyzerDb) -> Vec<FuncId> {
 }
 
 #[test]
-fn sidecar_tmp_paths_are_unique_per_write() {
-    let path = Path::new("/tmp/dataflow.v2.bin");
-    let first = unique_sidecar_tmp_path(path);
-    let second = unique_sidecar_tmp_path(path);
-
-    assert_ne!(first, second);
-    assert_eq!(first.parent(), path.parent());
-    assert!(first
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("dataflow.v2.bin.tmp.")));
-}
-
-#[test]
 fn factstore_sidecar_file_validator_rejects_corrupt_payload_even_when_size_matches() {
     let tmp = std::env::temp_dir().join(format!(
         "dataflow_corrupt_validator_{}.factstore",
@@ -101,33 +74,6 @@ fn factstore_sidecar_file_validator_rejects_corrupt_payload_even_when_size_match
     );
 
     let _ = std::fs::remove_file(&tmp);
-}
-
-#[cfg(unix)]
-#[test]
-fn process_probe_recognizes_current_process() {
-    assert!(process_is_alive(std::process::id()));
-}
-
-#[cfg(unix)]
-#[test]
-fn process_probe_rejects_implausible_pid() {
-    assert!(!process_is_alive(u32::MAX));
-}
-
-#[cfg(unix)]
-#[test]
-fn stale_sidecar_lock_is_reclaimed() {
-    let root = tempdir("stale-lock");
-    let sidecar = root.join("dataflow.v2.bin");
-    let lock_path = SidecarWriteLock::lock_path(&sidecar);
-    std::fs::write(&lock_path, u32::MAX.to_string()).expect("write stale lock");
-
-    let lock = SidecarWriteLock::acquire(&sidecar).expect("reclaim stale lock");
-    assert!(lock_path.exists());
-    drop(lock);
-    assert!(!lock_path.exists());
-    std::fs::remove_dir_all(&root).ok();
 }
 
 #[test]

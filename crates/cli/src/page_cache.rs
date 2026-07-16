@@ -8,17 +8,15 @@
 //! source/rulepack/dependency freshness fingerprints.
 
 use crate::{out_count, output, paging, progress};
-use bonsai_common::dependency_metadata::collect_dependency_metadata_fingerprints;
+use bonsai_common::{dependency_metadata::collect_dependency_metadata_fingerprints, write_atomic_bytes};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
-static PAGE_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static REMEMBERED_WORKSPACE_FINGERPRINT: OnceLock<
     Mutex<Option<(PathBuf, bonsai_sdk::WorkspaceContentFingerprint)>>,
 > = OnceLock::new();
@@ -267,28 +265,7 @@ pub(crate) fn read_keyed_payload<T: DeserializeOwned>(
 /// fsync'd so a crash can't leave a torn cache file. Shared by the page
 /// cache and the keyed-payload store.
 fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
-    let counter = PAGE_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("{}.{counter:x}.tmp", std::process::id()));
-    {
-        let mut tmp_file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        tmp_file.write_all(&serde_json::to_vec(value)?)?;
-        tmp_file.sync_all()?;
-    }
-    if let Err(err) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err.into());
-    }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-    }
-    Ok(())
+    write_atomic_bytes(path, &serde_json::to_vec(value)?).map_err(Into::into)
 }
 
 fn save_pages_value(workspace: &Path, pages: Vec<CachedPage>) -> anyhow::Result<()> {
