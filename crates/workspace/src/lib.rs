@@ -2402,6 +2402,61 @@ impl Workspace {
         diagnostics
     }
 
+    /// Return deterministic parser-coverage reasons for an exact file scope.
+    ///
+    /// Parsing is a cached compiler query. Parsed-file diagnostics and the
+    /// DB-level adapter/index diagnostic sink are both inspected, with file
+    /// sets preventing duplicate diagnostics from inflating the counts. A
+    /// hard parser, adapter, or VFS failure has no `ParsedFile`, so it is
+    /// recorded explicitly instead of allowing a false-complete analysis.
+    pub fn parser_incomplete_reasons_for_files(&self, files: &[FileId]) -> Vec<String> {
+        let file_set: AHashSet<FileId> = files.iter().copied().collect();
+        let mut syntax_error_files = AHashSet::new();
+        let mut parse_timeout_files = AHashSet::new();
+        let mut parse_failed_files = AHashSet::new();
+        let mut record_diagnostic = |diagnostic: &Diagnostic| {
+            if file_set.contains(&diagnostic.span.file) {
+                match diagnostic.code.as_deref() {
+                    Some("parse-timeout") => {
+                        parse_timeout_files.insert(diagnostic.span.file);
+                    }
+                    Some("syntax-error") => {
+                        syntax_error_files.insert(diagnostic.span.file);
+                    }
+                    _ => {}
+                }
+            }
+        };
+
+        for &file in files {
+            match self.inner.db.parse(file) {
+                Ok(parsed) => {
+                    for diagnostic in &parsed.diagnostics {
+                        record_diagnostic(diagnostic);
+                    }
+                }
+                Err(_) => {
+                    parse_failed_files.insert(file);
+                }
+            }
+        }
+        for diagnostic in self.inner.db.diagnostics() {
+            record_diagnostic(&diagnostic);
+        }
+
+        let mut reasons = std::collections::BTreeSet::new();
+        if !parse_failed_files.is_empty() {
+            reasons.insert(format!("parse-failed-files:{}", parse_failed_files.len()));
+        }
+        if !parse_timeout_files.is_empty() {
+            reasons.insert(format!("parse-timeout-files:{}", parse_timeout_files.len()));
+        }
+        if !syntax_error_files.is_empty() {
+            reasons.insert(format!("syntax-error-files:{}", syntax_error_files.len()));
+        }
+        reasons.into_iter().collect()
+    }
+
     pub fn stats(&self) -> WorkspaceStats {
         let DbStats {
             files,

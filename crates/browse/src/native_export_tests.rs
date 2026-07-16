@@ -36,6 +36,39 @@ fn compressed_complete_rows_are_honestly_non_materialized() {
 }
 
 #[test]
+fn parser_gaps_make_buffered_and_streaming_exports_incomplete() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("Broken.java"),
+        "class Broken { void method( { }\n",
+    )
+    .expect("write fixture");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+    let config = NativeExportConfig {
+        full_propagations: true,
+        complete_chains: true,
+        compiled_propagations: false,
+    };
+
+    let buffered = native_export_json_with_config(&ws, dir.path(), config).expect("buffered native export");
+    assert_eq!(buffered["analysis_complete"], false);
+    assert_eq!(
+        buffered["analysis_incomplete_reasons"],
+        serde_json::json!(["syntax-error-files:1"])
+    );
+
+    let mut streamed = Vec::new();
+    write_native_export_json_with_config(&ws, dir.path(), config, &mut streamed)
+        .expect("streaming native export");
+    let streamed: serde_json::Value = serde_json::from_slice(&streamed).expect("parse streaming export");
+    assert_eq!(streamed["analysis_complete"], false);
+    assert_eq!(
+        streamed["analysis_incomplete_reasons"],
+        serde_json::json!(["syntax-error-files:1"])
+    );
+}
+
+#[test]
 fn decorator_entrypoints_do_not_attach_across_function_body() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(

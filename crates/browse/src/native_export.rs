@@ -44,10 +44,11 @@ struct ExportOut<'a> {
     /// User-visible analysis facts are semantic only: exact or narrowed
     /// resolver evidence, never broad unresolved fan-out.
     analysis_scope: ExportAnalysisScope,
-    /// Whole-document completeness. `false` means one or more exported
-    /// evidence sections is intentionally omitted or capped; the exact
-    /// missing scope is listed in `analysis_incomplete_reasons` and in
-    /// the relevant section-level metadata.
+    /// Whole-document completeness. `false` means parser coverage was
+    /// incomplete or one or more exported evidence sections is intentionally
+    /// omitted or capped; the exact missing scope is listed in
+    /// `analysis_incomplete_reasons` and in the relevant section-level
+    /// metadata.
     analysis_complete: bool,
     analysis_incomplete_reasons: Vec<String>,
     summary: ExportSummary,
@@ -660,12 +661,14 @@ fn native_export(
     ));
     let phase_started = Instant::now();
     let taint_graph = build_taint_graph(ws, &spans, config, chain_limits, &chain_cache);
+    let parser_incomplete_reasons = ws.parser_incomplete_reasons_for_files(&ws.vfs().all_files());
     let completeness = export_analysis_completeness(
         config,
         flow_sections.flow_chains_truncated_targets,
         taint_graph.chains_truncated_targets,
         taint_graph.flow_id_labels_truncated_functions,
         chain_limits,
+        &parser_incomplete_reasons,
     );
     export_phase_log(format_args!(
         "taint graph: {:.3}s total={:.3}s",
@@ -760,12 +763,14 @@ fn write_native_export_streaming<W: Write + ?Sized>(
         &functions,
         config.complete_chains,
     );
+    let parser_incomplete_reasons = ws.parser_incomplete_reasons_for_files(&ws.vfs().all_files());
     let completeness = export_analysis_completeness(
         config,
         flow_chains_truncated_targets,
         chain_rows.chains_truncated_targets,
         chain_rows.flow_id_labels_truncated_functions,
         chain_limits,
+        &parser_incomplete_reasons,
     );
     map.serialize_entry("analysis_complete", &completeness.complete)?;
     map.serialize_entry("analysis_incomplete_reasons", &completeness.incomplete_reasons)?;
@@ -1099,8 +1104,9 @@ fn export_analysis_completeness(
     taint_chains_truncated_targets: usize,
     flow_id_labels_truncated_functions: usize,
     chain_limits: ExportChainLimits,
+    parser_incomplete_reasons: &[String],
 ) -> ExportCompleteness {
-    let mut incomplete_reasons = Vec::new();
+    let mut incomplete_reasons = parser_incomplete_reasons.to_vec();
     if let Some(reason) = propagation_omitted_reason(config) {
         incomplete_reasons.push(format!("taint_graph.propagations: {reason}"));
     }

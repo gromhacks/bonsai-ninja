@@ -37,7 +37,7 @@ use std::{
 const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v8.json";
 const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v8.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
-const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v7";
+const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v8";
 const CACHE_MANIFEST_FILE: &str = "manifest.json";
 const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const RETRIEVAL_NO_CANDIDATES_FILTER: &str = "/__bonsai_no_retrieval_candidates__/__none__";
