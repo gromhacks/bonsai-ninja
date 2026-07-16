@@ -766,7 +766,7 @@ fn assignment_cleanly_overwrites_target(
             .is_some_and(|kind| matches!(kind, AssignValueKind::Literal))
             || clean_constant_assignment(source_name, source_names)
             || assignment_rhs_is_clean_conditional(ws, span)))
-        || literal_list_get_assignment_is_clean(ws, span, source_call, source_call_args)
+        || literal_list_get_assignment_is_clean(ws, span)
         || local_call_returns_clean_value(ws, span, source_call)
 }
 
@@ -1042,25 +1042,35 @@ fn assignment_rhs_syntax_text(ws: &Workspace, span: Span) -> Option<String> {
         .map(|rhs| rhs.trim_end_matches(';').trim().to_string())
 }
 
-fn literal_list_get_assignment_is_clean(
-    ws: &Workspace,
-    span: Span,
-    source_call: Option<&str>,
-    source_call_args: &[String],
-) -> bool {
-    let Some(receiver) = source_call.and_then(|call| call.strip_suffix(".get")) else {
-        return false;
-    };
-    let Some(list_name) = clean_overwrite_target_key(receiver) else {
-        return false;
-    };
-    let Some(index) = source_call_args
-        .first()
-        .and_then(|arg| arg.trim().parse::<usize>().ok())
+fn literal_list_get_assignment_is_clean(ws: &Workspace, span: Span) -> bool {
+    let global = ws.db().global_index();
+    let Some(decl) = global
+        .decls_in(span.file)
+        .iter()
+        .filter(|decl| span_contains(decl.body_span.unwrap_or(decl.span), span))
+        .min_by_key(|decl| decl.span.len())
     else {
         return false;
     };
-    let Some(values) = literal_list_state_before_span(ws, span, &list_name) else {
+    let Some(FlowEvent::Call {
+        name,
+        receiver: Some(receiver),
+        args,
+        ..
+    }) = find_call_event_at(&decl.flow_events, span)
+    else {
+        return false;
+    };
+    if clean_overwrite_callee_tail(name) != "get" || args.len() != 1 {
+        return false;
+    }
+    let Some(list_name) = clean_overwrite_target_key(receiver) else {
+        return false;
+    };
+    let Some(index) = static_list_index(&args[0]) else {
+        return false;
+    };
+    let Some(values) = literal_list_state_before_span(&decl.flow_events, args[0].span, &list_name) else {
         return false;
     };
     values
@@ -1068,47 +1078,263 @@ fn literal_list_get_assignment_is_clean(
         .is_some_and(|value| value_part_contains_only_clean_literals(value))
 }
 
-fn literal_list_state_before_span(ws: &Workspace, span: Span, list_name: &str) -> Option<Vec<String>> {
-    let snapshot = ws.vfs().snapshot(span.file).ok()?;
-    let end = usize::try_from(span.start).unwrap_or(0).min(snapshot.text.len());
-    let start = ws
-        .enclosing_index()
-        .enclosing_for(ws.db(), span.file, span.start)
-        .map_or(0, |entry| entry.start as usize);
-    let prefix = snapshot.text.get(start..end)?;
-    let mut values: Option<Vec<String>> = None;
-    let new_marker = format!("{list_name} = new ");
-    let add_marker = format!("{list_name}.add");
-    let remove_marker = format!("{list_name}.remove");
-    for line in prefix.lines() {
-        let statement = line.split("//").next().unwrap_or(line).trim();
-        if statement.contains(&new_marker) {
-            values = Some(Vec::new());
-            continue;
-        }
-        if statement.contains(&add_marker) {
-            let value = call_first_argument(statement)?;
-            values.as_mut()?.push(value.to_string());
-            continue;
-        }
-        if statement.contains(&remove_marker) {
-            let index = call_first_argument(statement)?.trim().parse::<usize>().ok()?;
-            let values = values.as_mut()?;
-            if index >= values.len() {
-                return None;
-            }
-            values.remove(index);
-        }
-    }
-    values
+fn static_list_index(arg: &bonsai_lang_api::CallArg) -> Option<usize> {
+    (arg.place.is_none() && arg.source_names.is_empty())
+        .then(|| arg.value_text.trim().parse::<usize>().ok())
+        .flatten()
 }
 
-fn call_first_argument(statement: &str) -> Option<&str> {
-    let open = statement.find('(')?;
-    let close = statement[open + 1..].find(')')? + open + 1;
-    let args = &statement[open + 1..close];
-    let comma = find_top_level_char(args, ',').unwrap_or(args.len());
-    Some(args[..comma].trim())
+fn literal_list_state_before_span(
+    events: &[FlowEvent],
+    target_span: Span,
+    list_name: &str,
+) -> Option<Vec<String>> {
+    let mut state = None;
+    if !list_state_until_target(events, events, target_span, list_name, &mut state) {
+        return None;
+    }
+    state
+}
+
+fn list_state_until_target(
+    root_events: &[FlowEvent],
+    events: &[FlowEvent],
+    target_span: Span,
+    list_name: &str,
+    state: &mut Option<Vec<String>>,
+) -> bool {
+    for event in events {
+        if event.span() == target_span {
+            return true;
+        }
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } if events_have_exact_span(then_events, target_span)
+                || events_have_exact_span(else_events, target_span) =>
+            {
+                let target_events = if events_have_exact_span(then_events, target_span) {
+                    then_events
+                } else {
+                    else_events
+                };
+                return list_state_until_target(root_events, target_events, target_span, list_name, state);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. }
+                if events_have_exact_span(body, target_span) =>
+            {
+                return list_state_until_target(root_events, body, target_span, list_name, state);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                for nested in [
+                    body.as_slice(),
+                    catch_events.as_slice(),
+                    finally_events.as_slice(),
+                ] {
+                    if events_have_exact_span(nested, target_span) {
+                        return list_state_until_target(root_events, nested, target_span, list_name, state);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if event.span().start >= target_span.start {
+            continue;
+        }
+        apply_list_event(root_events, event, list_name, state);
+    }
+    false
+}
+
+fn events_have_exact_span(events: &[FlowEvent], target_span: Span) -> bool {
+    events.iter().any(|event| {
+        event.span() == target_span
+            || match event {
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    events_have_exact_span(then_events, target_span)
+                        || events_have_exact_span(else_events, target_span)
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => events_have_exact_span(body, target_span),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    events_have_exact_span(body, target_span)
+                        || events_have_exact_span(catch_events, target_span)
+                        || events_have_exact_span(finally_events, target_span)
+                }
+                _ => false,
+            }
+    })
+}
+
+fn apply_list_events(
+    root_events: &[FlowEvent],
+    events: &[FlowEvent],
+    list_name: &str,
+    state: &mut Option<Vec<String>>,
+) {
+    for event in events {
+        apply_list_event(root_events, event, list_name, state);
+    }
+}
+
+fn apply_list_event(
+    root_events: &[FlowEvent],
+    event: &FlowEvent,
+    list_name: &str,
+    state: &mut Option<Vec<String>>,
+) {
+    match event {
+        FlowEvent::Assign {
+            span,
+            target,
+            source_call,
+            ..
+        } if clean_overwrite_target_key(target).as_deref() == Some(list_name) => {
+            *state = source_call
+                .as_ref()
+                .filter(|_| empty_constructor_call_in_span(root_events, *span))
+                .map(|_| Vec::new());
+        }
+        FlowEvent::AggregateAssign { target, .. }
+            if clean_overwrite_target_key(target).as_deref() == Some(list_name) =>
+        {
+            *state = None;
+        }
+        FlowEvent::Call {
+            name, receiver, args, ..
+        } => {
+            let receiver_matches = receiver
+                .as_deref()
+                .and_then(clean_overwrite_target_key)
+                .as_deref()
+                == Some(list_name);
+            if receiver_matches {
+                match clean_overwrite_callee_tail(name).as_str() {
+                    "add"
+                        if args.len() == 1
+                            && args[0].place.is_none()
+                            && args[0].source_names.is_empty()
+                            && value_part_contains_only_clean_literals(&args[0].value_text) =>
+                    {
+                        if let Some(values) = state {
+                            values.push(args[0].value_text.clone());
+                        }
+                    }
+                    "remove" if args.len() == 1 => {
+                        let Some(index) = static_list_index(&args[0]) else {
+                            *state = None;
+                            return;
+                        };
+                        let Some(values) = state else {
+                            return;
+                        };
+                        if index >= values.len() {
+                            *state = None;
+                        } else {
+                            values.remove(index);
+                        }
+                    }
+                    _ => *state = None,
+                }
+            } else if args.iter().any(|arg| {
+                arg.place
+                    .as_deref()
+                    .and_then(clean_overwrite_target_key)
+                    .as_deref()
+                    == Some(list_name)
+            }) {
+                // A reference passed to an unknown call may be mutated.
+                *state = None;
+            }
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            let mut then_state = state.clone();
+            apply_list_events(root_events, then_events, list_name, &mut then_state);
+            let mut else_state = state.clone();
+            apply_list_events(root_events, else_events, list_name, &mut else_state);
+            *state = (then_state == else_state).then_some(then_state).flatten();
+        }
+        FlowEvent::Loop { body, .. } => {
+            let before = state.clone();
+            let mut after_one_iteration = before.clone();
+            apply_list_events(root_events, body, list_name, &mut after_one_iteration);
+            if after_one_iteration != before {
+                *state = None;
+            }
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            let mut body_state = state.clone();
+            apply_list_events(root_events, body, list_name, &mut body_state);
+            let mut catch_state = state.clone();
+            apply_list_events(root_events, catch_events, list_name, &mut catch_state);
+            *state = (body_state == catch_state).then_some(body_state).flatten();
+            apply_list_events(root_events, finally_events, list_name, state);
+        }
+        FlowEvent::Using { body, .. } => apply_list_events(root_events, body, list_name, state),
+        FlowEvent::Defer { .. } => {
+            // Deferred bodies execute after the lexical target.
+        }
+        _ => {}
+    }
+}
+
+fn empty_constructor_call_in_span(events: &[FlowEvent], assignment_span: Span) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Call {
+            span,
+            call_kind: bonsai_lang_api::CallKind::Constructor,
+            args,
+            ..
+        } => span_contains(assignment_span, *span) && args.is_empty(),
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            empty_constructor_call_in_span(then_events, assignment_span)
+                || empty_constructor_call_in_span(else_events, assignment_span)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            empty_constructor_call_in_span(body, assignment_span)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            empty_constructor_call_in_span(body, assignment_span)
+                || empty_constructor_call_in_span(catch_events, assignment_span)
+                || empty_constructor_call_in_span(finally_events, assignment_span)
+        }
+        _ => false,
+    })
 }
 
 fn split_ternary_parts(rhs: &str) -> Option<(&str, &str, &str)> {
@@ -1827,7 +2053,7 @@ pub(super) fn clean_overwrite_target_keys(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod numeric_constant_tests {
     use super::*;
-    use bonsai_lang_api::{AssignmentValueFact, LoopKind};
+    use bonsai_lang_api::{ArgumentPassingMode, AssignmentValueFact, CallArg, CallKind, LoopKind};
 
     fn span(file: FileId, start: usize, end: usize) -> Span {
         Span::new(file, start as u64, end as u64)
@@ -1853,6 +2079,143 @@ mod numeric_constant_tests {
             value_span,
             call_sites: Vec::new(),
         }
+    }
+
+    fn call_arg(arg_span: Span, value: &str, place: Option<&str>, sources: &[&str]) -> CallArg {
+        CallArg {
+            span: arg_span,
+            passing_mode: ArgumentPassingMode::Value,
+            name: None,
+            value_text: value.to_string(),
+            place: place.map(str::to_string),
+            source_names: sources.iter().map(|source| (*source).to_string()).collect(),
+        }
+    }
+
+    fn call(
+        call_span: Span,
+        name: &str,
+        receiver: Option<&str>,
+        call_kind: CallKind,
+        args: Vec<CallArg>,
+    ) -> FlowEvent {
+        FlowEvent::Call {
+            span: call_span,
+            name: name.to_string(),
+            receiver: receiver.map(str::to_string),
+            receiver_types: Vec::new(),
+            call_kind,
+            args,
+        }
+    }
+
+    #[test]
+    fn literal_list_state_uses_ordered_call_facts() {
+        let file = FileId::new(0);
+        let assignment_span = span(file, 0, 20);
+        let target_span = span(file, 70, 80);
+        let events = vec![
+            FlowEvent::Assign {
+                span: assignment_span,
+                target: "values".to_string(),
+                source_name: None,
+                source_call: Some("ArrayList".to_string()),
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: true,
+                value_kind: Some(AssignValueKind::CallResult),
+            },
+            call(
+                span(file, 8, 18),
+                "ArrayList",
+                None,
+                CallKind::Constructor,
+                Vec::new(),
+            ),
+            call(
+                span(file, 25, 35),
+                "values.add",
+                Some("values"),
+                CallKind::Method,
+                vec![call_arg(span(file, 31, 34), "\"first\"", None, &[])],
+            ),
+            call(
+                span(file, 40, 50),
+                "values.add",
+                Some("values"),
+                CallKind::Method,
+                vec![call_arg(span(file, 46, 49), "\"second\"", None, &[])],
+            ),
+            call(
+                span(file, 55, 65),
+                "values.remove",
+                Some("values"),
+                CallKind::Method,
+                vec![call_arg(span(file, 62, 63), "0", None, &[])],
+            ),
+            call(
+                target_span,
+                "values.get",
+                Some("values"),
+                CallKind::Method,
+                vec![call_arg(span(file, 77, 78), "0", None, &[])],
+            ),
+        ];
+
+        assert_eq!(
+            literal_list_state_before_span(&events, target_span, "values"),
+            Some(vec!["\"second\"".to_string()])
+        );
+    }
+
+    #[test]
+    fn conditional_list_mutation_invalidates_exact_state() {
+        let file = FileId::new(0);
+        let assignment_span = span(file, 0, 20);
+        let target_span = span(file, 70, 80);
+        let events = vec![
+            FlowEvent::Assign {
+                span: assignment_span,
+                target: "values".to_string(),
+                source_name: None,
+                source_call: Some("ArrayList".to_string()),
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: true,
+                value_kind: Some(AssignValueKind::CallResult),
+            },
+            call(
+                span(file, 8, 18),
+                "ArrayList",
+                None,
+                CallKind::Constructor,
+                Vec::new(),
+            ),
+            FlowEvent::Branch {
+                span: span(file, 25, 60),
+                condition: Some("flag".to_string()),
+                then_events: vec![call(
+                    span(file, 30, 40),
+                    "values.add",
+                    Some("values"),
+                    CallKind::Method,
+                    vec![call_arg(span(file, 36, 39), "\"only\"", None, &[])],
+                )],
+                else_events: Vec::new(),
+            },
+            call(
+                target_span,
+                "values.get",
+                Some("values"),
+                CallKind::Method,
+                vec![call_arg(span(file, 77, 78), "0", None, &[])],
+            ),
+        ];
+
+        assert_eq!(
+            literal_list_state_before_span(&events, target_span, "values"),
+            None
+        );
     }
 
     #[test]
