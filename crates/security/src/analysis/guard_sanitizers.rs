@@ -35,113 +35,37 @@ pub(super) fn source_sink_pair_is_low_signal(source: &FindingMatch, sink_rule: &
 }
 
 pub(super) fn dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMatch) -> Option<FindingMatch> {
-    if matches!(hit.language.as_str(), "javascript" | "typescript") {
-        return js_dev_only_environment_guard_sanitizer(ws, hit);
-    }
-    if hit.language != "python" {
+    if !matches!(hit.language.as_str(), "javascript" | "typescript" | "python") {
         return None;
     }
     let snapshot = ws.vfs().snapshot(hit.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let target_idx = usize::try_from(hit.line.checked_sub(1)?).ok()?;
-    let target_line = *lines.get(target_idx)?;
-    let target_indent = leading_ascii_whitespace(target_line);
-    let search_start = enclosing_body_start_line(ws, hit, &snapshot.text);
-    for idx in search_start..target_idx {
-        let guard_line = lines[idx];
-        if !python_dev_only_env_guard_line(guard_line) {
-            continue;
-        }
-        let guard_indent = leading_ascii_whitespace(guard_line);
-        if guard_indent > target_indent {
-            continue;
-        }
-        if !python_guard_exits_before_target(&lines, idx, target_idx, guard_indent, target_indent) {
-            continue;
-        }
-        return Some(FindingMatch {
-            rule_id: "engine.sanitizer.dev_only_env_guard".to_string(),
-            file: hit.file.clone(),
-            line: u32::try_from(idx + 1).ok()?,
-            column: u32::try_from(guard_indent + 1).ok()?,
-            text: guard_line.trim().to_string(),
-            enclosing_fn: hit.enclosing_fn.clone(),
-            tag: Some("dev-only-guard".to_string()),
-            severity: None,
-            category: Some("reachability-guard".to_string()),
-            trust: None,
-            payload_types: Vec::new(),
-            tainted_args: Vec::new(),
-            sanitised_arg_indices: Vec::new(),
-        });
-    }
-    None
-}
-
-fn js_dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMatch) -> Option<FindingMatch> {
-    let snapshot = ws.vfs().snapshot(hit.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let target_idx = usize::try_from(hit.line.checked_sub(1)?).ok()?;
-    let target_indent = leading_ascii_whitespace(lines.get(target_idx)?);
-    let search_start = enclosing_body_start_line(ws, hit, &snapshot.text);
-    for (idx, guard_line) in lines
-        .iter()
-        .copied()
-        .enumerate()
-        .take(target_idx)
-        .skip(search_start)
-    {
-        if !js_dev_only_env_guard_line(guard_line) {
-            continue;
-        }
-        let guard_indent = leading_ascii_whitespace(guard_line);
-        if guard_indent > target_indent {
-            continue;
-        }
-        return Some(FindingMatch {
-            rule_id: "engine.sanitizer.dev_only_env_guard".to_string(),
-            file: hit.file.clone(),
-            line: u32::try_from(idx + 1).ok()?,
-            column: u32::try_from(guard_indent + 1).ok()?,
-            text: guard_line.trim().to_string(),
-            enclosing_fn: hit.enclosing_fn.clone(),
-            tag: Some("dev-only-guard".to_string()),
-            severity: None,
-            category: Some("reachability-guard".to_string()),
-            trust: None,
-            payload_types: Vec::new(),
-            tainted_args: Vec::new(),
-            sanitised_arg_indices: Vec::new(),
-        });
-    }
-    None
-}
-
-/// Start guard discovery at the compiler-owned enclosing declaration rather
-/// than an arbitrary line window. Tree-sitter body spans keep the scan in the
-/// current function while allowing guards of any syntactic size or distance.
-fn enclosing_body_start_line(ws: &Workspace, hit: &RuleMatch, source: &str) -> usize {
-    let Some(entry) = ws
+    let entry = ws
         .enclosing_index()
-        .enclosing_for(ws.db(), hit.span.file, hit.span.start)
-    else {
-        return 0;
-    };
-    let Ok(start) = usize::try_from(entry.start) else {
-        return 0;
-    };
-    source
-        .as_bytes()
-        .get(..start.min(source.len()))
-        .map_or(0, |prefix| {
-            prefix
-                .iter()
-                .fold(0, |lines, byte| lines + usize::from(*byte == b'\n'))
-        })
+        .enclosing_for(ws.db(), hit.span.file, hit.span.start)?;
+    let global = ws.db().global_index();
+    let decl = global.decl_of(entry.symbol)?;
+    let mut branches = Vec::new();
+    collect_completed_branches_on_path(&decl.flow_events, hit.span, &mut branches);
+    let guard = branches.into_iter().rev().find(|branch| {
+        let condition_matches = if hit.language == "python" {
+            python_dev_only_env_guard_condition(branch.condition)
+        } else {
+            js_dev_only_env_guard_condition(branch.condition)
+        };
+        condition_matches && branch_arm_abruptly_exits(branch.then_events)
+    })?;
+    finding_for_guard_span(
+        hit,
+        snapshot.text.as_ref(),
+        guard.span,
+        "engine.sanitizer.dev_only_env_guard",
+        "dev-only-guard",
+        "reachability-guard",
+    )
 }
 
-fn js_dev_only_env_guard_line(line: &str) -> bool {
-    let compact = compact_guard_text(line);
+fn js_dev_only_env_guard_condition(condition: &str) -> bool {
+    let compact = compact_guard_text(condition);
     let lower = compact.to_ascii_lowercase();
     let reads_node_env = lower.contains("process.env.node_env") || lower.contains("node_env");
     if !reads_node_env || !(compact.contains("!==") || compact.contains("!=")) {
@@ -151,10 +75,6 @@ fn js_dev_only_env_guard_line(line: &str) -> bool {
         .iter()
         .any(|marker| lower.contains(marker));
     mentions_dev_env
-        && (lower.contains("return")
-            || lower.contains("throw")
-            || lower.contains("sendstatus(404")
-            || lower.contains("status(404"))
 }
 
 pub(super) fn python_realpath_containment_guard_sanitizer(
@@ -175,38 +95,25 @@ pub(super) fn python_realpath_containment_guard_sanitizer(
         return None;
     }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
     let global = ws.db().global_index();
     let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
-    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
-    let body_end = decl.body_span.unwrap_or(decl.span).end.saturating_sub(1);
-    let search_end = usize::try_from(span_map.line_col(body_end).line)
-        .ok()?
-        .min(lines.len());
-    for idx in sink_idx.saturating_add(1)..search_end {
-        let line = lines[idx];
-        if !python_path_containment_guard_line(line, &candidate, &base) {
+    let mut branches = Vec::new();
+    collect_following_branches_on_path(&decl.flow_events, snk.span, &mut branches);
+    for branch in branches {
+        if !python_path_containment_guard_condition(branch.condition, &candidate, &base) {
             continue;
         }
-        if !python_guard_body_exits(&lines, idx) {
+        if !branch_arm_abruptly_exits(branch.then_events) {
             continue;
         }
-        return Some(FindingMatch {
-            rule_id: "engine.sanitizer.python_realpath_containment_guard".to_string(),
-            file: snk.file.clone(),
-            line: u32::try_from(idx + 1).ok()?,
-            column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
-            text: line.trim().to_string(),
-            enclosing_fn: snk.enclosing_fn.clone(),
-            tag: Some("path-sanitize".to_string()),
-            severity: None,
-            category: Some("realpath-containment-guard".to_string()),
-            trust: None,
-            payload_types: Vec::new(),
-            tainted_args: Vec::new(),
-            sanitised_arg_indices: Vec::new(),
-        });
+        return finding_for_guard_span(
+            snk,
+            snapshot.text.as_ref(),
+            branch.span,
+            "engine.sanitizer.python_realpath_containment_guard",
+            "path-sanitize",
+            "realpath-containment-guard",
+        );
     }
     None
 }
@@ -237,59 +144,44 @@ pub(super) fn python_compiled_regex_guard_sanitizer(
     let global = ws.db().global_index();
     let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
-    let target_line = *lines.get(sink_idx)?;
-    let target_indent = leading_ascii_whitespace(target_line);
-    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
-    let search_start = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1)).ok()?;
-    for idx in search_start..sink_idx {
-        let line = lines[idx];
-        let guard_indent = leading_ascii_whitespace(line);
-        if guard_indent > target_indent {
-            continue;
-        }
-        let Some((regex_name, guarded_target)) = python_compiled_regex_guard_line(line, &targets) else {
+    let mut branches = Vec::new();
+    collect_completed_branches_on_path(&decl.flow_events, snk.span, &mut branches);
+    for branch in branches.into_iter().rev() {
+        let Some((regex_name, guarded_target)) =
+            python_compiled_regex_guard_condition(branch.condition, &targets)
+        else {
             continue;
         };
         if !python_compiled_regex_declared_safe_before(
             ws,
             snk.span.file,
-            idx,
+            branch.span,
             &regex_name,
             sink_rule.tag.as_deref(),
         ) {
             continue;
         }
-        if !python_guard_exits_before_target(&lines, idx, sink_idx, guard_indent, target_indent) {
+        if !branch_arm_abruptly_exits(branch.then_events) {
             continue;
         }
-        return Some(FindingMatch {
-            rule_id: "engine.sanitizer.python_compiled_regex_guard".to_string(),
-            file: snk.file.clone(),
-            line: u32::try_from(idx + 1).ok()?,
-            column: u32::try_from(guard_indent + 1).ok()?,
-            text: line.trim().to_string(),
-            enclosing_fn: snk.enclosing_fn.clone(),
-            tag: Some("regex-validate".to_string()),
-            severity: None,
-            category: Some(format!("compiled-regex-guard:{guarded_target}")),
-            trust: None,
-            payload_types: Vec::new(),
-            tainted_args: Vec::new(),
-            sanitised_arg_indices: Vec::new(),
-        });
+        return finding_for_guard_span(
+            snk,
+            snapshot.text.as_ref(),
+            branch.span,
+            "engine.sanitizer.python_compiled_regex_guard",
+            "regex-validate",
+            &format!("compiled-regex-guard:{guarded_target}"),
+        );
     }
     None
 }
 
-fn python_compiled_regex_guard_line(line: &str, targets: &[String]) -> Option<(String, String)> {
-    let compact = compact_guard_text(line);
-    let condition = compact.strip_prefix("if")?.split_once(':')?.0;
-    let call_text = condition
+fn python_compiled_regex_guard_condition(condition: &str, targets: &[String]) -> Option<(String, String)> {
+    let compact = compact_guard_text(condition);
+    let call_text = compact
         .strip_prefix("not")
-        .or_else(|| condition.strip_suffix("isNone"))
-        .or_else(|| condition.strip_suffix("==None"))?;
+        .or_else(|| compact.strip_suffix("isNone"))
+        .or_else(|| compact.strip_suffix("==None"))?;
     let (regex_name, arg) = python_compiled_regex_call_parts(call_text)?;
     let target = clean_overwrite_target_key(arg)?;
     targets
@@ -321,34 +213,20 @@ fn python_compiled_regex_call_parts(call_text: &str) -> Option<(String, &str)> {
 fn python_compiled_regex_declared_safe_before(
     ws: &Workspace,
     file: FileId,
-    guard_idx: usize,
+    guard_span: Span,
     regex_name: &str,
     sink_tag: Option<&str>,
 ) -> bool {
     let Some(file_index) = ws.db().decl_index(file) else {
         return false;
     };
-    let Ok(snapshot) = ws.vfs().snapshot(file) else {
-        return false;
-    };
-    let span_map = bonsai_common::cached_span_map_arc(file, snapshot.version, &snapshot.text);
     let mut assignments = Vec::new();
     for decl in &file_index.defs {
-        collect_structured_assignments_before(
-            &decl.flow_events,
-            Span::empty(file, u64::MAX),
-            &mut assignments,
-        );
+        collect_structured_assignments_before(&decl.flow_events, guard_span, &mut assignments);
     }
     assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
     assignments.dedup_by_key(|assignment| assignment.span);
     for assignment in assignments.into_iter().rev() {
-        let Ok(assignment_line) = usize::try_from(span_map.line_col(assignment.span.start).line) else {
-            continue;
-        };
-        if assignment_line > guard_idx {
-            continue;
-        }
         if clean_overwrite_target_key(assignment.target).as_deref() != Some(regex_name) {
             continue;
         }
@@ -561,52 +439,14 @@ fn os_path_join_base_arg_at(events: &[bonsai_lang_api::FlowEvent], sink_span: Sp
     None
 }
 
-fn python_path_containment_guard_line(line: &str, candidate: &str, base: &str) -> bool {
-    let compact = compact_guard_text(line);
-    let startswith_sep = format!("ifnot{candidate}.startswith({base}+os.sep):");
-    let startswith_slash_single = format!("ifnot{candidate}.startswith({base}+'/'):");
-    let startswith_slash_double = format!("ifnot{candidate}.startswith({base}+\"/\"):");
+fn python_path_containment_guard_condition(condition: &str, candidate: &str, base: &str) -> bool {
+    let compact = compact_guard_text(condition);
+    let startswith_sep = format!("not{candidate}.startswith({base}+os.sep)");
+    let startswith_slash_single = format!("not{candidate}.startswith({base}+'/')");
+    let startswith_slash_double = format!("not{candidate}.startswith({base}+\"/\")");
     compact.contains(&startswith_sep)
         || compact.contains(&startswith_slash_single)
         || compact.contains(&startswith_slash_double)
-}
-
-fn python_guard_body_exits(lines: &[&str], guard_idx: usize) -> bool {
-    let Some(guard_line) = lines.get(guard_idx) else {
-        return false;
-    };
-    let guard_indent = leading_ascii_whitespace(guard_line);
-    if let Some((_, inline_body)) = guard_line.split_once(':') {
-        if python_abrupt_exit_line(inline_body) {
-            return true;
-        }
-    }
-    for line in lines.iter().skip(guard_idx + 1) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let indent = leading_ascii_whitespace(line);
-        if indent <= guard_indent {
-            return false;
-        }
-        return python_abrupt_exit_line(trimmed);
-    }
-    false
-}
-
-fn python_abrupt_exit_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    let compact = compact_guard_text(trimmed);
-    trimmed.starts_with("raise ")
-        || trimmed == "raise"
-        || trimmed.starts_with("return ")
-        || trimmed == "return"
-        || trimmed.starts_with("abort(")
-        || trimmed.contains("FileNotFoundError(")
-        || compact.contains(";return")
-        || compact.contains(";raise")
-        || compact.contains(";abort(")
 }
 
 pub(super) fn python_lxml_parser_keyword_sanitizer(
@@ -623,46 +463,42 @@ pub(super) fn python_lxml_parser_keyword_sanitizer(
     let parser_arg = find_call_arg_named_at(&decl.flow_events, snk.span, "parser")?;
     let parser_var = clean_overwrite_target_key(&parser_arg.value_text)?;
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
-    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
-    let func_start = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1)).ok()?;
-    let assign_idx = python_hardened_lxml_parser_assignment_line(&lines, func_start, sink_idx, &parser_var)?;
-    let line = lines.get(assign_idx)?;
-    Some(FindingMatch {
-        rule_id: "engine.sanitizer.python_lxml_hardened_parser_arg".to_string(),
-        file: snk.file.clone(),
-        line: u32::try_from(assign_idx + 1).ok()?,
-        column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
-        text: line.trim().to_string(),
-        enclosing_fn: snk.enclosing_fn.clone(),
-        tag: Some("xxe-sanitizer".to_string()),
-        severity: None,
-        category: Some("hardened-parser-argument".to_string()),
-        trust: None,
-        payload_types: Vec::new(),
-        tainted_args: Vec::new(),
-        sanitised_arg_indices: Vec::new(),
-    })
+    let assignment_span =
+        python_hardened_lxml_parser_assignment_span(&decl.flow_events, snk.span, &parser_var)?;
+    finding_for_guard_span(
+        snk,
+        snapshot.text.as_ref(),
+        assignment_span,
+        "engine.sanitizer.python_lxml_hardened_parser_arg",
+        "xxe-sanitizer",
+        "hardened-parser-argument",
+    )
 }
 
-fn python_hardened_lxml_parser_assignment_line(
-    lines: &[&str],
-    search_start: usize,
-    sink_idx: usize,
+fn python_hardened_lxml_parser_assignment_span(
+    events: &[FlowEvent],
+    before: Span,
     parser_var: &str,
-) -> Option<usize> {
-    let assignment_prefix = format!("{parser_var}=");
-    for idx in (search_start..sink_idx).rev() {
-        let compact_line = compact_guard_text(lines.get(idx)?);
-        if !compact_line.starts_with(&assignment_prefix) || !compact_line.contains("etree.XMLParser(") {
+) -> Option<Span> {
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(events, before, &mut assignments);
+    assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    let mut calls = Vec::new();
+    collect_structured_calls(events, &mut calls);
+    for assignment in assignments.into_iter().rev() {
+        if clean_overwrite_target_key(assignment.target).as_deref() != Some(parser_var) {
             continue;
         }
-        let compact_block = compact_guard_text(&lines[idx..sink_idx.min(lines.len())].join("\n"));
-        if compact_block.contains("resolve_entities=False")
-            && !compact_block.contains("resolve_entities=True")
-        {
-            return Some(idx);
+        let hardened = calls.iter().any(|call| {
+            span_contains(assignment.span, call.span)
+                && clean_overwrite_callee_tail(call.name) == "xmlparser"
+                && call.args.iter().any(|arg| {
+                    arg.name.as_deref() == Some("resolve_entities")
+                        && arg.value_text.trim().eq_ignore_ascii_case("false")
+                })
+        });
+        if hardened {
+            return Some(assignment.span);
         }
     }
     None
@@ -683,30 +519,70 @@ pub(super) fn java_url_ssrf_guard_sanitizer(
     let global = ws.db().global_index();
     let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
     let parsed_var = constructor_assignment_target_at(&decl.flow_events, snk.span)?;
-    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
-    let body_end = decl.body_span.unwrap_or(decl.span).end.saturating_sub(1);
-    let end = usize::try_from(span_map.line_col(body_end).line)
-        .ok()?
-        .min(lines.len());
-    if sink_idx + 1 >= end {
+    let mut branches = Vec::new();
+    collect_following_branches_on_path(&decl.flow_events, snk.span, &mut branches);
+    let scheme_guard = branches.iter().find(|branch| {
+        java_url_scheme_guard_condition(branch.condition, &parsed_var)
+            && branch_arm_abruptly_exits(branch.then_events)
+    });
+    let has_host_allowlist = branches.iter().any(|branch| {
+        java_url_host_allowlist_condition(branch.condition, &parsed_var)
+            && branch_arm_abruptly_exits(branch.then_events)
+    });
+    let private_ip_reject = branches.iter().any(|branch| {
+        java_private_ip_reject_condition(branch.condition) && branch_arm_abruptly_exits(branch.then_events)
+    });
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(
+        &decl.flow_events,
+        Span::empty(snk.span.file, decl.span.end),
+        &mut assignments,
+    );
+    let has_dns_lookup = assignments.iter().any(|assignment| {
+        assignment.span.start > snk.span.start
+            && assignment
+                .source_call
+                .is_some_and(|call| clean_overwrite_callee_tail(call) == "getbyname")
+            && assignment
+                .source_call_args
+                .iter()
+                .any(|arg| compact_guard_text(arg) == format!("{parsed_var}.getHost()"))
+    });
+    if !(scheme_guard.is_some() && has_host_allowlist && has_dns_lookup && private_ip_reject) {
         return None;
     }
-    let tail = lines[sink_idx + 1..end].join("\n");
-    let compact = compact_guard_text(&tail);
-    let scheme_a = format!("!\"https\".equalsIgnoreCase({parsed_var}.getProtocol())");
-    let scheme_b = format!("!{parsed_var}.getProtocol().equalsIgnoreCase(\"https\")");
-    let scheme_c = format!("!\"https\".equals({parsed_var}.getProtocol())");
-    let has_scheme_guard =
-        compact.contains(&scheme_a) || compact.contains(&scheme_b) || compact.contains(&scheme_c);
-    let host_contains = format!(".contains({parsed_var}.getHost())");
-    let has_host_allowlist =
-        compact.contains(&host_contains) && (compact.contains("if(!") || compact.contains("if(false=="));
-    let dns_lookup = format!("InetAddress.getByName({parsed_var}.getHost())");
-    let has_dns_lookup = compact.contains(&dns_lookup) || compact.contains(&format!("java.net.{dns_lookup}"));
-    let private_ip_reject = [
+    finding_for_guard_span(
+        snk,
+        snapshot.text.as_ref(),
+        scheme_guard?.span,
+        "engine.sanitizer.java_url_ssrf_guard",
+        "ssrf-sanitize",
+        "url-scheme-host-private-ip-guard",
+    )
+}
+
+fn java_url_scheme_guard_condition(condition: &str, parsed_var: &str) -> bool {
+    let compact = compact_guard_text(condition);
+    compact.contains(&format!(
+        "!\"https\".equalsIgnoreCase({parsed_var}.getProtocol())"
+    )) || compact.contains(&format!(
+        "!{parsed_var}.getProtocol().equalsIgnoreCase(\"https\")"
+    )) || compact.contains(&format!("!\"https\".equals({parsed_var}.getProtocol())"))
+}
+
+fn java_url_host_allowlist_condition(condition: &str, parsed_var: &str) -> bool {
+    let compact = compact_guard_text(condition);
+    compact.contains(&format!(".contains({parsed_var}.getHost())"))
+        && (compact.starts_with('!')
+            || compact.starts_with("(!")
+            || compact.starts_with("false==")
+            || compact.starts_with("(false=="))
+}
+
+fn java_private_ip_reject_condition(condition: &str) -> bool {
+    let compact = compact_guard_text(condition);
+    [
         "isLoopbackAddress()",
         "isSiteLocalAddress()",
         "isLinkLocalAddress()",
@@ -716,37 +592,7 @@ pub(super) fn java_url_ssrf_guard_sanitizer(
     .iter()
     .filter(|needle| compact.contains(**needle))
     .count()
-        >= 3;
-    if !(has_scheme_guard
-        && has_host_allowlist
-        && has_dns_lookup
-        && private_ip_reject
-        && compact.contains("thrownewSecurityException"))
-    {
-        return None;
-    }
-    let guard_idx = lines
-        .iter()
-        .enumerate()
-        .skip(sink_idx + 1)
-        .take(end.saturating_sub(sink_idx + 1))
-        .find_map(|(idx, line)| line.contains("getProtocol").then_some(idx))?;
-    let guard_line = *lines.get(guard_idx)?;
-    Some(FindingMatch {
-        rule_id: "engine.sanitizer.java_url_ssrf_guard".to_string(),
-        file: snk.file.clone(),
-        line: u32::try_from(guard_idx + 1).ok()?,
-        column: u32::try_from(leading_ascii_whitespace(guard_line) + 1).ok()?,
-        text: guard_line.trim().to_string(),
-        enclosing_fn: snk.enclosing_fn.clone(),
-        tag: Some("ssrf-sanitize".to_string()),
-        severity: None,
-        category: Some("url-scheme-host-private-ip-guard".to_string()),
-        trust: None,
-        payload_types: Vec::new(),
-        tainted_args: Vec::new(),
-        sanitised_arg_indices: Vec::new(),
-    })
+        >= 3
 }
 
 pub(super) fn go_jwt_inline_keyfunc_algorithm_guard_sanitizer(
@@ -1315,58 +1161,67 @@ pub(super) fn go_xml_decoder_hardening_sanitizer(
     let global = ws.db().global_index();
     let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
     let decoder_var = assignment_target_for_source_call_at(&decl.flow_events, snk.span, "NewDecoder")?;
-    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
-    let body_end = decl.body_span.unwrap_or(decl.span).end.saturating_sub(1);
-    let end = usize::try_from(span_map.line_col(body_end).line)
-        .ok()?
-        .min(lines.len());
-    if sink_idx + 1 >= end {
-        return None;
-    }
-    let tail = lines[sink_idx + 1..end].join("\n");
-    let compact = compact_guard_text(&tail);
-    let strict_true = compact.contains(&format!("{decoder_var}.Strict=true"));
-    let charset_assign = compact.contains(&format!("{decoder_var}.CharsetReader=func("));
-    let allowlist_reject = compact.contains("if!")
-        && compact.contains("[charset]")
-        && (compact.contains("returnnil,errors.New(") || compact.contains("returnnil,fmt.Errorf("));
-    let returns_input = compact.contains("returninput,nil");
-    if !(strict_true && charset_assign && allowlist_reject && returns_input) {
-        return None;
-    }
-    let guard_idx = lines
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(
+        &decl.flow_events,
+        Span::empty(snk.span.file, decl.span.end),
+        &mut assignments,
+    );
+    let strict_target = format!("{decoder_var}.Strict");
+    let strict_true = assignments.iter().any(|assignment| {
+        assignment.span.start > snk.span.start
+            && assignment.target == strict_target
+            && assignment.source_name.is_some_and(|source| source == "true")
+    });
+    let charset_target = format!("{decoder_var}.CharsetReader");
+    let charset_assignment = assignments
         .iter()
-        .enumerate()
-        .skip(sink_idx + 1)
-        .take(end.saturating_sub(sink_idx + 1))
-        .find_map(|(idx, line)| line.contains(".CharsetReader").then_some(idx))
-        .or_else(|| {
-            lines
-                .iter()
-                .enumerate()
-                .skip(sink_idx + 1)
-                .take(end.saturating_sub(sink_idx + 1))
-                .find_map(|(idx, line)| line.contains(".Strict").then_some(idx))
-        })?;
-    let guard_line = *lines.get(guard_idx)?;
-    Some(FindingMatch {
-        rule_id: "engine.sanitizer.go_xml_decoder_hardening".to_string(),
-        file: snk.file.clone(),
-        line: u32::try_from(guard_idx + 1).ok()?,
-        column: u32::try_from(leading_ascii_whitespace(guard_line) + 1).ok()?,
-        text: guard_line.trim().to_string(),
-        enclosing_fn: snk.enclosing_fn.clone(),
-        tag: Some("xxe-sanitizer".to_string()),
-        severity: None,
-        category: Some("go-xml-decoder-hardening".to_string()),
-        trust: None,
-        payload_types: Vec::new(),
-        tainted_args: Vec::new(),
-        sanitised_arg_indices: Vec::new(),
-    })
+        .find(|assignment| assignment.span.start > snk.span.start && assignment.target == charset_target)?;
+    let callback = global.decls_in(snk.span.file).iter().find(|candidate| {
+        candidate.span.start >= charset_assignment.span.start
+            && candidate.span.end <= charset_assignment.span.end
+            && candidate.params.len() >= 2
+    })?;
+    if !(strict_true && go_charset_reader_callback_is_hardened(callback)) {
+        return None;
+    }
+    finding_for_guard_span(
+        snk,
+        snapshot.text.as_ref(),
+        charset_assignment.span,
+        "engine.sanitizer.go_xml_decoder_hardening",
+        "xxe-sanitizer",
+        "go-xml-decoder-hardening",
+    )
+}
+
+fn go_charset_reader_callback_is_hardened(callback: &bonsai_lang_api::Decl) -> bool {
+    let charset = callback.params.first().map(String::as_str).unwrap_or_default();
+    let input = callback.params.get(1).map(String::as_str).unwrap_or_default();
+    if charset.is_empty() || input.is_empty() {
+        return false;
+    }
+    let mut branches = Vec::new();
+    collect_all_structured_branches(&callback.flow_events, &mut branches);
+    let mut calls = Vec::new();
+    collect_structured_calls(&callback.flow_events, &mut calls);
+    let rejected = branches.iter().any(|branch| {
+        let condition = compact_guard_text(branch.condition);
+        let negated_lookup = condition.starts_with('!') && condition.contains(&format!("[{charset}]"));
+        let returns_error = branch_arm_abruptly_exits(branch.then_events)
+            && calls.iter().any(|call| {
+                span_contains(branch.span, call.span)
+                    && matches!(clean_overwrite_callee_tail(call.name).as_str(), "new" | "errorf")
+            });
+        negated_lookup && returns_error
+    });
+    let mut returns = Vec::new();
+    collect_return_bindings(&callback.flow_events, &mut returns);
+    let returns_input = returns
+        .iter()
+        .any(|(_, value_name)| value_name.is_some_and(|value| value == input));
+    rejected && returns_input
 }
 
 pub(super) fn nosql_eq_filter_wrapper_sanitizer(
@@ -1616,8 +1471,245 @@ fn split_top_level_once(text: &str, delimiter: char) -> Option<(&str, &str)> {
 struct StructuredAssignment<'a> {
     span: Span,
     target: &'a str,
+    source_name: Option<&'a str>,
     source_call: Option<&'a str>,
     source_call_args: &'a [String],
+}
+
+#[derive(Copy, Clone)]
+struct StructuredBranch<'a> {
+    span: Span,
+    condition: &'a str,
+    then_events: &'a [FlowEvent],
+}
+
+fn collect_completed_branches_on_path<'a>(
+    events: &'a [FlowEvent],
+    target: Span,
+    out: &mut Vec<StructuredBranch<'a>>,
+) {
+    for event in events {
+        let event_span = event.span();
+        if span_contains(event_span, target) {
+            match event {
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    if events_contain_target(then_events, target) {
+                        collect_completed_branches_on_path(then_events, target, out);
+                    } else if events_contain_target(else_events, target) {
+                        collect_completed_branches_on_path(else_events, target, out);
+                    }
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => collect_completed_branches_on_path(body, target, out),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    if events_contain_target(body, target) {
+                        collect_completed_branches_on_path(body, target, out);
+                    } else if events_contain_target(catch_events, target) {
+                        collect_completed_branches_on_path(catch_events, target, out);
+                    } else if events_contain_target(finally_events, target) {
+                        collect_completed_branches_on_path(finally_events, target, out);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if event_span.file != target.file || event_span.end > target.start {
+            continue;
+        }
+        if let FlowEvent::Branch {
+            span,
+            condition: Some(condition),
+            then_events,
+            ..
+        } = event
+        {
+            out.push(StructuredBranch {
+                span: *span,
+                condition,
+                then_events,
+            });
+        }
+    }
+}
+
+fn collect_all_structured_branches<'a>(events: &'a [FlowEvent], out: &mut Vec<StructuredBranch<'a>>) {
+    for event in events {
+        match event {
+            FlowEvent::Branch {
+                span,
+                condition,
+                then_events,
+                else_events,
+            } => {
+                if let Some(condition) = condition.as_deref() {
+                    out.push(StructuredBranch {
+                        span: *span,
+                        condition,
+                        then_events,
+                    });
+                }
+                collect_all_structured_branches(then_events, out);
+                collect_all_structured_branches(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_all_structured_branches(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_all_structured_branches(body, out);
+                collect_all_structured_branches(catch_events, out);
+                collect_all_structured_branches(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_following_branches_on_path<'a>(
+    events: &'a [FlowEvent],
+    target: Span,
+    out: &mut Vec<StructuredBranch<'a>>,
+) -> bool {
+    let mut found_target = false;
+    for event in events {
+        if !found_target && (event.span() == target || span_contains(event.span(), target)) {
+            found_target = match event {
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    if events_contain_target(then_events, target) {
+                        collect_following_branches_on_path(then_events, target, out)
+                    } else if events_contain_target(else_events, target) {
+                        collect_following_branches_on_path(else_events, target, out)
+                    } else {
+                        true
+                    }
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => collect_following_branches_on_path(body, target, out),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    if events_contain_target(body, target) {
+                        collect_following_branches_on_path(body, target, out)
+                    } else if events_contain_target(catch_events, target) {
+                        collect_following_branches_on_path(catch_events, target, out)
+                    } else if events_contain_target(finally_events, target) {
+                        collect_following_branches_on_path(finally_events, target, out)
+                    } else {
+                        true
+                    }
+                }
+                _ => true,
+            };
+            continue;
+        }
+        if !found_target {
+            continue;
+        }
+        if let FlowEvent::Branch {
+            span,
+            condition: Some(condition),
+            then_events,
+            ..
+        } = event
+        {
+            out.push(StructuredBranch {
+                span: *span,
+                condition,
+                then_events,
+            });
+        }
+    }
+    found_target
+}
+
+fn events_contain_target(events: &[FlowEvent], target: Span) -> bool {
+    events
+        .iter()
+        .any(|event| event.span() == target || span_contains(event.span(), target))
+}
+
+fn branch_arm_abruptly_exits(events: &[FlowEvent]) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Return { .. } | FlowEvent::Throw { .. } => return true,
+            FlowEvent::Call { name, .. }
+                if matches!(
+                    clean_overwrite_callee_tail(name).as_str(),
+                    "abort" | "sendstatus" | "exit" | "panic"
+                ) =>
+            {
+                return true;
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } if !else_events.is_empty()
+                && branch_arm_abruptly_exits(then_events)
+                && branch_arm_abruptly_exits(else_events) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn finding_for_guard_span(
+    hit: &RuleMatch,
+    source_text: &str,
+    span: Span,
+    rule_id: &str,
+    tag: &str,
+    category: &str,
+) -> Option<FindingMatch> {
+    let location = bonsai_common::SpanMap::new(source_text).line_col(span.start);
+    let text = source_text
+        .get(span.start as usize..span.end as usize)?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    Some(FindingMatch {
+        rule_id: rule_id.to_string(),
+        file: hit.file.clone(),
+        line: location.line,
+        column: location.column,
+        text,
+        enclosing_fn: hit.enclosing_fn.clone(),
+        tag: Some(tag.to_string()),
+        severity: None,
+        category: Some(category.to_string()),
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: Vec::new(),
+    })
 }
 
 fn collect_structured_assignments_before<'a>(
@@ -1630,6 +1722,7 @@ fn collect_structured_assignments_before<'a>(
             FlowEvent::Assign {
                 span,
                 target,
+                source_name,
                 source_call,
                 source_call_args,
                 ..
@@ -1638,6 +1731,7 @@ fn collect_structured_assignments_before<'a>(
                     out.push(StructuredAssignment {
                         span: *span,
                         target,
+                        source_name: source_name.as_deref(),
                         source_call: source_call.as_deref(),
                         source_call_args,
                     });
@@ -2044,53 +2138,76 @@ pub(super) fn python_url_ssrf_guard_sanitizer(
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
     let global = ws.db().global_index();
     let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
-    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
-    let func_start = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1)).ok()?;
-    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let prior = lines.get(func_start..sink_idx)?.join("\n");
-    let compact = compact_guard_text(&prior);
     let parsed_var = python_urlparse_assignment_var(&decl.flow_events, snk.span, &target)?;
-    let scheme_guard = compact.contains(&format!("{parsed_var}.scheme!=\"https\""))
-        || compact.contains(&format!("\"https\"!={parsed_var}.scheme"));
-    let host_allowlist = compact.contains(&format!("{parsed_var}.hostname"))
-        && (compact.contains("notinALLOWED")
-            || compact.contains("notinallowed")
-            || compact.contains("notinALLOWED_HOSTS")
-            || compact.contains("notinallowed_hosts"));
-    let dns_lookup = compact.contains(&format!("getaddrinfo({parsed_var}.hostname"));
-    let private_ip_reject = compact.contains("is_private")
-        && compact.contains("is_loopback")
-        && compact.contains("is_link_local");
-    let redirects_disabled = compact.contains("follow_redirects=False");
-    if !(scheme_guard && host_allowlist && dns_lookup && private_ip_reject && redirects_disabled) {
+    let mut branches = Vec::new();
+    collect_all_structured_branches(&decl.flow_events, &mut branches);
+    let relevant_branches: Vec<_> = branches
+        .into_iter()
+        .filter(|branch| branch.span.start < snk.span.start)
+        .collect();
+    let scheme_guard = relevant_branches.iter().find(|branch| {
+        python_url_scheme_guard_condition(branch.condition, &parsed_var)
+            && branch_arm_abruptly_exits(branch.then_events)
+    });
+    let host_allowlist = relevant_branches.iter().any(|branch| {
+        python_url_host_allowlist_condition(branch.condition, &parsed_var)
+            && branch_arm_abruptly_exits(branch.then_events)
+    });
+    let private_ip_reject = relevant_branches.iter().any(|branch| {
+        python_private_ip_reject_condition(branch.condition) && branch_arm_abruptly_exits(branch.then_events)
+    });
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    let hostname_place = format!("{parsed_var}.hostname");
+    let dns_lookup = calls.iter().any(|call| {
+        call.span.start < snk.span.start
+            && clean_overwrite_callee_tail(call.name) == "getaddrinfo"
+            && call
+                .args
+                .first()
+                .is_some_and(|arg| arg.place.as_deref() == Some(hostname_place.as_str()))
+    });
+    let redirects_disabled = calls.iter().any(|call| {
+        call.span.start < snk.span.start
+            && clean_overwrite_callee_tail(call.name) == "asyncclient"
+            && call.args.iter().any(|arg| {
+                arg.name.as_deref() == Some("follow_redirects")
+                    && arg.value_text.trim().eq_ignore_ascii_case("false")
+            })
+    });
+    if !(scheme_guard.is_some() && host_allowlist && dns_lookup && private_ip_reject && redirects_disabled) {
         return None;
     }
-    let guard_idx = lines
+    let mut finding = finding_for_guard_span(
+        snk,
+        snapshot.text.as_ref(),
+        scheme_guard?.span,
+        "engine.sanitizer.python_url_ssrf_guard",
+        "ssrf-sanitize",
+        "url-scheme-host-private-ip-guard",
+    )?;
+    finding.sanitised_arg_indices = sink_tainted_args
         .iter()
-        .enumerate()
-        .skip(func_start)
-        .take(sink_idx.saturating_sub(func_start))
-        .find_map(|(idx, line)| (line.contains(".scheme") && line.contains("https")).then_some(idx))?;
-    let line = lines.get(guard_idx)?;
-    Some(FindingMatch {
-        rule_id: "engine.sanitizer.python_url_ssrf_guard".to_string(),
-        file: snk.file.clone(),
-        line: u32::try_from(guard_idx + 1).ok()?,
-        column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
-        text: line.trim().to_string(),
-        enclosing_fn: snk.enclosing_fn.clone(),
-        tag: Some("ssrf-sanitize".to_string()),
-        severity: None,
-        category: Some("url-scheme-host-private-ip-guard".to_string()),
-        trust: None,
-        payload_types: Vec::new(),
-        tainted_args: Vec::new(),
-        sanitised_arg_indices: sink_tainted_args
-            .iter()
-            .filter_map(|arg| u32::try_from(arg.index).ok())
-            .collect(),
-    })
+        .filter_map(|arg| u32::try_from(arg.index).ok())
+        .collect();
+    Some(finding)
+}
+
+fn python_url_scheme_guard_condition(condition: &str, parsed_var: &str) -> bool {
+    let compact = compact_guard_text(condition);
+    compact.contains(&format!("{parsed_var}.scheme!=\"https\""))
+        || compact.contains(&format!("\"https\"!={parsed_var}.scheme"))
+}
+
+fn python_url_host_allowlist_condition(condition: &str, parsed_var: &str) -> bool {
+    let compact = compact_guard_text(condition).to_ascii_lowercase();
+    compact.contains(&format!("{parsed_var}.hostname").to_ascii_lowercase())
+        && (compact.contains("notinallowed") || compact.contains("notinallowed_hosts"))
+}
+
+fn python_private_ip_reject_condition(condition: &str) -> bool {
+    let compact = compact_guard_text(condition);
+    compact.contains("is_private") && compact.contains("is_loopback") && compact.contains("is_link_local")
 }
 
 fn python_urlparse_assignment_var(events: &[FlowEvent], before: Span, target: &str) -> Option<String> {
@@ -2268,12 +2385,8 @@ fn find_call_arg_named_at<'a>(
     None
 }
 
-fn python_dev_only_env_guard_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    if !trimmed.starts_with("if ") || !trimmed.ends_with(':') {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
+fn python_dev_only_env_guard_condition(condition: &str) -> bool {
+    let lower = condition.trim().to_ascii_lowercase();
     let reads_env = lower.contains("os.environ.get")
         || lower.contains("os.getenv")
         || lower.contains("environ.get")
@@ -2302,50 +2415,6 @@ fn python_dev_only_env_guard_line(line: &str) -> bool {
     DEV_LITERALS.iter().any(|literal| lower.contains(literal))
 }
 
-fn python_guard_exits_before_target(
-    lines: &[&str],
-    guard_idx: usize,
-    target_idx: usize,
-    guard_indent: usize,
-    target_indent: usize,
-) -> bool {
-    let mut saw_exit = false;
-    let mut saw_dedent_after_exit = false;
-    for line in lines.iter().take(target_idx).skip(guard_idx + 1) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let indent = leading_ascii_whitespace(line);
-        if !saw_exit {
-            if indent <= guard_indent {
-                return false;
-            }
-            if python_line_exits_scope(trimmed) {
-                saw_exit = true;
-            }
-            continue;
-        }
-        if indent <= guard_indent {
-            saw_dedent_after_exit = true;
-            break;
-        }
-    }
-    saw_exit && (saw_dedent_after_exit || target_indent <= guard_indent)
-}
-
-fn python_line_exits_scope(trimmed: &str) -> bool {
-    let compact = compact_guard_text(trimmed);
-    trimmed.starts_with("return")
-        || trimmed.starts_with("raise")
-        || trimmed.starts_with("abort(")
-        || trimmed.starts_with("flask.abort(")
-        || compact.contains(";return")
-        || compact.contains(";raise")
-        || compact.contains(";abort(")
-        || compact.contains(";flask.abort(")
-}
-
 fn leading_ascii_whitespace(line: &str) -> usize {
     line.as_bytes()
         .iter()
@@ -2362,10 +2431,6 @@ pub(super) fn finite_literal_map_lookup_allowlist_sanitizer(
         return None;
     }
     let snapshot = ws.vfs().snapshot(sink.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let target_idx = usize::try_from(sink.line.checked_sub(1)?).ok()?;
-    let target_line = *lines.get(target_idx)?;
-    let target_indent = leading_ascii_whitespace(target_line);
     let file_index = ws.db().decl_index(sink.span.file)?;
     let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&file_index.assignment_values);
     let enclosing = ws
@@ -2397,7 +2462,7 @@ pub(super) fn finite_literal_map_lookup_allowlist_sanitizer(
         }
         for assignment in &local_assignments {
             let location = span_map.line_col(assignment.span.start);
-            if location.column > u32::try_from(target_indent + 1).ok()? {
+            if location.column > sink.column {
                 continue;
             }
             if !python_assignment_narrows_key_to_map(
@@ -2718,4 +2783,57 @@ fn python_identifier_path_like(value: &str) -> bool {
         && value
             .split('.')
             .all(|part| !part.is_empty() && python_identifier_like(part))
+}
+
+#[cfg(test)]
+mod structured_guard_tests {
+    use super::*;
+
+    fn span(start: u64, end: u64) -> Span {
+        Span::new(FileId::new(0), start, end)
+    }
+
+    #[test]
+    fn completed_environment_guard_comes_from_branch_facts() {
+        let guard_span = span(0, 40);
+        let target_span = span(50, 60);
+        let events = [
+            FlowEvent::Branch {
+                span: guard_span,
+                condition: Some("process.env.NODE_ENV !== 'development'".to_string()),
+                then_events: vec![FlowEvent::Return {
+                    span: span(30, 36),
+                    value_text: None,
+                    value_name: None,
+                    value_flow: Default::default(),
+                }],
+                else_events: Vec::new(),
+            },
+            FlowEvent::Call {
+                span: target_span,
+                name: "sink".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: bonsai_lang_api::CallKind::Function,
+                args: Vec::new(),
+            },
+        ];
+        let mut branches = Vec::new();
+
+        collect_completed_branches_on_path(&events, target_span, &mut branches);
+
+        assert_eq!(branches.len(), 1);
+        assert!(js_dev_only_env_guard_condition(branches[0].condition));
+        assert!(branch_arm_abruptly_exits(branches[0].then_events));
+    }
+
+    #[test]
+    fn python_environment_condition_is_ast_rendering_not_if_line() {
+        assert!(python_dev_only_env_guard_condition(
+            "os.getenv('APP_ENV') != 'dev'"
+        ));
+        assert!(!python_dev_only_env_guard_condition(
+            "os.getenv('APP_ENV') == 'production'"
+        ));
+    }
 }
