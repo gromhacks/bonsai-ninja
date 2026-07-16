@@ -16,7 +16,8 @@
 use ahash::{AHashMap, AHashSet};
 use anyhow::{anyhow, Context, Result};
 use bonsai_common::{
-    dependency_metadata::collect_dependency_metadata_fingerprints, FuncId, MATCHER_POLICY_FINGERPRINT,
+    dependency_metadata::collect_dependency_metadata_fingerprints, write_atomic_bytes, FuncId,
+    MATCHER_POLICY_FINGERPRINT,
 };
 use bonsai_lang_api::{Decl, LanguageRegistry};
 use bonsai_workspace::{FileRefreshKind, WorkspaceOpenOptions};
@@ -1631,7 +1632,7 @@ fn cache_manifest_sidecars(stats: &CacheStats) -> Vec<CacheManifestSidecar> {
             &stats.dataflow_sidecar,
             stats.dataflow_sidecar_exists,
             stats.dataflow_sidecar_bytes,
-            "Compatibility dataflow sidecar retained for older warm-reopen paths.",
+            "Read-only migration fallback for dataflow sidecars written by older releases.",
         ),
         cache_manifest_sidecar(
             "value_flow",
@@ -2572,27 +2573,6 @@ where
     metadata_bytes.push(b'\n');
     write_atomic_bytes(&default_export_cache_metadata_path(root), &metadata_bytes)?;
     sync_parent_dir(cache);
-    Ok(())
-}
-
-fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut tmp = PendingExportTemp::new(unique_default_export_tmp_path(path));
-    {
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp.path)?;
-        let mut writer = io::BufWriter::with_capacity(64 * 1024, file);
-        writer.write_all(bytes)?;
-        writer.flush()?;
-        writer.get_ref().sync_all()?;
-    }
-    fs::rename(&tmp.path, path)?;
-    tmp.commit();
-    sync_parent_dir(path);
     Ok(())
 }
 

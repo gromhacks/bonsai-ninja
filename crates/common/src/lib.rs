@@ -10,6 +10,7 @@
 //! Nothing in this crate depends on Tree-sitter or any language adapter; it is
 //! safe to depend on from every other crate.
 
+pub mod atomic_file;
 pub mod dependency_metadata;
 pub mod ids;
 pub mod names;
@@ -18,6 +19,7 @@ pub mod precision;
 pub mod span;
 pub mod span_cache;
 
+pub use atomic_file::write_atomic_bytes;
 pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, TypeId, ValueId};
 pub use names::{
     callable_reference_variants, is_bonsai_case_probe_path, short_qualified_tail,

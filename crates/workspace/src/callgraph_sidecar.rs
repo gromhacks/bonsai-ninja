@@ -16,19 +16,17 @@
 use crate::cache_fingerprint::dependency_metadata_fingerprint_for_sidecar;
 use ahash::AHashMap;
 use bonsai_callgraph::ResolvedCallGraph;
-use bonsai_common::{workspace_bonsai_dir, MATCHER_POLICY_FINGERPRINT};
+use bonsai_common::{workspace_bonsai_dir, write_atomic_bytes, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
 use bonsai_hash::fnv1a_bytes64;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 // v11 (2026-05-27): adapter decl-extraction changes add synthesized
 // members (C# expression-bodied-property getters + record members, Java
 // records, Solidity struct-literal field writes) → new call edges, so
 // callgraphs persisted by older binaries are no longer equivalent.
 pub const CALLGRAPH_CACHE_VERSION: u32 = 11;
-static CALLGRAPH_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CallgraphSnapshot {
@@ -88,26 +86,7 @@ pub(crate) fn save_callgraph_sidecar(
     };
     let bytes =
         bincode::serialize(&snap).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let tmp = unique_tmp_path(path);
-    {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-    }
-    if let Err(err) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err);
-    }
-    Ok(())
+    write_atomic_bytes(path, &bytes)
 }
 
 /// Load the sidecar at `path` and return the graph if every
@@ -232,17 +211,4 @@ fn validate_snapshot_metadata(path: &Path, snap: &CallgraphSnapshot) -> std::io:
         ));
     }
     Ok(())
-}
-
-fn unique_tmp_path(target: &Path) -> PathBuf {
-    use std::ffi::OsString;
-    let counter = CALLGRAPH_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let mut name = OsString::from(".callgraph-tmp-");
-    name.push(pid.to_string());
-    name.push("-");
-    name.push(counter.to_string());
-    let mut path = target.to_path_buf();
-    path.set_file_name(name);
-    path
 }

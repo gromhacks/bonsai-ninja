@@ -823,8 +823,8 @@ fn cache_commands_cli_json_match_sdk_facade() {
         .expect("write dataflow sidecar");
     let stats = project.cache().stats().expect("SDK cache stats");
     assert!(
-        stats.dataflow_sidecar_exists,
-        "fixture should have a dataflow sidecar before clear: {stats:#?}"
+        stats.dataflow_factstore_sidecar_exists && !stats.dataflow_sidecar_exists,
+        "fixture should have only the canonical dataflow factstore before clear: {stats:#?}"
     );
     assert_json_eq(
         "cache stats after SDK dataflow rebuild",

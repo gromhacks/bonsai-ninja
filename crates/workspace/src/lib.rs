@@ -633,7 +633,8 @@ pub struct WorkspaceOpenOptions {
     /// accidentally force every query command to rebuild the callgraph.
     #[serde(default = "default_load_callgraph_sidecar")]
     pub load_callgraph_sidecar: bool,
-    /// Load `<workspace>/.bonsai/dataflow.v2.bin` before queries run.
+    /// Load the canonical dataflow factstore before queries run, with a
+    /// read-only fallback for legacy `dataflow.v2.bin` caches.
     pub load_dataflow_sidecar: bool,
     /// Compute every missing dataflow entry during open.
     pub prewarm_dataflow: bool,
@@ -2227,21 +2228,34 @@ impl Workspace {
         Ok(ws)
     }
 
-    /// Load the conventional dataflow sidecar for `root` into this
-    /// workspace. Returns the number of entries that survived schema,
-    /// content-hash, and dependency validation.
+    /// Load the canonical factstore dataflow sidecar for `root`, falling
+    /// back to the read-only legacy bincode cache when necessary.
     pub fn load_dataflow_sidecar(&self, root: &Path) -> std::io::Result<usize> {
+        let factstore = DataFlowCache::factstore_sidecar_path(root);
+        let loaded = self
+            .inner
+            .dataflow
+            .load_factstore_sidecar(&factstore, self.db())?;
+        if loaded > 0 {
+            return Ok(loaded);
+        }
         self.inner
             .dataflow
             .load_from_disk(&DataFlowCache::sidecar_path(root), self.db())
     }
 
-    /// Save the current dataflow cache to the conventional sidecar
-    /// path for `root`.
+    /// Persist the complete current dataflow cache to the canonical,
+    /// streaming factstore sidecar for `root`.
     pub fn save_dataflow_sidecar(&self, root: &Path) -> std::io::Result<()> {
         self.inner
             .dataflow
-            .save_to_disk(&DataFlowCache::sidecar_path(root), self.db())
+            .save_factstore(&DataFlowCache::factstore_sidecar_path(root), self.db())?;
+        let legacy = DataFlowCache::sidecar_path(root);
+        match std::fs::remove_file(legacy) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Load the conventional value-flow sidecar for `root`. Returns
