@@ -5181,8 +5181,13 @@ where
     };
     let mut source_func_ids: Vec<FuncId> = source_groups.keys().copied().collect();
     source_func_ids.sort_by_key(|func| func.raw());
-    let source_callback_targets =
-        configured_source_callback_targets_by_source(&source_work, pack, global.as_ref());
+    let resolved_call_graph = ws.cached_resolved_call_graph();
+    let source_callback_targets = configured_source_callback_targets_by_source(
+        &source_work,
+        pack,
+        global.as_ref(),
+        resolved_call_graph.as_ref(),
+    );
     let mut source_func_ids_for_graph = source_func_ids.clone();
     source_func_ids_for_graph.extend(
         source_callback_targets
@@ -6420,104 +6425,15 @@ fn coarse_corridor_for_source<'a>(
     )
 }
 
-struct SourceCallbackTargetIndex {
-    funcs_by_file: AHashMap<FileId, Vec<FuncId>>,
-    funcs_by_module: AHashMap<bonsai_lang_api::ModulePath, Vec<FuncId>>,
-}
-
-impl SourceCallbackTargetIndex {
-    fn build(global: &GlobalIndex) -> Self {
-        let mut funcs_by_file: AHashMap<FileId, Vec<FuncId>> = AHashMap::new();
-        let mut funcs_by_module: AHashMap<bonsai_lang_api::ModulePath, Vec<FuncId>> = AHashMap::new();
-        for file in global.all_files() {
-            for decl in global.functions_in(file) {
-                let func = FuncId::new(decl.symbol.raw());
-                funcs_by_file.entry(file).or_default().push(func);
-                if !decl.module_path.is_empty() {
-                    funcs_by_module
-                        .entry(decl.module_path.clone())
-                        .or_default()
-                        .push(func);
-                }
-            }
-        }
-        Self {
-            funcs_by_file,
-            funcs_by_module,
-        }
-    }
-
-    fn callback_targets_for_decl(
-        &self,
-        global: &GlobalIndex,
-        host_decl: &bonsai_lang_api::Decl,
-        callback_name: &str,
-    ) -> Vec<FuncId> {
-        let mut out = Vec::new();
-        let mut seen = AHashSet::default();
-        let host_file = global
-            .declaring_file(host_decl.symbol)
-            .unwrap_or(host_decl.span.file);
-        if let Some(funcs) = self.funcs_by_file.get(&host_file) {
-            extend_matching_callback_targets(global, funcs, callback_name, &mut out, &mut seen);
-        }
-        if !host_decl.module_path.is_empty() {
-            if let Some(funcs) = self.funcs_by_module.get(&host_decl.module_path) {
-                extend_matching_callback_targets(global, funcs, callback_name, &mut out, &mut seen);
-            }
-        }
-        out
-    }
-}
-
-fn extend_matching_callback_targets(
-    global: &GlobalIndex,
-    funcs: &[FuncId],
-    callback_name: &str,
-    out: &mut Vec<FuncId>,
-    seen: &mut AHashSet<FuncId>,
-) {
-    for func in funcs {
-        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
-            continue;
-        };
-        if !callback_decl_name_matches(decl, callback_name) {
-            continue;
-        }
-        if seen.insert(*func) {
-            out.push(*func);
-        }
-    }
-}
-
-fn callback_decl_name_matches(decl: &bonsai_lang_api::Decl, callback_name: &str) -> bool {
-    callback_name_matches_tail(&decl.name, callback_name)
-        || decl
-            .qualified_name
-            .as_deref()
-            .is_some_and(|qualified| callback_name_matches_tail(qualified, callback_name))
-}
-
-fn callback_name_matches_tail(name: &str, callback_name: &str) -> bool {
-    if name == callback_name {
-        return true;
-    }
-    name.rsplit_once("::")
-        .is_some_and(|(_, tail)| tail == callback_name)
-        || name
-            .rsplit_once('.')
-            .is_some_and(|(_, tail)| tail == callback_name)
-}
-
 fn configured_source_callback_targets_by_source(
     source_work: &[(&RuleMatch, FuncId, TokenSet)],
     pack: &Rulepack,
     global: &GlobalIndex,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
 ) -> AHashMap<FuncId, AHashSet<FuncId>> {
     if source_work.is_empty() {
         return AHashMap::new();
     }
-    let index = SourceCallbackTargetIndex::build(global);
     let mut out: AHashMap<FuncId, AHashSet<FuncId>> = AHashMap::new();
     for (src, src_func_id, _) in source_work {
         let Some(src_decl) = global.decl_of(SymbolId::new(src_func_id.raw())) else {
@@ -6539,20 +6455,21 @@ fn configured_source_callback_targets_by_source(
             let Some(arg) = args.get(shape.callback_arg_index) else {
                 continue;
             };
-            let callback_text = arg
-                .place
-                .as_deref()
-                .filter(|place| !place.trim().is_empty())
-                .unwrap_or(arg.value_text.as_str());
-            let callback_name = strip_source_callback_reference(callback_text);
-            if callback_name.is_empty() {
-                continue;
-            }
-            for target in index.callback_targets_for_decl(global, src_decl, callback_name) {
-                if target == *src_func_id {
+            // The callgraph already resolves callable literals/references
+            // from the parsed argument node. Containment by the exact
+            // argument span is the compiler proof that this indirect edge is
+            // the configured callback, so no callback spelling is parsed.
+            for edge in call_graph.callees_of(*src_func_id) {
+                if edge.kind != bonsai_callgraph::EdgeKind::Indirect
+                    || !edge.precision.is_semantic()
+                    || edge.span.file != arg.span.file
+                    || edge.span.start < arg.span.start
+                    || edge.span.end > arg.span.end
+                    || edge.to == *src_func_id
+                {
                     continue;
                 }
-                out.entry(*src_func_id).or_default().insert(target);
+                out.entry(*src_func_id).or_default().insert(edge.to);
             }
         }
     }
@@ -6607,46 +6524,6 @@ fn merge_configured_source_callback_corridors(
             .extend(source_corridor);
     }
     added_scope
-}
-
-fn strip_source_callback_reference(text: &str) -> &str {
-    let mut s = text.trim();
-    if let Some(open) = s.find('(') {
-        if let Some(close) = s.rfind(')') {
-            if open < close {
-                let prefix = s[..open].trim();
-                if matches!(prefix, "method" | "partial" | "fun") {
-                    s = s[open + 1..close].trim();
-                }
-            }
-        }
-    }
-    if let Some(rest) = s.strip_prefix("fun ") {
-        s = rest.trim();
-    }
-    while let Some(rest) = s
-        .strip_prefix('\\')
-        .or_else(|| s.strip_prefix('&'))
-        .or_else(|| s.strip_prefix(':'))
-    {
-        s = rest;
-    }
-    if let Some(idx) = s.find('/') {
-        if s[idx + 1..].chars().all(|c| c.is_ascii_digit()) {
-            s = &s[..idx];
-        }
-    }
-    if let Some((_, tail)) = s.rsplit_once("::") {
-        s = tail;
-    }
-    if let Some((_, tail)) = s.rsplit_once('.') {
-        s = tail;
-    }
-    s = s.trim_matches(|c: char| c == '"' || c == '\'').trim();
-    if s.is_empty() || !s.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return "";
-    }
-    s
 }
 
 fn extend_corridor_with_summary_dependency_support(
