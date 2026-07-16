@@ -73,8 +73,8 @@
 use bonsai_common::{FuncId, Precision, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
 use bonsai_lang_api::{
-    kit::SYNTHETIC_TUPLE_RESULT_PREFIX, AssignValueKind, CallArg, CallKind, Decl, DeclKind, ExpressionFlow,
-    ExpressionProjection, FlowEvent,
+    kit::SYNTHETIC_TUPLE_RESULT_PREFIX, AssignValueKind, AssignmentValueFact, CallArg, CallKind, Decl,
+    DeclKind, ExpressionFlow, ExpressionProjection, FlowEvent,
 };
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -845,11 +845,23 @@ impl NameInterner {
 /// places, so the segment merge can resolve local StrIds back to
 /// strings and re-intern them in the segment-level pool.
 pub fn transfer_function_for(decl: &Decl) -> TransferOutput {
-    transfer_function_for_with_options(decl, &TransferOptions::default())
+    transfer_function_for_with_options_and_assignment_values(decl, &TransferOptions::default(), &[])
 }
 
 /// Run the transfer-function pass with caller-provided options.
 pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions) -> TransferOutput {
+    transfer_function_for_with_options_and_assignment_values(decl, options, &[])
+}
+
+/// Run the transfer pass with exact assignment-to-RHS syntax facts from the
+/// declaration index. This is the production compiler path: nested call
+/// results are joined to their assignment writes by Tree-sitter spans rather
+/// than by reparsing source text or guessing from callee names.
+pub fn transfer_function_for_with_options_and_assignment_values(
+    decl: &Decl,
+    options: &TransferOptions,
+    assignment_values: &[AssignmentValueFact],
+) -> TransferOutput {
     let func = FuncId::new(decl.symbol.raw());
     let mut out = TransferOutput::new(func);
     out.is_constructor = matches!(decl.kind, DeclKind::Constructor);
@@ -879,6 +891,7 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
         yield_callback_names: collect_yield_callback_names(&decl.flow_events),
         pattern_bindings: collect_pattern_bindings(&decl.flow_events),
         pending_expression_calls: Vec::new(),
+        assignment_values,
         in_loop_replay: false,
     };
 
@@ -927,8 +940,17 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
 
     emit_receiver_field_writes(decl, &mut ctx);
     walk_events(&decl.flow_events, &mut ctx);
+    let mut flow_call_sites = Vec::new();
+    collect_flow_call_sites(&decl.flow_events, &mut flow_call_sites);
+    flow_call_sites.sort_unstable_by_key(|span| (span.file.raw(), span.start, span.end));
+    flow_call_sites.dedup();
     let mut assignment_call_sites = ahash::AHashSet::default();
-    collect_assignment_call_sites(&decl.flow_events, &mut assignment_call_sites);
+    collect_assignment_call_sites(
+        &decl.flow_events,
+        assignment_values,
+        &flow_call_sites,
+        &mut assignment_call_sites,
+    );
     for site in &mut ctx.out.call_sites {
         if assignment_call_sites.contains(&site.site.0) {
             site.is_assign_rhs = true;
@@ -1803,6 +1825,10 @@ struct TransferCtx<'a> {
     /// each result. Resolved after all Call events have been lowered so event
     /// order cannot affect dataflow.
     pending_expression_calls: Vec<PendingExpressionCall>,
+    /// Exact Tree-sitter assignment/RHS relationships for this file. The
+    /// facts are sorted by assignment span, so lookups remain logarithmic and
+    /// do not turn transfer into an assignments-squared pass on large files.
+    assignment_values: &'a [AssignmentValueFact],
     /// Whether the walker is replaying an enclosing loop body to establish
     /// loop-carried edges. A nested loop encountered during replay gets one
     /// body visit: its own normal visit already established its local carry
@@ -3210,7 +3236,12 @@ fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCal
     None
 }
 
-fn collect_assignment_call_sites(events: &[FlowEvent], out: &mut ahash::AHashSet<Span>) {
+fn collect_assignment_call_sites(
+    events: &[FlowEvent],
+    assignment_values: &[AssignmentValueFact],
+    flow_call_sites: &[Span],
+    out: &mut ahash::AHashSet<Span>,
+) {
     for (index, event) in events.iter().enumerate() {
         match event {
             FlowEvent::Assign {
@@ -3220,16 +3251,24 @@ fn collect_assignment_call_sites(events: &[FlowEvent], out: &mut ahash::AHashSet
             } => {
                 out.insert(assign_call_site_hint(events, index).map_or(*span, |hint| hint.site_span));
             }
+            FlowEvent::Assign { span, value_kind, .. }
+                if !matches!(value_kind, Some(AssignValueKind::CallableReference)) =>
+            {
+                let expression_spans = assignment_call_sites_for_span(assignment_values, *span);
+                for expression_span in expression_spans {
+                    collect_contained_call_sites(expression_span, flow_call_sites, out);
+                }
+            }
             FlowEvent::Branch {
                 then_events,
                 else_events,
                 ..
             } => {
-                collect_assignment_call_sites(then_events, out);
-                collect_assignment_call_sites(else_events, out);
+                collect_assignment_call_sites(then_events, assignment_values, flow_call_sites, out);
+                collect_assignment_call_sites(else_events, assignment_values, flow_call_sites, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_assignment_call_sites(body, out);
+                collect_assignment_call_sites(body, assignment_values, flow_call_sites, out);
             }
             FlowEvent::Try {
                 body,
@@ -3237,13 +3276,79 @@ fn collect_assignment_call_sites(events: &[FlowEvent], out: &mut ahash::AHashSet
                 finally_events,
                 ..
             } => {
-                collect_assignment_call_sites(body, out);
-                collect_assignment_call_sites(catch_events, out);
-                collect_assignment_call_sites(finally_events, out);
+                collect_assignment_call_sites(body, assignment_values, flow_call_sites, out);
+                collect_assignment_call_sites(catch_events, assignment_values, flow_call_sites, out);
+                collect_assignment_call_sites(finally_events, assignment_values, flow_call_sites, out);
             }
             _ => {}
         }
     }
+}
+
+fn collect_flow_call_sites(events: &[FlowEvent], out: &mut Vec<Span>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, .. } => out.push(*span),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_flow_call_sites(then_events, out);
+                collect_flow_call_sites(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_flow_call_sites(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_flow_call_sites(body, out);
+                collect_flow_call_sites(catch_events, out);
+                collect_flow_call_sites(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_contained_call_sites(
+    expression_span: Span,
+    flow_call_sites: &[Span],
+    out: &mut ahash::AHashSet<Span>,
+) {
+    let expression_key = (expression_span.file.raw(), expression_span.start);
+    let start = flow_call_sites.partition_point(|span| (span.file.raw(), span.start) < expression_key);
+    for call_site in flow_call_sites.iter().skip(start) {
+        if call_site.file != expression_span.file || call_site.start >= expression_span.end {
+            break;
+        }
+        if span_contains_or_equal(expression_span, *call_site) {
+            out.insert(*call_site);
+        }
+    }
+}
+
+fn assignment_call_sites_for_span(facts: &[AssignmentValueFact], span: Span) -> SmallVec<[Span; 2]> {
+    let key = |candidate: Span| (candidate.file.raw(), candidate.start, candidate.end);
+    let wanted = key(span);
+    let start = facts.partition_point(|fact| key(fact.assignment_span) < wanted);
+    let mut call_sites = SmallVec::new();
+    for fact in facts.iter().skip(start) {
+        let candidate = key(fact.assignment_span);
+        if candidate != wanted {
+            break;
+        }
+        for call_site in &fact.call_sites {
+            if !call_sites.contains(call_site) {
+                call_sites.push(*call_site);
+            }
+        }
+    }
+    call_sites
 }
 
 fn assign_sources_match_call(
@@ -3305,6 +3410,7 @@ fn walk_assign(
     if target.is_empty() {
         return;
     }
+    let indexed_call_sites = assignment_call_sites_for_span(ctx.assignment_values, span);
     let rhs_is_literal = matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::Literal));
     if is_structural_index_metadata_target(target) {
         return;
@@ -3371,6 +3477,29 @@ fn walk_assign(
         via_span: span,
     };
     emit_pattern_bindings_for_assign_span(span, ctx);
+
+    // A compound RHS can contain calls without being a direct call itself:
+    // PHP's `$raw = readline(...) ?: ""` is one example. The declaration
+    // index records the exact RHS call nodes, so join those CallRet places to
+    // this write without rebuilding expression structure from text. Callable
+    // references are values, not invocations, and therefore never receive
+    // this edge.
+    if source_call.is_none() && !matches!(value_kind, Some(AssignValueKind::CallableReference)) {
+        for call_span in indexed_call_sites {
+            let pending = PendingExpressionCall {
+                call_span,
+                target: write_node,
+                meta: edge_meta,
+            };
+            if !ctx.pending_expression_calls.iter().any(|existing| {
+                existing.call_span == pending.call_span
+                    && existing.target == pending.target
+                    && existing.meta == pending.meta
+            }) {
+                ctx.pending_expression_calls.push(pending);
+            }
+        }
+    }
 
     // Bridge each source's most-recent writer to the new target's
     // Write node. CFG narrowing: bridge_read consults

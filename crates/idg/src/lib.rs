@@ -98,9 +98,10 @@ pub use symbolic::{
 };
 pub use transfer::{
     transfer_for_many, transfer_for_many_with_options, transfer_function_for,
-    transfer_function_for_with_options, CallResultPassthroughSpec, CallSiteRef, CleanOutputOverwriteSpec,
-    NameInterner, OutputArgFlowSpec, ReceiverStatePropagationSpec, SourceCallbackArgSpec,
-    SourceOutputArgSpec, ThrowSite, TransferOptions, TransferOutput,
+    transfer_function_for_with_options, transfer_function_for_with_options_and_assignment_values,
+    CallResultPassthroughSpec, CallSiteRef, CleanOutputOverwriteSpec, NameInterner, OutputArgFlowSpec,
+    ReceiverStatePropagationSpec, SourceCallbackArgSpec, SourceOutputArgSpec, ThrowSite, TransferOptions,
+    TransferOutput,
 };
 pub use workspace::{CrossFileEdge, CrossFileEdges, FieldFlowLink, IdgWorkspace, SegmentId};
 

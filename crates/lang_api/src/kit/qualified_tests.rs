@@ -1,4 +1,4 @@
-use super::{assignment_rhs_text, normalise_qualified_text};
+use super::normalise_qualified_text;
 
 #[test]
 fn dot_access_is_unchanged() {
@@ -37,20 +37,4 @@ fn matches_shared_projection_canonicalization_spec() {
             "adapter-side normaliser drifted on `{input}`"
         );
     }
-}
-
-#[test]
-fn assignment_rhs_skips_eq_and_arrow() {
-    assert_eq!(assignment_rhs_text("a = b"), Some("b"));
-    // `==` and `=>` cause the first character to be skipped;
-    // production behavior treats the trailing portion as an
-    // RHS in pathological inputs, but adapters never feed
-    // raw comparison expressions to this helper.
-    assert_eq!(assignment_rhs_text("a => b"), None);
-    assert_eq!(assignment_rhs_text("a = (b == c)"), Some("(b == c)"));
-}
-
-#[test]
-fn assignment_rhs_handles_strings() {
-    assert_eq!(assignment_rhs_text(r#"a = "x = y""#), Some("\"x = y\""));
 }

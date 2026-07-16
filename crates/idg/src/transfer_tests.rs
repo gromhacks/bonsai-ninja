@@ -1241,6 +1241,54 @@ fn assign_call_rhs_uses_sibling_call_span_for_return_binding() {
 }
 
 #[test]
+fn compound_assignment_binds_ast_indexed_rhs_call_result() {
+    let mut decl = empty_decl(1, "f");
+    let assign_span = span(50, 90);
+    let call_name_span = span(58, 66);
+    let call_expression_span = span(58, 82);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: assign_span,
+            target: "raw".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: call_name_span,
+            name: "readline".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+    ];
+    let facts = [AssignmentValueFact {
+        assignment_span: assign_span,
+        value_span: span(55, 88),
+        call_sites: vec![call_expression_span],
+    }];
+    let out =
+        transfer_function_for_with_options_and_assignment_values(&decl, &TransferOptions::default(), &facts);
+    let place_for = |node_id: NodeId| {
+        let node = out.nodes.get(node_id).expect("node exists");
+        out.places.get(node.place).expect("place exists")
+    };
+    assert!(
+        out.edges.iter().any(|edge| {
+            matches!(place_for(edge.from), Place::CallRet { site } if site.0 == call_name_span)
+                && matches!(place_for(edge.to), Place::Write { span, .. } if *span == assign_span)
+        }),
+        "expected AST-indexed CallRet -> assignment Write edge: {:#?}",
+        out.edges
+    );
+    assert!(out.call_sites[0].is_assign_rhs);
+}
+
+#[test]
 fn assign_source_names_use_previous_sibling_call_span_for_return_binding() {
     let mut decl = empty_decl(1, "f");
     let assign_span = span(50, 90);

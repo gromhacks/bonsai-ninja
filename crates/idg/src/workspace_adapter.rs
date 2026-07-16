@@ -30,8 +30,8 @@ use crate::builder::{
     stitch_idg_with_selective_field_forwarding_mode, CalleeResolver, FuncToSegment, ResolvedCallee,
 };
 use crate::transfer::{
-    declared_receiver_names, receiver_name_matches, transfer_function_for_with_options, TransferOptions,
-    TransferOutput,
+    declared_receiver_names, receiver_name_matches, transfer_function_for_with_options_and_assignment_values,
+    TransferOptions, TransferOutput,
 };
 use crate::workspace::{IdgWorkspace, SegmentId};
 
@@ -4104,9 +4104,16 @@ fn run_transfer_in_parallel_for_files(
     }
     funcs
         .into_par_iter()
-        .map(|(_file, decl)| {
+        .map(|(file, decl)| {
+            let assignment_values = global
+                .file_index(file)
+                .map_or(&[][..], |index| index.assignment_values.as_slice());
             if aggregate_layouts.is_empty() || !flow_events_contain_aggregate_assign(&decl.flow_events) {
-                return transfer_function_for_with_options(decl, transfer_options);
+                return transfer_function_for_with_options_and_assignment_values(
+                    decl,
+                    transfer_options,
+                    assignment_values,
+                );
             }
             let mut resolved = decl.clone();
             resolve_aggregate_assignments(
@@ -4114,7 +4121,11 @@ fn run_transfer_in_parallel_for_files(
                 &resolved.type_aliases,
                 &aggregate_layouts,
             );
-            transfer_function_for_with_options(&resolved, transfer_options)
+            transfer_function_for_with_options_and_assignment_values(
+                &resolved,
+                transfer_options,
+                assignment_values,
+            )
         })
         .collect()
 }

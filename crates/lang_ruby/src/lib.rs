@@ -91,10 +91,6 @@ impl LanguageAdapter for RubyAdapter {
                 // the exact contract this implements.
                 apply_ruby_scope_visibility(&mut idx, &tree, snapshot.text.as_bytes(), file);
                 for decl in &mut idx.defs {
-                    bonsai_lang_api::kit::inject_callable_reference_aliases_from_source(
-                        &mut decl.flow_events,
-                        snapshot.text.as_ref(),
-                    );
                     inject_ruby_raise_throw_events(&mut decl.flow_events);
                     inject_ruby_super_call_events(&mut decl.flow_events, &decl.name);
                     normalize_ruby_subshell_events(&mut decl.flow_events, snapshot.text.as_bytes());
@@ -1344,6 +1340,7 @@ fn ruby_bareword_call_result_name(
             bonsai_lang_api::AssignValueKind::Literal
                 | bonsai_lang_api::AssignValueKind::CallResult
                 | bonsai_lang_api::AssignValueKind::YieldResult
+                | bonsai_lang_api::AssignValueKind::CallableReference
         )
     ) {
         return None;

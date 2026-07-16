@@ -40,8 +40,7 @@
 //!    non-call-shaped invocations (Scala infix, JSX components,
 //!    Dart selector chains) here.
 //! 8. **Assignment / qualified-target normalization** (~2353-2487):
-//!    `qualified_assign_target`, `normalise_qualified_text`,
-//!    `assignment_rhs_text`.
+//!    `qualified_assign_target`, `normalise_qualified_text`.
 //! 9. **Foreach header parsing** (~3256-3300): `split_foreach_header`,
 //!    binding-keyword stripping.
 //! 10. **Param extraction** (~5400-): `extract_param_names`,
@@ -111,7 +110,7 @@ use identifiers::has_direct_child_kind;
 use param_extraction::extract_param_names;
 use pseudo_call::pseudo_call_event;
 use qualified::{
-    assignment_rhs_text, binary_operator_is_assignment, normalise_qualified_text, qualified_assign_target,
+    binary_operator_is_assignment, normalise_qualified_text, qualified_assign_target,
     type_only_declaration_without_initializer,
 };
 pub(crate) use receiver_writes::argument_place;
@@ -1454,12 +1453,131 @@ fn assignment_target_node<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'
 /// fallback covers grammars whose initializer is an unfielded sibling while
 /// remaining a parsed-node relationship rather than a textual `=` scan.
 fn assignment_value_node<'tree>(node: Node<'tree>, target_node: Option<Node<'tree>>) -> Option<Node<'tree>> {
+    // Some grammars attach an RHS field id to punctuation. Perl list
+    // assignment, for example, reports its opening `(` as `right` even
+    // though the named `list_expression` is the actual value node. Compiler
+    // facts must never treat an anonymous terminal as an expression; reject
+    // those field results and use the named-child relationship below.
     node.child_by_field_name("right")
-        .or_else(|| node.child_by_field_name("rhs"))
-        .or_else(|| node.child_by_field_name("value"))
-        .or_else(|| node.child_by_field_name("result"))
-        .or_else(|| node.child_by_field_name("target"))
+        .filter(Node::is_named)
+        .or_else(|| node.child_by_field_name("rhs").filter(Node::is_named))
+        .or_else(|| node.child_by_field_name("value").filter(Node::is_named))
+        .or_else(|| node.child_by_field_name("result").filter(Node::is_named))
         .or_else(|| last_named_child_excluding(&node, target_node))
+}
+
+fn has_direct_token(node: &Node<'_>, src: &[u8], expected: &str) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    loop {
+        let child = cursor.node();
+        if !child.is_named() && node_text(&child, src).trim() == expected {
+            return true;
+        }
+        if !cursor.goto_next_sibling() {
+            return false;
+        }
+    }
+}
+
+/// Return the compiler-resolved callable name for assignment RHS syntax that
+/// denotes a callable value rather than invoking it. Detection is based on
+/// Tree-sitter node kinds, fields, and operator terminals; it never scans the
+/// surrounding assignment statement.
+fn callable_reference_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
+    named_callable_reference(node, src)
+        .or_else(|| elixir_capture_reference(node, src))
+        .or_else(|| ruby_method_reference(node, src))
+        .or_else(|| php_first_class_callable(node, src))
+}
+
+fn named_callable_reference(node: &Node<'_>, src: &[u8]) -> Option<String> {
+    if !matches!(
+        node.kind(),
+        "method_reference"
+            | "method_reference_expression"
+            | "callable_reference"
+            | "callable_reference_expression"
+            | "function_reference"
+    ) {
+        return None;
+    }
+    let name = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("method"))
+        .or_else(|| node.child_by_field_name("function"))
+        .or_else(|| last_non_comment_named_child(node))?;
+    let name = node_text(&name, src).trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn elixir_capture_reference(node: &Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "unary_operator" || !has_direct_token(node, src, "&") {
+        return None;
+    }
+    let operand = node
+        .child_by_field_name("operand")
+        .or_else(|| first_named_child(node))?;
+    if operand.kind() != "binary_operator" || !has_direct_token(&operand, src, "/") {
+        return None;
+    }
+    let function = operand
+        .child_by_field_name("left")
+        .or_else(|| first_named_child(&operand))?;
+    let arity = operand
+        .child_by_field_name("right")
+        .or_else(|| last_non_comment_named_child(&operand))?;
+    if arity.kind() != "integer" {
+        return None;
+    }
+    let function = node_text(&function, src).trim();
+    (!function.is_empty()).then(|| function.to_string())
+}
+
+fn ruby_method_reference(node: &Node<'_>, src: &[u8]) -> Option<String> {
+    if !COMMON_CALL_KINDS.contains(&node.kind()) {
+        return None;
+    }
+    let callee = node
+        .child_by_field_name("method")
+        .or_else(|| node.child_by_field_name("function"))
+        .or_else(|| node.child_by_field_name("name"))
+        .or_else(|| node.child_by_field_name("target"))?;
+    if node_text(&callee, src).trim() != "method" {
+        return None;
+    }
+    let arguments = node
+        .child_by_field_name("arguments")
+        .or_else(|| node.child_by_field_name("argument_list"))?;
+    let mut cursor = arguments.walk();
+    let children = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+    if children.len() != 1 || !matches!(children[0].kind(), "simple_symbol" | "symbol" | "symbol_literal") {
+        return None;
+    }
+    let name = node_text(&children[0], src).trim().trim_start_matches(':');
+    looks_like_bare_identifier(name).then(|| name.to_string())
+}
+
+fn php_first_class_callable(node: &Node<'_>, src: &[u8]) -> Option<String> {
+    if !COMMON_CALL_KINDS.contains(&node.kind()) {
+        return None;
+    }
+    let callee = node
+        .child_by_field_name("function")
+        .or_else(|| node.child_by_field_name("name"))
+        .or_else(|| node.child_by_field_name("target"))?;
+    let arguments = node
+        .child_by_field_name("arguments")
+        .or_else(|| node.child_by_field_name("argument_list"))?;
+    let mut cursor = arguments.walk();
+    let children = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+    if children.len() != 1 || children[0].kind() != "variadic_placeholder" {
+        return None;
+    }
+    let name = node_text(&callee, src).trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// Walk the subtree rooted at `node` and produce a tree of [`FlowEvent`].
@@ -2051,15 +2169,17 @@ fn walk_into(
         // rather over-walk than miss calls on the RHS, so as a fallback
         // we pick the LAST named child that isn't the target node.
         let rhs = assignment_value_node(node, target_node);
-        let source_name = rhs.and_then(|rhs_node| {
-            let rhs_text = node_text(&rhs_node, src).trim();
-            // Only emit `source_name` for bare-identifier RHS — compound
-            // expressions go through `source_call` / `source_names`.
-            if looks_like_bare_identifier(rhs_text) {
-                Some(rhs_text.to_string())
-            } else {
-                None
-            }
+        let callable_source = rhs.and_then(|rhs_node| callable_reference_name(&rhs_node, src));
+        let assignment_value_kind = callable_source
+            .is_some()
+            .then_some(crate::AssignValueKind::CallableReference);
+        let source_name = callable_source.clone().or_else(|| {
+            rhs.and_then(|rhs_node| {
+                let rhs_text = node_text(&rhs_node, src).trim();
+                // Only emit `source_name` for bare-identifier RHS — compound
+                // expressions go through `source_call` / `source_names`.
+                looks_like_bare_identifier(rhs_text).then(|| rhs_text.to_string())
+            })
         });
         // source_call: when the RHS is a direct call expression,
         // capture the callee name + the call's positional
@@ -2069,18 +2189,21 @@ fn walk_into(
         //   `y = item.get("k")` → source_call = Some("item.get"),
         //   source_call_args = ["x"]. If transform's summary says
         //   param 0 flows to the return, y inherits x's taint.
-        let (source_call, source_call_args) = rhs
-            .and_then(|n| extract_direct_call_info(&n, src))
-            .or_else(|| rhs.and_then(|n| extract_dart_selector_call_info(n, file, src)))
-            .or_else(|| {
-                rhs.is_none()
-                    .then(|| {
-                        first_call_descendant(node).and_then(|call| extract_direct_call_info(&call, src))
-                    })
-                    .flatten()
-            })
-            .or_else(|| extract_dart_selector_call_info(node, file, src))
-            .unwrap_or((None, Vec::new()));
+        let (source_call, source_call_args) = if callable_source.is_some() {
+            (None, Vec::new())
+        } else {
+            rhs.and_then(|n| extract_direct_call_info(&n, src))
+                .or_else(|| rhs.and_then(|n| extract_dart_selector_call_info(n, file, src)))
+                .or_else(|| {
+                    rhs.is_none()
+                        .then(|| {
+                            first_call_descendant(node).and_then(|call| extract_direct_call_info(&call, src))
+                        })
+                        .flatten()
+                })
+                .or_else(|| extract_dart_selector_call_info(node, file, src))
+                .unwrap_or((None, Vec::new()))
+        };
         // G2: when the RHS is a compound expression (template literal,
         // string concat, binary op, f-string, interpolation, member /
         // subscript access, ternary, null-coalesce), there is no
@@ -2096,8 +2219,10 @@ fn walk_into(
             .as_ref()
             .is_some_and(|n| is_large_literal_initializer_node(n.kind(), n))
             || has_direct_large_literal_initializer_child(&node);
-        if let Some(n) = rhs.filter(|n| !is_large_literal_initializer_node(n.kind(), n)) {
-            source_names.extend(extract_rhs_expr_operands(&n, src));
+        if callable_source.is_none() {
+            if let Some(n) = rhs.filter(|n| !is_large_literal_initializer_node(n.kind(), n)) {
+                source_names.extend(extract_rhs_expr_operands(&n, src));
+            }
         }
         // Some grammars expose a declaration initializer as a wrapper
         // whose "rhs" fallback is only the callee/type node, while the
@@ -2108,11 +2233,6 @@ fn walk_into(
         // `env = Envelope(cmd: raw)` preserve the `raw` dependency.
         if rhs.is_none() {
             source_names.extend(extract_rhs_expr_operands(&node, src));
-        }
-        if source_names.is_empty() && !rhs_is_large_literal {
-            if let Some(rhs_text) = assignment_rhs_text(node_text(&node, src)) {
-                source_names.extend(identifier_tokens_from_text(rhs_text));
-            }
         }
         // H1: `x OP= rhs` desugars to `x = x OP rhs`, so the LHS is always
         // read. Keep it among the sources (don't strip via same_identifier)
@@ -2127,23 +2247,15 @@ fn walk_into(
         // a universal false negative. A CALL RHS (`x = sanitize(x)`) still
         // strips: there the target is a consumed argument and the result is
         // the callee's return, so clean-overwrite / call-result semantics
-        // apply. `rhs` is `None` only for the full-node/text fallback (where
-        // the LHS identifier can leak into the operands), so a missing RHS
-        // also strips.
+        // apply. `rhs` is `None` only for the full-node structural fallback
+        // (where the LHS identifier can also appear among descendants), so a
+        // missing RHS also strips.
         let rhs_is_noncall_expr = rhs
             .as_ref()
             .is_some_and(|n| !COMMON_CALL_KINDS.contains(&n.kind()));
         let target_self_read = is_compound || rhs_is_noncall_expr;
         if !target_self_read {
             source_names.retain(|name| !same_identifier_name(name, &target));
-        }
-        if source_names.is_empty() && !rhs_is_large_literal {
-            if let Some(rhs_text) = assignment_rhs_text(node_text(&node, src)) {
-                source_names.extend(identifier_tokens_from_text(rhs_text));
-                if !target_self_read {
-                    source_names.retain(|name| !same_identifier_name(name, &target));
-                }
-            }
         }
         // Only a compound `x += a` unconditionally reads its target, so only
         // it re-adds the target when extraction missed it. A plain
@@ -2210,7 +2322,7 @@ fn walk_into(
                         source_call_args: source_call_args.clone(),
                         source_names: source_names.clone(),
                         declares_new_binding: false,
-                        value_kind: None,
+                        value_kind: assignment_value_kind,
                     });
                 }
             }
@@ -2237,7 +2349,7 @@ fn walk_into(
                         source_call_args: source_call_args.clone(),
                         source_names: source_names.clone(),
                         declares_new_binding: false,
-                        value_kind: None,
+                        value_kind: assignment_value_kind,
                     });
                 }
             }
@@ -2282,7 +2394,7 @@ fn walk_into(
                     source_call_args,
                     source_names,
                     declares_new_binding: false,
-                    value_kind: None,
+                    value_kind: assignment_value_kind,
                 });
             }
         }
@@ -4182,6 +4294,8 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
                 // of which form the tainted set holds.
                 if text != cleaned {
                     out.push(text.to_string());
+                } else if let Some(sigil) = identifier_parent_sigil(n, src) {
+                    out.push(format!("{sigil}{cleaned}"));
                 }
             }
         }
@@ -4201,6 +4315,19 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+fn identifier_parent_sigil(node: Node<'_>, src: &[u8]) -> Option<&'static str> {
+    let parent = node.parent()?;
+    if !matches!(
+        parent.kind(),
+        "scalar" | "array" | "hash" | "variable_name" | "identifier_dollar_escaped"
+    ) {
+        return None;
+    }
+    ["$", "@", "%"]
+        .into_iter()
+        .find(|sigil| has_direct_token(&parent, src, sigil))
 }
 
 fn call_receiver_source_names(node: &Node<'_>, src: &[u8]) -> Vec<String> {
@@ -5070,9 +5197,15 @@ pub fn extract_assignment_value_facts(
                     && value_span.end <= span.end
                     && value_span.start < value_span.end
                 {
+                    let call_sites = if callable_reference_name(&value, src).is_some() {
+                        Vec::new()
+                    } else {
+                        expression_flow::expression_call_spans(value, file)
+                    };
                     facts.push(crate::AssignmentValueFact {
                         assignment_span: span,
                         value_span,
+                        call_sites,
                     });
                 }
             }
@@ -8580,8 +8713,14 @@ pub fn apply_class_field_type_aliases(idx: &mut crate::DeclIndex) {
 /// `apply_call_receiver_types` so the classification reflects
 /// the post-stitch event tree.
 pub fn apply_assign_value_kind(idx: &mut crate::DeclIndex) {
+    let call_bearing_assignments: ahash::AHashSet<Span> = idx
+        .assignment_values
+        .iter()
+        .filter(|fact| !fact.call_sites.is_empty())
+        .map(|fact| fact.assignment_span)
+        .collect();
     for decl in &mut idx.defs {
-        classify_assign_value_kinds(&mut decl.flow_events);
+        classify_assign_value_kinds(&mut decl.flow_events, &call_bearing_assignments);
     }
 }
 
@@ -8698,67 +8837,6 @@ fn c_family_function_pointer_alias(
         return None;
     }
     Some((span_of(file, node), target, source))
-}
-
-/// Rewrite syntax-proven callable-reference assignments into the
-/// canonical local callable-alias shape consumed by the callgraph and
-/// taint engines.
-///
-/// This is intentionally syntax-only. It recognizes language surfaces
-/// that pass a callable value instead of invoking it (`this::helper`,
-/// `&helper/1`, `method(:helper)`, qualified callable paths, etc.) and
-/// leaves resolution to the semantic resolver. Plain identifier aliases
-/// such as `cb = helper` already come from the generic assignment
-/// walker, so this helper only fills gaps where the original HIR looks
-/// like a literal or call-result despite being a callable value.
-pub fn inject_callable_reference_aliases_from_source(events: &mut [FlowEvent], source: &str) {
-    for event in events {
-        match event {
-            FlowEvent::Assign {
-                span,
-                source_name,
-                source_call,
-                source_call_args,
-                source_names,
-                value_kind,
-                ..
-            } => {
-                let Some(rhs) = assignment_rhs_from_span(source, *span) else {
-                    continue;
-                };
-                if !rhs_is_non_bare_callable_reference(rhs) {
-                    continue;
-                }
-                *source_name = Some(rhs.to_string());
-                *source_call = None;
-                source_call_args.clear();
-                source_names.clear();
-                *value_kind = Some(crate::AssignValueKind::Compound);
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                inject_callable_reference_aliases_from_source(then_events, source);
-                inject_callable_reference_aliases_from_source(else_events, source);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                inject_callable_reference_aliases_from_source(body, source);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                inject_callable_reference_aliases_from_source(body, source);
-                inject_callable_reference_aliases_from_source(catch_events, source);
-                inject_callable_reference_aliases_from_source(finally_events, source);
-            }
-            _ => {}
-        }
-    }
 }
 
 /// Extract formal parameter names from common anonymous callable
@@ -8937,66 +9015,6 @@ fn param_name_from_piece(piece: &str) -> Option<String> {
                 "const" | "var" | "let" | "final" | "void" | "func" | "function"
             )
     })
-}
-
-fn assignment_rhs_from_span(source: &str, span: Span) -> Option<&str> {
-    let start = usize::try_from(span.start).ok()?.min(source.len());
-    let end = usize::try_from(span.end).ok()?.min(source.len());
-    if start >= end || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
-        return None;
-    }
-    let text = source.get(start..end)?;
-    let rhs = assignment_rhs_text(text)?.trim();
-    Some(rhs.trim_end_matches(';').trim())
-}
-
-fn rhs_is_non_bare_callable_reference(rhs: &str) -> bool {
-    let rhs = rhs.trim();
-    if rhs.is_empty() {
-        return false;
-    }
-    // A quoted bare word is first a data literal. Treating every
-    // `"abc"` / `'abc'` assignment as a callable alias pollutes
-    // FlowEvent source slots and prevents literal overwrites from
-    // being classified as clean writes. Quoted callback strings in
-    // actual call arguments are still handled by
-    // `callable_reference_variants` at the call site; assignment-level
-    // aliasing requires explicit callable-reference syntax.
-    if quoted_bare_word(rhs) {
-        return false;
-    }
-    if !rhs_has_explicit_callable_reference_syntax(rhs) {
-        return false;
-    }
-    let variants = bonsai_common::callable_reference_variants(rhs);
-    variants
-        .iter()
-        .any(|variant| variant.trim() != rhs && looks_like_bare_identifier(variant.trim()))
-}
-
-fn rhs_has_explicit_callable_reference_syntax(rhs: &str) -> bool {
-    let rhs = rhs.trim();
-    rhs.starts_with('&')
-        || rhs.starts_with("\\&")
-        || rhs.starts_with("fun ")
-        || rhs.starts_with("method(")
-        || rhs.contains("::")
-        || rhs.ends_with('.')
-        || rhs.ends_with("->")
-}
-
-fn quoted_bare_word(value: &str) -> bool {
-    let value = value.trim();
-    let Some(quote) = value.as_bytes().first().copied() else {
-        return false;
-    };
-    if !matches!(quote, b'\'' | b'"' | b'`') || value.as_bytes().last().copied() != Some(quote) {
-        return false;
-    }
-    let Some(inner) = value.get(1..value.len().saturating_sub(1)) else {
-        return false;
-    };
-    looks_like_bare_identifier(inner.trim())
 }
 
 fn c_family_declarator_is_function_pointer(node: &Node<'_>) -> bool {
@@ -9435,7 +9453,7 @@ fn propose_call_result_type_aliases(
     }
 }
 
-fn classify_assign_value_kinds(events: &mut [FlowEvent]) {
+fn classify_assign_value_kinds(events: &mut [FlowEvent], call_bearing_assignments: &ahash::AHashSet<Span>) {
     for event in events {
         match event {
             FlowEvent::Assign {
@@ -9444,6 +9462,7 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent]) {
                 source_call_args,
                 source_names,
                 value_kind,
+                span,
                 ..
             } => {
                 if value_kind.is_some() {
@@ -9451,7 +9470,11 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent]) {
                 }
                 let kind = if source_call.is_some() {
                     crate::AssignValueKind::CallResult
-                } else if source_name.is_none() && source_names.is_empty() && source_call_args.is_empty() {
+                } else if source_name.is_none()
+                    && source_names.is_empty()
+                    && source_call_args.is_empty()
+                    && !call_bearing_assignments.contains(span)
+                {
                     crate::AssignValueKind::Literal
                 } else {
                     crate::AssignValueKind::Compound
@@ -9463,11 +9486,11 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent]) {
                 else_events,
                 ..
             } => {
-                classify_assign_value_kinds(then_events);
-                classify_assign_value_kinds(else_events);
+                classify_assign_value_kinds(then_events, call_bearing_assignments);
+                classify_assign_value_kinds(else_events, call_bearing_assignments);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                classify_assign_value_kinds(body);
+                classify_assign_value_kinds(body, call_bearing_assignments);
             }
             FlowEvent::Try {
                 body,
@@ -9475,9 +9498,9 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent]) {
                 finally_events,
                 ..
             } => {
-                classify_assign_value_kinds(body);
-                classify_assign_value_kinds(catch_events);
-                classify_assign_value_kinds(finally_events);
+                classify_assign_value_kinds(body, call_bearing_assignments);
+                classify_assign_value_kinds(catch_events, call_bearing_assignments);
+                classify_assign_value_kinds(finally_events, call_bearing_assignments);
             }
             _ => {}
         }

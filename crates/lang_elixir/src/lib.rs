@@ -96,10 +96,6 @@ impl LanguageAdapter for ElixirAdapter {
                     decl.params = params;
                     augment_elixir_param_pattern_bindings(decl, snapshot.text.as_ref());
                 }
-                bonsai_lang_api::kit::inject_callable_reference_aliases_from_source(
-                    &mut decl.flow_events,
-                    snapshot.text.as_ref(),
-                );
                 inject_elixir_local_callable_invocations(decl, &local_callable_invocations);
                 insert_elixir_map_field_assigns_in_events(&mut decl.flow_events, &map_field_assigns);
                 remove_elixir_value_field_access_calls(&mut decl.flow_events, &value_field_access_spans);

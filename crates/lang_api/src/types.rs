@@ -709,6 +709,11 @@ pub enum AssignValueKind {
     /// engines preserve both edges instead of treating the aggregate token
     /// as imprecise field metadata.
     Destructure,
+    /// RHS is a syntax-proven callable reference rather than a call. The
+    /// canonical referenced symbol is carried in `source_name`; resolvers may
+    /// bind the assignment target as an indirect callable without inventing a
+    /// return-value edge.
+    CallableReference,
     /// RHS is a compound expression (member access, binary op,
     /// template literal, ternary, conditional, …). Engine
     /// tokenises identifiers and bridges every carrier.
@@ -1476,6 +1481,12 @@ pub struct Ref {
 pub struct AssignmentValueFact {
     pub assignment_span: Span,
     pub value_span: Span,
+    /// Exact call-expression nodes whose results participate in the RHS
+    /// value. These are extracted from the RHS tree, never recovered from
+    /// assignment text. Callable-reference syntax deliberately leaves this
+    /// empty because it denotes a function value rather than an invocation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_sites: Vec<Span>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
