@@ -10,6 +10,19 @@ on:
   workflow_dispatch:
 
 jobs:
+  dependency-audit:
+    name: Rust dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Reject vulnerabilities and new maintenance warnings
+        # bincode 1.x is temporarily retained for persisted-cache wire
+        # compatibility. Its replacement is tracked as a schema migration;
+        # every other RustSec warning remains release-blocking.
+        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0141
+
   layering:
     name: Layering DAG audit
     runs-on: ubuntu-latest

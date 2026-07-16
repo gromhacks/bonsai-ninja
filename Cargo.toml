@@ -81,14 +81,14 @@ zstd = "0.13"
 crossbeam-channel = "0.5"
 fs2 = "0.4"
 ignore = "0.4"
-lru = "0.12"
+lru = "0.16.3"
 tempfile = "3"
 
 # CLI / frontends
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-indicatif = "0.17"
+indicatif = "0.18.6"
 
 # Testing
 pretty_assertions = "1"
