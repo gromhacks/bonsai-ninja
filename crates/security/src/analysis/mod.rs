@@ -45,6 +45,7 @@ use std::time::{Duration, Instant};
 mod clean_overwrite;
 mod findings_build;
 mod guard_sanitizers;
+mod prototype_guard;
 mod source_seeds;
 mod taint_cache;
 mod validation;
@@ -74,6 +75,7 @@ use guard_sanitizers::{
     python_lxml_parser_keyword_sanitizer, python_realpath_containment_guard_sanitizer,
     python_url_ssrf_guard_sanitizer, source_sink_pair_is_low_signal, template_interpolations,
 };
+use prototype_guard::prototype_pollution_sink_is_guarded;
 #[cfg(test)]
 use source_seeds::seed_descendant_aliases_for_qualified_source_reads;
 use source_seeds::{
@@ -8113,9 +8115,6 @@ fn sanitizer_guard_feeds_sink_arg(
         return false;
     };
     let mut guarded = sanitizer_guard_variables_in_events(&decl.flow_events, san, tag);
-    if guarded.is_empty() {
-        guarded.extend(sanitizer_guard_variables_from_source_line(ws, san, tag));
-    }
     guarded.retain(|var| !looks_like_clean_constant(var));
     if guarded.is_empty() {
         return false;
@@ -8203,55 +8202,6 @@ fn collect_sanitizer_guard_variables(
             _ => {}
         }
     }
-}
-
-fn sanitizer_guard_variables_from_source_line(ws: &Workspace, san: &RuleMatch, tag: &str) -> Vec<String> {
-    let Ok(snapshot) = ws.vfs().snapshot(san.span.file) else {
-        return Vec::new();
-    };
-    let Some(line) = source_line_text(&snapshot.text, san.line) else {
-        return Vec::new();
-    };
-    match tag {
-        "same-origin-path" => receiver_before_call_token(line, &san.match_text)
-            .into_iter()
-            .collect(),
-        "ssrf-sanitize" | "allowlist-validate" => call_argument_identifiers_after(line, &san.match_text),
-        _ => Vec::new(),
-    }
-}
-
-fn receiver_before_call_token(line: &str, match_text: &str) -> Option<String> {
-    let token = match_text.trim();
-    let dot = token.rfind('.')?;
-    clean_overwrite_target_key(&token[..dot]).or_else(|| {
-        line.find(token)
-            .and_then(|idx| line[..idx].rsplit('.').next())
-            .and_then(clean_overwrite_target_key)
-    })
-}
-
-fn call_argument_identifiers_after(line: &str, match_text: &str) -> Vec<String> {
-    let token = match_text.trim();
-    let Some(start) = line.find(token) else {
-        return Vec::new();
-    };
-    let after = &line[start + token.len()..];
-    let Some(open_rel) = after.find('(') else {
-        return Vec::new();
-    };
-    let open = start + token.len() + open_rel;
-    let Some((_, args)) = balanced_paren_extent(line, open) else {
-        return Vec::new();
-    };
-    let mut vars: Vec<String> = identifier_tokens_outside_strings(args)
-        .into_iter()
-        .filter_map(|token| clean_overwrite_target_key(&token))
-        .filter(|token| !non_value_expression_token(token))
-        .collect();
-    vars.sort();
-    vars.dedup();
-    vars
 }
 
 fn guarded_variable_feeds_sink_target_in_events(
@@ -8490,139 +8440,11 @@ fn tainted_call_matches_sink(call: &TaintedCall, sink: &RuleMatch) -> bool {
     spans_overlap(call.call_span, sink.span)
 }
 
-/// Prototype-pollution merge/write rules are intentionally broad once
-/// tainted keys reach dynamic property writes. A nearby denylist guard
-/// for the exact index variable is a semantic barrier: the dangerous
-/// prototype carrier keys cannot reach this write.
-fn prototype_pollution_sink_is_guarded(ws: &Workspace, sink_rule: &Rule, sink: &RuleMatch) -> bool {
-    if sink_rule.tag.as_deref() != Some("prototype-pollution")
-        || !matches!(sink.language.as_str(), "javascript" | "typescript")
-    {
-        return false;
-    }
-
-    let Ok(snapshot) = ws.vfs().snapshot(sink.span.file) else {
-        return false;
-    };
-    let source = snapshot.text.as_ref();
-    let sink_start = sink.span.start as usize;
-    let sink_end = sink.span.end as usize;
-    if sink_start > source.len() {
-        return false;
-    }
-    let sink_text = source
-        .get(sink_start..sink_end.min(source.len()))
-        .unwrap_or(sink.match_text.as_str());
-    let mut key_vars = prototype_key_index_variables(sink_text);
-    if key_vars.is_empty() {
-        if let Some(line_text) = source_line_text(source, sink.line) {
-            key_vars.extend(prototype_key_index_variables(line_text));
-            key_vars.sort();
-            key_vars.dedup();
-        }
-    }
-    if key_vars.is_empty() && sink.match_text.contains(".key") {
-        key_vars.push("key".to_string());
-    }
-    if key_vars.is_empty() {
-        return false;
-    }
-
-    let scope_start = ws
-        .enclosing_index()
-        .enclosing_for(ws.db(), sink.span.file, sink.span.start)
-        .map(|entry| entry.start as usize)
-        .unwrap_or(0);
-    let Some(prefix) = source.get(scope_start..sink_start) else {
-        return false;
-    };
-    let compact = compact_guard_text(prefix);
-    if compact.contains("Object.freeze(Object.prototype)") {
-        return true;
-    }
-
-    if key_vars
-        .iter()
-        .any(|key| prototype_key_denylist_guard_present(&compact, key))
-    {
-        return true;
-    }
-
-    false
-}
-
-fn prototype_key_index_variables(text: &str) -> Vec<String> {
-    let mut vars = Vec::new();
-    let mut rest = text;
-    while let Some(open) = rest.find('[') {
-        rest = &rest[open + 1..];
-        let Some(close) = rest.find(']') else {
-            break;
-        };
-        let candidate = rest[..close].trim();
-        if is_js_identifier(candidate) && !vars.iter().any(|existing| existing == candidate) {
-            vars.push(candidate.to_string());
-        }
-        rest = &rest[close + 1..];
-    }
-    vars
-}
-
-fn source_line_text(source: &str, one_based_line: u32) -> Option<&str> {
-    if one_based_line == 0 {
-        return None;
-    }
-    source.lines().nth(usize::try_from(one_based_line - 1).ok()?)
-}
-
-fn is_js_identifier(text: &str) -> bool {
-    let mut chars = text.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
-}
-
+/// Normalize one adapter-selected compiler fact for small static evaluators.
+/// Callers pass branch conditions, arguments, or assignment renderings—not
+/// an enclosing source region.
 fn compact_guard_text(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_whitespace()).collect()
-}
-
-fn prototype_key_denylist_guard_present(compact: &str, key: &str) -> bool {
-    let has_abrupt_exit =
-        compact.contains("continue;") || compact.contains("return;") || compact.contains("throw");
-    if !has_abrupt_exit {
-        return false;
-    }
-
-    const DANGEROUS_KEYS: &[&str] = &["__proto__", "constructor", "prototype"];
-    let compares_all = DANGEROUS_KEYS
-        .iter()
-        .all(|dangerous| prototype_key_compare_present(compact, key, dangerous));
-    if compares_all {
-        return true;
-    }
-
-    let mentions_all_keys = DANGEROUS_KEYS.iter().all(|dangerous| compact.contains(dangerous));
-    mentions_all_keys
-        && (compact.contains(&format!(".includes({key})")) || compact.contains(&format!(".has({key})")))
-}
-
-fn prototype_key_compare_present(compact: &str, key: &str, dangerous: &str) -> bool {
-    [
-        format!(r#"{key}==="{dangerous}""#),
-        format!(r#"{key}=="{dangerous}""#),
-        format!(r#""{dangerous}"==={key}"#),
-        format!(r#""{dangerous}"=={key}"#),
-        format!("{key}==='{dangerous}'"),
-        format!("{key}=='{dangerous}'"),
-        format!("'{dangerous}'==={key}"),
-        format!("'{dangerous}'=={key}"),
-    ]
-    .iter()
-    .any(|needle| compact.contains(needle))
 }
 
 /// True iff `rule_id` resolves to a rule whose match kind binds to
