@@ -1844,6 +1844,12 @@ pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision_a
             edge_kind: ce.call_kind,
         });
     }
+    attach_nested_return_lineage(
+        &mut call_records,
+        &cross_calls,
+        global.as_ref(),
+        &mut call_summary_cache,
+    );
 
     graph.call_records = call_records;
     graph.precision = worst;
@@ -2282,6 +2288,12 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
             edge_kind: ce.call_kind,
         });
     }
+    attach_nested_return_lineage(
+        &mut call_records,
+        &cross_calls,
+        global.as_ref(),
+        &mut call_summary_cache,
+    );
 
     // Tainted call sites in closure → tainted_calls.
     let tainted_args_by_site =
@@ -4076,6 +4088,56 @@ fn tainted_args_for_cross_call_edge(
         value_text,
         param_name,
     }]
+}
+
+/// Link an outer call edge to the exact nested return that produced its
+/// tainted argument. IDG return stitches point from the nested callee back to
+/// the function that owns the call site; they cannot populate that owner's
+/// global `first_inflow` without creating a synthetic source-cycle. The AST
+/// argument span gives us a narrower fact: only the enclosing call whose
+/// argument contains that nested call should inherit the return trace.
+fn attach_nested_return_lineage(
+    records: &mut [TaintedCallEdge],
+    cross_calls: &[bonsai_idg::CrossCallEdge],
+    global: &GlobalIndex,
+    call_summary_cache: &mut CallEventSummaryCache<'_>,
+) {
+    debug_assert_eq!(records.len(), cross_calls.len());
+    let return_trace_by_site: ahash::AHashMap<(FuncId, bonsai_common::Span), u64> = cross_calls
+        .iter()
+        .zip(records.iter())
+        .filter_map(|(edge, record)| {
+            (edge.relation == bonsai_idg::CrossCallRelation::Return)
+                .then_some(((edge.callee, edge.call_span), record.trace_id))
+        })
+        .collect();
+    if return_trace_by_site.is_empty() {
+        return;
+    }
+
+    for (edge, record) in cross_calls.iter().zip(records.iter_mut()) {
+        let Ok(arg_idx) = usize::try_from(edge.arg_idx) else {
+            continue;
+        };
+        let Some(arg_span) =
+            cached_call_event_summary(edge.caller, edge.call_span, global, call_summary_cache)
+                .and_then(|summary| summary.args_span.get(arg_idx).copied())
+        else {
+            continue;
+        };
+        let Some((nested_span, _)) = cached_nested_call_event_summary(
+            edge.caller,
+            edge.call_span,
+            arg_span,
+            global,
+            call_summary_cache,
+        ) else {
+            continue;
+        };
+        if let Some(trace_id) = return_trace_by_site.get(&(edge.caller, nested_span)).copied() {
+            record.parent_trace_id = Some(trace_id);
+        }
+    }
 }
 
 fn promote_nested_tainted_call_args(

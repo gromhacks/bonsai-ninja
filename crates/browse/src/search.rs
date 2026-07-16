@@ -86,11 +86,18 @@ pub fn search(
             if candidates.is_empty() {
                 return Ok(Vec::new());
             }
-            let candidate_ids: HashSet<String> = candidates.iter().map(|doc| doc.fact_id.clone()).collect();
             let candidate_files: HashSet<String> =
                 candidates.iter().map(|doc| doc.file_path.clone()).collect();
+            // Retrieval is only a conservative file-candidate lookup. An
+            // explicitly warmed sidecar stores one compact projection per
+            // `(file, fact kind)`, while the small-workspace on-demand path
+            // can hold individual fact documents. Neither representation is
+            // public evidence, and their ids are intentionally not required
+            // to equal the ids of canonical rendered rows. Hydrate every
+            // exact substring match in the candidate files through the AST
+            // facts instead of treating candidate metadata as an allow-list
+            // of renderable fact identities.
             let mut hydrated = search_canonical(ws, query, f, usize::MAX, Some(&candidate_files))?;
-            hydrated.retain(|hit| candidate_ids.contains(&search_hit_fact_id(hit)));
             hydrated.truncate(limit);
             return Ok(hydrated);
         }
@@ -383,10 +390,6 @@ fn search_canonical(
     });
     hits.truncate(limit);
     Ok(hits)
-}
-
-fn search_hit_fact_id(hit: &SearchHit) -> String {
-    bonsai_retrieval::fact_id_for_parts(&hit.kind, &hit.file, hit.line, hit.column, &hit.name)
 }
 
 fn display_imports_for_search(
@@ -814,6 +817,31 @@ def handle_request(token):
             signatures(&retrieved),
             signatures(&canonical),
             "retrieval candidates must hydrate back to the canonical search rows"
+        );
+    }
+
+    #[test]
+    fn persisted_file_candidate_sidecar_hydrates_prefix_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("gateway.py"),
+            "def handle_request():\n    return 1\n",
+        )
+        .expect("write fixture");
+        let ws =
+            Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+        bonsai_retrieval::ensure_sidecar(&ws, dir.path()).expect("persist compact candidate sidecar");
+        let filters = SearchFilters::default();
+
+        let canonical =
+            search_canonical(&ws, "hand", &filters, usize::MAX, None).expect("canonical prefix search");
+        let retrieved = search(&ws, "hand", &filters, usize::MAX).expect("retrieval prefix search");
+
+        assert!(canonical.iter().any(|hit| hit.name == "handle_request"));
+        assert_eq!(
+            signatures(&retrieved),
+            signatures(&canonical),
+            "compact file candidates must narrow hydration without filtering canonical AST rows by candidate id"
         );
     }
 

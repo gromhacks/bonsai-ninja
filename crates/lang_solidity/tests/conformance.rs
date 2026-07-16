@@ -184,7 +184,7 @@ fn solidity_emit_and_yul_args_preserve_ast_value_facts() {
         "contract AstArgs {\n\
            struct Envelope { bytes command; }\n\
            event Action(bytes value);\n\
-           function log(Envelope memory env) public { emit Action(env.command); }\n\
+           function log(Envelope memory env, bool enabled) public returns (bytes memory) { if (enabled) { emit Action(env.command); } return env.command; }\n\
            function raw(address target) public { assembly { pop(call(gas(), target, 0, 0, 0, 0, 0)) } }\n\
          }",
     );
@@ -197,13 +197,24 @@ fn solidity_emit_and_yul_args_preserve_ast_value_facts() {
     };
     let idx = adapter.extract_declarations(file, &ctx);
     let log = idx.defs.iter().find(|decl| decl.name == "log").expect("log decl");
-    let emit_arg = log.flow_events.iter().find_map(|event| match event {
+    let branch = log.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Branch { then_events, .. } => Some(then_events),
+        _ => None,
+    });
+    let branch = branch.unwrap_or_else(|| panic!("emit branch: {:?}", log.flow_events));
+    let emit_arg = branch.iter().find_map(|event| match event {
         FlowEvent::Call { name, args, .. } if name == "emit" => args.first(),
         _ => None,
     });
     let emit_arg = emit_arg.unwrap_or_else(|| panic!("emit call: {:?}", log.flow_events));
-    assert_eq!(emit_arg.place.as_deref(), Some("env.command"));
+    assert_eq!(
+        emit_arg.place.as_deref(),
+        Some("env.command"),
+        "emit argument should retain its AST place: {:?}",
+        log.flow_events
+    );
     assert!(emit_arg.source_names.iter().any(|name| name == "env.command"));
+    assert!(matches!(log.flow_events.last(), Some(FlowEvent::Return { .. })));
 
     let raw = idx.defs.iter().find(|decl| decl.name == "raw").expect("raw decl");
     let target_arg = raw.flow_events.iter().find_map(|event| match event {
