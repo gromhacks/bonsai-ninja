@@ -26,11 +26,12 @@ pub use kit::{
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};
 pub use types::{
-    operations_from_flow_events, AggregateLayout, ArgumentPassingMode, AssignValueKind, AssignmentValueFact,
-    CallArg, CallKind, Comment, CommentKind, Decl, DeclIndex, DeclKind, ExpressionField, ExpressionFlow,
-    ExpressionProjection, FieldWrite, FlowEvent, ImportIndex, ImportScope, ImportSpec, LanguageId, LoopKind,
-    ModulePath, Operation, OperationKind, OperationOperand, OperationOperandRole, Ref, RefKind,
-    StringCategory, StringLiteral, TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
+    assignment_value_fact_for_span, assignment_value_rendering, operations_from_flow_events, AggregateLayout,
+    ArgumentPassingMode, AssignValueKind, AssignmentValueFact, AssignmentValueIndex, CallArg, CallKind,
+    Comment, CommentKind, Decl, DeclIndex, DeclKind, ExpressionField, ExpressionFlow, ExpressionProjection,
+    FieldWrite, FlowEvent, ImportIndex, ImportScope, ImportSpec, LanguageId, LoopKind, ModulePath, Operation,
+    OperationKind, OperationOperand, OperationOperandRole, Ref, RefKind, StringCategory, StringLiteral,
+    TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
 };
 
 use bonsai_common::FileId;

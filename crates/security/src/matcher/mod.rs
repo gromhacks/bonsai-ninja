@@ -10,8 +10,8 @@ use crate::rule::{ArgTaintedSpec, ConstraintKind, MatchKind, Rule, RuleTarget};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
-    AliasTarget, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ImportSpec, ModulePath, RefKind,
-    TypeAliasBinding,
+    AliasTarget, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ImportSpec,
+    ModulePath, RefKind, TypeAliasBinding,
 };
 use bonsai_taint::{TaintedCall, TaintedCallKind};
 use bonsai_workspace::{decl_decorator_names, Workspace};
@@ -5318,32 +5318,6 @@ fn split_return_read_token(value: &str) -> Vec<String> {
     split_read_token(value)
 }
 
-#[derive(Clone, Debug, Default)]
-struct AssignmentValueIndex {
-    value_spans: AHashMap<Span, Span>,
-}
-
-impl AssignmentValueIndex {
-    fn new(facts: &[bonsai_lang_api::AssignmentValueFact]) -> Self {
-        let mut value_spans = AHashMap::with_capacity(facts.len());
-        for fact in facts {
-            value_spans.entry(fact.assignment_span).or_insert(fact.value_span);
-        }
-        Self { value_spans }
-    }
-
-    fn rendering<'a>(&self, assignment_span: Span, source_text: Option<&'a str>) -> Option<&'a str> {
-        let value_span = self.value_spans.get(&assignment_span)?;
-        if value_span.file != assignment_span.file {
-            return None;
-        }
-        source_text?
-            .get(value_span.start as usize..value_span.end as usize)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    }
-}
-
 fn collect_assignment_texts(
     events: &[FlowEvent],
     assignment_values: &AssignmentValueIndex,
@@ -5374,8 +5348,8 @@ fn collect_assignment_texts_into(
                 if target.is_empty() {
                     continue;
                 }
-                let rhs_text = assignment_values
-                    .rendering(*span, source_text)
+                let rhs_text = source_text
+                    .and_then(|source_text| assignment_values.rendering(*span, source_text))
                     .map(str::to_string)
                     .or_else(|| {
                         structured_assignment_rendering(
@@ -6622,7 +6596,7 @@ impl WriteFact {
     }
 
     fn extend_with_assignment_value(&mut self, index: &AssignmentValueIndex, source_text: Option<&str>) {
-        let Some(value) = index.rendering(self.span, source_text) else {
+        let Some(value) = source_text.and_then(|source_text| index.rendering(self.span, source_text)) else {
             return;
         };
         self.argument.value_text = value.to_string();

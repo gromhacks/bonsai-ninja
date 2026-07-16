@@ -1417,10 +1417,9 @@ impl GrammarHandler {
 /// Select an assignment target from Tree-sitter fields and named-node
 /// relationships. Downstream consumers must not split the surrounding source
 /// statement to rediscover this node.
-fn assignment_target_node<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
+fn assignment_target_pattern_node<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
     let kind = node.kind();
-    let target = node
-        .child_by_field_name("left")
+    node.child_by_field_name("left")
         .or_else(|| node.child_by_field_name("lhs"))
         .or_else(|| node.child_by_field_name("target"))
         .or_else(|| node.child_by_field_name("name"))
@@ -1431,7 +1430,11 @@ fn assignment_target_node<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'
                 .then(|| first_named_child_of_kind(&node, "variable_declaration"))
                 .flatten()
         })
-        .or_else(|| first_non_keyword_named_child(&node, src))?;
+        .or_else(|| first_non_keyword_named_child(&node, src))
+}
+
+fn assignment_target_node<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
+    let target = assignment_target_pattern_node(node, src)?;
     Some(match target.kind() {
         "variable_declarator"
         | "init_declarator"
@@ -5190,8 +5193,9 @@ pub fn extract_assignment_value_facts(
         let is_assignment = handler.is_assignment(node.kind())
             && (node.kind() != "binary_operator" || binary_operator_is_assignment(&node, src));
         if is_assignment {
-            let target = assignment_target_node(node, src);
+            let target = assignment_target_pattern_node(node, src);
             if let Some(value) = assignment_value_node(node, target) {
+                let target_span = target.map(|target| span_of(file, &target));
                 let value_span = span_of(file, &value);
                 if value_span.start >= span.start
                     && value_span.end <= span.end
@@ -5204,6 +5208,7 @@ pub fn extract_assignment_value_facts(
                     };
                     facts.push(crate::AssignmentValueFact {
                         assignment_span: span,
+                        target_span,
                         value_span,
                         call_sites,
                     });
@@ -5217,6 +5222,8 @@ pub fn extract_assignment_value_facts(
         (
             fact.assignment_span.start,
             fact.assignment_span.end,
+            fact.target_span.map_or(0, |span| span.start),
+            fact.target_span.map_or(0, |span| span.end),
             fact.value_span.start,
             fact.value_span.end,
         )

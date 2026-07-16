@@ -724,8 +724,40 @@ pub(super) fn extract_comprehension_for_clause_assigns(
 }
 
 pub(super) fn extract_foreach_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+    if let Some((binding, iterable)) = foreach_binding_nodes(node) {
+        let binding_text = node_text(&binding, src);
+        let targets = binding_tokens_from_pattern(binding_text);
+        if !targets.is_empty() {
+            let iterable_text = node_text(&iterable, src).trim();
+            let source_name = looks_like_bare_identifier(iterable_text).then(|| iterable_text.to_string());
+            let source_names = extract_rhs_expr_operands(&iterable, src);
+            return targets
+                .into_iter()
+                .map(|target| FlowEvent::Assign {
+                    span: span_of(file, node),
+                    target,
+                    source_name: source_name.clone(),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: source_names.clone(),
+                    declares_new_binding: false,
+                    value_kind: Some(crate::AssignValueKind::Compound),
+                })
+                .collect();
+        }
+    }
     let text = node_text(node, src);
     foreach_binding_assigns_from_text(span_of(file, node), text)
+}
+
+fn foreach_binding_nodes<'tree>(node: &Node<'tree>) -> Option<(Node<'tree>, Node<'tree>)> {
+    let binding = ["variable", "pattern", "left", "target", "name"]
+        .into_iter()
+        .find_map(|field| node.child_by_field_name(field))?;
+    let iterable = ["list", "iterable", "right", "source", "collection", "value"]
+        .into_iter()
+        .find_map(|field| node.child_by_field_name(field))?;
+    (binding.id() != iterable.id()).then_some((binding, iterable))
 }
 
 /// Synthesize loop-variable bindings from a source-level foreach

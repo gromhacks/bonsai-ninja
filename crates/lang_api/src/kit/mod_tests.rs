@@ -8,7 +8,8 @@ use super::{
     walk_flow_events, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
-    AssignValueKind, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ModulePath, Visibility,
+    AssignValueKind, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent,
+    ModulePath, Visibility,
 };
 use bonsai_common::{FileId, Span, SymbolId};
 
@@ -210,8 +211,24 @@ fn assignment_value_fact_uses_exact_rhs_node_span() {
     let facts = extract_assignment_value_facts(&tree, FileId::new(0), &GENERIC_HANDLER, src);
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].assignment_span, assignment_span);
+    let target_span = facts[0].target_span.expect("exact assignment target span");
+    let target = &src[target_span.start as usize..target_span.end as usize];
+    assert_eq!(target, b"policy");
     let value = &src[facts[0].value_span.start as usize..facts[0].value_span.end as usize];
     assert_eq!(value, b"\"left=right\"");
+    let index = AssignmentValueIndex::new(&facts);
+    assert_eq!(
+        index.target_rendering(assignment_span, "def f():\n    policy = \"left=right\"\n"),
+        Some("policy")
+    );
+    assert_eq!(
+        index.rendering(assignment_span, "def f():\n    policy = \"left=right\"\n"),
+        Some("\"left=right\"")
+    );
+    assert_eq!(
+        crate::assignment_value_rendering(&facts, assignment_span, "def f():\n    policy = \"left=right\"\n",),
+        Some("\"left=right\"")
+    );
 }
 
 #[test]
