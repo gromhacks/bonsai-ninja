@@ -573,54 +573,10 @@ fn workspace_analysis_incomplete_reasons(
     scan_files: &[FileId],
     resolution: Option<&ResolutionCoverage>,
 ) -> Vec<String> {
-    let scan_file_set: AHashSet<FileId> = scan_files.iter().copied().collect();
-    let mut reasons = BTreeSet::new();
-    let mut syntax_error_files = AHashSet::new();
-    let mut parse_timeout_files = AHashSet::new();
-    let mut parse_failed_files = AHashSet::new();
-    let mut record_diagnostic = |diagnostic: &bonsai_diagnostics::Diagnostic| {
-        if scan_file_set.contains(&diagnostic.span.file) {
-            match diagnostic.code.as_deref() {
-                Some("parse-timeout") => {
-                    parse_timeout_files.insert(diagnostic.span.file);
-                }
-                Some("syntax-error") => {
-                    syntax_error_files.insert(diagnostic.span.file);
-                }
-                _ => {}
-            }
-        }
-    };
-    // Parse exactly the selected security scope. `Workspace::diagnostics()`
-    // intentionally covers the whole VFS and therefore defeats path/profile
-    // scoping on monorepos. A hard parser/adapter/VFS error has no ParsedFile
-    // diagnostic, so record it explicitly instead of reporting a false clean.
-    for &file in scan_files {
-        match ws.db().parse(file) {
-            Ok(parsed) => {
-                for diagnostic in &parsed.diagnostics {
-                    record_diagnostic(diagnostic);
-                }
-            }
-            Err(_) => {
-                parse_failed_files.insert(file);
-            }
-        }
-    }
-    // Adapter/index diagnostics are already accumulated in the DB sink and do
-    // not trigger parsing. Filter them after the scoped parse pass.
-    for diagnostic in ws.db().diagnostics() {
-        record_diagnostic(&diagnostic);
-    }
-    if !parse_failed_files.is_empty() {
-        reasons.insert(format!("parse-failed-files:{}", parse_failed_files.len()));
-    }
-    if !parse_timeout_files.is_empty() {
-        reasons.insert(format!("parse-timeout-files:{}", parse_timeout_files.len()));
-    }
-    if !syntax_error_files.is_empty() {
-        reasons.insert(format!("syntax-error-files:{}", syntax_error_files.len()));
-    }
+    let mut reasons: BTreeSet<String> = ws
+        .parser_incomplete_reasons_for_files(scan_files)
+        .into_iter()
+        .collect();
 
     if let Some(resolution) = resolution {
         let unresolved_workspace_calls = unresolved_workspace_call_site_count(ws, resolution);
