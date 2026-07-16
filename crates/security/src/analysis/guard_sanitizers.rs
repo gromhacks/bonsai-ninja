@@ -177,7 +177,13 @@ pub(super) fn python_realpath_containment_guard_sanitizer(
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
     let lines: Vec<&str> = snapshot.text.lines().collect();
     let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
-    let search_end = (sink_idx + 14).min(lines.len());
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
+    let body_end = decl.body_span.unwrap_or(decl.span).end.saturating_sub(1);
+    let search_end = usize::try_from(span_map.line_col(body_end).line)
+        .ok()?
+        .min(lines.len());
     for idx in sink_idx.saturating_add(1)..search_end {
         let line = lines[idx];
         if !python_path_containment_guard_line(line, &candidate, &base) {
@@ -236,10 +242,7 @@ pub(super) fn python_compiled_regex_guard_sanitizer(
     let target_line = *lines.get(sink_idx)?;
     let target_indent = leading_ascii_whitespace(target_line);
     let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
-    let func_start_line = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1))
-        .ok()
-        .unwrap_or_else(|| sink_idx.saturating_sub(60));
-    let search_start = func_start_line.max(sink_idx.saturating_sub(80));
+    let search_start = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1)).ok()?;
     for idx in search_start..sink_idx {
         let line = lines[idx];
         let guard_indent = leading_ascii_whitespace(line);
@@ -249,7 +252,8 @@ pub(super) fn python_compiled_regex_guard_sanitizer(
         let Some((regex_name, guarded_target)) = python_compiled_regex_guard_line(line, &targets) else {
             continue;
         };
-        if !python_compiled_regex_declared_safe_before(&lines, idx, &regex_name, sink_rule.tag.as_deref()) {
+        if !python_compiled_regex_declared_safe_before(&lines, 0, idx, &regex_name, sink_rule.tag.as_deref())
+        {
             continue;
         }
         if !python_guard_exits_before_target(&lines, idx, sink_idx, guard_indent, target_indent) {
@@ -311,11 +315,11 @@ fn python_compiled_regex_call_parts(call_text: &str) -> Option<(String, &str)> {
 
 fn python_compiled_regex_declared_safe_before(
     lines: &[&str],
+    search_start: usize,
     guard_idx: usize,
     regex_name: &str,
     sink_tag: Option<&str>,
 ) -> bool {
-    let search_start = guard_idx.saturating_sub(160);
     for idx in (search_start..guard_idx).rev() {
         let Some(pattern) = python_re_compile_assignment_pattern(lines[idx], regex_name) else {
             continue;
@@ -597,7 +601,9 @@ pub(super) fn python_lxml_parser_keyword_sanitizer(
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
     let lines: Vec<&str> = snapshot.text.lines().collect();
     let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
-    let assign_idx = python_hardened_lxml_parser_assignment_line(&lines, sink_idx, &parser_var)?;
+    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
+    let func_start = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1)).ok()?;
+    let assign_idx = python_hardened_lxml_parser_assignment_line(&lines, func_start, sink_idx, &parser_var)?;
     let line = lines.get(assign_idx)?;
     Some(FindingMatch {
         rule_id: "engine.sanitizer.python_lxml_hardened_parser_arg".to_string(),
@@ -618,18 +624,17 @@ pub(super) fn python_lxml_parser_keyword_sanitizer(
 
 fn python_hardened_lxml_parser_assignment_line(
     lines: &[&str],
+    search_start: usize,
     sink_idx: usize,
     parser_var: &str,
 ) -> Option<usize> {
     let assignment_prefix = format!("{parser_var}=");
-    let search_start = sink_idx.saturating_sub(80);
     for idx in (search_start..sink_idx).rev() {
         let compact_line = compact_guard_text(lines.get(idx)?);
         if !compact_line.starts_with(&assignment_prefix) || !compact_line.contains("etree.XMLParser(") {
             continue;
         }
-        let end = (idx + 10).min(sink_idx).min(lines.len());
-        let compact_block = compact_guard_text(&lines[idx..end].join("\n"));
+        let compact_block = compact_guard_text(&lines[idx..sink_idx.min(lines.len())].join("\n"));
         if compact_block.contains("resolve_entities=False")
             && !compact_block.contains("resolve_entities=True")
         {
@@ -661,7 +666,11 @@ pub(super) fn java_url_ssrf_guard_sanitizer(
             .get(sink_idx)
             .and_then(|line| java_constructor_assignment_target_from_line(line))
     })?;
-    let end = (sink_idx + 48).min(lines.len());
+    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
+    let body_end = decl.body_span.unwrap_or(decl.span).end.saturating_sub(1);
+    let end = usize::try_from(span_map.line_col(body_end).line)
+        .ok()?
+        .min(lines.len());
     if sink_idx + 1 >= end {
         return None;
     }
@@ -748,7 +757,13 @@ pub(super) fn go_jwt_inline_keyfunc_algorithm_guard_sanitizer(
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
     let lines: Vec<&str> = snapshot.text.lines().collect();
     let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
-    let end = (sink_idx + 32).min(lines.len());
+    let enclosing = ws
+        .enclosing_index()
+        .enclosing_for(ws.db(), snk.span.file, snk.span.start)?;
+    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
+    let end = usize::try_from(span_map.line_col(enclosing.end.saturating_sub(1)).line)
+        .ok()?
+        .min(lines.len());
     let block = lines.get(sink_idx..end)?.join("\n");
     let compact = compact_guard_text(&block);
     let parse_idx = compact.find("Parse(")?;
@@ -1299,7 +1314,11 @@ pub(super) fn go_xml_decoder_hardening_sanitizer(
                 .get(sink_idx)
                 .and_then(|line| go_assignment_target_from_call_line(line, "NewDecoder"))
         })?;
-    let end = (sink_idx + 48).min(lines.len());
+    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
+    let body_end = decl.body_span.unwrap_or(decl.span).end.saturating_sub(1);
+    let end = usize::try_from(span_map.line_col(body_end).line)
+        .ok()?
+        .min(lines.len());
     if sink_idx + 1 >= end {
         return None;
     }
@@ -2321,7 +2340,7 @@ pub(super) fn finite_literal_map_lookup_allowlist_sanitizer(
         if !python_literal_mapping_declared_before(&lines, target_idx, map_name) {
             continue;
         }
-        let search_start = target_idx.saturating_sub(30);
+        let search_start = enclosing_body_start_line(ws, sink, &snapshot.text);
         for (idx, line) in lines
             .iter()
             .copied()

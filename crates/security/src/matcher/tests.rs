@@ -35,6 +35,28 @@ fn flow_read_attribute_match_requires_actual_qualified_token() {
 }
 
 #[test]
+fn canonical_flow_read_uses_ast_rhs_span_instead_of_assignment_punctuation() {
+    let file = FileId::new(0);
+    let source = "req.query = sanitize(req.query)";
+    let assignment_span = Span::new(file, 0, source.len() as u64);
+    let value_start = source.find("sanitize").unwrap() as u64;
+    let value_span = Span::new(file, value_start, source.len() as u64);
+    let facts = [bonsai_lang_api::AssignmentValueFact {
+        assignment_span,
+        target_span: Some(Span::new(file, 0, "req.query".len() as u64)),
+        value_span,
+        call_sites: Vec::new(),
+    }];
+    let values = AssignmentValueIndex::new(&facts);
+
+    let matched =
+        canonical_flow_read_match_span_in_source(file, assignment_span, "req.query", &values, source);
+
+    assert_eq!(matched.start, source.rfind("req.query").unwrap() as u64);
+    assert_eq!(matched.end - matched.start, "req.query".len() as u64);
+}
+
+#[test]
 fn collect_calls_includes_assignment_source_call_metadata() {
     let events = vec![FlowEvent::Assign {
         span: span(),
