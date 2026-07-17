@@ -99,10 +99,11 @@ get wildcard semantics.
 Identifier tokens used in taint state come from adapter-emitted
 `source_names`, never from text-walking arbitrary expression strings.
 
-The `identifier_tokens_from_text` helper in the kit is quote-aware: it
-tracks `"..."`, `'...'`, and backticks and skips their contents. The
-engine's `arg_text_is_tainted` and `rhs_operand_is_tainted` short-circuit
-`false` on `is_quoted_literal` before any other check.
+The adapter kit walks tree-sitter expression children and emits only
+value-bearing identifier/place nodes. It does not recover taint operands by
+tokenizing rendered expressions. The engine's `arg_text_is_tainted` and
+`rhs_operand_is_tainted` also short-circuit `false` on `is_quoted_literal`
+before any other check.
 
 This matters because a string literal like `'.category == "electronics"'`
 must never produce identifier tokens that pollute state. An earlier version

@@ -116,9 +116,8 @@ fn extract_elixir_generator_binding_assigns(file: FileId, node: &Node<'_>, src: 
         else {
             continue;
         };
-        let rhs_text = node_text(&rhs, src);
         for target in binding_targets_from_pattern_node(&pattern, src) {
-            if let Some(assign) = pattern_binding_assign(file, &pattern, &target, rhs_text) {
+            if let Some(assign) = pattern_binding_assign(file, &pattern, &target, rhs, src) {
                 out.push(assign);
             }
         }

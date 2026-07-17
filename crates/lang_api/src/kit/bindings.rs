@@ -5,7 +5,7 @@
 //! type-test bindings, comprehension `for`-clauses, and foreach headers,
 //! so the taint engine sees pattern-bound names carry the subject's taint.
 
-use bonsai_common::{FileId, Span};
+use bonsai_common::FileId;
 use tree_sitter::Node;
 
 use crate::FlowEvent;
@@ -23,13 +23,10 @@ pub(super) fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: 
     out.extend(extract_elixir_case_stab_clause_bindings(file, node, src));
     out.extend(extract_rust_let_condition_bindings(file, node, src));
 
-    // Two grammars to cover: Python `match SUBJECT: case PAT:` (text
-    // path) and Rust / Scala / Kotlin / Swift / Dart `match SUBJECT
-    // { PAT => BODY }` (AST path). Rust's tree-sitter grammar
-    // exposes `match_expression { value, body: match_block }` and
-    // each arm as `match_arm { pattern, value }`. Walk the AST when
-    // the kind name reveals it; fall back to the line-based parser
-    // for Python's whitespace-delimited match statement.
+    // Rust's grammar exposes `match_expression { value, body }` while
+    // Python exposes `match_statement { subject, body }`. Both lower from
+    // their parsed subject/pattern nodes; indentation and punctuation never
+    // participate in binding discovery.
     if matches!(
         node.kind(),
         "match_expression" | "if_let_expression" | "while_let_expression"
@@ -37,49 +34,55 @@ pub(super) fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: 
         out.extend(extract_rust_style_match_bindings(file, node, src));
         return out;
     }
-    let text = node_text(node, src);
-    let trimmed = text.trim_start();
-    let Some(after_match) = trimmed.strip_prefix("match ") else {
-        return out;
-    };
-    let Some((subject, rest)) = after_match.split_once(':') else {
-        return out;
-    };
-    let subject = subject.trim();
-    if !looks_like_bare_identifier(subject) {
-        return out;
-    }
-    let mut targets: Vec<String> = Vec::new();
-    for line in rest.lines() {
-        let line = line.trim_start();
-        let Some(pattern) = line.strip_prefix("case ") else {
-            continue;
+    if node.kind() == "match_statement" {
+        let Some(subject) = node.child_by_field_name("subject") else {
+            return out;
         };
-        let pattern = pattern.split_once(':').map_or(pattern, |(p, _)| p);
-        // Drop the guard: `case x if x > limit:` binds only `x`; the guard
-        // condition's identifiers (`limit`) are reads, not bindings.
-        let pattern = pattern.split_once(" if ").map_or(pattern, |(p, _)| p);
-        for ident in identifier_tokens_from_text(pattern) {
-            if !matches!(
-                ident.as_str(),
-                "case" | "if" | "in" | "and" | "or" | "not" | "_" | "True" | "False" | "None"
-            ) {
-                targets.push(ident);
+        let Some(body) = node.child_by_field_name("body") else {
+            return out;
+        };
+        let (source_name, mut source_names) = binding_source_facts(subject, src);
+        // A canonical place already identifies the dependency exactly.
+        // Avoid emitting the same bare place through both carriers: Python's
+        // branch lowering treats `source_names` as additional operands, and
+        // the duplicate edge can obscure the function-return summary built
+        // from the branch result.
+        if source_name.is_some() {
+            source_names.clear();
+        }
+        let mut targets: Vec<String> = Vec::new();
+        let mut cursor = body.walk();
+        for case_clause in body.named_children(&mut cursor) {
+            if case_clause.kind() != "case_clause" {
+                continue;
+            }
+            let mut case_cursor = case_clause.walk();
+            let Some(pattern) = case_clause
+                .named_children(&mut case_cursor)
+                .find(|child| child.kind() == "case_pattern")
+            else {
+                continue;
+            };
+            for target in binding_targets_from_pattern_node(&pattern, src) {
+                if !targets.iter().any(|seen| same_identifier_name(seen, &target)) {
+                    targets.push(target);
+                }
             }
         }
+        targets.sort();
+        out.extend(targets.into_iter().filter_map(|target| {
+            (source_name.is_some() || !source_names.is_empty()).then(|| FlowEvent::Assign {
+                span: span_of(file, node),
+                target,
+                source_name: source_name.clone(),
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: source_names.clone(),
+                declares_new_binding: false,
+                value_kind: None,
+            })
+        }));
     }
-    targets.sort();
-    targets.dedup();
-    out.extend(targets.into_iter().map(|target| FlowEvent::Assign {
-        span: span_of(file, node),
-        target,
-        source_name: Some(subject.to_string()),
-        source_call: None,
-        source_call_args: Vec::new(),
-        source_names: Vec::new(),
-        declares_new_binding: false,
-        value_kind: None,
-    }));
     out
 }
 
@@ -125,11 +128,8 @@ pub(super) fn extract_rust_let_condition_bindings(
         else {
             continue;
         };
-        let val_text = node_text(&val, src);
-        let source_name = looks_like_bare_identifier(val_text.trim()).then(|| val_text.trim().to_string());
-        let source_names = identifier_tokens_from_text(val_text);
-        let pat_text = node_text(&pat, src);
-        for ident in binding_tokens_from_pattern(pat_text) {
+        let (source_name, source_names) = binding_source_facts(val, src);
+        for ident in binding_targets_from_pattern_node(&pat, src) {
             // Skip variant constructors (`Some`, `Ok`, user `Variant`) —
             // uppercase-leading — and non-binding pattern keywords.
             if ident.chars().next().is_some_and(|c| c.is_ascii_uppercase())
@@ -173,22 +173,17 @@ pub(super) fn extract_elixir_case_stab_clause_bindings(
     else {
         return Vec::new();
     };
-    let subject_text = node_text(&subject, src).trim();
-    if subject_text.is_empty() {
-        return Vec::new();
-    }
     let mut out = Vec::new();
     let mut cursor = node.walk();
     let mut stack = vec![*node];
     while let Some(current) = stack.pop() {
         if current.kind() == "stab_clause" {
             if let Some(pattern) = current.child_by_field_name("left") {
-                let pattern_text = node_text(&pattern, src);
                 for target in binding_targets_from_pattern_node(&pattern, src) {
-                    if !elixir_pattern_target_is_binding(pattern_text, &target) {
+                    if target == "_" || target.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
                         continue;
                     }
-                    if let Some(assign) = pattern_binding_assign(file, &pattern, &target, subject_text) {
+                    if let Some(assign) = pattern_binding_assign(file, &pattern, &target, subject, src) {
                         out.push(assign);
                     }
                 }
@@ -199,21 +194,6 @@ pub(super) fn extract_elixir_case_stab_clause_bindings(
         }
     }
     dedup_assign_events(out)
-}
-
-fn elixir_pattern_target_is_binding(pattern: &str, target: &str) -> bool {
-    let target = target.trim_start_matches(&['$', '@', '%'][..]);
-    if target.is_empty() || target == "_" || target.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
-        return false;
-    }
-    pattern.match_indices(target).any(|(start, _)| {
-        let end = start + target.len();
-        let before = pattern[..start].chars().next_back();
-        let after = pattern[end..].chars().next();
-        let boundary_before = before.is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()));
-        let boundary_after = after.is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()));
-        boundary_before && boundary_after && before != Some(':')
-    })
 }
 
 fn extract_instanceof_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
@@ -228,15 +208,7 @@ fn extract_instanceof_pattern_binding_assigns(file: FileId, node: &Node<'_>, src
             ) {
                 let target_text = node_text(&target, src).trim();
                 if looks_like_bare_identifier(target_text) {
-                    let source_text = node_text(&source, src).trim();
-                    let source_name =
-                        looks_like_bare_identifier(source_text).then(|| source_text.to_string());
-                    let mut source_names = identifier_tokens_from_text(source_text);
-                    if source_names.is_empty() {
-                        if let Some(source_name) = source_name.as_ref() {
-                            source_names.push(source_name.clone());
-                        }
-                    }
+                    let (source_name, mut source_names) = binding_source_facts(source, src);
                     source_names.retain(|name| !same_identifier_name(name, target_text));
                     source_names.sort();
                     source_names.dedup();
@@ -270,9 +242,8 @@ fn extract_is_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8])
                 current.child_by_field_name("expression"),
                 current.child_by_field_name("pattern"),
             ) {
-                let source_text = node_text(&source, src).trim();
                 for target in binding_targets_from_pattern_node(&pattern, src) {
-                    if let Some(assign) = pattern_binding_assign(file, &current, &target, source_text) {
+                    if let Some(assign) = pattern_binding_assign(file, &current, &target, source, src) {
                         out.push(assign);
                     }
                 }
@@ -298,12 +269,14 @@ fn extract_kotlin_when_subject_binding_assigns(file: FileId, node: &Node<'_>, sr
                 continue;
             };
             let target = node_text(&target_node, src);
-            let subject_text = node_text(&current, src);
-            let source_text = subject_text
-                .split_once('=')
-                .map(|(_, rhs)| rhs.trim())
-                .unwrap_or_default();
-            if let Some(assign) = pattern_binding_assign(file, &current, target, source_text) {
+            let mut subject_cursor = current.walk();
+            let Some(source) = current
+                .named_children(&mut subject_cursor)
+                .find(|child| child.id() != decl.id() && !matches!(child.kind(), "annotation" | "type"))
+            else {
+                continue;
+            };
+            if let Some(assign) = pattern_binding_assign(file, &current, target, source, src) {
                 out.push(assign);
             }
         }
@@ -321,14 +294,7 @@ fn extract_case_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8])
     let Some(subject) = node.child_by_field_name("value") else {
         return Vec::new();
     };
-    let subject_text = node_text(&subject, src).trim();
-    let source_name = looks_like_bare_identifier(subject_text).then(|| subject_text.to_string());
-    let mut source_names = identifier_tokens_from_text(subject_text);
-    if source_names.is_empty() {
-        if let Some(source_name) = source_name.as_ref() {
-            source_names.push(source_name.clone());
-        }
-    }
+    let (source_name, source_names) = binding_source_facts(subject, src);
 
     let mut targets: Vec<String> = Vec::new();
     let mut cursor = node.walk();
@@ -346,8 +312,7 @@ fn extract_case_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8])
                     pattern.kind(),
                     "variable_reference_pattern" | "reference_pattern" | "pin_pattern" | "pin"
                 ) {
-                    let pattern_text = node_text(&pattern, src);
-                    for target in binding_tokens_from_pattern(pattern_text) {
+                    for target in binding_targets_from_pattern_node(&pattern, src) {
                         if !targets.iter().any(|seen| same_identifier_name(seen, &target)) {
                             targets.push(target);
                         }
@@ -380,6 +345,15 @@ fn extract_case_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8])
 }
 
 fn extract_case_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+    // These shapes have a dedicated lowering pass below. Running the
+    // generic case-arm pass as well would duplicate bindings and treat a
+    // unit variant such as Rust `None` as a capture.
+    if matches!(
+        node.kind(),
+        "match_expression" | "if_let_expression" | "while_let_expression"
+    ) {
+        return Vec::new();
+    }
     let Some(subject) = node
         .child_by_field_name("value")
         .or_else(|| node.child_by_field_name("subject"))
@@ -390,7 +364,6 @@ fn extract_case_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8
     else {
         return Vec::new();
     };
-    let subject_text = node_text(&subject, src).trim();
     let mut out = Vec::new();
     let mut cursor = node.walk();
     let mut stack = vec![*node];
@@ -418,7 +391,7 @@ fn extract_case_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8
             }
             for pattern in patterns {
                 for target in binding_targets_from_pattern_node(&pattern, src) {
-                    if let Some(assign) = pattern_binding_assign(file, &pattern, &target, subject_text) {
+                    if let Some(assign) = pattern_binding_assign(file, &pattern, &target, subject, src) {
                         out.push(assign);
                     }
                 }
@@ -439,7 +412,6 @@ fn extract_case_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8
 
 pub(super) fn binding_targets_from_pattern_node(pattern: &Node<'_>, src: &[u8]) -> Vec<String> {
     let mut targets = Vec::new();
-    let mut cursor = pattern.walk();
     let mut stack = vec![*pattern];
     while let Some(current) = stack.pop() {
         // Ruby pin `in ^expected` (`variable_reference_pattern`) and
@@ -452,57 +424,98 @@ pub(super) fn binding_targets_from_pattern_node(pattern: &Node<'_>, src: &[u8]) 
         ) {
             continue;
         }
-        if current.kind() == "var" {
+
+        if matches!(
+            current.kind(),
+            "identifier"
+                | "simple_identifier"
+                | "variable_name"
+                | "var"
+                | "varname"
+                | "shorthand_property_identifier_pattern"
+        ) {
             push_binding_target(&mut targets, node_text(&current, src));
+            continue;
         }
-        for field in ["name", "bound_identifier"] {
-            if let Some(target) = current.child_by_field_name(field) {
-                push_binding_target(&mut targets, node_text(&target, src));
+
+        // A dotted Python pattern is a capture only when it is a single
+        // identifier. Multi-segment dotted names are value patterns. The
+        // constructor name of a class pattern is likewise a value, while
+        // all remaining children are nested binding patterns.
+        if current.kind() == "dotted_name" && current.named_child_count() > 1 {
+            continue;
+        }
+        if current.kind() == "class_pattern" {
+            let mut cursor = current.walk();
+            let children: Vec<Node<'_>> = current.named_children(&mut cursor).skip(1).collect();
+            stack.extend(children.into_iter().rev());
+            continue;
+        }
+
+        // Both Python and Ruby call these `keyword_pattern`, but expose
+        // different field metadata. A fielded Ruby key with no value is a
+        // shorthand capture (`value:`). A fielded value or Python's first
+        // positional identifier is a property key, never a binding.
+        if current.kind() == "keyword_pattern" {
+            if let Some(value) = current.child_by_field_name("value") {
+                stack.push(value);
+            } else if let Some(key) = current.child_by_field_name("key") {
+                push_binding_target(&mut targets, node_text(&key, src));
+            } else {
+                let mut cursor = current.walk();
+                let children: Vec<Node<'_>> = current.named_children(&mut cursor).skip(1).collect();
+                stack.extend(children.into_iter().rev());
+            }
+            continue;
+        }
+
+        // Map keys select data; only map values bind. Elixir, Ruby, and
+        // JavaScript-family grammars all expose these roles as fields.
+        if matches!(current.kind(), "pair" | "pair_pattern") {
+            if let Some(value) = current.child_by_field_name("value") {
+                stack.push(value);
+                continue;
             }
         }
-        if current.kind() == "variable_pattern" {
-            let mut child_cursor = current.walk();
-            let mut last_identifier = None;
-            for child in current.named_children(&mut child_cursor) {
-                if matches!(
-                    child.kind(),
-                    "identifier"
-                        | "simple_identifier"
-                        | "field_identifier"
-                        | "shorthand_property_identifier_pattern"
-                ) {
-                    last_identifier = Some(node_text(&child, src));
+
+        let mut cursor = current.walk();
+        let mut children = Vec::new();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                let field = cursor.field_name();
+                if child.is_named()
+                    && !matches!(
+                        field,
+                        Some(
+                            "type"
+                                | "key"
+                                | "class"
+                                | "path"
+                                | "constructor"
+                                | "guard"
+                                | "function"
+                                | "method"
+                                | "operator"
+                        )
+                    )
+                {
+                    children.push(child);
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
                 }
             }
-            if let Some(target) = last_identifier {
-                push_binding_target(&mut targets, target);
-            }
         }
-        for child in current.named_children(&mut cursor) {
-            stack.push(child);
-        }
+        stack.extend(children.into_iter().rev());
     }
-    // Text-fallback only when the structural walk found nothing AND the
-    // whole pattern is not a pin/reference read (`in ^expected`) — else
-    // the fallback would re-extract the pinned identifier the walk above
-    // deliberately skipped as a binding target.
-    let pattern_is_reference = matches!(
-        pattern.kind(),
-        "variable_reference_pattern" | "reference_pattern" | "pin_pattern" | "pin"
-    );
-    if targets.is_empty() && !pattern_is_reference {
-        for target in binding_tokens_from_pattern(node_text(pattern, src)) {
-            push_binding_target(&mut targets, &target);
-        }
-    }
-    targets.sort();
-    targets.dedup_by(|left, right| same_identifier_name(left, right));
     targets
 }
 
 fn push_binding_target(out: &mut Vec<String>, raw: &str) {
     let target = raw.trim().trim_start_matches(&['$', '@', '%'][..]);
     if !target.is_empty()
+        && target != "_"
         && looks_like_bare_identifier(target)
         && !out.iter().any(|seen| same_identifier_name(seen, target))
     {
@@ -514,19 +527,13 @@ pub(super) fn pattern_binding_assign(
     file: FileId,
     span_node: &Node<'_>,
     target: &str,
-    source_text: &str,
+    source: Node<'_>,
+    src: &[u8],
 ) -> Option<FlowEvent> {
-    let source_text = source_text.trim();
-    if source_text.is_empty() || !looks_like_bare_identifier(target) {
+    if !looks_like_bare_identifier(target) {
         return None;
     }
-    let source_name = looks_like_bare_identifier(source_text).then(|| source_text.to_string());
-    let mut source_names = identifier_tokens_from_text(source_text);
-    if source_names.is_empty() {
-        if let Some(source_name) = source_name.as_ref() {
-            source_names.push(source_name.clone());
-        }
-    }
+    let (source_name, mut source_names) = binding_source_facts(source, src);
     source_names.retain(|name| !same_identifier_name(name, target));
     source_names.sort();
     source_names.dedup();
@@ -543,6 +550,17 @@ pub(super) fn pattern_binding_assign(
         declares_new_binding: false,
         value_kind: None,
     })
+}
+
+fn binding_source_facts(source: Node<'_>, src: &[u8]) -> (Option<String>, Vec<String>) {
+    let source_name = argument_place(&source, src);
+    let mut source_names = extract_rhs_expr_operands(&source, src);
+    if source_names.is_empty() {
+        source_names.extend(source_name.iter().cloned());
+    }
+    source_names.sort();
+    source_names.dedup();
+    (source_name, source_names)
 }
 
 pub(super) fn dedup_assign_events(events: Vec<FlowEvent>) -> Vec<FlowEvent> {
@@ -590,18 +608,11 @@ fn extract_rust_style_match_bindings(file: FileId, node: &Node<'_>, src: &[u8]) 
     let Some(subject) = subject_node else {
         return Vec::new();
     };
-    let subject_text = node_text(&subject, src);
-    let source_name = if looks_like_bare_identifier(subject_text.trim()) {
-        Some(subject_text.trim().to_string())
-    } else {
-        None
-    };
-    let source_names = identifier_tokens_from_text(subject_text);
+    let (source_name, source_names) = binding_source_facts(subject, src);
     let mut out: Vec<FlowEvent> = Vec::new();
     let mut targets: Vec<String> = Vec::new();
     let mut visit_pattern = |pat_node: &Node<'_>| {
-        let pat_text = node_text(pat_node, src);
-        for ident in binding_tokens_from_pattern(pat_text) {
+        for ident in binding_targets_from_pattern_node(pat_node, src) {
             // Skip variant constructors: `Some`, `Err`, `Ok`,
             // user-defined `Variant(x)` — uppercase-leading
             // identifiers are constructors, not bindings, in Rust.
@@ -696,18 +707,11 @@ pub(super) fn extract_comprehension_for_clause_assigns(
     let (Some(lhs), Some(rhs)) = (lhs_node, rhs_node) else {
         return Vec::new();
     };
-    let lhs_text = node_text(&lhs, src);
-    let rhs_text = node_text(&rhs, src);
-    let targets = binding_tokens_from_pattern(lhs_text);
+    let targets = binding_targets_from_pattern_node(&lhs, src);
     if targets.is_empty() {
         return Vec::new();
     }
-    let source_name = if looks_like_bare_identifier(rhs_text.trim()) {
-        Some(rhs_text.trim().to_string())
-    } else {
-        None
-    };
-    let source_names = identifier_tokens_from_text(rhs_text);
+    let (source_name, source_names) = binding_source_facts(rhs, src);
     targets
         .into_iter()
         .map(|target| FlowEvent::Assign {
@@ -725,12 +729,9 @@ pub(super) fn extract_comprehension_for_clause_assigns(
 
 pub(super) fn extract_foreach_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
     if let Some((binding, iterable)) = foreach_binding_nodes(node) {
-        let binding_text = node_text(&binding, src);
-        let targets = binding_tokens_from_pattern(binding_text);
+        let targets = binding_targets_from_pattern_node(&binding, src);
         if !targets.is_empty() {
-            let iterable_text = node_text(&iterable, src).trim();
-            let source_name = looks_like_bare_identifier(iterable_text).then(|| iterable_text.to_string());
-            let source_names = extract_rhs_expr_operands(&iterable, src);
+            let (source_name, source_names) = binding_source_facts(iterable, src);
             return targets
                 .into_iter()
                 .map(|target| FlowEvent::Assign {
@@ -746,54 +747,95 @@ pub(super) fn extract_foreach_binding_assigns(file: FileId, node: &Node<'_>, src
                 .collect();
         }
     }
-    let text = node_text(node, src);
-    foreach_binding_assigns_from_text(span_of(file, node), text)
+    Vec::new()
 }
 
 fn foreach_binding_nodes<'tree>(node: &Node<'tree>) -> Option<(Node<'tree>, Node<'tree>)> {
-    let binding = ["variable", "pattern", "left", "target", "name"]
-        .into_iter()
-        .find_map(|field| node.child_by_field_name(field))?;
+    let binding = [
+        "variable",
+        "pattern",
+        "left",
+        "target",
+        "name",
+        "item",
+        "declarator",
+    ]
+    .into_iter()
+    .find_map(|field| node.child_by_field_name(field));
     let iterable = ["list", "iterable", "right", "source", "collection", "value"]
         .into_iter()
-        .find_map(|field| node.child_by_field_name(field))?;
-    (binding.id() != iterable.id()).then_some((binding, iterable))
-}
-
-/// Synthesize loop-variable bindings from a source-level foreach
-/// header. Adapters call this as a repair pass when their grammar
-/// exposes a loop body but not a standard foreach node kind.
-pub fn foreach_binding_assigns_from_text(span: Span, text: &str) -> Vec<FlowEvent> {
-    let Some((lhs, rhs)) = split_foreach_header(text) else {
-        return Vec::new();
-    };
-    let targets = binding_tokens_from_pattern(lhs);
-    if targets.is_empty() {
-        return Vec::new();
+        .find_map(|field| node.child_by_field_name(field));
+    if let (Some(binding), Some(iterable)) = (binding, iterable) {
+        if binding.id() != iterable.id() {
+            return Some((binding, iterable));
+        }
     }
-    let source_name = if looks_like_bare_identifier(rhs.trim()) {
-        Some(rhs.trim().to_string())
-    } else {
-        None
-    };
-    // Loop element bindings semantically derive from the iterable
-    // expression, regardless of whether that iterable is a bare
-    // collection (`for x in xs`) or a call (`for x in split(cmd)`).
-    // Surface operand identifiers as source_names so the taint engine
-    // can propagate through the binding without assuming anything
-    // about an arbitrary callee's return value.
-    let source_names = iterable_source_names_from_text(rhs);
-    targets
-        .into_iter()
-        .map(|target| FlowEvent::Assign {
-            span,
-            target,
-            source_name: source_name.clone(),
-            source_call: None,
-            source_call_args: Vec::new(),
-            source_names: source_names.clone(),
-            declares_new_binding: false,
-            value_kind: None,
-        })
-        .collect()
+
+    // Several grammars wrap the compiler-known pair once: Go in a
+    // `range_clause`, Lua in a `for_generic_clause`, and Scala in an
+    // `enumerator`. Follow only these grammar nodes, never source text.
+    for field in ["clause", "enumerators"] {
+        if let Some(wrapper) = node.child_by_field_name(field) {
+            if let Some(pair) = foreach_binding_nodes(&wrapper) {
+                return Some(pair);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    let named_children: Vec<Node<'tree>> = node.named_children(&mut cursor).collect();
+    for child in &named_children {
+        if matches!(
+            child.kind(),
+            "range_clause" | "for_generic_clause" | "enumerators" | "enumerator"
+        ) {
+            if let Some(pair) = foreach_binding_nodes(child) {
+                return Some(pair);
+            }
+        }
+    }
+
+    match node.kind() {
+        // These wrappers define the first named child as the pattern and
+        // the second as the iterable expression.
+        "for_generic_clause" | "enumerator" | "range_clause" => {
+            let [binding, iterable, ..] = named_children.as_slice() else {
+                return None;
+            };
+            Some((*binding, *iterable))
+        }
+        // PHP has no header fields. The first non-body child is the
+        // iterable and the second is either one variable or a key/value
+        // pair, both represented as parsed nodes.
+        "foreach_statement" => {
+            let body_id = node.child_by_field_name("body").map(|body| body.id());
+            let mut header = named_children
+                .into_iter()
+                .filter(|child| Some(child.id()) != body_id);
+            let iterable = header.next()?;
+            let binding = header.next()?;
+            Some((binding, iterable))
+        }
+        // Kotlin and Objective-C fast enumeration leave the header
+        // unfielded. Classic C-style loops have explicit init/condition/
+        // update fields and are deliberately rejected here.
+        "for_statement"
+            if [
+                "initializer",
+                "initialize",
+                "init",
+                "condition",
+                "update",
+                "increment",
+            ]
+            .into_iter()
+            .all(|field| node.child_by_field_name(field).is_none()) =>
+        {
+            let body_id = node.child_by_field_name("body").map(|body| body.id());
+            let mut header = named_children.into_iter().filter(|child| {
+                Some(child.id()) != body_id && !matches!(child.kind(), "annotation" | "label" | "type")
+            });
+            Some((header.next()?, header.next()?))
+        }
+        _ => None,
+    }
 }

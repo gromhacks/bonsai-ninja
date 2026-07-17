@@ -98,7 +98,7 @@ The kit is split across several files:
   flow-event extraction, RHS-token scanning, branch repair entry point.
 - `kit/branch_repair.rs` — span-based then/else partition recovery for
   grammars that lump both arms together.
-- `kit/foreach_header.rs` — for-of / for-in / for-each header parsing.
+- `kit/bindings.rs` — pattern and foreach lowering from tree-sitter fields.
 - `kit/identifiers.rs` — identifier-shape predicates.
 - `kit/param_extraction.rs` — parameter names + annotations.
 - `kit/pseudo_call.rs` — JSX, Go channel sends, C++ delete, PHP echo,

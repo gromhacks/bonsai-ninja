@@ -110,7 +110,7 @@ Adapter obligations:
   with no Assign for the iteration binding — the engine resolves `x`
   through the function's parameter list / scope chain (the loop
   binding is part of the surrounding `Decl::params` for some grammars,
-  or is synthesized by the kit's `split_foreach_header` for others).
+  or is synthesized from the grammar's parsed binding and iterable nodes).
 - `LoopKind::ForEach` is for explicit collection iteration; `For` is
   C-style `for(init; test; step)`. `Loop` covers infinite/`loop` /
   `while true`.

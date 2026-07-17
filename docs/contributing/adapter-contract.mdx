@@ -56,8 +56,8 @@ language-agnostic shapes:
   generic recovery, not a language fact.
 - `extract_return_value_text/name` — handles the `return EXPR;` shape
   that appears in every supported language.
-- `split_foreach_header` — handles `for x in xs`, `for (await x of xs)`,
-  `foreach my $x (@xs)` via uniform header parsing.
+- `extract_foreach_binding_assigns` follows each grammar's parsed binding
+  and iterable fields, including wrapped range/generator clauses.
 - `split_match_arms_in_branch_events` — applies to any match/switch
   grammar that emits a single flat Branch with arms concatenated.
   Adapters supply per-arm body spans; the helper rewrites for arm-
