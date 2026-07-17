@@ -2664,6 +2664,35 @@ struct FieldForwardingSites<'a> {
     passthrough_copies: &'a [FieldCopySite],
 }
 
+struct FieldPropagationInputs<'a> {
+    transforms: &'a AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
+    stitch_data: &'a AHashMap<FuncId, FunctionStitchData>,
+}
+
+struct FieldPropagationState<'a> {
+    inter_call_arg_entries: &'a mut InterCallArgEntryIndex,
+    synthetic_field_writes: &'a mut SyntheticFieldWriteCache,
+    ws: &'a mut IdgWorkspace,
+    known_edges: &'a mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
+    field_index: &'a mut FieldPlaceIndex,
+    pending: &'a mut Vec<PendingFieldWrite>,
+    enqueued: &'a mut AHashSet<PendingFieldWrite>,
+}
+
+#[derive(Clone, Copy)]
+struct OutboundFieldWrite<'a> {
+    from_seg: SegmentId,
+    to_seg: SegmentId,
+    to_func: FuncId,
+    target_base: &'a str,
+    write_span: Span,
+    via_span: Span,
+    precision: Precision,
+    call_kind: CallEdgeKind,
+    edge_kind: crate::edge::IdgEdgeKind,
+    skip_self_edge: bool,
+}
+
 fn stitch_field_argument_forwarding(
     sites: FieldForwardingSites<'_>,
     stitch_data: &AHashMap<FuncId, FunctionStitchData>,
@@ -2758,28 +2787,29 @@ fn stitch_field_argument_forwarding(
     let mut pending = Vec::new();
     let mut enqueued = AHashSet::default();
     seed_field_write_worklist(&field_index, &transforms, &mut pending, &mut enqueued);
+    let inputs = FieldPropagationInputs {
+        transforms: &transforms,
+        stitch_data,
+    };
+    let mut state = FieldPropagationState {
+        inter_call_arg_entries: &mut inter_call_arg_entries,
+        synthetic_field_writes: &mut synthetic_field_writes,
+        ws,
+        known_edges: &mut known_edges,
+        field_index: &mut field_index,
+        pending: &mut pending,
+        enqueued: &mut enqueued,
+    };
 
     let phase_started = Instant::now();
-    let before_edges = ws.total_edge_count();
-    let mut fallback_edges =
-        stitch_field_argument_fallbacks(sites, ws, &mut known_edges, &field_index, &inter_call_arg_entries);
-    fallback_edges += stitch_field_copy_fallbacks(
-        &copy_sites,
-        ws,
-        &mut known_edges,
-        &mut field_index,
-        &mut inter_call_arg_entries,
-        &mut synthetic_field_writes,
-        &transforms,
-        &mut pending,
-        &mut enqueued,
-        stitch_data,
-    );
+    let before_edges = state.ws.total_edge_count();
+    let mut fallback_edges = stitch_field_argument_fallbacks(sites, &mut state);
+    fallback_edges += stitch_field_copy_fallbacks(&copy_sites, &inputs, &mut state);
     let mut processed = 0usize;
     let mut processed_transforms = 0usize;
-    while let Some(write) = pending.pop() {
+    while let Some(write) = state.pending.pop() {
         processed += 1;
-        let Some((storage, write_span)) = ws.segment(write.seg_id).and_then(|segment| {
+        let Some((storage, write_span)) = state.ws.segment(write.seg_id).and_then(|segment| {
             let node = segment.nodes.get(write.node)?;
             if node.func != write.func {
                 return None;
@@ -2809,7 +2839,7 @@ fn stitch_field_argument_forwarding(
                 base: join_storage_part_refs(&parts[..split]),
                 writes: true,
             };
-            let Some(sites) = transforms.get(&key) else {
+            let Some(sites) = inputs.transforms.get(&key) else {
                 continue;
             };
             let source = FieldPlaceHit {
@@ -2818,36 +2848,18 @@ fn stitch_field_argument_forwarding(
                 span: Some(write_span),
             };
             let mut apply_site = |site: &FieldWriteTransform| {
-                if !field_transform_source_may_apply(
-                    site,
-                    &source,
-                    &inter_call_arg_entries,
-                    &synthetic_field_writes,
-                    stitch_data,
-                ) {
+                if !field_transform_source_may_apply(site, &source, &inputs, &state) {
                     return;
                 }
                 processed_transforms += 1;
-                apply_field_write_transform(
-                    site,
-                    &source,
-                    &mut inter_call_arg_entries,
-                    &mut synthetic_field_writes,
-                    ws,
-                    &mut known_edges,
-                    &mut field_index,
-                    &transforms,
-                    &mut pending,
-                    &mut enqueued,
-                    stitch_data,
-                );
+                apply_field_write_transform(site, &source, &inputs, &mut state);
             };
             for site in sites {
                 apply_site(site);
             }
         }
     }
-    let added_edges = ws.total_edge_count().saturating_sub(before_edges);
+    let added_edges = state.ws.total_edge_count().saturating_sub(before_edges);
     stitch_debug_log(format_args!(
         "field-forward worklist: {:.3}s processed={} transform_apps={} transforms={} fallback_edges={} added_edges={} total_edges={} pending_remaining={}",
         phase_started.elapsed().as_secs_f64(),
@@ -2856,8 +2868,8 @@ fn stitch_field_argument_forwarding(
         transform_count,
         fallback_edges,
         added_edges,
-        ws.total_edge_count(),
-        pending.len(),
+        state.ws.total_edge_count(),
+        state.pending.len(),
     ));
 }
 
@@ -3124,94 +3136,30 @@ fn dedup_receiver_mutation_sites(sites: &mut Vec<Arc<ReceiverMutationStitch>>) {
     sites.retain(|site| seen.insert(Arc::clone(site)));
 }
 
-#[allow(clippy::too_many_arguments)] // Worklist state is explicit to keep the field propagation side effects auditable.
 fn apply_field_write_transform(
     transform: &FieldWriteTransform,
     source: &FieldPlaceHit,
-    inter_call_arg_entries: &mut InterCallArgEntryIndex,
-    synthetic_field_writes: &mut SyntheticFieldWriteCache,
-    ws: &mut IdgWorkspace,
-    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
-    field_index: &mut FieldPlaceIndex,
-    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut Vec<PendingFieldWrite>,
-    enqueued: &mut AHashSet<PendingFieldWrite>,
-    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
+    inputs: &FieldPropagationInputs<'_>,
+    state: &mut FieldPropagationState<'_>,
 ) {
     match transform {
         FieldWriteTransform::Argument(site) => {
-            apply_field_argument_write(
-                site,
-                source,
-                inter_call_arg_entries,
-                synthetic_field_writes,
-                ws,
-                known_edges,
-                field_index,
-                transforms,
-                pending,
-                enqueued,
-            );
+            apply_field_argument_write(site, source, inputs, state);
         }
         FieldWriteTransform::Return(site) => {
-            apply_return_field_write(
-                site,
-                source,
-                inter_call_arg_entries,
-                synthetic_field_writes,
-                ws,
-                known_edges,
-                field_index,
-                transforms,
-                pending,
-                enqueued,
-            );
+            apply_return_field_write(site, source, inputs, state);
         }
         FieldWriteTransform::ScalarReturn(site) => {
-            apply_scalar_return_field_write(site, source, ws, known_edges);
+            apply_scalar_return_field_write(site, source, state);
         }
         FieldWriteTransform::ConstructorReturn(site) => {
-            apply_constructor_return_field_write(
-                site,
-                source,
-                inter_call_arg_entries,
-                synthetic_field_writes,
-                ws,
-                known_edges,
-                field_index,
-                transforms,
-                pending,
-                enqueued,
-            );
+            apply_constructor_return_field_write(site, source, inputs, state);
         }
         FieldWriteTransform::ReceiverMutation(site) => {
-            apply_receiver_mutation_field_write(
-                site,
-                source,
-                inter_call_arg_entries,
-                synthetic_field_writes,
-                ws,
-                known_edges,
-                field_index,
-                transforms,
-                pending,
-                enqueued,
-            );
+            apply_receiver_mutation_field_write(site, source, inputs, state);
         }
         FieldWriteTransform::Copy(site) => {
-            apply_intra_field_copy_write(
-                site,
-                source,
-                inter_call_arg_entries,
-                synthetic_field_writes,
-                ws,
-                known_edges,
-                field_index,
-                transforms,
-                pending,
-                enqueued,
-                stitch_data.get(&site.func).map(|data| &data.flow_control),
-            );
+            apply_intra_field_copy_write(site, source, inputs, state);
         }
     }
 }
@@ -3219,9 +3167,8 @@ fn apply_field_write_transform(
 fn field_transform_source_may_apply(
     transform: &FieldWriteTransform,
     source: &FieldPlaceHit,
-    inter_call_arg_entries: &InterCallArgEntryIndex,
-    synthetic_field_writes: &SyntheticFieldWriteCache,
-    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
+    inputs: &FieldPropagationInputs<'_>,
+    state: &FieldPropagationState<'_>,
 ) -> bool {
     if !is_forwardable_field(&source.field) {
         return false;
@@ -3232,7 +3179,7 @@ fn field_transform_source_may_apply(
                 || source_write_can_reach_call(
                     source,
                     site.call_span,
-                    inter_call_arg_entries,
+                    state.inter_call_arg_entries,
                     site.caller_seg,
                     site.caller,
                 )
@@ -3241,9 +3188,9 @@ fn field_transform_source_may_apply(
         FieldWriteTransform::Copy(site) => source_can_reach_field_copy(
             source,
             site,
-            synthetic_field_writes,
-            inter_call_arg_entries,
-            stitch_data.get(&site.func).map(|data| &data.flow_control),
+            state.synthetic_field_writes,
+            state.inter_call_arg_entries,
+            inputs.stitch_data.get(&site.func).map(|data| &data.flow_control),
         ),
         FieldWriteTransform::Return(_)
         | FieldWriteTransform::ConstructorReturn(_)
@@ -3251,24 +3198,17 @@ fn field_transform_source_may_apply(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // Call-site field forwarding carries source, destination, and worklist state.
 fn apply_field_argument_write(
     site: &FieldArgStitch,
     source: &FieldPlaceHit,
-    inter_call_arg_entries: &mut InterCallArgEntryIndex,
-    synthetic_field_writes: &mut SyntheticFieldWriteCache,
-    ws: &mut IdgWorkspace,
-    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
-    field_index: &mut FieldPlaceIndex,
-    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut Vec<PendingFieldWrite>,
-    enqueued: &mut AHashSet<PendingFieldWrite>,
+    inputs: &FieldPropagationInputs<'_>,
+    state: &mut FieldPropagationState<'_>,
 ) {
     if (!site.allow_out_of_order_source
         && !source_write_can_reach_call(
             source,
             site.call_span,
-            inter_call_arg_entries,
+            state.inter_call_arg_entries,
             site.caller_seg,
             site.caller,
         ))
@@ -3276,9 +3216,9 @@ fn apply_field_argument_write(
     {
         return;
     }
-    let Some((param_field_write, param_field_span, is_new_field_write)) = synthetic_field_writes
-        .ensure_parameter(
-            ws,
+    let Some((param_field_write, param_field_span, is_new_field_write)) =
+        state.synthetic_field_writes.ensure_parameter(
+            state.ws,
             site.callee_seg,
             site.callee,
             &site.param_name,
@@ -3289,14 +3229,14 @@ fn apply_field_argument_write(
         return;
     };
     let recorded = if is_new_field_write {
-        field_index.record_write(
+        state.field_index.record_write(
             site.callee_seg,
             site.callee,
             &site.param_name,
             &source.field,
             param_field_span,
             param_field_write,
-            transforms,
+            inputs.transforms,
         )
     } else {
         Vec::new()
@@ -3314,10 +3254,12 @@ fn apply_field_argument_write(
                 via_span: site.call_span,
             },
         },
-        ws,
-        known_edges,
+        state.ws,
+        state.known_edges,
     ) {
-        inter_call_arg_entries.insert(site.callee_seg, site.callee, param_field_write);
+        state
+            .inter_call_arg_entries
+            .insert(site.callee_seg, site.callee, param_field_write);
     }
     // A synthetic node can be interned first through a different prefix view
     // of the same storage place. Its exact inbound edge is new even when the
@@ -3332,60 +3274,48 @@ fn apply_field_argument_write(
         site.call_span,
         site.precision,
         site.call_kind,
-        ws,
-        known_edges,
-        field_index,
+        state.ws,
+        state.known_edges,
+        state.field_index,
     );
-    enqueue_recorded_field_writes(recorded, transforms, pending, enqueued);
+    enqueue_recorded_field_writes(recorded, inputs.transforms, state.pending, state.enqueued);
 }
 
-#[allow(clippy::too_many_arguments)] // Return field forwarding carries source, destination, and worklist state.
 fn apply_return_field_write(
     site: &ReturnFieldStitch,
     source: &FieldPlaceHit,
-    inter_call_arg_entries: &mut InterCallArgEntryIndex,
-    synthetic_field_writes: &mut SyntheticFieldWriteCache,
-    ws: &mut IdgWorkspace,
-    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
-    field_index: &mut FieldPlaceIndex,
-    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut Vec<PendingFieldWrite>,
-    enqueued: &mut AHashSet<PendingFieldWrite>,
+    inputs: &FieldPropagationInputs<'_>,
+    state: &mut FieldPropagationState<'_>,
 ) {
     apply_outbound_field_write(
-        site.callee_seg,
-        site.caller_seg,
-        site.caller,
-        &site.target_base,
-        site.write_span,
-        site.call_span,
-        site.precision,
-        site.call_kind,
+        OutboundFieldWrite {
+            from_seg: site.callee_seg,
+            to_seg: site.caller_seg,
+            to_func: site.caller,
+            target_base: &site.target_base,
+            write_span: site.write_span,
+            via_span: site.call_span,
+            precision: site.precision,
+            call_kind: site.call_kind,
+            edge_kind: crate::edge::IdgEdgeKind::InterFieldReturn,
+            skip_self_edge: false,
+        },
         source,
-        inter_call_arg_entries,
-        synthetic_field_writes,
-        ws,
-        known_edges,
-        field_index,
-        transforms,
-        pending,
-        enqueued,
-        crate::edge::IdgEdgeKind::InterFieldReturn,
-        false,
+        inputs,
+        state,
     );
 }
 
 fn apply_scalar_return_field_write(
     site: &ScalarReturnStitch,
     source: &FieldPlaceHit,
-    ws: &mut IdgWorkspace,
-    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
+    state: &mut FieldPropagationState<'_>,
 ) {
     if source.field != site.source_field {
         return;
     }
     let Some(target_write) = ensure_scalar_write_node(
-        ws,
+        state.ws,
         site.caller_seg,
         site.caller,
         &site.target_base,
@@ -3406,96 +3336,66 @@ fn apply_scalar_return_field_write(
                 via_span: site.call_span,
             },
         },
-        ws,
-        known_edges,
+        state.ws,
+        state.known_edges,
     );
 }
 
-#[allow(clippy::too_many_arguments)] // Constructor return forwarding carries source, destination, and worklist state.
 fn apply_constructor_return_field_write(
     site: &ConstructorReturnStitch,
     source: &FieldPlaceHit,
-    inter_call_arg_entries: &mut InterCallArgEntryIndex,
-    synthetic_field_writes: &mut SyntheticFieldWriteCache,
-    ws: &mut IdgWorkspace,
-    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
-    field_index: &mut FieldPlaceIndex,
-    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut Vec<PendingFieldWrite>,
-    enqueued: &mut AHashSet<PendingFieldWrite>,
+    inputs: &FieldPropagationInputs<'_>,
+    state: &mut FieldPropagationState<'_>,
 ) {
     apply_outbound_field_write(
-        site.callee_seg,
-        site.caller_seg,
-        site.caller,
-        &site.target_base,
-        site.write_span,
-        site.call_span,
-        site.precision,
-        site.call_kind,
+        OutboundFieldWrite {
+            from_seg: site.callee_seg,
+            to_seg: site.caller_seg,
+            to_func: site.caller,
+            target_base: &site.target_base,
+            write_span: site.write_span,
+            via_span: site.call_span,
+            precision: site.precision,
+            call_kind: site.call_kind,
+            edge_kind: crate::edge::IdgEdgeKind::InterFieldReturn,
+            skip_self_edge: false,
+        },
         source,
-        inter_call_arg_entries,
-        synthetic_field_writes,
-        ws,
-        known_edges,
-        field_index,
-        transforms,
-        pending,
-        enqueued,
-        crate::edge::IdgEdgeKind::InterFieldReturn,
-        false,
+        inputs,
+        state,
     );
 }
 
-#[allow(clippy::too_many_arguments)] // Receiver mutation forwarding carries source, destination, and worklist state.
 fn apply_receiver_mutation_field_write(
     site: &ReceiverMutationStitch,
     source: &FieldPlaceHit,
-    inter_call_arg_entries: &mut InterCallArgEntryIndex,
-    synthetic_field_writes: &mut SyntheticFieldWriteCache,
-    ws: &mut IdgWorkspace,
-    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
-    field_index: &mut FieldPlaceIndex,
-    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut Vec<PendingFieldWrite>,
-    enqueued: &mut AHashSet<PendingFieldWrite>,
+    inputs: &FieldPropagationInputs<'_>,
+    state: &mut FieldPropagationState<'_>,
 ) {
     apply_outbound_field_write(
-        site.callee_seg,
-        site.caller_seg,
-        site.caller,
-        &site.target_base,
-        site.call_span,
-        site.call_span,
-        site.precision,
-        site.call_kind,
+        OutboundFieldWrite {
+            from_seg: site.callee_seg,
+            to_seg: site.caller_seg,
+            to_func: site.caller,
+            target_base: &site.target_base,
+            write_span: site.call_span,
+            via_span: site.call_span,
+            precision: site.precision,
+            call_kind: site.call_kind,
+            edge_kind: crate::edge::IdgEdgeKind::InterFieldReturn,
+            skip_self_edge: false,
+        },
         source,
-        inter_call_arg_entries,
-        synthetic_field_writes,
-        ws,
-        known_edges,
-        field_index,
-        transforms,
-        pending,
-        enqueued,
-        crate::edge::IdgEdgeKind::InterFieldReturn,
-        false,
+        inputs,
+        state,
     );
 }
 
-#[allow(clippy::too_many_arguments)] // Intra-copy forwarding carries source, destination, and worklist state.
 fn apply_intra_field_copy_write(
     site: &FieldCopySite,
     source: &FieldPlaceHit,
-    inter_call_arg_entries: &mut InterCallArgEntryIndex,
-    synthetic_field_writes: &mut SyntheticFieldWriteCache,
-    ws: &mut IdgWorkspace,
-    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
-    field_index: &mut FieldPlaceIndex,
-    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut Vec<PendingFieldWrite>,
-    enqueued: &mut AHashSet<PendingFieldWrite>,
-    flow_control: Option<&FlowControlFacts>,
+    inputs: &FieldPropagationInputs<'_>,
+    state: &mut FieldPropagationState<'_>,
 ) {
     // Reaching definitions normally follow source order. A lexically later
     // syntax write may feed an earlier copy only when the adapter's structured
@@ -3509,32 +3409,28 @@ fn apply_intra_field_copy_write(
     if !source_can_reach_field_copy(
         source,
         site,
-        synthetic_field_writes,
-        inter_call_arg_entries,
-        flow_control,
+        state.synthetic_field_writes,
+        state.inter_call_arg_entries,
+        inputs.stitch_data.get(&site.func).map(|data| &data.flow_control),
     ) {
         return;
     }
     apply_outbound_field_write(
-        site.seg_id,
-        site.seg_id,
-        site.func,
-        &site.target_base,
-        site.write_span,
-        site.via_span,
-        site.precision,
-        site.call_kind,
+        OutboundFieldWrite {
+            from_seg: site.seg_id,
+            to_seg: site.seg_id,
+            to_func: site.func,
+            target_base: &site.target_base,
+            write_span: site.write_span,
+            via_span: site.via_span,
+            precision: site.precision,
+            call_kind: site.call_kind,
+            edge_kind: crate::edge::IdgEdgeKind::IntraAssign,
+            skip_self_edge: true,
+        },
         source,
-        inter_call_arg_entries,
-        synthetic_field_writes,
-        ws,
-        known_edges,
-        field_index,
-        transforms,
-        pending,
-        enqueued,
-        crate::edge::IdgEdgeKind::IntraAssign,
-        true,
+        inputs,
+        state,
     );
 }
 
@@ -3567,92 +3463,83 @@ fn source_can_reach_field_copy(
     flow_control.is_some_and(|facts| facts.spans_share_loop_back_edge(write_span, site.via_span))
 }
 
-#[allow(clippy::too_many_arguments)] // Shared helper keeps edge construction identical across propagation kinds.
 fn apply_outbound_field_write(
-    from_seg: SegmentId,
-    to_seg: SegmentId,
-    to_func: FuncId,
-    target_base: &str,
-    write_span: Span,
-    via_span: Span,
-    precision: Precision,
-    call_kind: CallEdgeKind,
+    target: OutboundFieldWrite<'_>,
     source: &FieldPlaceHit,
-    inter_call_arg_entries: &mut InterCallArgEntryIndex,
-    _synthetic_field_writes: &mut SyntheticFieldWriteCache,
-    ws: &mut IdgWorkspace,
-    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
-    field_index: &mut FieldPlaceIndex,
-    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut Vec<PendingFieldWrite>,
-    enqueued: &mut AHashSet<PendingFieldWrite>,
-    edge_kind: crate::edge::IdgEdgeKind,
-    skip_self_edge: bool,
+    inputs: &FieldPropagationInputs<'_>,
+    state: &mut FieldPropagationState<'_>,
 ) {
     if !is_forwardable_field(&source.field) {
         return;
     }
-    let Some((target_field_write, target_field_span, is_new_field_write)) =
-        SyntheticFieldWriteCache::ensure(ws, to_seg, to_func, target_base, &source.field, write_span)
-    else {
+    let Some((target_field_write, target_field_span, is_new_field_write)) = SyntheticFieldWriteCache::ensure(
+        state.ws,
+        target.to_seg,
+        target.to_func,
+        target.target_base,
+        &source.field,
+        target.write_span,
+    ) else {
         return;
     };
     let recorded = if is_new_field_write {
-        field_index.record_write(
-            to_seg,
-            to_func,
-            target_base,
+        state.field_index.record_write(
+            target.to_seg,
+            target.to_func,
+            target.target_base,
             &source.field,
             target_field_span,
             target_field_write,
-            transforms,
+            inputs.transforms,
         )
     } else {
         Vec::new()
     };
-    if !(skip_self_edge && from_seg == to_seg && source.node == target_field_write) {
+    if !(target.skip_self_edge && target.from_seg == target.to_seg && source.node == target_field_write) {
         let changed = place_inter_edge_if_absent(
-            from_seg,
-            to_seg,
+            target.from_seg,
+            target.to_seg,
             IdgEdge {
                 from: source.node,
                 to: target_field_write,
                 meta: crate::edge::EdgeMeta {
-                    precision,
-                    kind: edge_kind,
-                    call_kind,
-                    via_span,
+                    precision: target.precision,
+                    kind: target.edge_kind,
+                    call_kind: target.call_kind,
+                    via_span: target.via_span,
                 },
             },
-            ws,
-            known_edges,
+            state.ws,
+            state.known_edges,
         );
         if changed
             && matches!(
-                edge_kind,
+                target.edge_kind,
                 crate::edge::IdgEdgeKind::InterCallArg
                     | crate::edge::IdgEdgeKind::InterReturn
                     | crate::edge::IdgEdgeKind::InterFieldCallArg
                     | crate::edge::IdgEdgeKind::InterFieldReturn
             )
         {
-            inter_call_arg_entries.insert(to_seg, to_func, target_field_write);
+            state
+                .inter_call_arg_entries
+                .insert(target.to_seg, target.to_func, target_field_write);
         }
     }
     connect_field_write_to_reads(
-        to_seg,
-        to_func,
-        target_base,
+        target.to_seg,
+        target.to_func,
+        target.target_base,
         &source.field,
         target_field_write,
         target_field_span,
-        precision,
-        call_kind,
-        ws,
-        known_edges,
-        field_index,
+        target.precision,
+        target.call_kind,
+        state.ws,
+        state.known_edges,
+        state.field_index,
     );
-    enqueue_recorded_field_writes(recorded, transforms, pending, enqueued);
+    enqueue_recorded_field_writes(recorded, inputs.transforms, state.pending, state.enqueued);
 }
 
 fn source_write_can_reach_call(
@@ -3672,15 +3559,12 @@ fn source_write_can_reach_call(
 
 fn stitch_field_argument_fallbacks(
     sites: &[Arc<FieldArgStitch>],
-    ws: &mut IdgWorkspace,
-    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
-    field_index: &FieldPlaceIndex,
-    inter_call_arg_entries: &InterCallArgEntryIndex,
+    state: &mut FieldPropagationState<'_>,
 ) -> usize {
     let mut added = 0usize;
     for site in sites {
-        let writers = field_index.field_writes_for_base_before_call(
-            inter_call_arg_entries,
+        let writers = state.field_index.field_writes_for_base_before_call(
+            state.inter_call_arg_entries,
             site.caller_seg,
             site.caller,
             &site.actual_arg,
@@ -3689,7 +3573,9 @@ fn stitch_field_argument_fallbacks(
         if !writers.is_empty() {
             continue;
         }
-        let readers = field_index.field_reads_for_base(site.callee_seg, site.callee, &site.param_name);
+        let readers = state
+            .field_index
+            .field_reads_for_base(site.callee_seg, site.callee, &site.param_name);
         for (field, reader) in readers {
             if !is_forwardable_field(&field) {
                 continue;
@@ -3698,7 +3584,7 @@ fn stitch_field_argument_fallbacks(
             // whole CallArg value here would collapse an object into every
             // field demanded by the callee and taint unrelated siblings.
             let Some(actual_field_read) =
-                ensure_field_read_node(ws, site.caller_seg, site.caller, &site.actual_arg, &field)
+                ensure_field_read_node(state.ws, site.caller_seg, site.caller, &site.actual_arg, &field)
             else {
                 continue;
             };
@@ -3715,8 +3601,8 @@ fn stitch_field_argument_fallbacks(
                         via_span: site.call_span,
                     },
                 },
-                ws,
-                known_edges,
+                state.ws,
+                state.known_edges,
             );
             if changed {
                 added += 1;
@@ -3726,23 +3612,15 @@ fn stitch_field_argument_fallbacks(
     added
 }
 
-#[allow(clippy::too_many_arguments)]
 fn stitch_field_copy_fallbacks(
     sites: &[FieldCopySite],
-    ws: &mut IdgWorkspace,
-    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
-    field_index: &mut FieldPlaceIndex,
-    inter_call_arg_entries: &mut InterCallArgEntryIndex,
-    synthetic_field_writes: &mut SyntheticFieldWriteCache,
-    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut Vec<PendingFieldWrite>,
-    enqueued: &mut AHashSet<PendingFieldWrite>,
-    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
+    inputs: &FieldPropagationInputs<'_>,
+    state: &mut FieldPropagationState<'_>,
 ) -> usize {
     let mut added = 0usize;
     for site in sites {
-        let writers = field_index.field_writes_for_base_before_call(
-            inter_call_arg_entries,
+        let writers = state.field_index.field_writes_for_base_before_call(
+            state.inter_call_arg_entries,
             site.seg_id,
             site.func,
             &site.source_base,
@@ -3751,7 +3629,9 @@ fn stitch_field_copy_fallbacks(
         if !writers.is_empty() {
             continue;
         }
-        let mut readers = field_index.field_reads_for_base(site.seg_id, site.func, &site.target_base);
+        let mut readers = state
+            .field_index
+            .field_reads_for_base(site.seg_id, site.func, &site.target_base);
         readers.sort_by(|a, b| (a.0.as_str(), a.1 .0).cmp(&(b.0.as_str(), b.1 .0)));
         readers.dedup();
         for (field, _) in readers {
@@ -3759,11 +3639,11 @@ fn stitch_field_copy_fallbacks(
                 continue;
             }
             let Some(source_read) =
-                ensure_field_read_node(ws, site.seg_id, site.func, &site.source_base, &field)
+                ensure_field_read_node(state.ws, site.seg_id, site.func, &site.source_base, &field)
             else {
                 continue;
             };
-            let before = known_edges.len();
+            let before = state.known_edges.len();
             apply_intra_field_copy_write(
                 site,
                 &FieldPlaceHit {
@@ -3771,17 +3651,10 @@ fn stitch_field_copy_fallbacks(
                     node: source_read,
                     span: None,
                 },
-                inter_call_arg_entries,
-                synthetic_field_writes,
-                ws,
-                known_edges,
-                field_index,
-                transforms,
-                pending,
-                enqueued,
-                stitch_data.get(&site.func).map(|data| &data.flow_control),
+                inputs,
+                state,
             );
-            added = added.saturating_add(known_edges.len().saturating_sub(before));
+            added = added.saturating_add(state.known_edges.len().saturating_sub(before));
         }
     }
     added
