@@ -365,8 +365,7 @@ pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<
 pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
     let mut default_exports = Vec::new();
     for export_node in collect_kinds(tree, &["export_statement"]) {
-        let text = node_text(&export_node, src).trim_start();
-        if !text.starts_with("export default") {
+        if !export_statement_has_default_modifier(export_node) {
             continue;
         }
         let target = export_node
@@ -550,6 +549,26 @@ fn collect_commonjs_object_export_aliases(
                 export_name,
                 span_of(decl_index.file, &value),
             );
+        }
+    }
+}
+
+/// True when the parsed export statement carries ECMAScript's direct
+/// `default` modifier. Named exports such as `export { value as default }`
+/// contain a named `export_specifier` identifier instead and deliberately do
+/// not satisfy this predicate.
+fn export_statement_has_default_modifier(node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    loop {
+        let child = cursor.node();
+        if !child.is_named() && child.kind() == "default" {
+            return true;
+        }
+        if !cursor.goto_next_sibling() {
+            return false;
         }
     }
 }
@@ -1793,4 +1812,26 @@ fn js_module_segments(path: &std::path::Path) -> Vec<String> {
     }
     segments.retain(|segment| !segment.is_empty());
     segments
+}
+
+#[cfg(test)]
+mod syntax_tests {
+    use super::{collect_kinds, export_statement_has_default_modifier, language_from_pack, PACK_NAME};
+
+    fn export_has_default_modifier(source: &str) -> bool {
+        let language = language_from_pack(PACK_NAME).expect("javascript grammar");
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set javascript grammar");
+        let tree = parser.parse(source, None).expect("parse javascript");
+        let exports = collect_kinds(&tree, &["export_statement"]);
+        assert_eq!(exports.len(), 1, "expected one parsed export statement");
+        export_statement_has_default_modifier(exports[0])
+    }
+
+    #[test]
+    fn default_export_modifier_comes_from_the_syntax_tree() {
+        assert!(export_has_default_modifier("export default app;"));
+        assert!(!export_has_default_modifier("export { app as default };"));
+        assert!(!export_has_default_modifier("export const app = 1;"));
+    }
 }

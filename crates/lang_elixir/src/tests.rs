@@ -122,12 +122,25 @@ fn function_value_dot_call_lowers_from_cst() {
     );
 }
 
+fn parsed_clause_params(src: &str, name: &str) -> (Vec<String>, Vec<(String, String)>) {
+    let language = language_from_pack(PACK_NAME).expect("elixir grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set elixir grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse elixir source");
+    let span = bonsai_common::Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+    let nodes = elixir_clause_param_nodes(&tree, src.as_bytes(), span, name).expect("parameter nodes");
+    let slots = elixir_clause_param_slots(&nodes, src.as_bytes());
+    let bindings = nodes
+        .iter()
+        .flat_map(|node| elixir_map_pattern_bindings(node, src.as_bytes()))
+        .collect();
+    (slots, bindings)
+}
+
 #[test]
 fn short_clause_name_does_not_match_def_keyword() {
     let src = "def f(p, 0), do: sink(p)";
-    let span = bonsai_common::Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
-
-    let params = elixir_clause_param_slots(src, span, "f").expect("params");
+    let (params, _) = parsed_clause_params(src, "f");
 
     assert_eq!(params, vec!["p".to_string(), "_arg1".to_string()]);
 }
@@ -135,10 +148,7 @@ fn short_clause_name_does_not_match_def_keyword() {
 #[test]
 fn struct_pattern_parameter_has_a_distinct_slot_and_field_binding() {
     let src = "defp cmd_of(%Envelope{cmd: cmd}), do: cmd";
-    let span = bonsai_common::Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
-
-    let params = elixir_clause_param_slots(src, span, "cmd_of").expect("params");
-    let bindings = elixir_map_pattern_bindings("%Envelope{cmd: cmd}");
+    let (params, bindings) = parsed_clause_params(src, "cmd_of");
 
     assert_eq!(params, vec!["_arg0".to_string()]);
     assert_eq!(bindings, vec![("cmd".to_string(), "cmd".to_string())]);
@@ -147,9 +157,7 @@ fn struct_pattern_parameter_has_a_distinct_slot_and_field_binding() {
 #[test]
 fn keyword_pattern_parameter_keeps_its_binding_name() {
     let src = "def helper(name: name), do: sink(name)";
-    let span = bonsai_common::Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
-
-    let params = elixir_clause_param_slots(src, span, "helper").expect("params");
+    let (params, _) = parsed_clause_params(src, "helper");
 
     assert_eq!(params, vec!["name".to_string()]);
 }

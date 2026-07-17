@@ -64,6 +64,35 @@ fn contains_loop(events: &[FlowEvent]) -> bool {
 }
 
 #[test]
+fn ruby_static_element_keys_are_structural_read_refs() {
+    let source = r#"
+require "rack"
+
+def query(env)
+  # QUERY_STRING in a comment is not a read.
+  ignored = "QUERY_STRING"
+  value = env["QUERY_STRING"]
+  env["QUERY_STRING"] = ignored
+  value
+end
+"#;
+    let db = db_with(source);
+    let file = db.vfs().all_files()[0];
+    let index = db.decl_index(file).expect("ruby declaration index");
+    let refs = index
+        .refs
+        .iter()
+        .filter(|reference| reference.name.ends_with("QUERY_STRING"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(refs.len(), 1, "only the parsed element read should surface");
+    assert_eq!(refs[0].name, "env.QUERY_STRING");
+    let start = usize::try_from(refs[0].span.start).expect("span start");
+    let end = usize::try_from(refs[0].span.end).expect("span end");
+    assert_eq!(&source[start..end], "QUERY_STRING");
+}
+
+#[test]
 fn ruby_super_return_emits_semantic_super_call_and_base() {
     let db = db_with(
         r#"

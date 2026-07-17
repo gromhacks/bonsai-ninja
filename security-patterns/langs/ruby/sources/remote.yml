@@ -419,7 +419,7 @@
   match:
     kind: read
     target:
-      name: QUERY_STRING
+      attribute: [env, QUERY_STRING]
   match_examples:
   - name: ruby.source.rack_env_query_string example
     code: |
