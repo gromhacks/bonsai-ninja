@@ -370,6 +370,36 @@ fn facade_index_semantic_writes_structural_sidecars_and_query_hydrates_idg() {
 }
 
 #[test]
+fn long_lived_query_hydrates_idg_only_after_sidecar_appears() {
+    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
+    let root = temp_python_micro("late-idg-hydration");
+    let sdk = sdk();
+    let queried = sdk.open_query(&root).expect("query before semantic index");
+    assert!(queried.workspace().db().idg_service().is_none());
+
+    let indexed = sdk
+        .index_semantic(&root)
+        .expect("semantic index from peer project");
+    assert!(
+        indexed
+            .cache()
+            .stats()
+            .expect("semantic cache stats")
+            .idg_sidecar_exists
+    );
+
+    assert!(
+        queried.workspace().db().idg_service().is_some(),
+        "an already-open query project should hydrate a newly written IDG sidecar"
+    );
+    // The unchanged sidecar is already observed. A second boundary should be
+    // an identity check, not another factstore decode.
+    assert!(queried.workspace().db().idg_service().is_some());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn cache_stats_validation_marks_semantic_sidecars_stale_after_source_change() {
     let root = temp_python_micro("semantic-cache-validation-stale");
     let sdk = sdk();
@@ -1723,17 +1753,34 @@ fn facade_hot_reloads_saved_source_changes() {
     };
     assert!(names(&project).contains(&"old_name".to_string()));
 
+    let unchanged = project.refresh_from_disk().expect("unchanged metadata refresh");
+    assert_eq!(unchanged.metadata_files_checked, 1);
+    assert_eq!(unchanged.content_files_read, 0);
+    assert!(!unchanged.changed());
+
     std::fs::write(&app, "def new_name():\n    pass\n").expect("modify source");
+    let modified = project.refresh_from_disk().expect("modified metadata refresh");
+    assert_eq!(modified.metadata_files_checked, 1);
+    assert_eq!(modified.content_files_read, 1);
+    assert_eq!(modified.modified, 1);
     let after_modify = names(&project);
     assert!(after_modify.contains(&"new_name".to_string()));
     assert!(!after_modify.contains(&"old_name".to_string()));
 
     let extra = root.join("extra.py");
     std::fs::write(&extra, "def added_name():\n    pass\n").expect("add source");
+    let added = project.refresh_from_disk().expect("added metadata refresh");
+    assert_eq!(added.metadata_files_checked, 2);
+    assert_eq!(added.content_files_read, 1);
+    assert_eq!(added.added, 1);
     let after_add = names(&project);
     assert!(after_add.contains(&"added_name".to_string()));
 
     std::fs::remove_file(&extra).expect("remove source");
+    let removed = project.refresh_from_disk().expect("removed metadata refresh");
+    assert_eq!(removed.metadata_files_checked, 1);
+    assert_eq!(removed.content_files_read, 0);
+    assert_eq!(removed.removed, 1);
     let after_remove = names(&project);
     assert!(!after_remove.contains(&"added_name".to_string()));
 
@@ -1741,11 +1788,91 @@ fn facade_hot_reloads_saved_source_changes() {
 }
 
 #[test]
+fn facade_uses_git_change_index_without_missing_clean_transitions() {
+    let root = tempdir("git-hot-reload");
+    let run_git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .status()
+    };
+    if !run_git(&["init", "-q"]).is_ok_and(|status| status.success()) {
+        let _ = std::fs::remove_dir_all(root);
+        return;
+    }
+
+    let app = root.join("app.py");
+    let original = "def original_name():\n    pass\n";
+    let modified = "def modified_name():\n    pass\n";
+    std::fs::write(&app, original).expect("write initial source");
+    assert!(run_git(&["add", "app.py"]).is_ok_and(|status| status.success()));
+    assert!(run_git(&[
+        "-c",
+        "user.name=Bonsai Test",
+        "-c",
+        "user.email=bonsai@example.invalid",
+        "commit",
+        "-qm",
+        "initial"
+    ])
+    .is_ok_and(|status| status.success()));
+
+    let project = bonsai_sdk::Bonsai::new()
+        .index(&root)
+        .expect("index clean worktree");
+    let clean = project.refresh_from_disk().expect("clean indexed refresh");
+    assert_eq!(clean.metadata_files_checked, 0);
+    assert_eq!(clean.content_files_read, 0);
+
+    std::fs::write(&app, modified).expect("modify tracked source");
+    let dirty = project.refresh_from_disk().expect("dirty tracked refresh");
+    assert_eq!(dirty.metadata_files_checked, 1);
+    assert_eq!(dirty.content_files_read, 1);
+    assert_eq!(dirty.modified, 1);
+
+    // Returning to HEAD removes the path from current `git status`; the
+    // previous dirty set must still make it a refresh candidate once.
+    std::fs::write(&app, original).expect("restore tracked source");
+    let restored = project.refresh_from_disk().expect("clean transition refresh");
+    assert_eq!(restored.metadata_files_checked, 1);
+    assert_eq!(restored.content_files_read, 1);
+    assert_eq!(restored.modified, 1);
+
+    let stable = project.refresh_from_disk().expect("stable clean refresh");
+    assert_eq!(stable.metadata_files_checked, 0);
+    assert_eq!(stable.content_files_read, 0);
+    assert!(!stable.changed());
+
+    let extra = root.join("extra.py");
+    std::fs::write(&extra, "def extra_name():\n    pass\n").expect("write untracked source");
+    let added = project.refresh_from_disk().expect("untracked source refresh");
+    assert_eq!(added.metadata_files_checked, 2);
+    assert_eq!(added.content_files_read, 1);
+    assert_eq!(added.added, 1);
+
+    let bonsai_ignore = root.join(".bonsaiignore");
+    std::fs::write(&bonsai_ignore, "extra.py\n").expect("write compiler-input ignore rule");
+    let excluded = project.refresh_from_disk().expect("ignore-rule refresh");
+    assert_eq!(excluded.removed, 1);
+    assert_eq!(excluded.content_files_read, 0);
+
+    std::fs::remove_file(&bonsai_ignore).expect("remove compiler-input ignore rule");
+    let included = project.refresh_from_disk().expect("ignore-rule removal refresh");
+    assert_eq!(included.added, 1);
+    assert_eq!(included.content_files_read, 1);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn facade_records_auto_refresh_failures_and_clears_them_after_recovery() {
     let root = tempdir("hot-reload-diagnostic");
-    std::fs::write(root.join("app.py"), "def stable_name():\n    pass\n").expect("write initial source");
+    let app = root.join("app.py");
+    std::fs::write(&app, "def stable_name():\n    pass\n").expect("write initial source");
     let project = bonsai_sdk::Bonsai::new().index(&root).expect("index");
 
+    // One bad file must not roll back or repeatedly reread a valid sibling.
+    std::fs::write(&app, "def refreshed_name():\n    pass\n").expect("modify valid source");
     let invalid = root.join("invalid.py");
     std::fs::write(&invalid, [0xff, 0xfe]).expect("write invalid UTF-8 source");
 
@@ -1756,7 +1883,8 @@ fn facade_records_auto_refresh_failures_and_clears_them_after_recovery() {
     let defs = browse
         .defs(Default::default())
         .expect("existing defs remain queryable");
-    assert!(defs.iter().any(|def| def.name == "stable_name"));
+    assert!(defs.iter().any(|def| def.name == "refreshed_name"));
+    assert!(!defs.iter().any(|def| def.name == "stable_name"));
     let diagnostic = project
         .last_refresh_error()
         .expect("automatic refresh failure must be observable");
@@ -1766,10 +1894,17 @@ fn facade_records_auto_refresh_failures_and_clears_them_after_recovery() {
     );
 
     std::fs::write(&invalid, "def recovered_name():\n    pass\n").expect("repair source");
+    let recovered = project.refresh_from_disk().expect("explicit recovery refresh");
+    assert_eq!(recovered.metadata_files_checked, 2);
+    assert_eq!(recovered.content_files_read, 1);
+    assert_eq!(recovered.added, 1);
+    assert_eq!(recovered.modified, 0);
     let defs = project
         .browse()
         .defs(Default::default())
         .expect("defs after recovery");
+    assert!(defs.iter().any(|def| def.name == "refreshed_name"));
+    assert!(!defs.iter().any(|def| def.name == "stable_name"));
     assert!(defs.iter().any(|def| def.name == "recovered_name"));
     assert!(project.last_refresh_error().is_none());
 
@@ -1790,6 +1925,34 @@ fn external_workspace_fingerprint_profile() {
         fingerprint.digest
     );
     assert!(fingerprint.files > 0);
+}
+
+#[test]
+#[ignore = "set BONSAI_SCALE_ROOT to profile an external workspace"]
+fn external_workspace_metadata_refresh_profile() {
+    let root = std::path::PathBuf::from(std::env::var_os("BONSAI_SCALE_ROOT").expect("BONSAI_SCALE_ROOT"));
+    let open_started = std::time::Instant::now();
+    let project = bonsai_sdk::Bonsai::new()
+        .index(&root)
+        .expect("index external workspace");
+    let open_elapsed = open_started.elapsed();
+
+    let refresh_started = std::time::Instant::now();
+    let report = project
+        .refresh_from_disk()
+        .expect("refresh unchanged external workspace");
+    let refresh_elapsed = refresh_started.elapsed();
+    eprintln!(
+        "indexed {} supported files in {:.3}s; metadata refresh checked {} files and read {} contents in {:.3}s",
+        project.workspace().stats().files,
+        open_elapsed.as_secs_f64(),
+        report.metadata_files_checked,
+        report.content_files_read,
+        refresh_elapsed.as_secs_f64(),
+    );
+    assert_eq!(report.metadata_files_checked, 0);
+    assert_eq!(report.content_files_read, 0);
+    assert!(!report.changed());
 }
 
 #[test]

@@ -555,6 +555,23 @@ pub struct SourceFileFingerprint {
     pub hash: u64,
 }
 
+/// Cheap on-disk identity for one supported compiler input.
+///
+/// Long-lived SDK projects compare these stamps before reading file contents,
+/// so an unchanged query pays for directory traversal and metadata only. On
+/// Unix, ctime plus device/inode identity also catches same-size rewrites and
+/// atomic editor replacements even when a tool preserves mtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceFileStamp {
+    pub path: std::path::PathBuf,
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+    pub change_seconds: i64,
+    pub change_nanoseconds: i64,
+    pub device: u64,
+    pub inode: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum FileRefreshKind {
     Added,
@@ -2271,6 +2288,53 @@ impl Workspace {
         read_supported_source_file_fingerprints(&canonical_root, &self.inner.registry)
     }
 
+    /// Current supported source files under `root`, using metadata-only
+    /// change stamps. This does not open or hash unchanged source contents.
+    pub fn source_file_stamps(&self, root: &Path) -> Result<Vec<SourceFileStamp>, WorkspaceError> {
+        let canonical_root = canonical_workspace_root(root);
+        read_supported_source_file_stamps(&canonical_root, &self.inner.registry)
+    }
+
+    /// Metadata-only stamp for one supported source path. Returns `None`
+    /// when the path has no registered language adapter or was removed.
+    /// Workspace frontends use this after a source-control change index has
+    /// narrowed the candidate set, avoiding a recursive metadata walk.
+    pub fn source_file_stamp(&self, path: &Path) -> Result<Option<SourceFileStamp>, WorkspaceError> {
+        let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+            return Ok(None);
+        };
+        if self.inner.registry.adapter_for_extension(ext).is_none() {
+            return Ok(None);
+        }
+        match source_file_stamp(path) {
+            Ok(stamp) => Ok(Some(stamp)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(WorkspaceError::Io(error)),
+        }
+    }
+
+    /// Metadata stamps for the source files already present in this
+    /// workspace snapshot. Used to initialize long-lived refresh state
+    /// without walking the workspace a second time during open.
+    pub fn indexed_source_file_stamps(&self) -> Result<Vec<SourceFileStamp>, WorkspaceError> {
+        let files = self.inner.vfs.all_files();
+        let mut stamps = Vec::with_capacity(files.len());
+        for file in files {
+            let path = self.inner.vfs.path(file).map_err(|error| {
+                WorkspaceError::Io(std::io::Error::other(format!(
+                    "reading indexed source path: {error}"
+                )))
+            })?;
+            match source_file_stamp(&path) {
+                Ok(stamp) => stamps.push(stamp),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(WorkspaceError::Io(error)),
+            }
+        }
+        stamps.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(stamps)
+    }
+
     /// Refresh one on-disk source file in place. Parser, decl/import,
     /// CFG, flow-id, dataflow, value-flow, callgraph, source-taint,
     /// and other derived caches are invalidated through the same
@@ -3231,20 +3295,7 @@ fn read_supported_source_file_fingerprints(
     canonical_root: &Path,
     registry: &LanguageRegistry,
 ) -> Result<Vec<SourceFileFingerprint>, WorkspaceError> {
-    let mut builder = ignore::WalkBuilder::new(canonical_root);
-    builder
-        .follow_links(false)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .parents(true)
-        .ignore(true)
-        .add_custom_ignore_filename(".bonsaiignore");
-    let entries = builder
-        .build()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| WorkspaceError::Io(std::io::Error::other(error.to_string())))?;
+    let entries = walk_workspace_entries(canonical_root)?;
 
     use rayon::prelude::*;
     let outcomes: Vec<Result<Option<SourceFileFingerprint>, std::io::Error>> = entries
@@ -3293,6 +3344,87 @@ fn read_supported_source_file_fingerprints(
     Ok(fingerprints)
 }
 
+/// Collect metadata-only stamps for supported source files. Unlike
+/// `read_supported_source_file_fingerprints`, this never opens a source file.
+fn read_supported_source_file_stamps(
+    canonical_root: &Path,
+    registry: &LanguageRegistry,
+) -> Result<Vec<SourceFileStamp>, WorkspaceError> {
+    let entries = walk_workspace_entries(canonical_root)?;
+    use rayon::prelude::*;
+    let outcomes: Vec<Result<Option<SourceFileStamp>, std::io::Error>> = entries
+        .into_par_iter()
+        .map(|entry| {
+            if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
+                return Ok(None);
+            }
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+                return Ok(None);
+            };
+            if registry.adapter_for_extension(ext).is_none() {
+                return Ok(None);
+            }
+            source_file_stamp(path).map(Some)
+        })
+        .collect();
+
+    let mut stamps = Vec::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        match outcome {
+            Ok(Some(stamp)) => stamps.push(stamp),
+            Ok(None) => {}
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        }
+    }
+    stamps.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(stamps)
+}
+
+fn source_file_stamp(path: &Path) -> Result<SourceFileStamp, std::io::Error> {
+    let metadata = std::fs::metadata(path)?;
+    #[cfg(unix)]
+    let (change_seconds, change_nanoseconds, device, inode) = {
+        use std::os::unix::fs::MetadataExt as _;
+        (
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+            metadata.dev(),
+            metadata.ino(),
+        )
+    };
+    #[cfg(not(unix))]
+    let (change_seconds, change_nanoseconds, device, inode) = (0, 0, 0, 0);
+    Ok(SourceFileStamp {
+        path: path.to_path_buf(),
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        change_seconds,
+        change_nanoseconds,
+        device,
+        inode,
+    })
+}
+
+fn walk_workspace_entries(canonical_root: &Path) -> Result<Vec<ignore::DirEntry>, WorkspaceError> {
+    let mut builder = ignore::WalkBuilder::new(canonical_root);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .parents(true)
+        .ignore(true)
+        .add_custom_ignore_filename(".bonsaiignore");
+    let mut entries = builder
+        .build()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| WorkspaceError::Io(std::io::Error::other(error.to_string())))?;
+    entries.sort_by(|left, right| left.path().cmp(right.path()));
+    Ok(entries)
+}
+
 fn stream_supported_source_files<F>(
     canonical_root: &Path,
     registry: &LanguageRegistry,
@@ -3304,21 +3436,7 @@ where
     // Inclusion is structural: explicit ignore rules plus the adapter's
     // supported extension. File names and source text are compiler input,
     // never heuristics for dropping otherwise supported programs.
-    let mut builder = ignore::WalkBuilder::new(canonical_root);
-    builder
-        .follow_links(false)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .parents(true)
-        .ignore(true)
-        .add_custom_ignore_filename(".bonsaiignore");
-    let mut entries: Vec<_> = builder
-        .build()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| WorkspaceError::Io(std::io::Error::other(error.to_string())))?;
-    entries.sort_by(|a, b| a.path().cmp(b.path()));
+    let entries = walk_workspace_entries(canonical_root)?;
 
     for entry in entries {
         if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
@@ -3404,21 +3522,7 @@ fn read_supported_source_files_impl(
     // still walks in OS-native order, so a fresh ingest can assign different
     // FileIds to the same paths across runs. Sort by path so allocation and
     // refresh fingerprints are deterministic.
-    let mut builder = ignore::WalkBuilder::new(canonical_root);
-    builder
-        .follow_links(false)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .parents(true)
-        .ignore(true)
-        .add_custom_ignore_filename(".bonsaiignore");
-    let mut entries: Vec<_> = builder
-        .build()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| WorkspaceError::Io(std::io::Error::other(error.to_string())))?;
-    entries.sort_by(|a, b| a.path().cmp(b.path()));
+    let entries = walk_workspace_entries(canonical_root)?;
 
     // Read files in parallel. The prior sequential `for entry in
     // entries { read_to_string(...) }` loop blocked the downstream
