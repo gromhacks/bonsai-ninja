@@ -124,7 +124,8 @@ impl LanguageAdapter for ErlangAdapter {
                 );
                 bonsai_lang_api::kit::annotate_tuple_call_result_bindings(
                     &mut decl.flow_events,
-                    snapshot.text.as_ref(),
+                    &tree,
+                    snapshot.text.as_bytes(),
                 );
                 augment_erlang_record_flow_events(
                     &mut decl.flow_events,

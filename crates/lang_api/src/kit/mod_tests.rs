@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     AssignValueKind, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent,
-    ModulePath, Visibility,
+    GrammarHandler, ModulePath, Visibility,
 };
 use bonsai_common::{FileId, Span, SymbolId};
 
@@ -40,6 +40,155 @@ fn assign_facts(events: &[FlowEvent]) -> Vec<(&str, Option<&str>, Vec<&str>)> {
             _ => None,
         })
         .collect()
+}
+
+fn assignment_targets(events: &[FlowEvent], out: &mut Vec<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, .. } => {
+                if !out.contains(target) {
+                    out.push(target.clone());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                assignment_targets(then_events, out);
+                assignment_targets(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                assignment_targets(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                assignment_targets(body, out);
+                assignment_targets(catch_events, out);
+                assignment_targets(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn destructured_assignment_targets_follow_cst_binding_positions() {
+    type DestructureCase<'a> = (&'a str, &'a [u8], &'a [&'a str], &'a [&'a str]);
+    let cases: &[DestructureCase<'_>] = &[
+        (
+            "python",
+            b"first, second = pair\n",
+            &["first", "second"],
+            &["pair"],
+        ),
+        (
+            "javascript",
+            b"const {key: renamed = fallback, plain} = object; const [first = backup, second] = items;",
+            &["renamed", "plain", "first", "second"],
+            &["key", "object", "items", "fallback", "backup"],
+        ),
+        (
+            "go",
+            b"package p\nfunc f() { first, second := pair() }",
+            &["first", "second"],
+            &["pair"],
+        ),
+        (
+            "kotlin",
+            b"fun f(pair: Pair<String, String>) { val (first, second) = pair }",
+            &["first", "second"],
+            &["pair"],
+        ),
+        (
+            "elixir",
+            b"[first | second] = items",
+            &["first", "second"],
+            &["items"],
+        ),
+        ("ruby", b"first, second = pair\n", &["first", "second"], &["pair"]),
+        (
+            "perl",
+            b"my ($first, $second) = @items;",
+            &["first", "second"],
+            &["items"],
+        ),
+    ];
+
+    for (pack, src, expected, non_bindings) in cases {
+        let tree = parse_language(pack, src);
+        let scope = collect_kinds(&tree, &["block", "statement_block", "function_body"])
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| tree.root_node());
+        let elixir_handler = GrammarHandler {
+            assignment_kinds: &["binary_operator"],
+            ..GENERIC_HANDLER
+        };
+        let handler = if *pack == "elixir" {
+            &elixir_handler
+        } else {
+            &GENERIC_HANDLER
+        };
+        let events = walk_flow_events(scope, FileId::new(0), src, handler, &[]);
+        let mut targets = Vec::new();
+        assignment_targets(&events, &mut targets);
+        for expected_target in *expected {
+            assert!(
+                targets
+                    .iter()
+                    .any(|target| target.trim_start_matches(['$', '@', '%']) == *expected_target),
+                "{pack}: missing {expected_target}: {events:#?}\nAST: {}",
+                tree.root_node().to_sexp()
+            );
+        }
+        for non_binding in *non_bindings {
+            assert!(
+                targets
+                    .iter()
+                    .all(|target| target.trim_start_matches(['$', '@', '%']) != *non_binding),
+                "{pack}: value/key became binding {non_binding}: {events:#?}"
+            );
+        }
+        if *pack == "kotlin" {
+            for expected_target in *expected {
+                assert!(
+                    events.iter().any(|event| matches!(
+                        event,
+                        FlowEvent::Assign { target, source_names, .. }
+                            if target == expected_target && source_names.iter().any(|source| source == "pair")
+                    )),
+                    "kotlin: destructured binding {expected_target} lost its RHS dependency: {events:#?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn indexed_field_assignment_does_not_rebind_its_base_object() {
+    let src = b"void f(struct Envelope env) { env.cmd[sizeof(env.cmd) - 1] = '\\0'; }";
+    let tree = parse_language("c", src);
+    let scope = collect_kinds(&tree, &["compound_statement"])
+        .into_iter()
+        .next()
+        .expect("C function body");
+    let events = walk_flow_events(scope, FileId::new(0), src, &GENERIC_HANDLER, &[]);
+    let mut targets = Vec::new();
+    assignment_targets(&events, &mut targets);
+
+    assert!(
+        targets.iter().any(|target| target.starts_with("env.cmd")),
+        "indexed field write must keep its parsed place: {events:#?}"
+    );
+    assert!(
+        targets.iter().all(|target| target != "env"),
+        "indexed field write must not become a whole-object assignment: {events:#?}"
+    );
 }
 
 #[test]
@@ -248,7 +397,8 @@ fn foreach_bindings_cover_fielded_and_wrapped_grammar_shapes() {
 
 #[test]
 fn tuple_call_result_bindings_keep_source_positions() {
-    let src = "{a, _b} = helper(x)";
+    let src = "a, _b = helper(x)";
+    let tree = parse_language("python", src.as_bytes());
     let span = Span::new(FileId::new(0), 0, src.len() as u64);
     let mut events = vec![
         FlowEvent::Assign {
@@ -273,7 +423,7 @@ fn tuple_call_result_bindings_keep_source_positions() {
         },
     ];
 
-    annotate_tuple_call_result_bindings(&mut events, src);
+    annotate_tuple_call_result_bindings(&mut events, &tree, src.as_bytes());
     assert!(matches!(
         &events[0],
         FlowEvent::Assign { source_names, .. }

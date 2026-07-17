@@ -103,10 +103,7 @@ impl LanguageAdapter for ElixirAdapter {
                     &mut decl.flow_events,
                     snapshot.text.as_ref(),
                 );
-                bonsai_lang_api::kit::annotate_tuple_call_result_bindings(
-                    &mut decl.flow_events,
-                    snapshot.text.as_ref(),
-                );
+                bonsai_lang_api::kit::annotate_tuple_call_result_bindings(&mut decl.flow_events, &tree, src);
             }
             let private_spans = collect_elixir_defp_spans(&tree, src);
             for decl in &mut decl_index.defs {

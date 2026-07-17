@@ -425,6 +425,22 @@ pub(super) fn binding_targets_from_pattern_node(pattern: &Node<'_>, src: &[u8]) 
             continue;
         }
 
+        // JavaScript/TypeScript defaulted destructuring uses an
+        // `assignment_pattern`: `[binding = fallback]`. Only the parsed LHS
+        // binds; the RHS is a value read. Descending through both children
+        // would manufacture an assignment to `fallback` and could taint or
+        // clean-overwrite an unrelated local.
+        if current.kind() == "assignment_pattern" {
+            if let Some(binding) = current
+                .child_by_field_name("left")
+                .or_else(|| current.child_by_field_name("name"))
+                .or_else(|| first_named_child(&current))
+            {
+                stack.push(binding);
+            }
+            continue;
+        }
+
         if matches!(
             current.kind(),
             "identifier"

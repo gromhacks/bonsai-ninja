@@ -343,10 +343,10 @@ fn qualify_bare_hierarchy_member_events(
     }
 }
 
-/// Annotate destructured tuple call-result assignments with their
+/// Annotate destructured tuple call-result assignments with their parsed
 /// positional result index. Some grammars lower `{a, b} = call()` into
 /// separate Assign events that otherwise carry identical call metadata.
-pub fn annotate_tuple_call_result_bindings(events: &mut [FlowEvent], src: &str) {
+pub fn annotate_tuple_call_result_bindings(events: &mut [FlowEvent], tree: &Tree, src: &[u8]) {
     for event in events {
         match event {
             FlowEvent::Assign {
@@ -356,7 +356,7 @@ pub fn annotate_tuple_call_result_bindings(events: &mut [FlowEvent], src: &str) 
                 source_names,
                 ..
             } => {
-                if let Some(index) = tuple_call_result_binding_index(src, *span, target) {
+                if let Some(index) = tuple_call_result_binding_index(tree, src, *span, target) {
                     let marker = format!("{SYNTHETIC_TUPLE_RESULT_PREFIX}{index}");
                     if !source_names.iter().any(|source| source == &marker) {
                         source_names.push(marker);
@@ -368,11 +368,11 @@ pub fn annotate_tuple_call_result_bindings(events: &mut [FlowEvent], src: &str) 
                 else_events,
                 ..
             } => {
-                annotate_tuple_call_result_bindings(then_events, src);
-                annotate_tuple_call_result_bindings(else_events, src);
+                annotate_tuple_call_result_bindings(then_events, tree, src);
+                annotate_tuple_call_result_bindings(else_events, tree, src);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                annotate_tuple_call_result_bindings(body, src);
+                annotate_tuple_call_result_bindings(body, tree, src);
             }
             FlowEvent::Try {
                 body,
@@ -380,45 +380,60 @@ pub fn annotate_tuple_call_result_bindings(events: &mut [FlowEvent], src: &str) 
                 finally_events,
                 ..
             } => {
-                annotate_tuple_call_result_bindings(body, src);
-                annotate_tuple_call_result_bindings(catch_events, src);
-                annotate_tuple_call_result_bindings(finally_events, src);
+                annotate_tuple_call_result_bindings(body, tree, src);
+                annotate_tuple_call_result_bindings(catch_events, tree, src);
+                annotate_tuple_call_result_bindings(finally_events, tree, src);
             }
             _ => {}
         }
     }
 }
 
-fn tuple_call_result_binding_index(src: &str, span: Span, target: &str) -> Option<usize> {
-    let text = src.get(span.start as usize..span.end as usize)?;
-    let (lhs, _) = text.split_once('=')?;
-    let lhs = lhs.trim();
-    let body = ['{', '[', '(']
-        .into_iter()
-        .find_map(|open| {
-            let close = match open {
-                '{' => '}',
-                '[' => ']',
-                '(' => ')',
-                _ => unreachable!(),
-            };
-            let start = lhs.find(open)?;
-            let end = lhs.rfind(close)?;
-            (start < end).then(|| &lhs[start + open.len_utf8()..end])
-        })
-        .unwrap_or(lhs);
-    if !body.contains(',') {
-        return None;
+fn tuple_call_result_binding_index(tree: &Tree, src: &[u8], span: Span, target: &str) -> Option<usize> {
+    let start = usize::try_from(span.start).ok()?;
+    let end = usize::try_from(span.end).ok()?;
+    let mut current = tree.root_node().descendant_for_byte_range(start, end)?;
+    loop {
+        if let Some(lhs) = assignment_lhs_node(&current) {
+            if let Some(index) = positional_pattern_binding_index(lhs, target, src) {
+                return Some(index);
+            }
+        }
+        current = current.parent()?;
     }
-    let target = target.trim();
-    split_top_level_commas(body).iter().position(|binding| {
-        let binding = binding
-            .trim()
-            .trim_start_matches('^')
-            .trim_start_matches(['(', '[', '{'])
-            .trim_end_matches([')', ']', '}']);
-        binding == target || sanitize_assign_target(binding) == target
-    })
+}
+
+fn positional_pattern_binding_index(pattern: Node<'_>, target: &str, src: &[u8]) -> Option<usize> {
+    const POSITIONAL_PATTERNS: &[&str] = &[
+        "tuple_pattern",
+        "pattern_list",
+        "array_pattern",
+        "list_pattern",
+        "left_assignment_list",
+        "expression_list",
+        "list_expression",
+        "tuple",
+        "list_literal",
+        "pattern",
+    ];
+    if POSITIONAL_PATTERNS.contains(&pattern.kind()) {
+        let mut cursor = pattern.walk();
+        let children: Vec<Node<'_>> = pattern.named_children(&mut cursor).collect();
+        if children.len() > 1 {
+            return children.iter().position(|child| {
+                binding_targets_from_pattern_node(child, src)
+                    .iter()
+                    .any(|binding| same_identifier_name(binding, target))
+            });
+        }
+    }
+    let mut cursor = pattern.walk();
+    for child in pattern.named_children(&mut cursor) {
+        if let Some(index) = positional_pattern_binding_index(child, target, src) {
+            return Some(index);
+        }
+    }
+    None
 }
 
 /// Look up a language from the pack and wrap any error nicely.
@@ -1424,7 +1439,10 @@ fn assignment_target_pattern_node<'tree>(node: Node<'tree>, src: &[u8]) -> Optio
         .or_else(|| node.child_by_field_name("declarator"))
         .or_else(|| {
             (kind == "property_declaration")
-                .then(|| first_named_child_of_kind(&node, "variable_declaration"))
+                .then(|| {
+                    first_named_child_of_kind(&node, "multi_variable_declaration")
+                        .or_else(|| first_named_child_of_kind(&node, "variable_declaration"))
+                })
                 .flatten()
         })
         .or_else(|| first_non_keyword_named_child(&node, src))
@@ -2327,20 +2345,7 @@ fn walk_into(
                 }
             }
             if qualified_target.is_none() {
-                // Merge the two extra-target sources (comma/pattern text
-                // split + structural `left`-field pattern walk) into ONE
-                // deduped list. They independently rediscover the same
-                // non-primary bindings, so without a cross-helper dedup a
-                // destructure like `a, b = f()` emitted `b` twice — a
-                // spurious duplicate write that also perturbs the
-                // last-write clean-overwrite accounting.
-                let mut extra_targets = extra_assign_targets(&raw_target, &target);
-                for extra_target in extra_lhs_binding_targets(&node, target_node, src, &target) {
-                    if !extra_targets.contains(&extra_target) {
-                        extra_targets.push(extra_target);
-                    }
-                }
-                for extra_target in extra_targets {
+                for extra_target in extra_lhs_binding_targets(&node, src, &target) {
                     out.push(FlowEvent::Assign {
                         span: span_of(file, &node),
                         target: extra_target,
@@ -4684,13 +4689,10 @@ pub fn sanitize_assign_target(raw: &str) -> String {
             !(c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '@' | '%' | '!' | '?'))
         })
         .to_string();
-    // Reject fragments that aren't a plausible bare lvalue: a stray
-    // parenthesis left by a mis-split constructor/extractor pattern
-    // (`Envelope(kind`, `fp)(int`, `arr(0`). Only `(`/`)` mark that
-    // junk — `[]`/`{}` are legitimate in subscript / hash-element write
-    // targets (Perl `$c->{cmd}`, `$h{key}`, `arr[i]`), so they must NOT
-    // be rejected here. The real bindings for the junk shapes are
-    // recovered separately via `binding_tokens_from_pattern`.
+    // Reject fragments that aren't a plausible bare lvalue. Structured
+    // extractor/destructuring bindings are recovered from their CST pattern
+    // nodes, so a wrapper fragment such as `Envelope(kind` is never a
+    // semantic target.
     if cleaned.contains(['(', ')']) || cleaned.chars().any(|c: char| c.is_whitespace()) {
         return String::new();
     }
@@ -4705,79 +4707,118 @@ fn same_identifier_name(left: &str, right: &str) -> bool {
     left_bare == right_bare
 }
 
-/// Pull additional assign targets out of a multi-binding LHS — tuples,
-/// destructures, parallel assignments. The `primary` target is already
-/// emitted by the caller; this returns the *extras* the caller still
-/// needs to emit one Assign event each for.
-fn extra_assign_targets(raw: &str, primary: &str) -> Vec<String> {
-    let lhs_text = raw
-        .trim()
-        .split_once('=')
-        .map_or(raw.trim(), |(lhs, _)| lhs)
-        .trim();
-    let lhs_start = lhs_text.trim_start();
-    if !lhs_start.starts_with(['[', '{', '('])
-        && (lhs_text.contains('[') || lhs_text.contains('.') || lhs_text.contains("->"))
-    {
-        return Vec::new();
-    }
-    let mut extra_targets = Vec::new();
-    // Comma-delimited tuple — skip the first element (it's `primary`).
-    for tuple_part in lhs_text.split(',').skip(1) {
-        let sanitized = sanitize_assign_target(tuple_part);
-        if !sanitized.is_empty() && sanitized != primary && !extra_targets.iter().any(|t| t == &sanitized) {
-            extra_targets.push(sanitized);
-        }
-    }
-    // Pattern-shaped LHS — JS array/object destructure, Ruby pattern
-    // assignment, Perl list assignment. Walk the pattern for binding
-    // tokens.
-    if primary.is_empty() || lhs_text.trim_start().starts_with('[') || lhs_text.contains(['(', '{', '|']) {
-        for binding_token in binding_tokens_from_pattern(lhs_text) {
-            let sanitized = sanitize_assign_target(&binding_token);
-            if !sanitized.is_empty() && sanitized != primary && !extra_targets.iter().any(|t| t == &sanitized)
-            {
-                extra_targets.push(sanitized);
-            }
-        }
-    }
-    extra_targets
-}
-
-fn extra_lhs_binding_targets(
-    node: &Node<'_>,
-    target_node: Option<Node<'_>>,
-    src: &[u8],
-    primary: &str,
-) -> Vec<String> {
-    let lhs = node
-        .child_by_field_name("left")
-        .or_else(|| node.child_by_field_name("target"))
-        .or_else(|| first_named_child_of_kind(node, "variable_list"))
-        .or_else(|| first_named_child_of_kind(node, "variables"))
-        .or_else(|| first_named_child_of_kind(node, "pattern"));
-    let Some(lhs) = lhs else {
+fn extra_lhs_binding_targets(node: &Node<'_>, src: &[u8], primary: &str) -> Vec<String> {
+    let Some(lhs) = assignment_lhs_node(node) else {
         return Vec::new();
     };
-    let lhs_text = node_text(&lhs, src);
-    if qualified_assign_target(Some(lhs), src).is_some()
-        || lhs_text.contains('[')
-        || lhs_text.contains('.')
-        || lhs_text.contains("->")
-    {
+    let Some(pattern) = destructured_assignment_pattern(lhs) else {
         return Vec::new();
-    }
-    if target_node.is_some_and(|target| target.id() == lhs.id()) && !node_text(&lhs, src).contains(',') {
-        return Vec::new();
-    }
+    };
     let mut out = Vec::new();
-    for target in binding_tokens_from_pattern(lhs_text) {
-        let target = sanitize_assign_target(&target);
+    for target in binding_targets_from_pattern_node(&pattern, src) {
         if !target.is_empty() && target != primary && !out.iter().any(|t| t == &target) {
             out.push(target);
         }
     }
     out
+}
+
+/// Return the parsed aggregate binding pattern for a multi-target assignment.
+///
+/// This is deliberately a syntax-kind whitelist. Walking every identifier
+/// below an arbitrary LHS confuses place expressions with destructuring: in C,
+/// `env.cmd[index] = value` contains the identifier `env`, but it writes one
+/// indexed field rather than rebinding the whole `env` object. Tree-sitter
+/// grammars represent real parallel/destructured bindings with one of these
+/// aggregate pattern/list nodes, so only those nodes may fan out into extra
+/// assignment targets.
+fn destructured_assignment_pattern(node: Node<'_>) -> Option<Node<'_>> {
+    const AGGREGATE_BINDING_KINDS: &[&str] = &[
+        "array_pattern",
+        "destructuring_pattern",
+        "expression_list",
+        "left_assignment_list",
+        "list",
+        "list_expression",
+        "list_literal",
+        "list_pattern",
+        "multi_variable_declaration",
+        "object_pattern",
+        "pattern_list",
+        "tuple",
+        "tuple_pattern",
+        "variable_list",
+        "variables",
+    ];
+    if AGGREGATE_BINDING_KINDS.contains(&node.kind()) {
+        return Some(node);
+    }
+
+    // Perl represents `my ($a, $b)` as one `variable_declaration` with a
+    // repeated grammar field named `variables`; the singular `my $a` form
+    // instead has one `variable` field. Repeated binding fields are the CST's
+    // declaration that this is parallel binding, so the wrapper itself is the
+    // aggregate pattern.
+    if node.kind() == "variable_declaration" {
+        let mut cursor = node.walk();
+        let mut variable_fields = 0usize;
+        if cursor.goto_first_child() {
+            loop {
+                if cursor.node().is_named() && cursor.field_name() == Some("variables") {
+                    variable_fields += 1;
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        if variable_fields > 1 {
+            return Some(node);
+        }
+    }
+
+    // Swift and a few pattern grammars use a generic `pattern` wrapper. It is
+    // aggregate only when the CST itself exposes multiple pattern children;
+    // a single identifier wrapper is not destructuring.
+    if node.kind() == "pattern" {
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+        if children.len() > 1 {
+            return Some(node);
+        }
+        return children.into_iter().find_map(destructured_assignment_pattern);
+    }
+
+    // Declaration wrappers may contain the actual parsed pattern as a field.
+    // Follow only grammar-declared pattern/declarator relationships; never
+    // descend through member, field, or subscript place expressions.
+    for field in ["pattern", "declarator"] {
+        if let Some(child) = node.child_by_field_name(field) {
+            if let Some(pattern) = destructured_assignment_pattern(child) {
+                return Some(pattern);
+            }
+        }
+    }
+    None
+}
+
+fn assignment_lhs_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
+    node.child_by_field_name("left")
+        .or_else(|| node.child_by_field_name("lhs"))
+        .or_else(|| node.child_by_field_name("target"))
+        .or_else(|| node.child_by_field_name("pattern"))
+        .or_else(|| node.child_by_field_name("name"))
+        .or_else(|| node.child_by_field_name("declarator"))
+        .or_else(|| first_named_child_of_kind(node, "variable_list"))
+        .or_else(|| first_named_child_of_kind(node, "variables"))
+        .or_else(|| first_named_child_of_kind(node, "multi_variable_declaration"))
+        .or_else(|| first_named_child_of_kind(node, "pattern"))
+        .or_else(|| first_named_child_of_kind(node, "tuple_pattern"))
+        .or_else(|| first_named_child_of_kind(node, "array_pattern"))
+        .or_else(|| first_named_child_of_kind(node, "list_pattern"))
+        .or_else(|| first_named_child_of_kind(node, "left_assignment_list"))
+        .or_else(|| first_named_child_of_kind(node, "expression_list"))
+        .or_else(|| first_named_child_of_kind(node, "tuple"))
 }
 
 /// Return the parser-declared base and index expressions of a subscript
@@ -4867,67 +4908,6 @@ fn ruby_append_mutation_assignment(
         value_kind: None,
     });
     true
-}
-
-fn binding_tokens_from_pattern(pattern: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut token_start = 0usize;
-    for (idx, c) in pattern.char_indices() {
-        if c == '_' || c == '$' || c == '@' || c == '%' || c.is_ascii_alphanumeric() {
-            if current.is_empty() {
-                token_start = idx;
-            }
-            current.push(c);
-        } else if !current.is_empty() {
-            push_pattern_binding(pattern, token_start, idx, &mut current, &mut out);
-        }
-    }
-    if !current.is_empty() {
-        push_pattern_binding(pattern, token_start, pattern.len(), &mut current, &mut out);
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn push_pattern_binding(
-    pattern: &str,
-    start: usize,
-    end: usize,
-    current: &mut String,
-    out: &mut Vec<String>,
-) {
-    let raw = std::mem::take(current);
-    let cleaned = raw.trim_start_matches(&['$', '@', '%'][..]);
-    let prev = pattern[..start].chars().rev().find(|c| !c.is_whitespace());
-    let next = pattern[end..].chars().find(|c| !c.is_whitespace());
-    let is_map_key = next == Some(':');
-    let is_type_name = prev == Some('%') || cleaned.chars().next().is_some_and(|c| c.is_ascii_uppercase());
-    let is_keyword = matches!(
-        cleaned,
-        "my" | "our"
-            | "local"
-            | "let"
-            | "var"
-            | "const"
-            | "auto"
-            | "in"
-            | "do"
-            | "true"
-            | "false"
-            | "nil"
-            | "null"
-            | "_"
-    );
-    if !is_map_key && !is_type_name && !is_keyword && looks_like_bare_identifier(cleaned) {
-        let stripped = cleaned.to_string();
-        let has_sigil = stripped != raw;
-        out.push(raw);
-        if has_sigil {
-            out.push(stripped);
-        }
-    }
 }
 
 /// Fold every run of ASCII whitespace (spaces, tabs, newlines) in
@@ -5343,7 +5323,7 @@ pub fn decl_index_with_handler(
         if syntax_broken {
             retain_flow_events_outside_errors(&mut flow_events, &error_spans);
         }
-        annotate_tuple_call_result_bindings(&mut flow_events, snapshot.text.as_ref());
+        annotate_tuple_call_result_bindings(&mut flow_events, &tree, src);
 
         // For Elixir def-macros, params live on the SIGNATURE call
         // (the first argument of the outer call), not on the outer
@@ -5522,7 +5502,7 @@ pub fn decl_index_with_handler(
         if syntax_broken {
             retain_flow_events_outside_errors(&mut flow_events, &error_spans);
         }
-        annotate_tuple_call_result_bindings(&mut flow_events, snapshot.text.as_ref());
+        annotate_tuple_call_result_bindings(&mut flow_events, &tree, src);
         if params.is_empty() && flow_events.is_empty() {
             continue;
         }
@@ -8759,41 +8739,6 @@ fn c_family_function_pointer_alias(
         return None;
     }
     Some((span_of(file, node), target, source))
-}
-
-fn split_top_level_commas(text: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0usize;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for (idx, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '"' | '\'' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' | '<' => depth += 1,
-            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                parts.push(text[start..idx].to_string());
-                start = idx + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    parts.push(text[start..].to_string());
-    parts
 }
 
 fn c_family_declarator_is_function_pointer(node: &Node<'_>) -> bool {
