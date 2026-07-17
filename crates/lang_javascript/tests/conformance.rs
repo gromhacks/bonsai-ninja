@@ -126,6 +126,42 @@ fn direct_default_export_modifier_creates_default_alias() {
 }
 
 #[test]
+fn commonjs_callable_default_export_creates_default_alias() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "service.js",
+            "module.exports = function render(el, html) { el.innerHTML = html; };\n",
+        )],
+    );
+    for file in ws.db().vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+    }
+    let global = ws.db().global_index();
+    let decls = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .map(|decl| {
+            (
+                decl.name.as_str(),
+                decl.kind,
+                decl.span,
+                decl.name_span,
+                decl.body_span,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        decls.iter().any(|(name, ..)| *name == "default"),
+        "declarations: {decls:?}"
+    );
+}
+
+#[test]
 fn commonjs_object_export_alias_preserves_different_local_function_name() {
     use bonsai_lang_api::LanguageAdapter;
 
