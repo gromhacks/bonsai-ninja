@@ -6,9 +6,10 @@ use super::{
     apply_constructor_result_type_aliases, argument_place, assignment_value_node, build_call_event,
     callable_reference_name, canonical_simple_type_name, collect_kinds, expression_flow_from_node,
     extract_assignment_value_facts, extract_return_value_name, extract_rhs_expr_operands, language_from_pack,
-    node_text, normalize_call_name_whitespace, normalize_call_result_assignment_sources,
-    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, span_of,
-    walk_flow_events, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
+    lower_local_closure_captures, node_text, normalize_call_name_whitespace,
+    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
+    receiver_projected_alias_matches, span_of, walk_flow_events, GENERIC_HANDLER,
+    SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
     AssignValueKind, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent,
@@ -116,6 +117,18 @@ fn destructured_assignment_targets_follow_cst_binding_positions() {
             b"my ($first, $second) = @items;",
             &["first", "second"],
             &["items"],
+        ),
+        (
+            "rust",
+            b"struct Boxed { value: String } fn f(args: Boxed) { let Boxed { value } = args; }",
+            &["value"],
+            &["Boxed", "args"],
+        ),
+        (
+            "lua",
+            b"function outer() local ok, value = pcall(function() return source() end) end",
+            &["ok", "value"],
+            &["pcall", "source"],
         ),
     ];
 
@@ -371,6 +384,20 @@ fn foreach_bindings_cover_fielded_and_wrapped_grammar_shapes() {
             &["row", "index"],
             "rows",
         ),
+        (
+            "dart",
+            b"void f(List<String> rows) { for (var row in rows) sink(row); }",
+            "for_statement",
+            &["row"],
+            "rows",
+        ),
+        (
+            "objc",
+            b"void f(NSArray *rows) { for (NSString *row in rows) { sink(row); } }",
+            "for_statement",
+            &["row"],
+            "rows",
+        ),
     ];
 
     for (pack, src, kind, expected_targets, expected_source) in cases {
@@ -393,6 +420,86 @@ fn foreach_bindings_cover_fielded_and_wrapped_grammar_shapes() {
             );
         }
     }
+}
+
+#[test]
+fn scala_case_binding_uses_the_match_subject_node() {
+    let src = b"object Demo { def f(args: String) = args match { case value => sink(value) } }";
+    let tree = parse_language("scala", src);
+    let match_expr = collect_kinds(&tree, &["match_expression"])[0];
+    let events = extract_match_binding_assigns(FileId::new(0), &match_expr, src);
+    let facts = assign_facts(&events);
+
+    assert!(
+        facts.iter().any(|(target, source, sources)| {
+            *target == "value" && (source == &Some("args") || sources.contains(&"args"))
+        }),
+        "{facts:?}"
+    );
+}
+
+#[test]
+fn local_closure_conversion_adds_only_ast_proven_free_bindings() {
+    let file = FileId::new(0);
+    let mut caller = m9_func_decl(
+        0,
+        "entry",
+        None,
+        vec![
+            FlowEvent::Assign {
+                span: Span::new(file, 10, 50),
+                target: "closure".to_string(),
+                source_name: None,
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: true,
+                value_kind: Some(AssignValueKind::CallableReference),
+            },
+            FlowEvent::Call {
+                span: Span::new(file, 60, 70),
+                name: "closure".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                args: Vec::new(),
+            },
+        ],
+    );
+    caller.span = Span::new(file, 0, 100);
+    caller.params = vec!["captured".to_string(), "unused".to_string()];
+    let mut closure = m9_func_decl(
+        1,
+        "closure",
+        None,
+        vec![FlowEvent::Call {
+            span: Span::new(file, 30, 40),
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: Span::new(file, 35, 38),
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "captured".to_string(),
+                place: Some("captured".to_string()),
+                source_names: vec!["captured".to_string()],
+            }],
+        }],
+    );
+    closure.span = Span::new(file, 20, 50);
+    let mut defs = vec![caller, closure];
+
+    lower_local_closure_captures(&mut defs);
+
+    assert_eq!(defs[1].params, ["captured"]);
+    assert_eq!(defs[1].name, "closure");
+    assert!(matches!(
+        &defs[0].flow_events[1],
+        FlowEvent::Call { call_kind: CallKind::Indirect, args, .. }
+            if args.len() == 1 && args[0].place.as_deref() == Some("captured")
+    ));
 }
 
 #[test]

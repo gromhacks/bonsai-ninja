@@ -385,6 +385,7 @@ impl AnalyzerDb {
                     decl.implicit_receiver_names.push(receiver.to_string());
                 }
             }
+            bonsai_lang_api::apply_local_closure_captures(&mut index);
             bonsai_lang_api::apply_constructor_result_type_aliases(&mut index);
             bonsai_lang_api::apply_assign_value_kind(&mut index);
             bonsai_lang_api::apply_assign_call_result_types(&mut index);

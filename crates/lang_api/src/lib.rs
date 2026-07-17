@@ -15,13 +15,13 @@ pub use kit::{
     alias_map_from_import_specs, alias_map_from_imports, apply_assign_call_result_types,
     apply_assign_value_kind, apply_call_receiver_types, apply_call_receiver_types_with_super_tokens,
     apply_class_field_type_aliases, apply_constructor_result_type_aliases, apply_file_stem_semantic_identity,
-    apply_module_path_semantic_identity, c_family_preproc_imports, collect_assign_targets,
-    collect_constructor_result_type_aliases, collect_modifier_visibility, collect_param_type_aliases,
-    decl_index_with_handler, extend_alias_map_with_flow_events, extract_assignment_value_facts,
-    extract_imports_via, inject_lifecycle_events, normalize_call_result_assignment_sources,
-    populate_decl_return_types, rewrite_implicit_member_reads, with_fn_kinds, AliasTarget, GrammarHandler,
-    ImplicitMemberReadCall, LifecycleTransition, ModifierVocabulary, TypeAliasVocabulary, GENERIC_HANDLER,
-    WILDCARD_IMPORT_ALIAS_PREFIX,
+    apply_local_closure_captures, apply_module_path_semantic_identity, c_family_preproc_imports,
+    collect_assign_targets, collect_constructor_result_type_aliases, collect_modifier_visibility,
+    collect_param_type_aliases, decl_index_with_handler, extend_alias_map_with_flow_events,
+    extract_assignment_value_facts, extract_imports_via, inject_lifecycle_events,
+    normalize_call_result_assignment_sources, populate_decl_return_types, rewrite_implicit_member_reads,
+    with_fn_kinds, AliasTarget, GrammarHandler, ImplicitMemberReadCall, LifecycleTransition,
+    ModifierVocabulary, TypeAliasVocabulary, GENERIC_HANDLER, WILDCARD_IMPORT_ALIAS_PREFIX,
 };
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};
