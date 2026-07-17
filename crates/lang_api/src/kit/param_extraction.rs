@@ -25,9 +25,9 @@
 use tree_sitter::Node;
 
 use super::{
-    binding_tokens_from_pattern, callable_param_names_from_text, extract_direct_call_info,
-    first_identifier_descendant, first_identifier_like_child, first_named_child_of_kind,
-    looks_like_identifier, node_text, short_name_of, COMMON_CALL_KINDS, SYNTHETIC_VARARGS_PARAM,
+    extract_direct_call_info, first_identifier_descendant, first_identifier_like_child,
+    first_named_child_of_kind, looks_like_identifier, node_text, short_name_of, COMMON_CALL_KINDS,
+    SYNTHETIC_VARARGS_PARAM,
 };
 
 /// Per-parameter annotation/decorator names, parallel-indexed with
@@ -359,33 +359,7 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
         // keep parameter-index alignment with annotations.
         param_names.push(bound_name.unwrap_or_default());
     }
-    let fn_text = node_text(fn_node, src);
-    let fallback_param_text = parameters_container
-        .map(|container| node_text(&container, src))
-        .unwrap_or(fn_text);
-    let fallback_params = callable_param_names_from_text(fallback_param_text);
-    if param_names.is_empty() {
-        param_names.extend(fallback_params);
-    } else if fallback_params
-        .iter()
-        .any(|param| param == SYNTHETIC_VARARGS_PARAM)
-        && !param_names.iter().any(|param| param == SYNTHETIC_VARARGS_PARAM)
-    {
-        param_names.push(SYNTHETIC_VARARGS_PARAM.to_string());
-    }
-    if has_standalone_ellipsis_param(fn_text)
-        && !param_names.iter().any(|param| param == SYNTHETIC_VARARGS_PARAM)
-    {
-        param_names.push(SYNTHETIC_VARARGS_PARAM.to_string());
-    }
     param_names
-}
-
-fn has_standalone_ellipsis_param(text: &str) -> bool {
-    let Some(segment) = first_parenthesized_segment_text(text) else {
-        return false;
-    };
-    segment.split(',').any(|piece| piece.trim() == "...")
 }
 
 fn is_parameter_modifier_container(kind: &str) -> bool {
@@ -393,25 +367,6 @@ fn is_parameter_modifier_container(kind: &str) -> bool {
         kind,
         "parameter_modifiers" | "modifiers" | "annotation_list" | "attribute_list"
     )
-}
-
-fn first_parenthesized_segment_text(text: &str) -> Option<&str> {
-    let open = text.find('(')?;
-    let mut depth = 0usize;
-    for (idx, ch) in text[open..].char_indices() {
-        let absolute = open + idx;
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return text.get(open + 1..absolute);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Push a single parameter's name onto `out`, handling:
@@ -446,12 +401,10 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
         return;
     }
 
-    // JS destructured params: tree-sitter-javascript places the pattern
-    // directly as the param node (no `required_parameter` wrapper as in
-    // TS), so `{cmd}` / `[a, b]` never reach the `pattern`-field path
-    // below. A default (`{cmd} = {}`) wraps it in an assignment_pattern;
-    // unwrap to the `left` binding first. Mirror the TS routing through
-    // `binding_tokens_from_pattern` so both languages expand identically.
+    // JS destructured params sit directly in the parameter list while TS
+    // wraps them in a `required_parameter`. Walk the parsed pattern nodes;
+    // property keys, default expressions, and type annotations are excluded
+    // by CST fields rather than by tokenizing the pattern's source text.
     let mut pattern_node = param;
     if matches!(
         pattern_node.kind(),
@@ -462,8 +415,7 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
         }
     }
     if matches!(pattern_node.kind(), "object_pattern" | "array_pattern") {
-        let pattern_text = node_text(&pattern_node, src).trim();
-        let pattern_bindings = binding_tokens_from_pattern(pattern_text);
+        let pattern_bindings = binding_names_from_pattern(pattern_node, src);
         if !pattern_bindings.is_empty() {
             param_names.extend(pattern_bindings);
             return;
@@ -522,24 +474,94 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
         })
         .or_else(|| first_identifier_like_child(&param))
         .or_else(|| first_identifier_descendant(param));
+    if let Some(name_node) = name_node {
+        if is_binding_pattern_kind(name_node.kind()) {
+            let pattern_bindings = binding_names_from_pattern(name_node, src);
+            if !pattern_bindings.is_empty() {
+                param_names.extend(pattern_bindings);
+                return;
+            }
+        }
+    }
     let raw_name_text = match (bare_identifier_text, name_node) {
         (Some(text), _) => text,
         (None, Some(node)) => node_text(&node, src).trim().to_string(),
+        _ if is_unnamed_variadic_parameter(param.kind()) => {
+            param_names.push(SYNTHETIC_VARARGS_PARAM.to_string());
+            return;
+        }
         _ => return,
     };
     let trimmed_name = raw_name_text.trim();
-    if trimmed_name.starts_with(['{', '[', '(']) {
-        let pattern_bindings = binding_tokens_from_pattern(trimmed_name);
-        if !pattern_bindings.is_empty() {
-            param_names.extend(pattern_bindings);
-            return;
-        }
-    }
     // Filter out sigil-only entries (`*`, `&`) that are syntax noise
     // rather than meaningful parameter bindings.
     if !trimmed_name.is_empty() && trimmed_name != "*" && trimmed_name != "&" {
         param_names.push(trimmed_name.to_string());
     }
+}
+
+fn is_unnamed_variadic_parameter(kind: &str) -> bool {
+    matches!(
+        kind,
+        "variadic_parameter" | "variadic_declaration" | "variadic_placeholder"
+    )
+}
+
+fn is_binding_pattern_kind(kind: &str) -> bool {
+    kind.contains("pattern") || matches!(kind, "tuple" | "list" | "parameters" | "destructuring_declarator")
+}
+
+fn binding_names_from_pattern(pattern: Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut bindings = Vec::new();
+    collect_binding_names(pattern, src, &mut bindings);
+    bindings
+}
+
+fn collect_binding_names(node: Node<'_>, src: &[u8], bindings: &mut Vec<String>) {
+    if binding_identifier_kind(node.kind()) {
+        let name = node_text(&node, src).trim();
+        if !name.is_empty() && !bindings.iter().any(|existing| existing == name) {
+            bindings.push(name.to_string());
+        }
+        return;
+    }
+
+    let structural_child = match node.kind() {
+        "pair_pattern" => node.child_by_field_name("value"),
+        "assignment_pattern" | "object_assignment_pattern" => node.child_by_field_name("left"),
+        _ => None,
+    };
+    if let Some(child) = structural_child {
+        collect_binding_names(child, src, bindings);
+        return;
+    }
+
+    for index in 0..node.child_count() {
+        let Ok(index) = u32::try_from(index) else {
+            continue;
+        };
+        let Some(child) = node.child(index).filter(Node::is_named) else {
+            continue;
+        };
+        if matches!(
+            node.field_name_for_child(index),
+            Some("type" | "key" | "right" | "value" | "default" | "path" | "constructor")
+        ) || child.kind().contains("type")
+        {
+            continue;
+        }
+        collect_binding_names(child, src, bindings);
+    }
+}
+
+fn binding_identifier_kind(kind: &str) -> bool {
+    kind == "shorthand_property_identifier_pattern"
+        || (looks_like_identifier(kind)
+            && !kind.contains("type")
+            && !matches!(
+                kind,
+                "property_identifier" | "private_property_identifier" | "field_identifier"
+            ))
 }
 
 /// First direct identifier-like child that is not itself type syntax.
@@ -608,4 +630,62 @@ fn last_identifier_descendant_by_position<'tree>(node: Node<'tree>) -> Option<No
         }
     }
     latest_by_position
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kit::language_from_pack;
+
+    fn params_for(pack: &str, function_kind: &str, src: &str) -> Vec<String> {
+        let language = language_from_pack(pack).unwrap_or_else(|error| panic!("{pack}: {error}"));
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set language");
+        let tree = parser.parse(src.as_bytes(), None).expect("parse source");
+        let function = find_kind(tree.root_node(), function_kind).expect("function node");
+        extract_param_names(&function, src.as_bytes())
+    }
+
+    fn find_kind<'tree>(root: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            if node.kind() == kind {
+                return Some(node);
+            }
+            let mut cursor = node.walk();
+            let mut children: Vec<Node<'tree>> = node.named_children(&mut cursor).collect();
+            children.reverse();
+            pending.extend(children);
+        }
+        None
+    }
+
+    #[test]
+    fn javascript_destructured_params_follow_pattern_nodes() {
+        let params = params_for(
+            "javascript",
+            "function_declaration",
+            "function run({ command: cmd, user, nested: { token }, ...rest }, [first, last] = []) {}",
+        );
+
+        assert_eq!(params, ["cmd", "user", "token", "rest", "first", "last"]);
+    }
+
+    #[test]
+    fn typescript_typed_destructuring_excludes_keys_and_types() {
+        let params = params_for(
+            "typescript",
+            "arrow_function",
+            "const run = ({ command: cmd, user }: Input, ...rest: string[]) => {};",
+        );
+
+        assert_eq!(params, ["cmd", "user", "rest"]);
+    }
+
+    #[test]
+    fn c_unnamed_variadic_param_comes_from_grammar_node() {
+        let params = params_for("c", "function_definition", "void log(const char *fmt, ...) {}");
+
+        assert_eq!(params, ["fmt", SYNTHETIC_VARARGS_PARAM]);
+    }
 }

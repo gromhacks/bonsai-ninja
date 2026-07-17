@@ -250,7 +250,7 @@ fn call_member_name(name: &str) -> &str {
 }
 
 #[test]
-fn ruby_no_parentheses_receiver_send_stays_call_result() {
+fn ruby_method_symbol_is_a_structured_callable_reference() {
     let ws = bonsai_testkit::workspace_with(
         vec![adapter_for_lang("ruby")],
         &[(
@@ -296,9 +296,9 @@ end
             _ => None,
         })
         .expect("callback assignment");
-    assert_eq!(callback_assign.0.as_deref(), Some("method(:helper)"));
+    assert_eq!(callback_assign.0.as_deref(), Some("helper"));
     assert_eq!(callback_assign.1.as_deref(), None);
-    assert_eq!(callback_assign.2, &Some(AssignValueKind::Compound));
+    assert_eq!(callback_assign.2, &Some(AssignValueKind::CallableReference));
 }
 
 fn fixture_for(lang: &str) -> Conformance {

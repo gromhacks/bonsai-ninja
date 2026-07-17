@@ -196,6 +196,22 @@ fn return_value_name_uses_structured_syntax_before_text_fallback() {
 }
 
 #[test]
+fn perl_sigiled_return_uses_the_scalar_ast_node() {
+    let language = language_from_pack("perl").expect("perl grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set perl grammar");
+    let src = b"sub f { my $value = 1; return $value; }\n";
+    let tree = parser.parse(src, None).expect("parse perl");
+    let returns = collect_kinds(&tree, &["return_expression"]);
+
+    assert_eq!(returns.len(), 1);
+    assert_eq!(
+        extract_return_value_name(&returns[0], src).as_deref(),
+        Some("$value")
+    );
+}
+
+#[test]
 fn assignment_value_fact_uses_exact_rhs_node_span() {
     let language = language_from_pack("python").expect("python grammar");
     let mut parser = tree_sitter::Parser::new();

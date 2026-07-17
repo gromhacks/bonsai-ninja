@@ -96,6 +96,20 @@ pub fn extract_return_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> 
         let unwrapped = first_identifier_like_child(&value_node)?;
         return Some(node_text(&unwrapped, src).trim().to_string());
     }
+    // Perl wraps a sigiled variable in `scalar` / `array` / `hash` and
+    // exposes the binding as its sole `varname` child. Preserve the sigil
+    // from that exact AST node; compound dereferences/subscripts have extra
+    // children and deliberately do not take this single-place path.
+    if matches!(value_kind, "scalar" | "array" | "hash") {
+        let mut cursor = value_node.walk();
+        let children: Vec<Node<'_>> = value_node.named_children(&mut cursor).collect();
+        if children.len() == 1 && children[0].kind() == "varname" {
+            let value = node_text(&value_node, src).trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
     // TypeScript type-assertion wrappers carry a TYPE node beside the
     // value (`x as T`, `x satisfies T`, `x!`, `<T>x`). We must peel to
     // the VALUE child specifically — `first_identifier_like_child`
