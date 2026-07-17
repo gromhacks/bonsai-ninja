@@ -858,8 +858,12 @@ where
         return Vec::new();
     }
     let prepared_by_language = build_prepared_rule_batches(&prepared, factory);
+    // Package/context gates and receiver-base matching both consume
+    // workspace-global syntax facts. Build them once before the file-level
+    // Rayon scan so workers borrow the canonical compiler IR instead of
+    // racing to construct it or rebuilding per-file declarations afterward.
+    let global_file_indexes = ws.db().global_index();
     let receiver_base_map = workspace_receiver_base_map_if_needed(ws, &prepared, mode, retention);
-    let global_file_indexes = (!receiver_base_map.is_empty()).then(|| ws.db().global_index());
     let debug_security_phase = bonsai_diagnostics::debug::is_enabled("security-phase");
     let constructor_fallback_languages: AHashSet<&str> = prepared
         .iter()
@@ -905,7 +909,7 @@ where
     // join. Match collection order is non-deterministic across
     // runs, but downstream callers already invoke `sort_matches` on
     // the returned Vec before emission to keep finding ids stable.
-    let workers = matcher_worker_count(files.len());
+    let workers = matcher_worker_count();
     if workers <= 1 || files.len() <= 1 {
         return files
             .iter()
@@ -925,52 +929,23 @@ where
                                 on_file_done();
                                 return file_out;
                             };
-                            match retention {
-                                FactRetention::Cached => {
-                                    let Some(file_index) = ws.db().decl_index(file) else {
-                                        on_file_done();
-                                        return file_out;
-                                    };
-                                    let ctx = FileScanContext {
-                                        ws,
-                                        file,
-                                        file_index: file_index.as_ref(),
-                                        constructor_names: &constructor_names,
-                                        mode,
-                                        taint_view,
-                                        retention,
-                                        receiver_base_map: &receiver_base_map,
-                                    };
-                                    scan_file_rules(&ctx, &file_rules, &mut file_out);
-                                }
-                                FactRetention::Transient => {
-                                    let borrowed_index = global_file_indexes
-                                        .as_ref()
-                                        .and_then(|global| global.decl_index_in(file));
-                                    let owned_index;
-                                    let file_index = if let Some(index) = borrowed_index {
-                                        index
-                                    } else {
-                                        owned_index = ws.db().decl_index_uncached(file);
-                                        let Some(index) = owned_index.as_ref() else {
-                                            on_file_done();
-                                            return file_out;
-                                        };
-                                        index
-                                    };
-                                    let ctx = FileScanContext {
-                                        ws,
-                                        file,
-                                        file_index,
-                                        constructor_names: &constructor_names,
-                                        mode,
-                                        taint_view,
-                                        retention,
-                                        receiver_base_map: &receiver_base_map,
-                                    };
-                                    scan_file_rules(&ctx, &file_rules, &mut file_out);
-                                }
-                            }
+                            let Some(file_index) =
+                                scan_decl_index(ws, global_file_indexes.as_ref(), file, retention)
+                            else {
+                                on_file_done();
+                                return file_out;
+                            };
+                            let ctx = FileScanContext {
+                                ws,
+                                file,
+                                file_index: file_index.as_ref(),
+                                constructor_names: &constructor_names,
+                                mode,
+                                taint_view,
+                                retention,
+                                receiver_base_map: &receiver_base_map,
+                            };
+                            scan_file_rules(&ctx, &file_rules, &mut file_out);
                             if dedup_file_matches {
                                 dedup_inventory_matches_in_place(&mut file_out);
                             }
@@ -1015,52 +990,26 @@ where
                                             return file_out;
                                         };
                                         parsed_files_worker.fetch_add(1, Ordering::Relaxed);
-                                        match retention {
-                                            FactRetention::Cached => {
-                                                let Some(file_index) = ws.db().decl_index(file) else {
-                                                    let _ = tick_tx.send(());
-                                                    return file_out;
-                                                };
-                                                let ctx = FileScanContext {
-                                                    ws,
-                                                    file,
-                                                    file_index: file_index.as_ref(),
-                                                    constructor_names: &constructor_names,
-                                                    mode,
-                                                    taint_view,
-                                                    retention,
-                                                    receiver_base_map: &receiver_base_map,
-                                                };
-                                                scan_file_rules(&ctx, &file_rules, &mut file_out);
-                                            }
-                                            FactRetention::Transient => {
-                                                let borrowed_index = global_file_indexes
-                                                    .as_ref()
-                                                    .and_then(|global| global.decl_index_in(file));
-                                                let owned_index;
-                                                let file_index = if let Some(index) = borrowed_index {
-                                                    index
-                                                } else {
-                                                    owned_index = ws.db().decl_index_uncached(file);
-                                                    let Some(index) = owned_index.as_ref() else {
-                                                        let _ = tick_tx.send(());
-                                                        return file_out;
-                                                    };
-                                                    index
-                                                };
-                                                let ctx = FileScanContext {
-                                                    ws,
-                                                    file,
-                                                    file_index,
-                                                    constructor_names: &constructor_names,
-                                                    mode,
-                                                    taint_view,
-                                                    retention,
-                                                    receiver_base_map: &receiver_base_map,
-                                                };
-                                                scan_file_rules(&ctx, &file_rules, &mut file_out);
-                                            }
-                                        }
+                                        let Some(file_index) = scan_decl_index(
+                                            ws,
+                                            global_file_indexes.as_ref(),
+                                            file,
+                                            retention,
+                                        ) else {
+                                            let _ = tick_tx.send(());
+                                            return file_out;
+                                        };
+                                        let ctx = FileScanContext {
+                                            ws,
+                                            file,
+                                            file_index: file_index.as_ref(),
+                                            constructor_names: &constructor_names,
+                                            mode,
+                                            taint_view,
+                                            retention,
+                                            receiver_base_map: &receiver_base_map,
+                                        };
+                                        scan_file_rules(&ctx, &file_rules, &mut file_out);
                                         if dedup_file_matches {
                                             dedup_inventory_matches_in_place(&mut file_out);
                                         }
@@ -1128,7 +1077,7 @@ fn language_needs_bare_constructor_fallback(language: &str) -> bool {
     !matches!(language, "java" | "c" | "csharp" | "go" | "rust")
 }
 
-fn matcher_worker_count(_file_count: usize) -> usize {
+fn matcher_worker_count() -> usize {
     let available = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
@@ -1137,13 +1086,13 @@ fn matcher_worker_count(_file_count: usize) -> usize {
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
     {
-        return requested.clamp(1, available);
+        return requested.max(1);
     }
     if let Some(requested) = std::env::var("RAYON_NUM_THREADS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
     {
-        return requested.clamp(1, available);
+        return requested.max(1);
     }
     available
 }
@@ -1193,6 +1142,37 @@ enum ConstraintMode {
 enum FactRetention {
     Cached,
     Transient,
+}
+
+enum ScanDeclIndex<'a> {
+    Global(&'a DeclIndex),
+    Cached(Arc<DeclIndex>),
+    Transient(DeclIndex),
+}
+
+impl AsRef<DeclIndex> for ScanDeclIndex<'_> {
+    fn as_ref(&self) -> &DeclIndex {
+        match self {
+            Self::Global(index) => index,
+            Self::Cached(index) => index.as_ref(),
+            Self::Transient(index) => index,
+        }
+    }
+}
+
+fn scan_decl_index<'a>(
+    ws: &Workspace,
+    global: &'a bonsai_index::GlobalIndex,
+    file: FileId,
+    retention: FactRetention,
+) -> Option<ScanDeclIndex<'a>> {
+    if let Some(index) = global.decl_index_in(file) {
+        return Some(ScanDeclIndex::Global(index));
+    }
+    match retention {
+        FactRetention::Cached => ws.db().decl_index(file).map(ScanDeclIndex::Cached),
+        FactRetention::Transient => ws.db().decl_index_uncached(file).map(ScanDeclIndex::Transient),
+    }
 }
 
 struct FileScanContext<'a, 'taint> {
@@ -7143,7 +7123,7 @@ fn collect_constructor_names_for_files(ws: &Workspace, files: &[FileId]) -> AHas
             .map(|decl| decl.name.clone())
             .collect()
     };
-    let workers = matcher_worker_count(files.len());
+    let workers = matcher_worker_count();
     if workers > 1 && files.len() > 1 {
         let collect = || {
             use rayon::prelude::*;

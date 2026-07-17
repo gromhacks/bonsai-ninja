@@ -482,6 +482,28 @@ impl AnalyzerDb {
         if let Some(v) = cached {
             return v;
         }
+        // A global-index request can originate inside a caller-owned Rayon
+        // pool (the security matcher is the canonical example). Building a
+        // second pool with `install` from that worker lets Rayon execute more
+        // caller-pool jobs while it waits; those jobs then re-enter this
+        // single-flight lock and deadlock the owning worker. Isolate the
+        // compiler pass on a plain OS thread whenever the caller is already a
+        // Rayon worker. The build still uses host-parallel lowering internally.
+        let arc = if rayon::current_thread_index().is_some() {
+            let db = self.clone();
+            match std::thread::spawn(move || db.build_global_index_uncached()).join() {
+                Ok(index) => index,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        } else {
+            self.build_global_index_uncached()
+        };
+        let mut cache = self.inner.cache.write();
+        cache.global_index = Some(arc.clone());
+        arc
+    }
+
+    fn build_global_index_uncached(&self) -> Arc<GlobalIndex> {
         let files = self.inner.vfs.all_files();
         let consume_decl_index_cache = should_consume_decl_index_cache_for_global();
         let mut gi = GlobalIndex::new();
@@ -495,10 +517,7 @@ impl AnalyzerDb {
             }
         }
         gi.finalize_semantic_facts();
-        let arc = Arc::new(gi);
-        let mut cache = self.inner.cache.write();
-        cache.global_index = Some(arc.clone());
-        arc
+        Arc::new(gi)
     }
 
     fn populate_global_index_consuming(&self, gi: &mut GlobalIndex, files: &[FileId]) {

@@ -211,6 +211,45 @@ fn global_index_concurrent_callers_lower_each_file_once() {
 }
 
 #[test]
+fn global_index_single_flight_is_safe_from_parallel_rayon_callers() {
+    use std::sync::{atomic::AtomicUsize, Barrier};
+
+    let vfs = Arc::new(Vfs::new());
+    vfs.write("fixture.py", "def shared():\n    return 1\n");
+    let declaration_calls = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(CountingPythonAdapter {
+        declaration_calls: Arc::clone(&declaration_calls),
+    }));
+    let db = AnalyzerDb::new(vfs, registry);
+    let start = Barrier::new(2);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .expect("caller pool");
+
+    let (left, right) = pool.install(|| {
+        rayon::join(
+            || {
+                start.wait();
+                db.global_index()
+            },
+            || {
+                start.wait();
+                db.global_index()
+            },
+        )
+    });
+
+    assert_eq!(
+        declaration_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "Rayon callers must share one workspace lowering pass"
+    );
+    assert!(Arc::ptr_eq(&left, &right));
+}
+
+#[test]
 fn tree_provider_honors_the_requested_snapshot_after_a_concurrent_write() {
     let vfs = Arc::new(Vfs::new());
     let file = vfs.write("fixture.py", "def before():\n    return 1\n");
