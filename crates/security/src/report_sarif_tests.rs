@@ -21,6 +21,7 @@ fn sample_match(rule_id: &str, file: &str, line: u32) -> FindingMatch {
         tainted_args: vec![TaintedArgInfo {
             index: 0,
             value_text: "user_input".to_string(),
+            ..TaintedArgInfo::default()
         }],
         sanitised_arg_indices: Vec::new(),
     }
