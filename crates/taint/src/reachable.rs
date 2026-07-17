@@ -24,7 +24,7 @@
 
 use crate::text::normalise_qualified_text;
 use ahash::AHashSet;
-use bonsai_common::{FileId, FuncId, Precision, Span, SymbolId};
+use bonsai_common::{short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_db::AnalyzerDb;
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::FlowEvent;
@@ -1070,6 +1070,14 @@ fn rule_match_seed_nodes(
                 .collect::<Vec<_>>();
             if !anchored_named_nodes.is_empty() {
                 seed_nodes.extend(anchored_named_nodes);
+                // A source assignment can bind a whole aggregate (`event =
+                // req.body`). The anchored node is the exact `Write(event)`,
+                // while field forwarding deliberately keeps that whole-object
+                // node separate from projected reads such as
+                // `event.command`. Seed only AST-materialized descendant READS
+                // requested by the compiler seed pattern (`event.*`); never
+                // descendant writes, which may be later clean overwrites.
+                seed_nodes.extend(token_descendant_read_seed_nodes(source_func, &seed_names, idg));
             } else {
                 let mut named_nodes = idg.read_or_write_nodes_for_names(source_func, &seed_names);
                 // A read-kind source whose matched name is a parameter
@@ -2372,7 +2380,8 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
             parent_trace_id,
             caller,
             name: call_summary.name.clone(),
-            call_span,
+            call_span: direct_assignment_call_span(global.as_ref(), call_span, &call_summary.name)
+                .unwrap_or(call_span),
             tainted_args,
             tainted_receiver,
             kind: crate::inter::TaintedCallKind::Call,
@@ -2565,6 +2574,24 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
         }
     }
     graph
+}
+
+/// Translate an assignment-backed IDG call identity to the exact parsed call
+/// expression span used for diagnostics. The graph intentionally retains the
+/// assignment span as its stable write/call-result identity; public evidence
+/// should point at the Tree-sitter call node rather than the start of the
+/// surrounding assignment.
+fn direct_assignment_call_span(
+    global: &GlobalIndex,
+    assignment_span: bonsai_common::Span,
+    call_name: &str,
+) -> Option<bonsai_common::Span> {
+    let index = global.file_index(assignment_span.file)?;
+    let fact = bonsai_lang_api::assignment_value_fact_for_span(&index.assignment_values, assignment_span)?;
+    let direct_name = fact.direct_call_name.as_deref()?;
+    let names_match =
+        direct_name == call_name || short_qualified_tail(direct_name) == short_qualified_tail(call_name);
+    names_match.then(|| fact.call_sites.first().copied()).flatten()
 }
 
 /// Expand an IDG seed set with semantic transfer shapes before

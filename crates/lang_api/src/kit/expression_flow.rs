@@ -234,7 +234,7 @@ fn field_pair_nodes(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
     (key.id() != value.id()).then_some((key, value))
 }
 
-fn static_field_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+pub(super) fn static_field_name(node: Node<'_>, src: &[u8]) -> Option<String> {
     let kind = node.kind();
     if !looks_like_identifier(kind)
         && !kind.contains("string")
@@ -363,6 +363,16 @@ fn projection_is_static(node: &Node<'_>, src: &[u8]) -> bool {
                 .child_by_field_name("index")
                 .or_else(|| current.child_by_field_name("subscript"))
                 .or_else(|| current.child_by_field_name("argument"))
+                .or_else(|| {
+                    // PHP and a few other grammars keep the subscript key as
+                    // the second named CST child without assigning a field
+                    // id. The child order is still grammar structure: base,
+                    // then key. Consume that parsed relationship rather than
+                    // rejecting a statically named projection.
+                    let mut cursor = current.walk();
+                    let index = current.named_children(&mut cursor).nth(1);
+                    index
+                })
             else {
                 return false;
             };

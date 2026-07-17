@@ -1402,6 +1402,25 @@ fn perl_list_expression_dependencies_come_from_scalar_ast_values() {
 }
 
 #[test]
+fn erlang_list_argument_keeps_nested_call_operand_from_ast() {
+    let source = r#"-module(example).
+-export([run/1]).
+run(Input) -> os:cmd(["ping ", uri_string:quote(Input)]).
+"#;
+    let tree = parse_language("erlang", source.as_bytes());
+    let outer = collect_kinds(&tree, &["call"])
+        .into_iter()
+        .filter_map(|node| build_call_event(node, FileId::new(0), source.as_bytes(), &GENERIC_HANDLER, &[]))
+        .find(|event| matches!(event, FlowEvent::Call { name, .. } if name == "os:cmd"))
+        .expect("outer os:cmd call");
+    let FlowEvent::Call { args, .. } = outer else {
+        unreachable!();
+    };
+    assert_eq!(args.len(), 1, "{args:?}");
+    assert_eq!(args[0].source_names, ["Input"]);
+}
+
+#[test]
 fn rust_shorthand_struct_initializer_is_an_exact_aggregate_field() {
     let source = "fn make(data: Envelope) -> Self { Self { data } }";
     let language = language_from_pack("rust").expect("Rust language pack");

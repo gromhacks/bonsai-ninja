@@ -1359,6 +1359,19 @@ fn emit_receiver_field_writes(decl: &Decl, ctx: &mut TransferCtx<'_>) {
             };
             if !param_name.is_empty() {
                 ctx.bridge_read(param_name, write_node, edge_meta);
+                // A receiver-field assignment copies the parameter value as
+                // an aggregate too. Record the parsed storage relationship so
+                // Phase 3 can preserve any exact descendant fields that are
+                // materialized by cross-call stitching after this local
+                // transfer has run (`data.cmd -> this.data.cmd`).
+                let copy = DescendantCopy {
+                    source_base: param_name.to_string(),
+                    target_base: target.to_string(),
+                    span: write.span,
+                };
+                if !ctx.out.descendant_copies.contains(&copy) {
+                    ctx.out.descendant_copies.push(copy);
+                }
             }
         }
         ctx.commit_writer(target, write_node);
@@ -2787,6 +2800,12 @@ fn walk_assign(
         return;
     }
     let indexed_call_sites = assignment_call_sites_for_span(ctx.assignment_values, span);
+    let indexed_value_flow = bonsai_lang_api::assignment_value_fact_for_span(ctx.assignment_values, span)
+        .and_then(|fact| {
+            (!fact.value_flow.aggregate_fields.is_empty() || !fact.value_flow.spreads.is_empty())
+                .then(|| fact.value_flow.clone())
+        });
+    let has_indexed_named_aggregate = indexed_value_flow.is_some();
     let rhs_is_literal = matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::Literal));
     if is_structural_index_metadata_target(target) {
         return;
@@ -2805,6 +2824,12 @@ fn walk_assign(
     } else {
         build_target_node(target, span, ctx)
     };
+    if let Some(flow) = indexed_value_flow
+        .as_ref()
+        .filter(|_| has_indexed_named_aggregate)
+    {
+        emit_local_expression_aggregate(target, flow, span, ctx);
+    }
 
     let assign_kind = if is_field_write {
         IdgEdgeKind::IntraFieldWrite
@@ -2830,12 +2855,13 @@ fn walk_assign(
     // so link by span CONTAINMENT, not equality. Containment is a
     // superset of the old equality match, so existing field-precise
     // shapes are unchanged.
-    let suppress_broad_container_inputs = !is_field_write && {
-        let bare_target = target.trim();
-        ctx.field_precise_container_assigns
-            .iter()
-            .any(|(field_span, base)| base == bare_target && span_contains_or_equal(span, *field_span))
-    };
+    let suppress_broad_container_inputs = !is_field_write
+        && (has_indexed_named_aggregate || {
+            let bare_target = target.trim();
+            ctx.field_precise_container_assigns
+                .iter()
+                .any(|(field_span, base)| base == bare_target && span_contains_or_equal(span, *field_span))
+        });
     if is_structural_index_base_write(target, source_name, source_names, suppress_broad_container_inputs) {
         return;
     }

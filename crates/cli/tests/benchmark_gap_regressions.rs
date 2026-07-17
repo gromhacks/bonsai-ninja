@@ -97,12 +97,23 @@ fn run_taint_json_with_flags(ws: &Path, source: &str, sink: &str, flags: &[&str]
         String::from_utf8_lossy(&out.stderr)
     );
 
-    serde_json::from_slice::<Vec<Value>>(&out.stdout).unwrap_or_else(|error| {
+    let value = serde_json::from_slice::<Value>(&out.stdout).unwrap_or_else(|error| {
         panic!(
             "invalid taint JSON: {error}\nstdout:\n{}",
             String::from_utf8_lossy(&out.stdout)
         )
-    })
+    });
+    value
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .or_else(|| value.as_array().cloned())
+        .unwrap_or_else(|| {
+            panic!(
+                "taint JSON must be a paged envelope or row array\nstdout:\n{}",
+                String::from_utf8_lossy(&out.stdout)
+            )
+        })
 }
 
 fn run_sinks_json(ws: &Path, rule_regex: &str) -> Vec<Value> {

@@ -16,6 +16,7 @@ use bonsai_lang_api::AdapterArc;
 use bonsai_lang_go::GoAdapter;
 use bonsai_lang_javascript::JavaScriptAdapter;
 use bonsai_lang_objc::ObjCAdapter;
+use bonsai_lang_php::PhpAdapter;
 use bonsai_lang_python::PythonAdapter;
 use bonsai_lang_rust::RustAdapter;
 use bonsai_lang_solidity::SolidityAdapter;
@@ -95,6 +96,11 @@ fn solidity_db(src: &str) -> AnalyzerDb {
     build_db(adapter, &[("Demo.sol", src)])
 }
 
+fn php_db(src: &str) -> AnalyzerDb {
+    let adapter: AdapterArc = Arc::new(PhpAdapter::new());
+    build_db(adapter, &[("app.php", src)])
+}
+
 fn strings_fields_passthrough() -> Vec<CallResultPassthrough> {
     vec![CallResultPassthrough {
         callee: "strings.Fields".to_string(),
@@ -102,6 +108,39 @@ fn strings_fields_passthrough() -> Vec<CallResultPassthrough> {
         input_arg_indices: vec![0],
         input_receiver: false,
     }]
+}
+
+#[test]
+fn php_keyed_container_field_survives_constructor_and_getter() {
+    let src = r#"<?php
+class Box {
+    public function __construct(protected array $data) {}
+    public function cmd(): string { return $this->data['cmd']; }
+    public function run(): void { sink($this->cmd()); }
+}
+function entry($raw, $user): void {
+    $envelope = ['cmd' => $raw, 'user' => $user];
+    $box = new Box($envelope);
+    $box->run();
+}
+function sink($value): void {}
+"#;
+    let db = php_db(src);
+    let entry = func_id_or_none(&db, "entry").expect("entry should index");
+    let raw_seeds = seed(&["raw"]);
+    let raw_result = interprocedural_taint(entry, &raw_seeds, &cfg(), &db);
+    assert!(
+        sink_reached(&raw_result, "sink"),
+        "the selected cmd field must survive constructor state and getter return: {:?}",
+        raw_result.tainted_calls
+    );
+
+    let user_result = interprocedural_taint(entry, &seed(&["user"]), &cfg(), &db);
+    assert!(
+        !sink_reached(&user_result, "sink"),
+        "a sibling user field must not widen into the cmd getter: {:?}",
+        user_result.tainted_calls
+    );
 }
 
 #[test]

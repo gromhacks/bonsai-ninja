@@ -360,7 +360,7 @@
       func upload(fh *multipart.FileHeader) string {
         return fh.Filename
       }
-    expect_match_text: [Filename]
+    expect_match_text: [fh.Filename]
   description: "multipart.FileHeader.Filename - client-supplied upload filename; treat as tainted path/name input."
 - id: go.nethttp.body_read
   enabled: false

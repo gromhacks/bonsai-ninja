@@ -7,7 +7,8 @@ cmd_raw(Input) ->
     os:cmd("ping " ++ Input).
 
 cmd_safe(Input) ->
-    %% Safe — os:cmd with a whitelisted argv list; Input is a single token.
+    %% Wrong-context sanitizer evidence: URL encoding is visible on-path but
+    %% must not clear a command-injection finding for os:cmd/1.
     os:cmd(["ping ", uri_string:quote(Input)]).
 
 %% --- Open redirect ---------------------------------------------------

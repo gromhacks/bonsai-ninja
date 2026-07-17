@@ -1293,6 +1293,80 @@ fn compound_assignment_binds_ast_indexed_rhs_call_result() {
 }
 
 #[test]
+fn indexed_object_initializer_is_field_precise_without_duplicate_flow_event() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["userInput".to_string()];
+    let assign_span = span(20, 60);
+    decl.flow_events = vec![FlowEvent::Assign {
+        span: assign_span,
+        target: "cfg".to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec![
+            "command".to_string(),
+            "label".to_string(),
+            "userInput".to_string(),
+        ],
+        declares_new_binding: true,
+        value_kind: Some(AssignValueKind::Compound),
+    }];
+    let facts = [AssignmentValueFact {
+        assignment_span: assign_span,
+        target_span: Some(span(20, 23)),
+        value_span: span(26, 60),
+        call_sites: Vec::new(),
+        value_flow: ExpressionFlow {
+            aggregate_fields: vec![
+                bonsai_lang_api::ExpressionField {
+                    name: "command".to_string(),
+                    value: ExpressionFlow::from_place("userInput"),
+                },
+                bonsai_lang_api::ExpressionField {
+                    name: "label".to_string(),
+                    value: ExpressionFlow::default(),
+                },
+            ],
+            ..ExpressionFlow::default()
+        },
+        direct_call_name: None,
+        direct_call_receiver: None,
+    }];
+
+    let out =
+        transfer_function_for_with_options_and_assignment_values(&decl, &TransferOptions::default(), &facts);
+    let edges = out
+        .edges
+        .iter()
+        .map(|edge| {
+            (
+                rendered_place_name(&out, edge.from),
+                rendered_place_name(&out, edge.to),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        edges
+            .iter()
+            .any(|(from, to)| from == "userInput" && to == "cfg.command"),
+        "indexed field carrier missing: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .all(|(from, to)| !(from == "userInput" && to == "cfg.label")),
+        "literal sibling must stay clean: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .all(|(from, to)| !(from == "userInput" && to == "cfg")),
+        "broad container edge defeats field precision: {edges:?}"
+    );
+}
+
+#[test]
 fn assign_source_names_use_previous_sibling_call_span_for_return_binding() {
     let mut decl = empty_decl(1, "f");
     let assign_span = span(50, 90);

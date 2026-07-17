@@ -556,6 +556,27 @@
       attribute: [path, normalize]
   description: "Disabled - path.normalize alone does NOT prevent traversal; requires path.resolve + prefix check."
 
+- id: typescript.sanitizer.path_basename
+  enabled: true
+  language: typescript
+  tag: path-sanitize
+  packages: [path]
+  match:
+    kind: call
+    callee:
+      attribute: [path, basename]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: path basename
+    code: |
+      import path from "path";
+      function clean(input: string) {
+        return path.basename(input);
+      }
+    expect_match_text: [path.basename]
+  description: path.basename - strips directory components, leaving just the filename.
+
 # -- NoSQL operator stripping ------------------------------------------------
 - id: typescript.sanitizer.mongo_sanitize
   enabled: true

@@ -938,17 +938,16 @@
     target:
       regex: "(^|\\.)(HttpOnly|Secure)$"
   constraints:
-  - any_arg_matches_regex: |-
-      HttpOnly\s*=\s*true|Secure\s*=\s*true
+  - any_arg_matches_regex: "^true$"
   match_examples:
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; CookieOptions.HttpOnly = true; } }
     expect_match_text: [CookieOptions.HttpOnly]
-  - name: declared shape negative constraint boundary
-    code: "class Example { void ExampleMethod() { CookieOptions.HttpOnly(); } }\n"
+  - name: false cookie flag negative
+    code: "class Example { void ExampleMethod() { CookieOptions.HttpOnly = false; } }\n"
     expect_no_match: true
-  description: "ASP.NET CookieOptions { HttpOnly = true, Secure = true }."
+  description: "ASP.NET CookieOptions HttpOnly/Secure true assignment. Each required hardening flag is recorded independently; audit cookie setup for both flags."
 
 # Rate-limit middleware presence sanitizers (round 2 fill).
 - id: csharp.ratelimit.aspnetcore_addratelimiter

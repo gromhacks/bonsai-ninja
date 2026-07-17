@@ -112,9 +112,8 @@ fn simple_variable_assignment_uses_exact_source_name() {
             FlowEvent::Assign {
                 target,
                 source_name: Some(source),
-                source_names,
                 ..
-            } if target == "$y" && source == "$x" && source_names.is_empty()
+            } if target == "$y" && source == "$x"
         )),
         "PHP simple variable rename should use exact source_name, got {:#?}",
         handle.flow_events
@@ -144,4 +143,61 @@ fn member_access_assignment_stays_compound() {
         "PHP member access should stay on qualified compound source_names, got {:#?}",
         handle.flow_events
     );
+}
+
+#[test]
+fn member_access_inside_compound_expression_keeps_sigiled_projection() {
+    let db = db_with(
+        "<?php\nfunction handle($obj) { $size = $obj->capacity * 2; sink($size); }\nfunction sink($s) {}\n",
+    );
+    let global = db.global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle function should be indexed");
+
+    assert!(
+        handle.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_names,
+                ..
+            } if target == "$size" && source_names.iter().any(|source| source == "$obj.capacity")
+        )),
+        "PHP compound member read should retain its exact sigiled projection, got {:#?}",
+        handle.flow_events
+    );
+}
+
+#[test]
+fn keyed_array_destructure_reads_the_selected_rhs_field() {
+    let db = db_with(
+        "<?php\nfunction handle($envelope) { ['cmd' => $cmd, 'user' => $user] = $envelope; sink($cmd); }\nfunction sink($s) {}\n",
+    );
+    let global = db.global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle function should be indexed");
+
+    for (target, expected_source) in [("cmd", "$envelope.cmd"), ("user", "$envelope.user")] {
+        assert!(
+            handle.flow_events.iter().any(|event| matches!(
+                event,
+                FlowEvent::Assign {
+                    target: actual_target,
+                    source_name: Some(source),
+                    source_names,
+                    ..
+                } if actual_target == target
+                    && source == expected_source
+                    && source_names == &vec![expected_source.to_string()]
+            )),
+            "PHP keyed destructure should retain {target} <- {expected_source}, got {:#?}",
+            handle.flow_events
+        );
+    }
 }

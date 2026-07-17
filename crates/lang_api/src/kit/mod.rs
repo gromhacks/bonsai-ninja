@@ -2208,16 +2208,22 @@ fn walk_into(
         let callable_source = rhs
             .filter(|_| !rhs_is_callable_literal)
             .and_then(|rhs_node| callable_reference_name(&rhs_node, src));
-        let assignment_value_kind = (callable_source.is_some() || rhs_is_callable_literal)
+        let simple_place_source = rhs
+            .filter(|rhs_node| looks_like_identifier(rhs_node.kind()))
+            .and_then(|rhs_node| argument_place(&rhs_node, src));
+        let mut assignment_value_kind = (callable_source.is_some() || rhs_is_callable_literal)
             .then_some(crate::AssignValueKind::CallableReference);
-        let source_name = callable_source.clone().or_else(|| {
-            rhs.and_then(|rhs_node| {
-                let rhs_text = node_text(&rhs_node, src).trim();
-                // Only emit `source_name` for bare-identifier RHS — compound
-                // expressions go through `source_call` / `source_names`.
-                looks_like_bare_identifier(rhs_text).then(|| rhs_text.to_string())
-            })
-        });
+        let mut source_name = callable_source
+            .clone()
+            .or_else(|| simple_place_source.clone())
+            .or_else(|| {
+                rhs.and_then(|rhs_node| {
+                    let rhs_text = node_text(&rhs_node, src).trim();
+                    // Only emit `source_name` for bare-identifier RHS — compound
+                    // expressions go through `source_call` / `source_names`.
+                    looks_like_bare_identifier(rhs_text).then(|| rhs_text.to_string())
+                })
+            });
         // source_call: when the RHS is a direct call expression,
         // capture the callee name + the call's positional
         // argument identifier texts. This is what the interprocedural
@@ -2226,7 +2232,8 @@ fn walk_into(
         //   `y = item.get("k")` → source_call = Some("item.get"),
         //   source_call_args = ["x"]. If transform's summary says
         //   param 0 flows to the return, y inherits x's taint.
-        let (source_call, source_call_args) = if callable_source.is_some() || rhs_is_callable_literal {
+        let (mut source_call, mut source_call_args) = if callable_source.is_some() || rhs_is_callable_literal
+        {
             (None, Vec::new())
         } else {
             rhs.and_then(|n| extract_direct_call_info(&n, src))
@@ -2259,6 +2266,13 @@ fn walk_into(
         if callable_source.is_none() && !rhs_is_callable_literal {
             if let Some(n) = rhs.filter(|n| !is_large_literal_initializer_node(n.kind(), n)) {
                 source_names.extend(extract_rhs_expr_operands(&n, src));
+                // Retain the exact parser-proven qualified place in addition
+                // to scalar operands. This preserves language sigils on a
+                // projection (`$obj->token` -> `$obj.token`) without an
+                // adapter rescanning rendered expression text.
+                if let Some(place) = argument_place(&n, src).filter(|place| place.contains('.')) {
+                    source_names.push(place);
+                }
             }
         }
         // Some grammars expose a declaration initializer as a wrapper
@@ -2310,6 +2324,16 @@ fn walk_into(
         }
         source_names.sort();
         source_names.dedup();
+        // Keyed destructuring is a field projection, not a whole-container
+        // read. Preserve the parser-declared selector for each binding so
+        // `['cmd' => $cmd] = $envelope` lowers to
+        // `cmd <- $envelope.cmd`. This keeps exact aggregate writes
+        // field-sensitive across a later destructure without recovering keys
+        // from rendered assignment text.
+        let keyed_binding_sources = rhs
+            .and_then(|rhs_node| argument_place(&rhs_node, src))
+            .map(|base| keyed_lhs_binding_sources(&node, src, &base))
+            .unwrap_or_default();
         // Some grammars emit a declaration-name wrapper as an
         // assignment-shaped node (`val raw` / `local raw`) in addition
         // to the real initializer assignment. A node with no RHS and
@@ -2371,15 +2395,22 @@ fn walk_into(
             // because `extra_lhs_binding_targets` accepts only aggregate CST
             // pattern kinds.
             for extra_target in extra_lhs_binding_targets(&node, src, &target) {
+                let keyed_source = keyed_binding_sources.iter().find_map(|(binding, source)| {
+                    same_identifier_name(binding, &extra_target).then_some(source)
+                });
                 out.push(FlowEvent::Assign {
                     span: span_of(file, &node),
                     target: extra_target,
-                    source_name: source_name.clone(),
-                    source_call: source_call.clone(),
-                    source_call_args: source_call_args.clone(),
-                    source_names: source_names.clone(),
+                    source_name: keyed_source.cloned().or_else(|| source_name.clone()),
+                    source_call: keyed_source.is_none().then(|| source_call.clone()).flatten(),
+                    source_call_args: keyed_source.map_or_else(|| source_call_args.clone(), |_| Vec::new()),
+                    source_names: keyed_source
+                        .map(|source| vec![source.clone()])
+                        .unwrap_or_else(|| source_names.clone()),
                     declares_new_binding: false,
-                    value_kind: assignment_value_kind,
+                    value_kind: keyed_source
+                        .map(|_| crate::AssignValueKind::Destructure)
+                        .or(assignment_value_kind),
                 });
             }
             // Subscript-assign `obj[key] = value` is semantically
@@ -2415,6 +2446,16 @@ fn walk_into(
             // blank-target Assign — the real bindings are already emitted
             // as extras above.
             if !target.is_empty() {
+                if let Some(keyed_source) = keyed_binding_sources
+                    .iter()
+                    .find_map(|(binding, source)| same_identifier_name(binding, &target).then_some(source))
+                {
+                    source_name = Some(keyed_source.clone());
+                    source_call = None;
+                    source_call_args.clear();
+                    source_names = vec![keyed_source.clone()];
+                    assignment_value_kind = Some(crate::AssignValueKind::Destructure);
+                }
                 out.push(FlowEvent::Assign {
                     span: span_of(file, &node),
                     target,
@@ -4626,33 +4667,12 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
             }
             continue;
         }
-        // Avoid descending into nested CALL sites — those are handled
-        // separately by `extract_direct_call_info` on the outer call.
-        // Constructor-style initializers can wrap a value-bearing call inside
-        // an argument-list RHS (`Repo repo(std::move(env))`). Keep the nested
-        // call's argument operands while still skipping the callee name.
+        // Avoid treating nested-call callee names as value operands. Walk the
+        // parsed argument containers instead, so constructor initializers and
+        // compound call arguments retain their value carriers without any
+        // rendered-expression parsing.
         if COMMON_CALL_KINDS.contains(&n.kind()) && n.id() != node.id() {
-            // M8: Kotlin/Swift expose call args under `value_arguments`
-            // (often wrapped in a `call_suffix`) or a Swift `tuple_expression`
-            // rather than `arguments`/`argument_list`. Without these a nested
-            // call inside a compound RHS or call argument contributed NO
-            // operands for Kotlin/Swift, unlike Python/JS/Java/Go. Mirror the
-            // broader arg-list lookup used when building CallArgs.
-            if let Some(args_node) = n
-                .child_by_field_name("arguments")
-                .or_else(|| n.child_by_field_name("argument_list"))
-                .or_else(|| first_named_child_of_kind(&n, "value_arguments"))
-                .or_else(|| {
-                    first_named_child_of_kind(&n, "call_suffix")
-                        .and_then(|cs| first_named_child_of_kind(&cs, "value_arguments"))
-                })
-                .or_else(|| first_named_child_of_kind(&n, "tuple_expression"))
-                // Rust-style macro invocations expose their value operands
-                // in a parsed token tree rather than an `arguments` node.
-                // Treat that AST child as the argument payload while still
-                // excluding the macro/callee identifier itself.
-                .or_else(|| first_named_child_of_kind(&n, "token_tree"))
-            {
+            for args_node in call_argument_containers(n) {
                 let mut arg_cursor = args_node.walk();
                 for arg in args_node.named_children(&mut arg_cursor) {
                     out.extend(extract_rhs_expr_operands(&arg, src));
@@ -4662,7 +4682,13 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
         }
         if MEMBER_EXPR_KINDS.contains(&n.kind()) {
             if let Some(name) = normalize_member_name(&n, src) {
+                let bare = name
+                    .trim_start_matches(bonsai_common::IDENTIFIER_SIGILS)
+                    .to_string();
                 out.push(name);
+                if !bare.is_empty() {
+                    out.push(bare);
+                }
             }
             // H6: suppress the member TAIL (the property / attribute name)
             // as a standalone bare operand. Consumers only ever strip the
@@ -5162,6 +5188,119 @@ fn extra_lhs_binding_targets(node: &Node<'_>, src: &[u8], primary: &str) -> Vec<
         }
     }
     out
+}
+
+/// Map grammar-proven keyed pattern bindings to exact projections of the RHS
+/// container. Tree-sitter grammars either expose `key` / `value` fields on a
+/// pair node or retain an anonymous `=>` token between two named children
+/// (PHP array destructuring). Both shapes are parsed syntax relationships;
+/// this helper never scans or splits the surrounding assignment rendering.
+fn keyed_lhs_binding_sources(node: &Node<'_>, src: &[u8], rhs_base: &str) -> Vec<(String, String)> {
+    let Some(lhs) = assignment_lhs_node(node) else {
+        return Vec::new();
+    };
+    let Some(pattern) = destructured_assignment_pattern(lhs) else {
+        return Vec::new();
+    };
+    let mut keyed = Vec::new();
+    collect_keyed_pattern_bindings(pattern, src, &mut Vec::new(), &mut keyed);
+    let base = rhs_base.trim().trim_end_matches('.');
+    if base.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (binding, path) in keyed {
+        if path.is_empty() {
+            continue;
+        }
+        let source = format!("{base}.{}", path.join("."));
+        if !out
+            .iter()
+            .any(|existing| existing == &(binding.clone(), source.clone()))
+        {
+            out.push((binding, source));
+        }
+    }
+    out
+}
+
+fn collect_keyed_pattern_bindings(
+    node: Node<'_>,
+    src: &[u8],
+    prefix: &mut Vec<String>,
+    out: &mut Vec<(String, Vec<String>)>,
+) {
+    if let (Some(key), Some(value)) = (
+        node.child_by_field_name("key")
+            .or_else(|| node.child_by_field_name("name")),
+        node.child_by_field_name("value")
+            .or_else(|| node.child_by_field_name("pattern")),
+    ) {
+        if key.id() != value.id() {
+            if let Some(key) = expression_flow::static_field_name(key, src) {
+                prefix.push(key);
+                collect_keyed_pattern_value(value, src, prefix, out);
+                prefix.pop();
+                return;
+            }
+        }
+    }
+
+    // PHP's list-literal pattern does not field its key/value children, but
+    // the grammar retains the `=>` terminal between them. Walk the direct CST
+    // children so nested expressions cannot be mistaken for pair syntax.
+    let mut cursor = node.walk();
+    let mut previous_named = None;
+    let mut awaiting_value = false;
+    let mut handled_value_ids = Vec::new();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.is_named() {
+                if awaiting_value {
+                    if let Some(key_node) = previous_named.take() {
+                        if let Some(key) = expression_flow::static_field_name(key_node, src) {
+                            prefix.push(key);
+                            collect_keyed_pattern_value(child, src, prefix, out);
+                            prefix.pop();
+                            handled_value_ids.push(child.id());
+                        }
+                    }
+                    awaiting_value = false;
+                } else {
+                    previous_named = Some(child);
+                }
+            } else if node_text(&child, src).trim() == "=>" {
+                awaiting_value = true;
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+
+    let mut named = node.walk();
+    for child in node.named_children(&mut named) {
+        if !handled_value_ids.contains(&child.id()) {
+            collect_keyed_pattern_bindings(child, src, prefix, out);
+        }
+    }
+}
+
+fn collect_keyed_pattern_value(
+    value: Node<'_>,
+    src: &[u8],
+    prefix: &mut Vec<String>,
+    out: &mut Vec<(String, Vec<String>)>,
+) {
+    if destructured_assignment_pattern(value).is_some() {
+        collect_keyed_pattern_bindings(value, src, prefix, out);
+        return;
+    }
+    let targets = binding_targets_from_pattern_node(&value, src);
+    if targets.len() == 1 && !prefix.is_empty() {
+        out.push((targets[0].clone(), prefix.clone()));
+    }
 }
 
 /// Return the parsed aggregate binding pattern for a multi-target assignment.
@@ -7396,7 +7535,12 @@ fn normalize_member_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
             // Base of the chain — include its text and stop.
             let text = node_text(&n, src).trim().to_string();
             if !text.is_empty() {
-                parts.push(text.trim_start_matches('$').to_string());
+                // Preserve language sigils in the canonical storage place.
+                // The operand inventory separately emits bare aliases for
+                // tolerant name matching; dropping the sigil here loses the
+                // exact qualified identity (`$c.capacity`) needed to suppress
+                // its whole-object carrier (`$c`).
+                parts.push(text);
             }
             break;
         }
@@ -8231,7 +8375,7 @@ fn call_argument_containers(node: Node<'_>) -> Vec<Node<'_>> {
             // without it, a nested call arg like `sink(source())` never
             // surfaces its inner `source()` Call.
             "arguments" | "argument_list" | "value_arguments" | "call_suffix" | "expr_args"
-            | "call_argument" => {
+            | "call_argument" | "token_tree" => {
                 v.push(child);
             }
             _ => {}

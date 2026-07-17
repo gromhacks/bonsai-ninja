@@ -484,6 +484,8 @@
     kind: call
     callee:
       attribute: [path, basename]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: path basename
     code: |
