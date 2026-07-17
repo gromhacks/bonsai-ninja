@@ -20,7 +20,7 @@ use bonsai_common::{
     MATCHER_POLICY_FINGERPRINT,
 };
 use bonsai_lang_api::{Decl, LanguageRegistry};
-use bonsai_workspace::{FileRefreshKind, WorkspaceOpenOptions};
+use bonsai_workspace::{FileRefreshKind, SourceFileStamp, WorkspaceOpenOptions};
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -46,7 +46,10 @@ const RETRIEVAL_NO_CANDIDATES_FILTER: &str = "/__bonsai_no_retrieval_candidates_
 static EXPORT_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub mod read_file;
+mod refresh;
 pub mod tree;
+
+use refresh::{disk_file_stamp, DiskFileStamp, GitChangeOracle};
 
 pub use read_file::{
     read_file as build_read_file, FindingDigest, FlowEntryExit, FlowRole, InlinedDecl, LineDeclSpan,
@@ -651,6 +654,15 @@ impl Bonsai {
     /// SDK's current registry and rulepack handles attached.
     fn project(&self, root: &Path, workspace: Workspace, open_options: WorkspaceOpenOptions) -> Project {
         let fingerprints = workspace_fingerprints_from_vfs(&workspace);
+        let change_oracle = GitChangeOracle::discover(root);
+        let file_stamps = if change_oracle.is_some() {
+            AHashMap::new()
+        } else {
+            workspace_stamps_from_vfs(&workspace)
+        };
+        let idg_sidecar_stamp = disk_file_stamp(&bonsai_workspace::idg_sidecar_path(root))
+            .ok()
+            .flatten();
         Project {
             root: root.to_path_buf(),
             workspace,
@@ -658,6 +670,9 @@ impl Bonsai {
             rulepack: self.rulepack.clone(),
             rulepack_root: self.rulepack_root.clone(),
             fingerprints: Arc::new(Mutex::new(fingerprints)),
+            file_stamps: Arc::new(Mutex::new(file_stamps)),
+            change_oracle: Arc::new(Mutex::new(change_oracle)),
+            idg_sidecar_stamp: Arc::new(Mutex::new(idg_sidecar_stamp)),
             refresh_gate: Arc::new(Mutex::new(())),
             last_refresh_error: Arc::new(Mutex::new(None)),
             pending_dataflow_sidecar_save: Arc::new(AtomicBool::new(false)),
@@ -723,6 +738,9 @@ pub struct Project {
     rulepack: Option<Arc<Rulepack>>,
     rulepack_root: Option<PathBuf>,
     fingerprints: Arc<Mutex<AHashMap<PathBuf, u64>>>,
+    file_stamps: Arc<Mutex<AHashMap<PathBuf, SourceFileStamp>>>,
+    change_oracle: Arc<Mutex<Option<GitChangeOracle>>>,
+    idg_sidecar_stamp: Arc<Mutex<Option<DiskFileStamp>>>,
     refresh_gate: Arc<Mutex<()>>,
     last_refresh_error: Arc<Mutex<Option<String>>>,
     pending_dataflow_sidecar_save: Arc<AtomicBool>,
@@ -732,6 +750,10 @@ pub struct Project {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct WorkspaceRefreshReport {
+    /// Supported source entries checked using metadata only.
+    pub metadata_files_checked: usize,
+    /// Source contents opened because their metadata stamp changed.
+    pub content_files_read: usize,
     pub added: usize,
     pub modified: usize,
     pub removed: usize,
@@ -765,10 +787,22 @@ impl Project {
     ) -> Self {
         let root = root.as_ref();
         let fingerprints = workspace_fingerprints_from_vfs(&workspace);
+        let change_oracle = GitChangeOracle::discover(root);
+        let file_stamps = if change_oracle.is_some() {
+            AHashMap::new()
+        } else {
+            workspace_stamps_from_vfs(&workspace)
+        };
+        let idg_sidecar_stamp = disk_file_stamp(&bonsai_workspace::idg_sidecar_path(root))
+            .ok()
+            .flatten();
         Self {
             root: root.to_path_buf(),
             workspace,
             fingerprints: Arc::new(Mutex::new(fingerprints)),
+            file_stamps: Arc::new(Mutex::new(file_stamps)),
+            change_oracle: Arc::new(Mutex::new(change_oracle)),
+            idg_sidecar_stamp: Arc::new(Mutex::new(idg_sidecar_stamp)),
             registry,
             rulepack: None,
             rulepack_root: None,
@@ -945,28 +979,111 @@ impl Project {
         // Serialise refresh transactions without holding the fingerprint-map
         // lock across file IO, parsing, cache invalidation, or sidecar writes.
         let _refresh = self.refresh_gate.lock().expect("refresh gate lock");
-        let current = self
-            .workspace
-            .source_file_fingerprints(&self.root)
-            .with_context(|| format!("scanning {}", self.root.display()))?;
-        let current_map: AHashMap<PathBuf, u64> =
-            current.into_iter().map(|file| (file.path, file.hash)).collect();
+        let previous_stamps = self.file_stamps.lock().expect("file stamp lock").clone();
+        let previous_fingerprints = self.fingerprints.lock().expect("fingerprint lock").clone();
+        let candidates = {
+            let mut oracle_slot = self.change_oracle.lock().expect("change oracle lock");
+            match oracle_slot.as_mut() {
+                Some(oracle) => match oracle.candidates() {
+                    Ok(candidates) => Some(candidates),
+                    Err(_) => {
+                        // Source-control acceleration is optional. Once it is
+                        // unavailable, retain exactness by reverting to the
+                        // canonical recursive workspace scan.
+                        *oracle_slot = None;
+                        None
+                    }
+                },
+                None => None,
+            }
+        };
 
-        let previous = self.fingerprints.lock().expect("fingerprint lock").clone();
-        let previous_paths: AHashSet<PathBuf> = previous.keys().cloned().collect();
-        let current_paths: AHashSet<PathBuf> = current_map.keys().cloned().collect();
+        let mut full_reconciliation = candidates.is_none();
+        let mut candidate_paths = AHashSet::new();
+        let mut current_map = AHashMap::new();
+        let mut removed_paths = Vec::new();
+        let mut metadata_files_checked = 0;
+        if let Some(changes) = candidates {
+            full_reconciliation |= changes.reconcile_workspace;
+            for path in changes.paths {
+                candidate_paths.insert(path.clone());
+                if previous_fingerprints.contains_key(&path) {
+                    metadata_files_checked += 1;
+                    match self
+                        .workspace
+                        .source_file_stamp(&path)
+                        .with_context(|| format!("checking {}", path.display()))?
+                    {
+                        Some(stamp) => {
+                            current_map.insert(path, stamp);
+                        }
+                        None => removed_paths.push(path),
+                    }
+                    continue;
+                }
 
-        let mut report = WorkspaceRefreshReport::default();
-        for path in previous_paths.difference(&current_paths) {
-            if self.workspace.remove_file_from_index(path).is_some() {
+                // Git reports non-source changes as well. A new supported
+                // source requires a complete reconciliation so nested
+                // .gitignore/.ignore/.bonsaiignore rules remain authoritative;
+                // no path spelling heuristic may add compiler input.
+                let supported = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| self.registry.adapter_for_extension(extension).is_some());
+                if supported
+                    && std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file())
+                {
+                    full_reconciliation = true;
+                    break;
+                }
+            }
+        }
+
+        if full_reconciliation {
+            let current = self
+                .workspace
+                .source_file_stamps(&self.root)
+                .with_context(|| format!("scanning {}", self.root.display()))?;
+            current_map = current
+                .into_iter()
+                .map(|stamp| (stamp.path.clone(), stamp))
+                .collect();
+            metadata_files_checked = current_map.len();
+            removed_paths = previous_fingerprints
+                .keys()
+                .filter(|path| !current_map.contains_key(*path))
+                .cloned()
+                .collect();
+        }
+
+        let mut next_stamps = previous_stamps.clone();
+        let mut next_fingerprints = previous_fingerprints.clone();
+
+        let mut report = WorkspaceRefreshReport {
+            metadata_files_checked,
+            ..WorkspaceRefreshReport::default()
+        };
+        for path in removed_paths {
+            if self.workspace.remove_file_from_index(&path).is_some() {
                 report.removed += 1;
             }
+            next_stamps.remove(&path);
+            next_fingerprints.remove(&path);
+            self.clear_refresh_retry(&path);
         }
 
         let mut changed_paths: Vec<PathBuf> = current_map
             .iter()
-            .filter_map(|(path, hash)| {
-                if previous.get(path).copied() == Some(*hash) {
+            .filter_map(|(path, stamp)| {
+                if previous_stamps.get(path) == Some(stamp) {
+                    None
+                } else if previous_stamps.get(path).is_none()
+                    && previous_fingerprints.contains_key(path)
+                    && !candidate_paths.contains(path)
+                {
+                    // Git-backed projects initialize stamps lazily. A path
+                    // absent from the exact Git candidate set still matches
+                    // the VFS snapshot opened from that same worktree.
                     None
                 } else {
                     Some(path.clone())
@@ -974,23 +1091,54 @@ impl Project {
             })
             .collect();
         changed_paths.sort();
+        if full_reconciliation {
+            let changed: AHashSet<&Path> = changed_paths.iter().map(PathBuf::as_path).collect();
+            for (path, stamp) in &current_map {
+                if !changed.contains(path.as_path()) {
+                    next_stamps.insert(path.clone(), stamp.clone());
+                }
+            }
+        }
+        let mut first_error = None;
         for path in changed_paths {
+            report.content_files_read += 1;
             let refresh = self
                 .workspace
                 .refresh_file_from_disk(&path)
-                .with_context(|| format!("refreshing {}", path.display()))?;
-            match refresh.kind {
-                FileRefreshKind::Added => report.added += 1,
-                FileRefreshKind::Modified => report.modified += 1,
-                FileRefreshKind::Unchanged => {}
+                .with_context(|| format!("refreshing {}", path.display()));
+            match refresh {
+                Ok(refresh) => {
+                    match refresh.kind {
+                        FileRefreshKind::Added => report.added += 1,
+                        FileRefreshKind::Modified => report.modified += 1,
+                        FileRefreshKind::Unchanged => {}
+                    }
+                    if let Ok(snapshot) = self.workspace.db().vfs().snapshot(refresh.file) {
+                        next_fingerprints
+                            .insert(path.clone(), bonsai_hash::fnv1a_bytes64(snapshot.text.as_bytes()));
+                    }
+                    if let Some(stamp) = current_map.get(&path) {
+                        next_stamps.insert(path.clone(), stamp.clone());
+                    }
+                    self.clear_refresh_retry(&path);
+                }
+                Err(error) => {
+                    self.retain_refresh_retry(&path);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
 
-        // The live workspace now reflects every source hash in current_map.
-        // Publish that compact state before optional prewarm/persistence so a
-        // sidecar write failure cannot cause every later query to reparse the
-        // same already-applied edits.
-        *self.fingerprints.lock().expect("fingerprint lock") = current_map;
+        // Publish every successfully applied edit before returning a later
+        // refresh/sidecar error. A bad file will be retried because its stamp
+        // is deliberately absent, while good siblings are not reread.
+        *self.file_stamps.lock().expect("file stamp lock") = next_stamps;
+        *self.fingerprints.lock().expect("fingerprint lock") = next_fingerprints;
+        if let Some(error) = first_error {
+            return Err(error);
+        }
 
         if report.changed() && self.refresh_options.prewarm_dataflow {
             let pending = self.workspace.dataflow().pending_count(self.workspace.db());
@@ -1005,16 +1153,44 @@ impl Project {
             self.pending_dataflow_sidecar_save.store(false, Ordering::Release);
         }
 
-        // Another process may have completed a semantic index since this
-        // long-lived Project was opened. Hydrate that already-validated IDG
-        // snapshot after the live source view is current so every facade sees
-        // the same semantic backend as a freshly opened CLI process. This is a
-        // read-only cache load: it never forces an IDG build, and the sidecar's
-        // pipeline hash rejects snapshots for different source contents.
-        self.workspace
-            .load_idg_sidecar(&self.root)
-            .with_context(|| format!("loading IDG sidecar under {}", self.root.display()))?;
+        // Another process may complete a semantic index after this long-lived
+        // Project opens. Hydrate only when the sidecar identity changes: an
+        // unchanged multi-gigabyte factstore must never be decoded again at
+        // every facade boundary. Parse-only projects do not consume semantic
+        // sidecars at all. The loader still validates the exact pipeline hash
+        // before seeding the shared IDG service.
+        if self.refresh_options.load_idg_sidecar {
+            let sidecar = bonsai_workspace::idg_sidecar_path(&self.root);
+            let current_stamp = disk_file_stamp(&sidecar)
+                .with_context(|| format!("checking IDG sidecar {}", sidecar.display()))?;
+            let changed = {
+                let mut observed = self.idg_sidecar_stamp.lock().expect("IDG sidecar stamp lock");
+                if *observed == current_stamp {
+                    false
+                } else {
+                    *observed = current_stamp;
+                    true
+                }
+            };
+            if changed {
+                self.workspace
+                    .load_idg_sidecar(&self.root)
+                    .with_context(|| format!("loading IDG sidecar under {}", self.root.display()))?;
+            }
+        }
         Ok(report)
+    }
+
+    fn retain_refresh_retry(&self, path: &Path) {
+        if let Some(oracle) = self.change_oracle.lock().expect("change oracle lock").as_mut() {
+            oracle.retain_retry(path);
+        }
+    }
+
+    fn clear_refresh_retry(&self, path: &Path) {
+        if let Some(oracle) = self.change_oracle.lock().expect("change oracle lock").as_mut() {
+            oracle.clear_retry(path);
+        }
     }
 
     fn refresh_from_disk_best_effort(&self) {
@@ -1102,6 +1278,15 @@ fn workspace_fingerprints_from_vfs(workspace: &Workspace) -> AHashMap<PathBuf, u
                 bonsai_hash::fnv1a_bytes64(snapshot.text.as_bytes()),
             ))
         })
+        .collect()
+}
+
+fn workspace_stamps_from_vfs(workspace: &Workspace) -> AHashMap<PathBuf, SourceFileStamp> {
+    workspace
+        .indexed_source_file_stamps()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|stamp| (stamp.path.clone(), stamp))
         .collect()
 }
 
