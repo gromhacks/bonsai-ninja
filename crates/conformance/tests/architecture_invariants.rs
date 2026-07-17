@@ -3086,3 +3086,23 @@ fn typed_lang_adapters_emit_decl_type_aliases() {
         violations.values().cloned().collect::<Vec<_>>().join("\n")
     );
 }
+
+/// Syntax indexing is a compiler frontend pass: its default parallelism comes
+/// from the host, not from arbitrary repository-size bands. File-count gates
+/// made the same AST workload substantially slower as soon as a project crossed
+/// a threshold and are particularly harmful on large monorepos.
+#[test]
+fn syntax_index_parallelism_is_not_project_size_capped() {
+    let root = repo_root();
+    let workspace = read(&root.join("crates/workspace/src/lib.rs"));
+    let body = function_body(&workspace, "workspace_parse_worker_count");
+
+    assert!(
+        body.contains("available_parallelism"),
+        "default syntax-index parallelism must be derived from the host"
+    );
+    assert!(
+        !body.contains("file_count") && !body.contains("files.len()"),
+        "syntax-index worker selection must not depend on project size"
+    );
+}
