@@ -754,13 +754,18 @@ fn collect_flow_event_kinds(value: &serde_json::Value, out: &mut BTreeSet<String
         serde_json::Value::Object(obj) => {
             if obj.len() == 1 {
                 if let Some(kind) = obj.keys().next().filter(|kind| is_flow_event_kind(kind)) {
-                    out.insert(kind.clone());
+                    out.insert(kind.to_ascii_lowercase());
                 }
             }
             if let Some(events) = obj.get("flow_events").and_then(|v| v.as_array()) {
                 for event in events {
-                    if let Some(kind) = event.as_object().and_then(|o| o.keys().next()) {
-                        out.insert(kind.clone());
+                    if let Some(kind) = event.as_object().and_then(|event| {
+                        event
+                            .get("kind")
+                            .and_then(|kind| kind.as_str())
+                            .or_else(|| event.keys().next().map(String::as_str))
+                    }) {
+                        out.insert(kind.to_ascii_lowercase());
                     }
                 }
             }
@@ -2870,8 +2875,9 @@ fn mega_flow_exports_adapter_facts_for_taint_engine() {
         let mut event_kinds = BTreeSet::new();
         collect_flow_event_kinds(&export, &mut event_kinds);
         for kind in required_mega_flow_event_kinds(lang) {
+            let native_kind = kind.to_ascii_lowercase();
             assert!(
-                event_kinds.contains(*kind),
+                event_kinds.contains(&native_kind),
                 "{lang}: export missing FlowEvent::{kind}; got {event_kinds:?}"
             );
         }

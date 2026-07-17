@@ -1004,6 +1004,16 @@ impl Project {
                 .with_context(|| format!("saving dataflow sidecar under {}", self.root.display()))?;
             self.pending_dataflow_sidecar_save.store(false, Ordering::Release);
         }
+
+        // Another process may have completed a semantic index since this
+        // long-lived Project was opened. Hydrate that already-validated IDG
+        // snapshot after the live source view is current so every facade sees
+        // the same semantic backend as a freshly opened CLI process. This is a
+        // read-only cache load: it never forces an IDG build, and the sidecar's
+        // pipeline hash rejects snapshots for different source contents.
+        self.workspace
+            .load_idg_sidecar(&self.root)
+            .with_context(|| format!("loading IDG sidecar under {}", self.root.display()))?;
         Ok(report)
     }
 

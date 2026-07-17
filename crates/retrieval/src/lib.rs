@@ -43,7 +43,9 @@ use std::path::{Path, PathBuf};
 // streaming zstd compression. Canonical FactDoc semantics are unchanged; the
 // representation removes workspace-scale repetition from the sidecar.
 // v9 (2026-07-16): MessagePack replaces the retired binary codec.
-pub const RETRIEVAL_SCHEMA_VERSION: u32 = 9;
+// v10 (2026-07-16): compact string/comment candidate rows retain their
+// enclosing AST callable names, restoring the v7 candidate contract.
+pub const RETRIEVAL_SCHEMA_VERSION: u32 = 10;
 
 /// Factstore table id for retrieval snapshots.
 pub const RETRIEVAL_TABLE_ID: u32 = 0x5254_5631;
@@ -859,14 +861,22 @@ fn build_persisted_candidate_docs(ws: &Workspace) -> Vec<FactDoc> {
                 candidate_terms(&mut groups, kind).add(&reference.name);
             }
             for string in &index.strings {
+                let enclosing_function = enclosing_function_for_span(ws, string.span);
                 let strings = candidate_terms(&mut groups, "string");
                 strings.add(&string.text);
                 strings.add(&format!("{:?}", string.category).to_lowercase());
+                if let Some(function) = enclosing_function.as_deref() {
+                    strings.add(function);
+                }
             }
             for comment in &index.comments {
+                let enclosing_function = enclosing_function_for_span(ws, comment.span);
                 let comments = candidate_terms(&mut groups, "comment");
                 comments.add(&comment.text);
                 comments.add(&format!("{:?}", comment.kind).to_lowercase());
+                if let Some(function) = enclosing_function.as_deref() {
+                    comments.add(function);
+                }
             }
         }
         finish_file_candidate_groups(

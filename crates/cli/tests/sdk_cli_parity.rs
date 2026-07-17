@@ -422,12 +422,13 @@ fn summarize_json(value: &Value) -> String {
 }
 
 fn normalized_index_stats(mut value: Value) -> Value {
-    // `cached_cfgs` is an in-process DB cache counter, not a semantic
-    // index result. A warm dataflow sidecar can satisfy index prewarm
-    // without rebuilding CFG objects in this process, so CLI/SDK
-    // parity compares the stable workspace stats here.
+    // These fields report process-local cache occupancy, not semantic index
+    // results. A fresh retrieval/dataflow sidecar can hydrate one process
+    // while another computes the same exact facts on demand, so parity
+    // compares the stable workspace stats here.
     if let Value::Object(obj) = &mut value {
         obj.remove("cached_cfgs");
+        obj.remove("cached_decl_indexes");
     }
     normalized_json(value)
 }

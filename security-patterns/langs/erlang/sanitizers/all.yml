@@ -6,6 +6,8 @@
     kind: call
     callee:
       regex: "^uri_string:quote"
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |

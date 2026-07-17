@@ -455,7 +455,7 @@ pub(crate) fn argument_place(node: &Node<'_>, src: &[u8]) -> Option<String> {
         return None;
     }
     if !text.is_empty() && argument_node_is_place(node, text.as_str()) && qualified_place_text(&text) {
-        return Some(normalise_qualified_text(&text));
+        return canonical_argument_place(&text);
     }
     if let Some(value) = node.child_by_field_name("value") {
         let text = normalize_call_name_whitespace(node_text(&value, src));
@@ -463,13 +463,19 @@ pub(crate) fn argument_place(node: &Node<'_>, src: &[u8]) -> Option<String> {
             return None;
         }
         if !text.is_empty() && argument_node_is_place(&value, text.as_str()) {
-            return Some(normalise_qualified_text(&text));
+            return canonical_argument_place(&text);
         }
     }
     if text.is_empty() || !argument_node_is_place(node, text.as_str()) {
         return None;
     }
-    Some(normalise_qualified_text(&text))
+    canonical_argument_place(&text)
+}
+
+fn canonical_argument_place(text: &str) -> Option<String> {
+    let place = normalise_qualified_text(text);
+    let place = place.trim_start_matches(bonsai_common::REFERENCE_SIGILS).trim();
+    (!place.is_empty()).then(|| place.to_string())
 }
 
 fn qualified_place_text(text: &str) -> bool {

@@ -684,6 +684,47 @@ fn anchored_projected_source_does_not_seed_container_siblings() {
 }
 
 #[test]
+fn anchored_container_assignment_seeds_materialized_descendant_reads() {
+    let func = FuncId::new(11);
+    let anchor = Span {
+        file: FileId::new(0),
+        start: 10,
+        end: 40,
+    };
+    let mut segment = IdgSegment::new();
+    let event = segment.strings.intern("event");
+    let command = segment.strings.intern("command");
+    let event_write = segment.intern_place(Place::write(event, anchor));
+    let command_read = segment.intern_place(Place::Read {
+        name: event,
+        path: vec![command].into(),
+    });
+    segment.intern_node(func, event_write);
+    segment.intern_node(func, command_read);
+    segment.record_func(func);
+    let service = service_from_segment(segment);
+    let db = empty_db();
+    let seeds = TokenSet::from_iter(["event".to_string(), "req.body".to_string()]);
+
+    let nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(func, &seeds, Some(anchor), &[]),
+        db.global_index().as_ref(),
+        &service,
+    );
+    let points = nodes
+        .iter()
+        .filter_map(|node| service.resolve_point(*node))
+        .collect::<Vec<_>>();
+
+    assert!(points
+        .iter()
+        .any(|point| { point.kind == bonsai_idg::PointKind::Write && point.name == "event" }));
+    assert!(points
+        .iter()
+        .any(|point| { point.kind == bonsai_idg::PointKind::Read && point.name == "event.command" }));
+}
+
+#[test]
 fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
     let func = FuncId::new(0);
     let call_span = Span {

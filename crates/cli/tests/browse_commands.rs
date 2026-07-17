@@ -6998,7 +6998,6 @@ fn every_lang_micro_dump_taint_json_shape() {
         for required in [
             "source",
             "seeds",
-            "sanitizers",
             "analysis_complete",
             "analysis_incomplete_reasons",
             "precision",

@@ -315,8 +315,9 @@ class Validator:
             ],
             json_out=True,
         )
-        if not isinstance(taint, list) or len(taint) != expected_findings:
-            got = len(taint) if isinstance(taint, list) else "?"
+        taint_rows = taint.get("rows", []) if isinstance(taint, dict) else taint
+        if not isinstance(taint_rows, list) or len(taint_rows) != expected_findings:
+            got = len(taint_rows) if isinstance(taint_rows, list) else "?"
             self.failures.append(
                 Failure(lang, "derive taint", ["security", str(ws), "taint-analysis"], f"expected {expected_findings} findings, got {got}")
             )
@@ -324,7 +325,7 @@ class Validator:
         if lang == "python" and any(
             row.get("source", {}).get("rule_id") == "entry-point.decorator_handler.param_0"
             and row.get("source", {}).get("enclosing_fn") == "run_pipeline"
-            for row in taint
+            for row in taint_rows
         ):
             self.failures.append(
                 Failure(
@@ -349,6 +350,8 @@ class Validator:
         # `handle_request`) is the canonical primary chain on each
         # mega_flow fixture, and its chain head resolves to a
         # single decl.
+        taint = taint_rows
+
         def is_inferred(row: dict) -> bool:
             return (row.get("source", {}).get("rule_id") or "").startswith("entry-point.")
         def is_module_synthetic(name: object) -> bool:
@@ -538,7 +541,7 @@ class Validator:
         if candidate_id:
             add("dump-resolve --candidate", ["dump-resolve", ws, target, "--candidate", candidate_id, "--format", "json"], json_out=True)
         add("dump-taint basic", ["dump-taint", ws, "--source", entry, "--format", "json"], json_out=True)
-        add("dump-taint switches", ["dump-taint", ws, "--source", entry, "--seed", "cmd", "--sanitizer", "clean_twin", "--sink", target, "--budget", "64", "--compact", "--format", "text"], nonempty=True)
+        add("dump-taint switches", ["dump-taint", ws, "--source", entry, "--seed", "cmd", "--sink", target, "--compact", "--all", "--format", "text"], nonempty=True)
         if taint_id:
             add("dump-taint --taint", ["dump-taint", ws, "--source", entry, "--taint", taint_id, "--format", "json"], json_out=True)
 
