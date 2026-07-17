@@ -281,9 +281,9 @@ mod tests {
             Some("payload")
         );
 
-        let bytes = bincode::serialize(&graph).expect("serialize symbolic graph");
+        let bytes = bonsai_common::wire::encode(&graph).expect("serialize symbolic graph");
         let mut restored: SymbolicFieldGraph =
-            bincode::deserialize(&bytes).expect("deserialize symbolic graph");
+            bonsai_common::wire::decode(&bytes).expect("deserialize symbolic graph");
         restored.rebuild_indexes();
         assert_eq!(
             restored.intern_base(SegmentId(3), FuncId::new(9), "payload"),

@@ -8,10 +8,10 @@ lang_erlang          4       6       6       20      3       2       6       0  
 lang_go              5       5       5       11      1       1       4       1       1       1       1       4       4       1       1
 lang_java            2       4       4       5       1       2       4       1       1       1       1       4       4       1       0
 lang_javascript      2       6       6       9       2       1       6       1       1       1       1       6       6       1       0
-lang_kotlin          3       4       4       6       2       1       4       0       0       0       0       4       4       0       0
+lang_kotlin          3       3       3       3       2       1       3       0       0       0       0       3       3       0       0
 lang_lua             1       3       3       2       1       0       3       0       0       0       0       3       3       0       0
 lang_objc            1       5       5       4       0       0       5       0       0       0       0       5       5       0       0
-lang_perl            18      12      12      30      0       4       13      0       0       0       0       10      10      0       0
+lang_perl            18      15      14      32      0       4       16      0       0       0       0       13      13      0       0
 lang_php             2       1       1       1       0       0       1       0       0       0       0       1       1       0       0
 lang_python          9       12      12      11      2       1       12      1       1       1       1       12      12      1       0
 lang_ruby            9       7       7       7       5       3       7       2       2       3       3       7       7       2       0

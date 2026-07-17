@@ -15,7 +15,6 @@ bonsai_hash = { workspace = true }
 bonsai_lang_api = { workspace = true }
 bonsai_workspace = { workspace = true }
 ahash = { workspace = true }
-bincode = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 zstd = { workspace = true }

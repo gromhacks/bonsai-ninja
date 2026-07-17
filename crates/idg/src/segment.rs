@@ -14,13 +14,13 @@
 //! whole serialized [`IdgSegment`]. The factstore atomic-rename and
 //! pipeline-hash invalidation gate apply unchanged.
 //!
-//! Why piggyback on factstore rather than `bincode + atomic-rename`:
+//! Why piggyback on factstore rather than a raw binary file:
 //! the table id + pipeline hash header validation gives us free
 //! version + matcher-policy invalidation, the streaming writer is
 //! already cross-arch + cross-platform, and we get consistent
 //! tooling between IDG segments and the per-function caches.
 
-use bonsai_common::FuncId;
+use bonsai_common::{wire, FuncId};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -39,7 +39,7 @@ use crate::place::Place;
 pub const IDG_SEGMENT_TABLE_ID: u32 = 100;
 
 /// On-disk format version for IDG segments. Bump on layout change.
-pub const IDG_SEGMENT_VERSION: u32 = 2;
+pub const IDG_SEGMENT_VERSION: u32 = 3;
 
 /// One source file's portion of the workspace IDG.
 ///
@@ -151,10 +151,10 @@ impl IdgSegment {
     }
 
     /// Persist this segment to `path` as a factstore file. Single
-    /// entry, key 0, payload = bincode of self.
+    /// entry, key 0, payload = MessagePack encoding of self.
     pub fn write_to_path(&self, path: &Path, pipeline_hash: u64) -> IdgResult<()> {
         let writer = FactStoreWriter::create(path, IDG_SEGMENT_TABLE_ID, pipeline_hash)?;
-        let payload = bincode::serialize(self)
+        let payload = wire::encode(self)
             .map_err(|e| IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         writer.add_owned(0, 0, payload)?;
         writer.finish()?;
@@ -178,12 +178,12 @@ impl IdgSegment {
         let Some(hit) = reader.get(0)? else {
             return Ok(None);
         };
-        let mut segment: Self = bincode::deserialize(&hit.payload)
+        let mut segment: Self = wire::decode(&hit.payload)
             .map_err(|e| IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         if segment.version != IDG_SEGMENT_VERSION {
             return Ok(None);
         }
-        // Rebuild reverse-lookup maps that bincode skipped.
+        // Rebuild reverse-lookup maps skipped by Serde.
         segment.places.rebuild_lookup();
         segment.nodes.rebuild_lookup();
         segment.strings.rebuild_lookup();

@@ -11,7 +11,7 @@ fn write_test_store(path: &Path, entries: &[(u64, u64, &[u8])]) {
 }
 
 /// Decoder that just sums the payload bytes — keeps tests
-/// concrete without dragging in bincode.
+/// concrete without coupling the storage layer to a payload codec.
 fn sum_decoder(bytes: &[u8]) -> Arc<u32> {
     Arc::new(bytes.iter().map(|b| u32::from(*b)).sum())
 }

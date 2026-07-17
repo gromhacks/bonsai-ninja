@@ -1,4 +1,4 @@
-//! `.bonsai/callgraph.v10.bin` sidecar — persists the workspace's
+//! Versioned callgraph sidecar — persists the workspace's
 //! resolved call graph across CLI invocations. Earlier every
 //! `bonsai-ninja` command rebuilt it from scratch (sequential
 //! `for file in global.all_files()` loop in
@@ -16,17 +16,18 @@
 use crate::cache_fingerprint::dependency_metadata_fingerprint_for_sidecar;
 use ahash::AHashMap;
 use bonsai_callgraph::ResolvedCallGraph;
-use bonsai_common::{workspace_bonsai_dir, write_atomic_bytes, MATCHER_POLICY_FINGERPRINT};
+use bonsai_common::{wire, workspace_bonsai_dir, write_atomic_bytes, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
 use bonsai_hash::fnv1a_bytes64;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+// v12 (2026-07-16): MessagePack replaces the retired binary codec.
 // v11 (2026-05-27): adapter decl-extraction changes add synthesized
 // members (C# expression-bodied-property getters + record members, Java
 // records, Solidity struct-literal field writes) → new call edges, so
 // callgraphs persisted by older binaries are no longer equivalent.
-pub const CALLGRAPH_CACHE_VERSION: u32 = 11;
+pub const CALLGRAPH_CACHE_VERSION: u32 = 12;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CallgraphSnapshot {
@@ -55,7 +56,7 @@ pub(crate) struct CallgraphSnapshot {
 
 #[must_use]
 pub fn callgraph_sidecar_path(workspace_root: &Path) -> PathBuf {
-    workspace_bonsai_dir(workspace_root).join(format!("callgraph.v{CALLGRAPH_CACHE_VERSION}.bin"))
+    workspace_bonsai_dir(workspace_root).join(format!("callgraph.v{CALLGRAPH_CACHE_VERSION}.msgpack"))
 }
 
 pub(crate) fn save_callgraph_sidecar(
@@ -84,8 +85,7 @@ pub(crate) fn save_callgraph_sidecar(
         build_fingerprint: crate::build_fingerprint_hash(),
         graph: graph.clone(),
     };
-    let bytes =
-        bincode::serialize(&snap).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let bytes = wire::encode(&snap).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     write_atomic_bytes(path, &bytes)
 }
 
@@ -98,7 +98,7 @@ pub(crate) fn load_callgraph_sidecar(path: &Path, db: &AnalyzerDb) -> Option<Res
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
-    let snap: CallgraphSnapshot = bincode::deserialize(&bytes).ok()?;
+    let snap: CallgraphSnapshot = wire::decode(&bytes).ok()?;
     if snap.version != CALLGRAPH_CACHE_VERSION {
         return None;
     }
@@ -147,8 +147,8 @@ pub(crate) fn load_callgraph_sidecar(path: &Path, db: &AnalyzerDb) -> Option<Res
 /// when an [`AnalyzerDb`] is available.
 pub fn validate_callgraph_sidecar_file(path: &Path) -> std::io::Result<usize> {
     let bytes = std::fs::read(path)?;
-    let snap: CallgraphSnapshot = bincode::deserialize(&bytes)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    let snap: CallgraphSnapshot =
+        wire::decode(&bytes).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
     validate_snapshot_metadata(path, &snap)?;
     Ok(snap.graph.inner().edges.len())
 }
@@ -165,8 +165,8 @@ where
     P: AsRef<Path>,
 {
     let bytes = std::fs::read(path)?;
-    let snap: CallgraphSnapshot = bincode::deserialize(&bytes)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    let snap: CallgraphSnapshot =
+        wire::decode(&bytes).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
     validate_snapshot_metadata(path, &snap)?;
     let mut current: Vec<(String, u64)> = fingerprints
         .into_iter()

@@ -28,15 +28,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// On-disk format version. Bump when the layout changes so old
-/// sidecars are rejected. v3 is the workspace-interned factstore
-/// format produced by [`bonsai_factstore`]; older bincode-based v2
-/// sidecars (extension `.bin`) co-exist on disk but are ignored —
-/// they don't share `MAGIC` with the factstore reader so they fail
-/// the open check naturally.
+/// sidecars are rejected. The workspace-interned factstore format is
+/// produced by [`bonsai_factstore`], whose header and pipeline hash reject
+/// incompatible payloads before decoding.
+// v10 (2026-07-16): MessagePack replaces the retired binary codec.
 // v9 (2026-07-16): remove the retired saturation field.
 // v8 (2026-05-27): the value-flow graph derives from the IDG, whose
 // construction and seeding changed enough to reject older sidecars.
-pub const VALUE_FLOW_CACHE_VERSION: u32 = 9;
+pub const VALUE_FLOW_CACHE_VERSION: u32 = 10;
 
 /// Caller-defined table id stamped into the factstore header. Lets
 /// the reader detect "this is the value-flow store" vs other
@@ -865,7 +864,7 @@ fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
     }
 }
 
-/// On-disk snapshot. Round-trips via bincode.
+/// On-disk snapshot. Round-trips via Serde.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SerializableValueFlowSnapshot {
     pub version: u32,

@@ -18,7 +18,7 @@
 //! segments and the rest of the cross-file index stay untouched.
 
 use ahash::AHashMap;
-use bonsai_common::FuncId;
+use bonsai_common::{wire, FuncId};
 use serde::{Deserialize, Serialize};
 
 use crate::edge::IdgEdge;
@@ -227,7 +227,7 @@ impl CrossFileEdges {
 pub struct IdgWorkspace {
     segments: Vec<IdgSegment>,
     /// `FuncId.raw() → SegmentId`. Rebuilt from each segment's `funcs`
-    /// list after deserialisation; bincode skips it on the wire.
+    /// list after deserialisation; Serde skips it on the wire.
     #[serde(skip)]
     by_func: AHashMap<u32, SegmentId>,
     /// Cross-file edges. Populated by the workspace builder
@@ -355,10 +355,10 @@ impl IdgWorkspace {
     /// factstore. Each segment is serialised as its own factstore
     /// entry (key = segment index + 1) so peak RAM during persistence
     /// is bounded by the writer's small, backpressured pipeline of
-    /// active/queued bincode buffers, not the whole IDG. Each serialized
+    /// active/queued MessagePack buffers, not the whole IDG. Each serialized
     /// `Vec<u8>` moves into the writer without a second payload copy.
     /// A 100K-LOC C codebase's IDG can occupy several GB in memory; the
-    /// previous single-buffer `bincode::serialize` path needed that much
+    /// previous single-buffer serialization path needed that much
     /// RAM again during the write, OOM'ing processes that the in-memory
     /// build had already cleared.
     ///
@@ -404,11 +404,11 @@ impl IdgWorkspace {
             symbolic_transform_count: self.symbolic_field.transforms().len() as u64,
             symbolic_transform_chunk_count: symbolic_transform_chunk_count as u32,
         };
-        let meta_bytes = bincode::serialize(&metadata)
+        let meta_bytes = wire::encode(&metadata)
             .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         writer.add_owned(0, IDG_WORKSPACE_VERSION as u64, meta_bytes)?;
         for (idx, segment) in self.segments.iter().enumerate() {
-            let segment_bytes = bincode::serialize(segment)
+            let segment_bytes = wire::encode(segment)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
             writer.add_owned((idx + 1) as u64, IDG_WORKSPACE_VERSION as u64, segment_bytes)?;
         }
@@ -419,7 +419,7 @@ impl IdgWorkspace {
             .chunks(IDG_WORKSPACE_EDGE_CHUNK_LEN)
             .enumerate()
         {
-            let bytes = bincode::serialize(chunk)
+            let bytes = wire::encode(chunk)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
             writer.add_owned(cross_base + idx as u64, IDG_WORKSPACE_VERSION as u64, bytes)?;
         }
@@ -430,7 +430,7 @@ impl IdgWorkspace {
             .chunks(IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN)
             .enumerate()
         {
-            let bytes = bincode::serialize(chunk)
+            let bytes = wire::encode(chunk)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
             writer.add_owned(field_base + idx as u64, IDG_WORKSPACE_VERSION as u64, bytes)?;
         }
@@ -439,7 +439,7 @@ impl IdgWorkspace {
             cross_file_chunk_count as u32,
             field_flow_chunk_count as u32,
         );
-        let header_bytes = bincode::serialize(&(self.symbolic_field.strings(), self.symbolic_field.bases()))
+        let header_bytes = wire::encode(&(self.symbolic_field.strings(), self.symbolic_field.bases()))
             .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         writer.add_owned(symbolic_header, IDG_WORKSPACE_VERSION as u64, header_bytes)?;
         let transform_base = symbolic_header + 1;
@@ -449,7 +449,7 @@ impl IdgWorkspace {
             .chunks(IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN)
             .enumerate()
         {
-            let bytes = bincode::serialize(chunk)
+            let bytes = wire::encode(chunk)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
             writer.add_owned(transform_base + idx as u64, IDG_WORKSPACE_VERSION as u64, bytes)?;
         }
@@ -503,7 +503,7 @@ impl IdgWorkspace {
             );
             return Ok(None);
         }
-        let metadata: IdgWorkspaceMetadataOwned = bincode::deserialize(&metadata_hit.payload)
+        let metadata: IdgWorkspaceMetadataOwned = wire::decode(&metadata_hit.payload)
             .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         if metadata.version != IDG_WORKSPACE_VERSION {
             bonsai_diagnostics::debug_log!(
@@ -533,7 +533,7 @@ impl IdgWorkspace {
                 );
                 return Ok(None);
             };
-            let mut segment: IdgSegment = bincode::deserialize(&hit.payload)
+            let mut segment: IdgSegment = wire::decode(&hit.payload)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
             if segment.version != IDG_SEGMENT_VERSION {
                 bonsai_diagnostics::debug_log!(
@@ -566,7 +566,7 @@ impl IdgWorkspace {
                 );
                 return Ok(None);
             };
-            let chunk: Vec<CrossFileEdge> = bincode::deserialize(&hit.payload)
+            let chunk: Vec<CrossFileEdge> = wire::decode(&hit.payload)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
             for edge in chunk {
                 ws.cross_file.push(edge);
@@ -593,7 +593,7 @@ impl IdgWorkspace {
                 );
                 return Ok(None);
             };
-            let chunk: Vec<FieldFlowLink> = bincode::deserialize(&hit.payload)
+            let chunk: Vec<FieldFlowLink> = wire::decode(&hit.payload)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
             ws.field_flow.extend(chunk);
         }
@@ -620,9 +620,8 @@ impl IdgWorkspace {
             );
             return Ok(None);
         };
-        let (strings, bases): (Vec<String>, Vec<SymbolicFieldBase>) =
-            bincode::deserialize(&header_hit.payload)
-                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        let (strings, bases): (Vec<String>, Vec<SymbolicFieldBase>) = wire::decode(&header_hit.payload)
+            .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         if strings.len() as u64 != metadata.symbolic_string_count
             || bases.len() as u64 != metadata.symbolic_base_count
         {
@@ -639,7 +638,7 @@ impl IdgWorkspace {
                 );
                 return Ok(None);
             };
-            let chunk: Vec<SymbolicFieldTransform> = bincode::deserialize(&hit.payload)
+            let chunk: Vec<SymbolicFieldTransform> = wire::decode(&hit.payload)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
             symbolic.extend_transforms(chunk);
         }
@@ -727,7 +726,7 @@ const IDG_WORKSPACE_TABLE_ID: u32 = 101;
 /// [`IdgSegment`], renamed enum variant in [`crate::place::Place`]) or
 /// source-to-call edge semantic change that can leave old facts
 /// structurally decodable but security-significant.
-const IDG_WORKSPACE_VERSION: u32 = 10;
+const IDG_WORKSPACE_VERSION: u32 = 11;
 
 #[cfg(not(test))]
 const IDG_WORKSPACE_EDGE_CHUNK_LEN: usize = 100_000;

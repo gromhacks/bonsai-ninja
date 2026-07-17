@@ -140,8 +140,8 @@ fn cross_file_rebuild_indexes_after_serde() {
             CallEdgeKind::Direct,
         ),
     });
-    let bytes = bincode::serialize(&cfe).unwrap();
-    let mut restored: CrossFileEdges = bincode::deserialize(&bytes).unwrap();
+    let bytes = bonsai_common::wire::encode(&cfe).unwrap();
+    let mut restored: CrossFileEdges = bonsai_common::wire::decode(&bytes).unwrap();
     // After deserialize, by_from / by_to are empty.
     assert_eq!(restored.outgoing_from_segment(SegmentId(1)).count(), 0);
     restored.rebuild_indexes();
