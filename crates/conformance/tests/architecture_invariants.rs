@@ -3097,11 +3097,14 @@ fn syntax_index_parallelism_is_not_project_size_capped() {
     let workspace = read(&root.join("crates/workspace/src/lib.rs"));
     let database = read(&root.join("crates/db/src/lib.rs"));
     let security_matcher = read(&root.join("crates/security/src/matcher/mod.rs"));
+    let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
 
     for (source, function) in [
         (&workspace, "workspace_parse_worker_count"),
         (&database, "global_index_worker_count"),
         (&security_matcher, "matcher_worker_count"),
+        (&security_analysis, "source_analysis_worker_count"),
+        (&security_analysis, "security_taint_worker_count"),
     ] {
         let body = function_body(source, function);
         assert!(
@@ -3111,6 +3114,10 @@ fn syntax_index_parallelism_is_not_project_size_capped() {
         assert!(
             !body.contains("file_count") && !body.contains("files.len()"),
             "{function} must not select workers from project size"
+        );
+        assert!(
+            !body.contains(".clamp("),
+            "{function} must honor an explicit worker override without a hidden ceiling"
         );
     }
 
