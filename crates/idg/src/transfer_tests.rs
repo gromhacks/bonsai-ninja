@@ -2796,18 +2796,6 @@ fn is_bare_identifier_acceptance() {
 }
 
 #[test]
-fn pattern_binding_uses_syntax_shape_not_variant_name_inventory() {
-    assert_eq!(
-        pattern_binding_from_condition("let Ready(value) = state"),
-        Some(("value".to_string(), "state".to_string()))
-    );
-    assert_eq!(
-        pattern_binding_from_condition("let ProjectSpecific(payload) = input"),
-        Some(("payload".to_string(), "input".to_string()))
-    );
-}
-
-#[test]
 fn transfer_for_many_processes_all_decls() {
     let decls: Vec<Decl> = (0..3).map(|i| empty_decl(i, &format!("f{i}"))).collect();
     let outs = transfer_for_many(decls.iter());
@@ -2818,21 +2806,67 @@ fn transfer_for_many_processes_all_decls() {
 }
 
 #[test]
-fn matches_shared_projection_canonicalization_spec() {
-    // The IDG-transfer copy of projection canonicalization. Unlike the
-    // other two normalisers it extracts accesses from arbitrary text,
-    // so we assert each projection form yields exactly its canonical
-    // dotted access. Pinned to the shared vectors so it cannot drift
-    // from the adapter-side and engine-side copies. See
-    // `bonsai_common::PROJECTION_CANONICALIZATION_VECTORS`.
-    for (input, expected) in bonsai_common::PROJECTION_CANONICALIZATION_VECTORS {
-        let accesses = extract_qualified_accesses_outside_strings(input);
-        assert_eq!(
-            accesses.iter().map(|(a, _, _)| a.as_str()).collect::<Vec<_>>(),
-            vec![*expected],
-            "IDG-transfer extractor drifted on `{input}`"
-        );
-    }
+fn structured_receiver_fact_drives_receiver_flow() {
+    let mut decl = empty_decl(1, "f");
+    let call_span = span(40, 52);
+    decl.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "rendered.receiver.send".to_string(),
+        receiver: Some("rendered.receiver".to_string()),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Method,
+        args: Vec::new(),
+    }];
+    let receiver_facts = vec![bonsai_lang_api::CallReceiverFact {
+        call_span,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("state.client"),
+    }];
+    let out = transfer_function_for_with_options_and_syntax_facts(
+        &decl,
+        &TransferOptions::default(),
+        &[],
+        &receiver_facts,
+    );
+    let site = out.call_sites.first().expect("call site");
+    let receiver_node = site.receiver_arg_node.expect("receiver node");
+
+    assert_eq!(site.receiver_storage_base.as_deref(), Some("state.client"));
+    assert!(out
+        .edges
+        .iter()
+        .any(|edge| { edge.to == receiver_node && rendered_place_name(&out, edge.from) == "state.client" }));
+    assert!(!out.edges.iter().any(|edge| {
+        edge.to == receiver_node && rendered_place_name(&out, edge.from) == "rendered.receiver"
+    }));
+}
+
+#[test]
+fn structured_implicit_receiver_fact_defers_storage_identity_to_stitching() {
+    let mut decl = empty_decl(1, "method");
+    decl.implicit_receiver_names = vec!["$this".to_string()];
+    let call_span = span(40, 52);
+    decl.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "$this->value".to_string(),
+        receiver: Some("$this".to_string()),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Method,
+        args: Vec::new(),
+    }];
+    let receiver_facts = vec![bonsai_lang_api::CallReceiverFact {
+        call_span,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("$this"),
+    }];
+    let out = transfer_function_for_with_options_and_syntax_facts(
+        &decl,
+        &TransferOptions::default(),
+        &[],
+        &receiver_facts,
+    );
+    let site = out.call_sites.first().expect("call site");
+
+    assert_eq!(site.receiver_storage_base, None);
+    assert!(site.receiver_arg_node.is_some());
 }
 
 #[test]

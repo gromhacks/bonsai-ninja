@@ -50,9 +50,8 @@ use crate::symbolic::{
     SymbolicFieldGraph, SymbolicFieldTransform, SymbolicFieldTransformKind, NO_SYMBOLIC_STRING,
 };
 use crate::transfer::{
-    inline_call_result_receiver_base, inline_constructor_receiver_base, receiver_name_matches,
-    receiver_tokens_equal, CallSiteRef, DescendantCopy, FlowControlFacts, ReturnFieldProjection,
-    TransferOutput,
+    receiver_name_matches, receiver_tokens_equal, CallSiteRef, DescendantCopy, FlowControlFacts,
+    ReturnFieldProjection, TransferOutput,
 };
 use crate::workspace::{CrossFileEdge, IdgWorkspace, SegmentId};
 
@@ -2359,11 +2358,8 @@ fn receiver_field_forwarding_base(
     is_ancestor_dispatch: bool,
     allow_implicit_receiver_rewrite: bool,
 ) -> String {
-    if let Some(base) = inline_constructor_receiver_base(receiver, site.site.0) {
-        return base;
-    }
-    if let Some(base) = inline_call_result_receiver_base(receiver, site.site.0) {
-        return base;
+    if let Some(base) = site.receiver_storage_base.as_deref() {
+        return base.to_string();
     }
     if allow_implicit_receiver_rewrite {
         return implicit_receiver_actual_base(

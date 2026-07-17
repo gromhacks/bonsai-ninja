@@ -304,11 +304,13 @@ impl LanguageAdapter for RubyAdapter {
         let comments = bonsai_lang_api::kit::extract_comments(&tree, file, src);
         let assignment_values =
             bonsai_lang_api::kit::extract_assignment_value_facts(&tree, file, &HANDLER, src);
+        let call_receivers = bonsai_lang_api::kit::extract_call_receiver_facts(&tree, file, &HANDLER, src);
         DeclIndex {
             file,
             defs,
             refs,
             assignment_values,
+            call_receivers,
             aggregate_layouts: Vec::new(),
             strings,
             comments,
