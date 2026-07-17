@@ -116,6 +116,14 @@ pub struct TaintedArgInfo {
     pub index: usize,
     /// The argument's identifier text as it appeared in source.
     pub value_text: String,
+    /// Canonical place lowered from the argument AST, when the argument is
+    /// addressable as one value-flow location.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub place: Option<String>,
+    /// Identifier reads lowered from the argument AST. Consumers should use
+    /// these semantic operands instead of re-tokenizing `value_text`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub source_names: Vec<String>,
 }
 
 /// One taint-propagation edge preserved for report consumers. Unlike the

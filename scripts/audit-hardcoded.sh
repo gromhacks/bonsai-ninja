@@ -85,7 +85,7 @@ for crate_dir in "$ROOT_DIR"/crates/*/src/; do
             esac
             echo "$line" >> "$out_file"
             hit_count=$((hit_count + 1))
-        done < <(grep -rnF --include='*.rs' "$pat" "$crate_dir" 2>/dev/null || true)
+        done < <(rg -n -F --no-messages --glob '*.rs' "$pat" "$crate_dir" || true)
     done
 
     if (( hit_count > 0 )); then

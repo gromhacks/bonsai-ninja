@@ -67,17 +67,39 @@ fn strict_source_text_matching_does_not_seed_receivers_or_siblings() {
 }
 
 #[test]
-fn clean_overwrite_target_keys_extract_compound_sink_operands() {
-    assert_eq!(clean_overwrite_target_keys("x"), vec!["x"]);
-    assert_eq!(clean_overwrite_target_keys("\"-c \" + x"), vec!["x"]);
-    assert_eq!(
-        clean_overwrite_target_keys("format!(\"{}\", cmd)"),
-        vec!["cmd", "format"]
-    );
-    assert_eq!(
-        clean_overwrite_target_keys("\"x inside string\""),
-        Vec::<String>::new()
-    );
+fn clean_overwrite_target_key_does_not_guess_compound_expression_operands() {
+    assert_eq!(clean_overwrite_target_key("x").as_deref(), Some("x"));
+    assert!(clean_overwrite_target_key("\"-c \" + x").is_none());
+    assert!(clean_overwrite_target_key("format!(\"{}\", cmd)").is_none());
+    assert!(clean_overwrite_target_key("\"x inside string\"").is_none());
+}
+
+#[test]
+fn tainted_argument_evidence_preserves_structured_ast_operands() {
+    let span = bonsai_common::Span::new(bonsai_common::FileId::new(1), 10, 30);
+    let events = [FlowEvent::Call {
+        span,
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span,
+            passing_mode: Default::default(),
+            name: None,
+            value_text: "prefix + command".to_string(),
+            place: None,
+            source_names: vec!["prefix".to_string(), "command".to_string()],
+        }],
+    }];
+    let tainted = bonsai_taint::TaintedArgAtCall {
+        index: 0,
+        value_text: "prefix + command".to_string(),
+    };
+
+    let info = tainted_arg_info_from_events(&events, span, &tainted);
+    assert_eq!(info.source_names, ["prefix", "command"]);
+    assert_eq!(tainted_arg_target_keys(&info), ["command", "prefix"]);
 }
 
 #[test]
@@ -946,6 +968,8 @@ fn nested_call_fixture(
     let sink_tainted_args = vec![TaintedArgInfo {
         index: 0,
         value_text: sink_arg.value_text.clone(),
+        place: sink_arg.place.clone(),
+        source_names: sink_arg.source_names.clone(),
     }];
     drop(index);
     NestedCallFixture {
@@ -1216,6 +1240,7 @@ fn sink_match_for_grouping() -> FindingMatch {
     sink.tainted_args = vec![TaintedArgInfo {
         index: 0,
         value_text: "cmd".to_string(),
+        ..TaintedArgInfo::default()
     }];
     sink
 }

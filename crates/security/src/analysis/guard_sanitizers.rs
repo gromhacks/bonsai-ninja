@@ -133,7 +133,7 @@ pub(super) fn python_compiled_regex_guard_sanitizer(
     }
     let mut targets: Vec<String> = sink_tainted_args
         .iter()
-        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .flat_map(tainted_arg_target_keys)
         .filter(|target| !clean_conditional_helper_identifier(target) && !looks_like_clean_constant(target))
         .collect();
     targets.sort();
@@ -750,7 +750,7 @@ pub(super) fn js_ts_local_html_escape_helper_sanitizer(
     let sink_call = structured_call_at_match(&sink_calls, snk.span, "")?;
     let tainted_places: Vec<String> = sink_tainted_args
         .iter()
-        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .flat_map(tainted_arg_target_keys)
         .collect();
     let helper_call = sink_calls.iter().find(|call| {
         call.span != sink_call.span
@@ -1112,36 +1112,6 @@ fn java_html_sanitizer_call_wraps_param(
                         .is_some_and(|source| params.iter().any(|param| param == &source))
                 })
         })
-}
-
-pub(super) fn template_interpolations(value_text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let bytes = value_text.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'$' && bytes[i + 1] == b'{' {
-            let start = i + 2;
-            let mut depth = 1usize;
-            let mut j = start;
-            while j < bytes.len() {
-                match bytes[j] {
-                    b'{' => depth += 1,
-                    b'}' => {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            out.push(&value_text[start..j]);
-                            i = j;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                j += 1;
-            }
-        }
-        i += 1;
-    }
-    out
 }
 
 pub(super) fn go_xml_decoder_hardening_sanitizer(
@@ -1821,7 +1791,7 @@ pub(super) fn local_ldap_escape_helper_sanitizer(
 fn ldap_tainted_filter_targets(sink_tainted_args: &[TaintedArgInfo]) -> Vec<String> {
     let mut targets = Vec::new();
     for arg in sink_tainted_args {
-        for key in clean_overwrite_target_keys(&arg.value_text) {
+        for key in tainted_arg_target_keys(arg) {
             if !matches!(
                 key.as_str(),
                 "scope"
@@ -2012,7 +1982,7 @@ pub(super) fn go_same_origin_redirect_helper_guard_sanitizer(
     let mut targets: Vec<String> = sink_tainted_args
         .iter()
         .filter(|arg| arg.index != usize::MAX)
-        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .flat_map(tainted_arg_target_keys)
         .filter(|target| !looks_like_clean_constant(target))
         .collect();
     targets.sort();
@@ -2563,7 +2533,7 @@ pub(super) fn guarded_char_append_allowlist_sanitizer(
     }
     let mut targets: Vec<String> = tainted_args
         .iter()
-        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .flat_map(tainted_arg_target_keys)
         .filter(|target| !clean_conditional_helper_identifier(target) && !looks_like_clean_constant(target))
         .collect();
     targets.sort();

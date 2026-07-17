@@ -50,10 +50,10 @@ mod source_seeds;
 mod taint_cache;
 mod validation;
 use clean_overwrite::{
-    clean_conditional_helper_identifier, clean_overwrite_callee_tail, clean_overwrite_target_key,
-    clean_overwrite_target_keys, interprocedural_clean_overwrite_kills_lineage_arg,
-    looks_like_clean_constant, numeric_literal, quoted_literal, same_function_clean_overwrite_kills_sink_arg,
-    CleanOverwritePolicy,
+    call_arg_target_keys, clean_conditional_helper_identifier, clean_overwrite_callee_tail,
+    clean_overwrite_target_key, interprocedural_clean_overwrite_kills_lineage_arg, looks_like_clean_constant,
+    numeric_literal, quoted_literal, same_function_clean_overwrite_kills_sink_arg,
+    tainted_arg_info_from_events, tainted_arg_target_keys, CleanOverwritePolicy,
 };
 #[cfg(test)]
 use clean_overwrite::{
@@ -74,7 +74,7 @@ use guard_sanitizers::{
     js_ts_local_html_escape_helper_sanitizer, local_ldap_escape_helper_sanitizer,
     nosql_eq_filter_wrapper_sanitizer, python_compiled_regex_guard_sanitizer,
     python_lxml_parser_keyword_sanitizer, python_realpath_containment_guard_sanitizer,
-    python_url_ssrf_guard_sanitizer, source_sink_pair_is_low_signal, template_interpolations,
+    python_url_ssrf_guard_sanitizer, source_sink_pair_is_low_signal,
 };
 use prototype_guard::prototype_pollution_sink_is_guarded;
 #[cfg(test)]
@@ -2900,18 +2900,30 @@ fn build_call_evidence<'a>(
         return None;
     }
     let chain_names = chain_names_for_path(ws, &chain_funcs)?;
+    let global = ws.db().global_index();
+    let sink_events = global
+        .decl_of(SymbolId::new(call.caller.raw()))
+        .map(|decl| decl.flow_events.as_slice());
     let mut sink_tainted_args: Vec<TaintedArgInfo> = call
         .tainted_args
         .iter()
-        .map(|arg| TaintedArgInfo {
-            index: arg.index,
-            value_text: arg.value_text.clone(),
+        .map(|arg| {
+            sink_events.map_or_else(
+                || TaintedArgInfo {
+                    index: arg.index,
+                    value_text: arg.value_text.clone(),
+                    ..TaintedArgInfo::default()
+                },
+                |events| tainted_arg_info_from_events(events, call.call_span, arg),
+            )
         })
         .collect();
     if let Some(receiver) = call.tainted_receiver.as_deref() {
         sink_tainted_args.push(TaintedArgInfo {
             index: usize::MAX,
             value_text: receiver.to_string(),
+            place: Some(receiver.to_string()),
+            source_names: Vec::new(),
         });
     }
     Some(CallEvidence {
@@ -4481,6 +4493,7 @@ fn extend_java_mdc_context_logger_findings(
             sink_match.tainted_args.push(TaintedArgInfo {
                 index: usize::MAX,
                 value_text: "MDC context".to_string(),
+                ..TaintedArgInfo::default()
             });
 
             let mut chain_display = mdc_flow.finding.chain_display.clone();
@@ -7294,74 +7307,6 @@ fn source_can_precede_sink(
         || spans_share_enclosing_loop(ws, sink_func, src.span, snk.span)
 }
 
-fn interpolation_identifier_tokens(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    for interpolation in template_interpolations(text) {
-        tokens.extend(identifier_tokens_outside_strings(interpolation));
-    }
-    for interpolation in python_f_string_interpolations(text) {
-        tokens.extend(identifier_tokens_outside_strings(interpolation));
-    }
-    tokens
-}
-
-fn python_f_string_interpolations(text: &str) -> Vec<&str> {
-    let trimmed = text.trim_start();
-    let lower = trimmed.to_ascii_lowercase();
-    if !(lower.starts_with("f\"")
-        || lower.starts_with("f'")
-        || lower.starts_with("fr\"")
-        || lower.starts_with("fr'")
-        || lower.starts_with("rf\"")
-        || lower.starts_with("rf'"))
-    {
-        return Vec::new();
-    }
-    braced_interpolations(trimmed)
-}
-
-fn braced_interpolations(text: &str) -> Vec<&str> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] != b'{' {
-            i += 1;
-            continue;
-        }
-        if bytes.get(i + 1).copied() == Some(b'{') {
-            i += 2;
-            continue;
-        }
-        let start = i + 1;
-        let mut depth = 1usize;
-        let mut j = start;
-        while j < bytes.len() {
-            match bytes[j] {
-                b'{' => depth += 1,
-                b'}' => {
-                    if bytes.get(j + 1).copied() == Some(b'}') && depth == 1 {
-                        j += 2;
-                        continue;
-                    }
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        out.push(&text[start..j]);
-                        i = j + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            j += 1;
-        }
-        if j >= bytes.len() {
-            break;
-        }
-    }
-    out
-}
-
 fn identifier_tokens_outside_strings(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -7975,10 +7920,10 @@ fn sanitizer_assignment_sink_target_keys(
 ) -> AHashSet<String> {
     let mut target_keys: AHashSet<String> = sink_tainted_args
         .iter()
-        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .flat_map(tainted_arg_target_keys)
         .collect();
     if target_keys.is_empty() && sink_rule.match_spec.kind == MatchKind::Return {
-        target_keys.extend(clean_overwrite_target_keys(&snk.match_text));
+        target_keys.extend(clean_overwrite_target_key(&snk.match_text));
     }
     target_keys
 }
@@ -8148,7 +8093,7 @@ fn sanitizer_guard_feeds_sink_arg(
     }
     let target_keys: AHashSet<String> = sink_tainted_args
         .iter()
-        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .flat_map(tainted_arg_target_keys)
         .filter(|target| !looks_like_clean_constant(target))
         .collect();
     if target_keys.is_empty() {
@@ -8374,7 +8319,7 @@ fn guarded_variable_flows_into_receiver_before_sink(
                     continue;
                 }
                 if args.iter().any(|arg| {
-                    clean_overwrite_target_keys(&arg.value_text)
+                    call_arg_target_keys(arg)
                         .into_iter()
                         .any(|key| guarded.contains(&key))
                 }) {

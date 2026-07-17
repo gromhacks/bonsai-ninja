@@ -25,6 +25,44 @@ impl<'a> CleanOverwritePolicy<'a> {
     }
 }
 
+pub(super) fn tainted_arg_info_from_events(
+    events: &[FlowEvent],
+    call_span: Span,
+    arg: &bonsai_taint::TaintedArgAtCall,
+) -> TaintedArgInfo {
+    let structured = find_call_arg_at(events, call_span, arg.index);
+    TaintedArgInfo {
+        index: arg.index,
+        value_text: arg.value_text.clone(),
+        place: structured.and_then(|call_arg| call_arg.place.clone()),
+        source_names: structured
+            .map(|call_arg| call_arg.source_names.clone())
+            .unwrap_or_default(),
+    }
+}
+
+pub(super) fn tainted_arg_target_keys(arg: &TaintedArgInfo) -> Vec<String> {
+    semantic_target_keys(arg.place.as_deref(), &arg.source_names, &arg.value_text)
+}
+
+pub(super) fn call_arg_target_keys(arg: &bonsai_lang_api::CallArg) -> Vec<String> {
+    semantic_target_keys(arg.place.as_deref(), &arg.source_names, &arg.value_text)
+}
+
+fn semantic_target_keys(place: Option<&str>, source_names: &[String], fallback_text: &str) -> Vec<String> {
+    let mut out: Vec<String> = source_names
+        .iter()
+        .filter_map(|source| clean_overwrite_target_key(source))
+        .collect();
+    out.extend(place.and_then(clean_overwrite_target_key));
+    if out.is_empty() {
+        out.extend(clean_overwrite_target_key(fallback_text));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub(super) fn same_function_clean_overwrite_kills_sink_arg(
     policy: CleanOverwritePolicy<'_>,
     src_func: FuncId,
@@ -37,22 +75,25 @@ pub(super) fn same_function_clean_overwrite_kills_sink_arg(
     if src_func != sink_func || (tainted_args.is_empty() && tainted_receiver.is_none()) {
         return false;
     }
+    let global = policy.ws.db().global_index();
+    let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
+        return false;
+    };
     let mut targets: Vec<String> = tainted_args
         .iter()
-        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .flat_map(|arg| {
+            find_call_arg_at(&decl.flow_events, sink_span, arg.index).map_or_else(
+                || clean_overwrite_target_key(&arg.value_text).into_iter().collect(),
+                call_arg_target_keys,
+            )
+        })
         .collect();
-    if let Some(receiver) = tainted_receiver {
-        targets.extend(clean_overwrite_target_keys(receiver));
-    }
+    targets.extend(tainted_receiver.and_then(clean_overwrite_target_key));
     targets.sort();
     targets.dedup();
     if targets.is_empty() {
         return false;
     }
-    let global = policy.ws.db().global_index();
-    let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
-        return false;
-    };
     clean_overwrite_between(
         policy,
         &decl.flow_events,
@@ -161,26 +202,13 @@ fn clean_overwrite_targets_for_edge_arg(
 ) -> Vec<String> {
     let mut targets = Vec::new();
     if let Some(arg) = find_call_arg_at(events, call_span, tainted_arg.index) {
-        for source_name in &arg.source_names {
-            targets.extend(clean_overwrite_target_keys(source_name));
-        }
-        if targets.is_empty() {
-            if let Some(place) = arg.place.as_deref() {
-                targets.extend(clean_overwrite_target_keys(place));
-            }
-        }
+        targets.extend(call_arg_target_keys(arg));
     }
     if targets.is_empty() {
-        targets.extend(clean_overwrite_target_keys(&tainted_arg.value_text));
+        targets.extend(clean_overwrite_target_key(&tainted_arg.value_text));
     }
-    targets.retain(|target| {
-        !clean_conditional_helper_identifier(target)
-            && !looks_like_clean_constant(target)
-            && target != "f"
-            && target != "r"
-            && target != "b"
-            && target != "u"
-    });
+    targets
+        .retain(|target| !clean_conditional_helper_identifier(target) && !looks_like_clean_constant(target));
     targets.sort();
     targets.dedup();
     targets
@@ -1794,26 +1822,6 @@ pub(super) fn clean_overwrite_target_key(text: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
-}
-
-pub(super) fn clean_overwrite_target_keys(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(key) = clean_overwrite_target_key(text) {
-        out.push(key);
-    }
-    for token in identifier_tokens_outside_strings(text) {
-        if let Some(key) = clean_overwrite_target_key(&token) {
-            out.push(key);
-        }
-    }
-    for token in interpolation_identifier_tokens(text) {
-        if let Some(key) = clean_overwrite_target_key(&token) {
-            out.push(key);
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
 }
 
 #[cfg(test)]
