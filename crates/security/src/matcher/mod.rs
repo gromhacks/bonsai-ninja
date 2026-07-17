@@ -2619,12 +2619,13 @@ fn scan_params_batch(
                 if !prepared.call_context_allows(param, &[], &alias_map, file_packages.as_ref()) {
                     continue;
                 }
-                let (file_path, line, col, span) = param_decl_site(ws, file, decl, param)
-                    .or_else(|| first_param_read_site(ws, file, file_index, decl, param))
-                    .unwrap_or_else(|| {
-                        let (file_path, line, col) = resolve_span(ws, file, decl.name_span);
-                        (file_path, line, col, decl.name_span)
-                    });
+                // A `kind: param` rule binds the declaration, not one
+                // arbitrary later read. `Decl.name_span` is the adapter's
+                // grammar-derived declaration anchor and remains before the
+                // body for ordering/clean-overwrite analysis. The binding
+                // itself is carried in `match_text` and `Decl.params`.
+                let span = decl.name_span;
+                let (file_path, line, col) = resolve_span(ws, file, span);
                 if !constraints_pass(ConstraintEval {
                     rule_id: &prepared.rule.id,
                     callee: param,
@@ -2659,158 +2660,6 @@ fn scan_params_batch(
             }
         }
     }
-}
-
-fn param_decl_site(
-    ws: &Workspace,
-    file: FileId,
-    decl: &bonsai_lang_api::Decl,
-    param: &str,
-) -> Option<(String, u32, u32, Span)> {
-    let snapshot = ws.db().vfs().snapshot(file).ok()?;
-    let text = snapshot.text.as_ref();
-    let start = decl.span.start.min(decl.span.end) as usize;
-    let mut upper_bounds = Vec::new();
-    if let Some(body) = decl.body_span {
-        upper_bounds.push(body.start);
-    }
-    if let Some(first_event) = first_flow_event_start(&decl.flow_events) {
-        upper_bounds.push(first_event);
-    }
-    upper_bounds.push(decl.span.end);
-    let body_start = upper_bounds
-        .into_iter()
-        .filter(|bound| *bound > decl.span.start)
-        .map(|bound| bound.min(decl.span.end) as usize)
-        .filter(|bound| *bound <= text.len() && *bound > start)
-        .min()?;
-    let signature = text.get(start..body_start)?;
-    let mut best_start = None;
-    for (offset, _) in signature.match_indices(param) {
-        let absolute = start + offset;
-        let end = absolute + param.len();
-        if identifier_boundary(text, absolute, end) {
-            best_start = Some(absolute);
-        }
-    }
-    let absolute_start = best_start?;
-    let span = Span::new(file, absolute_start as u64, (absolute_start + param.len()) as u64);
-    let (file_path, line, col) = resolve_span(ws, file, span);
-    Some((file_path, line, col, span))
-}
-
-fn first_flow_event_start(events: &[FlowEvent]) -> Option<u64> {
-    events
-        .iter()
-        .map(|event| match event {
-            FlowEvent::Call { span, .. }
-            | FlowEvent::Assign { span, .. }
-            | FlowEvent::AggregateAssign { span, .. }
-            | FlowEvent::Return { span, .. }
-            | FlowEvent::Throw { span, .. }
-            | FlowEvent::Break { span, .. }
-            | FlowEvent::Continue { span, .. }
-            | FlowEvent::Yield { span, .. }
-            | FlowEvent::Await { span, .. }
-            | FlowEvent::Lifecycle { span, .. } => span.start,
-            FlowEvent::Branch {
-                span,
-                then_events,
-                else_events,
-                ..
-            } => [
-                Some(span.start),
-                first_flow_event_start(then_events),
-                first_flow_event_start(else_events),
-            ]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or(span.start),
-            FlowEvent::Loop { span, body, .. }
-            | FlowEvent::Defer { span, body }
-            | FlowEvent::Using { span, body, .. } => [Some(span.start), first_flow_event_start(body)]
-                .into_iter()
-                .flatten()
-                .min()
-                .unwrap_or(span.start),
-            FlowEvent::Try {
-                span,
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => [
-                Some(span.start),
-                first_flow_event_start(body),
-                first_flow_event_start(catch_events),
-                first_flow_event_start(finally_events),
-            ]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or(span.start),
-        })
-        .min()
-}
-
-fn identifier_boundary(text: &str, start: usize, end: usize) -> bool {
-    fn is_ident_byte(byte: u8) -> bool {
-        byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
-    }
-    let before_ok = start == 0 || !is_ident_byte(text.as_bytes()[start - 1]);
-    let after_ok = end >= text.len() || !is_ident_byte(text.as_bytes()[end]);
-    before_ok && after_ok
-}
-
-fn first_param_read_site(
-    ws: &Workspace,
-    file: FileId,
-    file_index: &DeclIndex,
-    decl: &bonsai_lang_api::Decl,
-    param: &str,
-) -> Option<(String, u32, u32, Span)> {
-    let body = decl.body_span.unwrap_or(decl.span);
-    let min_start = body.start.max(decl.name_span.end);
-    let read = file_index
-        .refs
-        .iter()
-        .filter(|reference| reference.kind == RefKind::Read)
-        .filter(|reference| reference.span.start >= min_start && reference.span.start < body.end)
-        .filter(|reference| {
-            reference.scope.is_none_or(|scope| scope == decl.symbol)
-                && read_name_mentions_param(&reference.name, param)
-        })
-        .min_by_key(|reference| (reference.span.start, reference.span.end));
-    if let Some(reference) = read {
-        let (file_path, line, col) = resolve_span(ws, file, reference.span);
-        return Some((file_path, line, col, reference.span));
-    }
-
-    let mut reads = Vec::new();
-    collect_flow_read_sites(&decl.flow_events, &mut reads);
-    reads
-        .into_iter()
-        .filter(|(span, tokens)| {
-            span.start >= min_start && span.start < body.end && tokens_read_param(tokens, param)
-        })
-        .min_by_key(|(span, _)| (span.start, span.end))
-        .map(|(span, _)| {
-            let (file_path, line, col) = resolve_span(ws, file, span);
-            (file_path, line, col, span)
-        })
-}
-
-fn read_name_mentions_param(name: &str, param: &str) -> bool {
-    split_read_token(name)
-        .iter()
-        .any(|token| normalize_param_name(token) == normalize_param_name(param))
-}
-
-fn tokens_read_param(tokens: &[String], param: &str) -> bool {
-    tokens
-        .iter()
-        .any(|token| normalize_param_name(token) == normalize_param_name(param))
 }
 
 fn decl_target_context_allows(
@@ -7747,13 +7596,6 @@ fn collect_class_field_taints_for_files(
 
 fn is_synthetic_anonymous_callable(decl: &bonsai_lang_api::Decl) -> bool {
     decl.name.starts_with("<lambda@") && decl.name.ends_with('>')
-}
-
-/// Strip leading sigils (`$` / `&` / `*`) from a parameter name so
-/// `$x` and `x` compare equal across languages.
-fn normalize_param_name(name: &str) -> &str {
-    name.trim()
-        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION)
 }
 
 /// What kind of entry point we inferred. Drives the finding's

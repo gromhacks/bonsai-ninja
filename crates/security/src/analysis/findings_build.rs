@@ -188,17 +188,21 @@ pub(super) fn make_finding(
         };
         for sanitizer_match in sanitizer_hits {
             let sanitizer_rule = pack.find_rule_by_id(&sanitizer_match.rule_id);
+            let nested_in_tainted_sink_arg = sanitizer_is_nested_in_tainted_sink_arg(
+                context.ws,
+                context.sink_func,
+                src,
+                sanitizer_match,
+                snk,
+                &context.sink_tainted_args,
+            );
             let dataflow_connected =
                 sanitizer_call_overlaps_tainted_call(sanitizer_match, context.tainted_call_spans)
                     || sanitizer_char_allowlist_guards_tainted_call(
                         sanitizer_match,
                         context.tainted_call_spans,
                     )
-                    || sanitizer_is_nested_in_tainted_sink_arg(
-                        src,
-                        sanitizer_match,
-                        &context.sink_tainted_args,
-                    )
+                    || nested_in_tainted_sink_arg
                     || sanitizer_assignment_output_feeds_sink_arg(
                         context.ws,
                         hop_func,
@@ -217,6 +221,7 @@ pub(super) fn make_finding(
                     )
                     || xxe_factory_hardening_sanitizes_sink(
                         context.ws,
+                        context.sink_func,
                         sanitizer_rule,
                         skr,
                         sanitizer_match,
@@ -231,7 +236,7 @@ pub(super) fn make_finding(
                 hop_func,
                 snk,
                 context.sink_func,
-                &context.sink_tainted_args,
+                nested_in_tainted_sink_arg,
                 dataflow_connected,
                 post_sink_path_construction_containment,
             ) {
