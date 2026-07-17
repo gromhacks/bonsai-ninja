@@ -33,9 +33,10 @@ use std::sync::Arc;
 /// sidecars (extension `.bin`) co-exist on disk but are ignored —
 /// they don't share `MAGIC` with the factstore reader so they fail
 /// the open check naturally.
+// v9 (2026-07-16): remove the retired saturation field.
 // v8 (2026-05-27): the value-flow graph derives from the IDG, whose
 // construction and seeding changed enough to reject older sidecars.
-pub const VALUE_FLOW_CACHE_VERSION: u32 = 8;
+pub const VALUE_FLOW_CACHE_VERSION: u32 = 9;
 
 /// Caller-defined table id stamped into the factstore header. Lets
 /// the reader detect "this is the value-flow store" vs other

@@ -40,14 +40,14 @@ pub(crate) const SYNTHETIC_RECEIVER_PARAM_NAME: &str = "receiver";
 /// The semantic contract used to translate source facts into IDG seed nodes.
 ///
 /// Both policies consume indexed AST/flow facts. `RuleMatch` is span-anchored
-/// and field-sensitive for security rules; `LegacyTokenApi` preserves the
-/// historical public token API's sigil, call-result, and first-write behavior.
+/// and field-sensitive for security rules; `TokenApi` defines the public
+/// token API's sigil, call-result, and first-write behavior.
 /// Keeping the policy explicit lets every consumer share one seed composer
 /// without silently mixing the two contracts.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum IdgSeedPolicy {
     RuleMatch,
-    LegacyTokenApi,
+    TokenApi,
 }
 
 /// Input to [`compose_idg_seed_nodes`].
@@ -78,13 +78,13 @@ impl<'a> IdgSeedRequest<'a> {
     }
 
     #[must_use]
-    pub fn legacy_tokens(func: FuncId, names: &'a TokenSet) -> Self {
+    pub fn token_api(func: FuncId, names: &'a TokenSet) -> Self {
         Self {
             func,
             names,
             anchor: None,
             output_arg_names: &[],
-            policy: IdgSeedPolicy::LegacyTokenApi,
+            policy: IdgSeedPolicy::TokenApi,
         }
     }
 }
@@ -131,8 +131,6 @@ pub struct EntryTaintGraph {
     pub tainted_calls: Vec<crate::inter::TaintedCall>,
     #[serde(default = "default_graph_precision")]
     pub precision: Precision,
-    #[serde(default)]
-    pub saturated: bool,
     /// Compatibility metric for the number of resolved cross-call relations
     /// represented by this graph. It never limits semantic work.
     #[serde(default)]
@@ -145,7 +143,6 @@ impl Default for EntryTaintGraph {
             call_records: Vec::new(),
             tainted_calls: Vec::new(),
             precision: Precision::Exact,
-            saturated: false,
             pairs_analyzed: 0,
         }
     }
@@ -455,8 +452,8 @@ fn span_contains(outer: Span, inner: Span) -> bool {
 /// to seed (adapter limitation) or when the global index doesn't
 /// have a decl for the FuncId (stale id after invalidation).
 #[must_use]
-pub fn taint_facts_for_entry(entry_func: FuncId, db: &AnalyzerDb, _sanitizers: &TokenSet) -> KindedTokens {
-    taint_facts_and_graph_for_entry(entry_func, db, &TokenSet::default()).0
+pub fn taint_facts_for_entry(entry_func: FuncId, db: &AnalyzerDb) -> KindedTokens {
+    taint_facts_and_graph_for_entry(entry_func, db).0
 }
 
 /// Default entry seed for fact-oriented and diagnostic taint queries:
@@ -523,10 +520,9 @@ pub fn default_entry_graph_seed(decl: Option<&bonsai_lang_api::Decl>) -> TokenSe
 pub fn taint_facts_and_graph_for_entry(
     entry_func: FuncId,
     db: &AnalyzerDb,
-    sanitizers: &TokenSet,
 ) -> (KindedTokens, EntryTaintGraph) {
     let caches = crate::inter::InterTaintCaches::default();
-    taint_facts_and_graph_for_entry_with_caches(entry_func, db, sanitizers, &caches)
+    taint_facts_and_graph_for_entry_with_caches(entry_func, db, &caches)
 }
 
 /// Variant that threads a caller-provided `InterTaintCaches` so
@@ -536,7 +532,6 @@ pub fn taint_facts_and_graph_for_entry(
 pub fn taint_facts_and_graph_for_entry_with_caches(
     entry_func: FuncId,
     db: &AnalyzerDb,
-    _sanitizers: &TokenSet,
     caches: &crate::inter::InterTaintCaches,
 ) -> (KindedTokens, EntryTaintGraph) {
     let mut facts = KindedTokens::default();
@@ -573,7 +568,6 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
         let idg = crate::idg_build::compiler_idg_service_without_default_seed(db);
         caches.mark_used();
         let config = crate::inter::InterTaintConfig {
-            sanitizers: TokenSet::default(),
             max_edge_precision: Some(Precision::Narrowed),
             ..Default::default()
         };
@@ -600,7 +594,6 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
             .collect();
         graph.tainted_calls.clone_from(&graph_result.tainted_calls);
         graph.precision = graph_result.precision;
-        graph.saturated = graph_result.saturated;
 
         // Avoid re-running the inter pass when the two seeds coincide;
         // a separate fact-only run is only needed if the wider graph_seed
@@ -1035,7 +1028,7 @@ pub fn compose_idg_seed_nodes(
             global,
             idg,
         ),
-        IdgSeedPolicy::LegacyTokenApi => legacy_token_seed_nodes(request.func, request.names, global, idg),
+        IdgSeedPolicy::TokenApi => token_api_seed_nodes(request.func, request.names, global, idg),
     }
 }
 
@@ -1179,9 +1172,9 @@ fn rule_seed_name_matches(seed_names: &[String], point_name: &str) -> bool {
 ///    `CallRet → Write` edge, and the CallRet lands in
 ///    `source_call_spans` so `sink(source(x))` isn't pruned as clean.
 ///
-/// This is the compatibility-policy branch of the canonical seed composer;
-/// security selects the rule-match policy instead.
-fn legacy_token_seed_nodes(
+/// This is the token-policy branch of the canonical seed composer; security
+/// selects the span-anchored rule-match policy instead.
+fn token_api_seed_nodes(
     entry_func: FuncId,
     seeds: &TokenSet,
     global: &GlobalIndex,
@@ -1206,7 +1199,7 @@ fn legacy_token_seed_nodes(
             );
         }
     }
-    // The legacy API's token contract distinguishes scalar value taint
+    // The token API distinguishes scalar value taint
     // (`args`) from descendant-container taint (`args.*`).  Do not use the
     // security seed expansion here: promoting every bare token to `.*`
     // makes passing a tainted object also taint unrelated fields in the
@@ -1230,7 +1223,7 @@ fn legacy_token_seed_nodes(
     // Explicit wildcard seeds (`args.*`) address unshadowed projected
     // READS. Seed reads only: projected writes may be later clean
     // overwrites and must never be resurrected as sources.
-    nodes.extend(legacy_descendant_read_seed_nodes(entry_func, &expanded, idg));
+    nodes.extend(token_descendant_read_seed_nodes(entry_func, &expanded, idg));
     if let Some(decl) = global.decl_of(SymbolId::new(entry_func.raw())) {
         // Locals that are the entry-most definition of a seed name (e.g.
         // Perl `my ($args) = @_;` when the adapter models the param as a
@@ -1258,7 +1251,7 @@ fn legacy_token_seed_nodes(
         for span in call_spans {
             nodes.extend(idg.call_ret_node_at_site(entry_func, span));
         }
-        // Legacy callers sometimes describe an output-buffer source with a
+        // Token API callers can describe an output-buffer source with a
         // pair of tokens (`fgets` + `buf`) instead of declarative
         // `SourceOutputArgs`. When both the call name and one of its
         // addressable arguments are explicitly seeded, start the closure at
@@ -1274,7 +1267,7 @@ fn legacy_token_seed_nodes(
     nodes
 }
 
-fn legacy_descendant_read_seed_nodes(
+fn token_descendant_read_seed_nodes(
     entry_func: FuncId,
     expanded_names: &[String],
     idg: &bonsai_idg::IdgQueryService,
@@ -1356,7 +1349,7 @@ fn collect_first_write_spans(
 }
 
 /// Recursively collect the spans of calls whose name matches one of the
-/// seed tokens, using the legacy engine's qualified-tail match:
+/// seed tokens, using the token API's qualified-tail match:
 /// `ReadLine` matches `Console.ReadLine`, `question` matches
 /// `rl.question`, `get` matches `maps:get`.
 fn collect_seed_matching_call_spans(events: &[FlowEvent], seeds: &TokenSet, out: &mut Vec<Span>) {
@@ -1853,7 +1846,6 @@ pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision_a
 
     graph.call_records = call_records;
     graph.precision = worst;
-    graph.saturated = false;
     graph.pairs_analyzed = u32::try_from(cross_calls.len()).unwrap_or(u32::MAX);
     graph
 }
@@ -2044,7 +2036,7 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
     let mut graph = EntryTaintGraph::default();
 
     // Compose the seed set. When the caller supplies `extra_seed_nodes`
-    // (the legacy token-seeding API, which resolves sigil'd / call-name /
+    // (the token-seeding API, which resolves sigil'd / call-name /
     // clean-overwrite-safe seeds ITSELF), use exactly those — mixing in
     // the rule-match policy's name-based read/write seeding would
     // re-add post-overwrite writes and the sink's own read, defeating SSA.
@@ -2509,7 +2501,6 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
     graph.call_records = call_records;
     graph.tainted_calls = tainted_calls;
     graph.precision = worst;
-    graph.saturated = false;
     graph.pairs_analyzed = u32::try_from(cross_calls.len()).unwrap_or(u32::MAX);
     if bonsai_diagnostics::debug::is_enabled("taint-graph") {
         let n = global

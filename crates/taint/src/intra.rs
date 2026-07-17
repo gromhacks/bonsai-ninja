@@ -52,10 +52,6 @@ use bonsai_lang_api::FlowEvent;
 pub struct TaintConfig {
     /// Identifier names that start tainted at the function's entry.
     pub sources: TokenSet,
-    /// Compatibility field retained for callers that still pass a
-    /// sanitizer list. Sanitizers are classification evidence, not a
-    /// taint-transfer input, so this set does not alter propagation.
-    pub sanitizers: TokenSet,
 }
 
 /// Per-block taint state after the fixed point converges. Callers
@@ -73,9 +69,6 @@ pub struct IntraTaintResult {
     /// How many worklist iterations the analysis took. Exposed for
     /// tests and performance validation; never affects semantics.
     pub iterations: u32,
-    /// Compatibility field. Compiler dataflow is never truncated, so this is
-    /// always false.
-    pub saturated: bool,
     /// Diagnostics emitted for CFG shapes that force defensive
     /// analysis behavior. These are not parse diagnostics; they flag
     /// analyzer/adapter invariants that should be investigated.
@@ -182,7 +175,6 @@ pub fn intraprocedural_taint(cfg: &Cfg, config: &TaintConfig) -> IntraTaintResul
         block_in,
         block_out,
         iterations,
-        saturated: false,
         diagnostics,
     }
 }

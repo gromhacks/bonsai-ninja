@@ -1,4 +1,4 @@
-//! IDG-backed interprocedural taint compatibility surface.
+//! IDG-backed interprocedural taint API surface.
 //!
 //! The former per-function worklist lived in `inter/mod.rs`. All public
 //! entry points now derive their result from one IDG forward closure. The
@@ -26,44 +26,27 @@ pub use summary::{
 
 #[derive(Clone, Debug)]
 pub struct InterTaintConfig {
-    /// Compatibility-only sanitizer inventory. Sanitizer attribution belongs
-    /// to the security layer and does not kill propagation in the IDG.
-    pub sanitizers: TokenSet,
-    /// Retained for source compatibility; IDG sources are the composed seed
-    /// nodes supplied to the query.
-    pub source_bearing_functions: AHashSet<FuncId>,
-    /// Declarative transfer-time shapes honored by the compatibility IDG.
+    /// Declarative transfer-time shapes honored by the compiler IDG.
     pub clean_output_overwrites: Vec<CleanOutputOverwrite>,
     pub source_output_args: Vec<SourceOutputArgs>,
     pub source_callback_args: Vec<SourceCallbackArgs>,
     /// Declarative query-time transfer overlays.
     pub call_result_passthroughs: Vec<CallResultPassthrough>,
     pub output_arg_flows: Vec<OutputArgFlow>,
-    /// Retained for source compatibility. Indirect callback inputs are now
-    /// derived from resolver-proven callable arguments instead of method-name
-    /// inventories.
-    pub callback_invocation_methods: AHashSet<String>,
     pub receiver_state_propagations: Vec<ReceiverStatePropagation>,
     pub max_edge_precision: Option<Precision>,
-    /// Retained for source compatibility. IDG closure uses one node-bitset
-    /// lattice.
-    pub lattice_mode: crate::value_flow::LatticeMode,
 }
 
 impl Default for InterTaintConfig {
     fn default() -> Self {
         Self {
-            sanitizers: TokenSet::default(),
-            source_bearing_functions: AHashSet::default(),
             clean_output_overwrites: Vec::new(),
             source_output_args: Vec::new(),
             source_callback_args: Vec::new(),
             call_result_passthroughs: Vec::new(),
             output_arg_flows: Vec::new(),
-            callback_invocation_methods: AHashSet::default(),
             receiver_state_propagations: Vec::new(),
             max_edge_precision: Some(Precision::Narrowed),
-            lattice_mode: crate::value_flow::LatticeMode::default(),
         }
     }
 }
@@ -155,29 +138,12 @@ pub struct InterTaintResult {
     pub tainted_calls: Vec<TaintedCall>,
     pub precision: Precision,
     pub pairs_analyzed: u32,
-    pub saturated: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum ConstValue {
-    Bool(bool),
-    Int(i64),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FunctionSeed {
     pub func: FuncId,
     pub seed: Vec<String>,
-    pub consts: Vec<(String, ConstValue)>,
-    pub dyn_callees: Vec<(String, u32)>,
-    pub lineage: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct FunctionSeedBase {
-    pub func: FuncId,
-    pub seed: Vec<String>,
-    pub consts: Vec<(String, ConstValue)>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -264,7 +230,7 @@ pub(crate) fn idg_backed_interprocedural_taint_with_service(
     }
     let global = db.global_index();
     let seed_nodes = crate::reachable::compose_idg_seed_nodes(
-        crate::reachable::IdgSeedRequest::legacy_tokens(entry_func, entry_sources),
+        crate::reachable::IdgSeedRequest::token_api(entry_func, entry_sources),
         global.as_ref(),
         idg,
     );
@@ -343,7 +309,6 @@ fn entry_taint_graph_to_inter_result(
         tainted_calls: graph.tainted_calls,
         precision: graph.precision,
         pairs_analyzed: graph.pairs_analyzed,
-        saturated: graph.saturated,
     }
 }
 
@@ -396,7 +361,7 @@ fn idg_backed_call_site_receives_taint(
     let idg = crate::idg_build::idg_service_for_inter_config(db, config);
     let global = db.global_index();
     let seed_nodes = crate::reachable::compose_idg_seed_nodes(
-        crate::reachable::IdgSeedRequest::legacy_tokens(func, entry_sources),
+        crate::reachable::IdgSeedRequest::token_api(func, entry_sources),
         global.as_ref(),
         idg.as_ref(),
     );

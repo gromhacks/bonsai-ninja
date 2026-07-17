@@ -119,7 +119,6 @@ struct OnDiskEntry {
     forward: Vec<(u32, Vec<u32>)>,
     backward: Vec<(u32, Vec<u32>)>,
     precision: Precision,
-    saturated: bool,
     /// Sorted ascending so encoding is deterministic.
     returning_seeds: Vec<u32>,
 }
@@ -217,7 +216,6 @@ where
         forward,
         backward,
         precision: entry.graph.precision,
-        saturated: entry.graph.saturated,
         returning_seeds,
     }
 }
@@ -343,7 +341,6 @@ impl OnDiskEntry {
         // record.
         let mut graph = ValueFlowGraph::new();
         graph.precision = self.precision;
-        graph.saturated = self.saturated;
         for node in &nodes {
             graph.nodes.insert(node.clone());
         }

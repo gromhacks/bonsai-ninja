@@ -3042,8 +3042,6 @@ pub struct ShowOptions<'a> {
     pub taint_source: Option<&'a str>,
     /// Seed identifiers for structured `T:` propagation ids.
     pub taint_seeds: &'a [&'a str],
-    /// Sanitizer identifiers for structured `T:` propagation ids.
-    pub taint_sanitizers: &'a [&'a str],
     /// Optional sink-name filter when resolving `T:` propagation ids.
     pub taint_sink: Option<&'a str>,
 }
@@ -3246,11 +3244,6 @@ impl Show<'_> {
                 .taint_seeds
                 .iter()
                 .map(|seed| (*seed).to_string())
-                .collect(),
-            sanitizers: options
-                .taint_sanitizers
-                .iter()
-                .map(|sanitizer| (*sanitizer).to_string())
                 .collect(),
             sink: options.taint_sink,
             taint_id: Some(taint_id),

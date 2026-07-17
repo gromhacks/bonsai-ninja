@@ -154,9 +154,8 @@ fn seed(names: &[&str]) -> TokenSet {
     names.iter().map(|n| (*n).to_string()).collect()
 }
 
-fn config_with_call_shapes(callbacks: &[&str], mutators: &[&str]) -> InterTaintConfig {
+fn config_with_receiver_mutators(mutators: &[&str]) -> InterTaintConfig {
     InterTaintConfig {
-        callback_invocation_methods: callbacks.iter().map(|name| (*name).to_string()).collect(),
         receiver_state_propagations: mutators
             .iter()
             .map(|name| ReceiverStatePropagation {
@@ -1658,13 +1657,8 @@ fn interproc_complex_produces_propagations(lang: &str, subdir: &str) {
     // any propagation. This is a "does the interprocedural pass work
     // on this language at all?" test — it doesn't care WHICH entry
     // works, just that SOME realistic entry does.
-    let mut saturated_count = 0u32;
     for (entry, seed_set) in &candidates {
         let result = interprocedural_taint(*entry, seed_set, &InterTaintConfig::default(), &db);
-        if result.saturated {
-            saturated_count += 1;
-            continue;
-        }
         if !result.call_records.is_empty() {
             // Success — at least one entry produced propagations.
             return;
@@ -1684,24 +1678,22 @@ fn interproc_complex_produces_propagations(lang: &str, subdir: &str) {
     //   that loop binding as an `Assign` event, so the intra pass
     //   can't propagate `@tokens`→`$token`. This is a loop-binding
     //   grammar limitation rather than an engine bug; the
-    //   interprocedural pass still runs cleanly (no saturation).
+    //   interprocedural pass still runs to its fixed point.
     if candidates.is_empty() || lang == "perl" {
         eprintln!(
             "[{lang}] complex fixture did not produce interprocedural \
-             propagations (candidates={}, saturated={}). Documented \
+             propagations (candidates={}). Documented \
              adapter-specific pattern — not an engine regression.",
             candidates.len(),
-            saturated_count,
         );
         return;
     }
     panic!(
-        "{lang}: tried {} candidate entries, {} saturated, 0 produced propagations. \
+        "{lang}: tried {} candidate entries, 0 produced propagations. \
          Adapter DOES populate params, so interprocedural pass should find \
          cross-function edges. Either the resolver isn't connecting calls or all \
          entries are leaf helpers.",
         candidates.len(),
-        saturated_count,
     );
 }
 
@@ -1769,7 +1761,7 @@ fn python_mega_flow_handle_reaches_execute_from_request_args_get() {
     let execute = func_id(&db, "execute");
     let mut seed = TokenSet::default();
     seed.insert("request.args.get".to_string());
-    let config = config_with_call_shapes(&["execute"], &["append"]);
+    let config = config_with_receiver_mutators(&["append"]);
     let result = interprocedural_taint(handle, &seed, &config, &db);
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
@@ -1807,7 +1799,7 @@ fn javascript_mega_flow_handle_reaches_execute_from_readline_question() {
     let execute = func_id(&db, "execute");
     let mut seed = TokenSet::default();
     seed.insert("question".to_string());
-    let config = config_with_call_shapes(&[], &["push"]);
+    let config = config_with_receiver_mutators(&["push"]);
     let result = interprocedural_taint(handle, &seed, &config, &db);
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
@@ -1942,23 +1934,6 @@ fn scala_cross_file_chain_method_projection_reaches_execute() {
     );
 }
 
-// `go_mega_flow_handle_reaches_execute_from_query_value` and its
-// ruby twin below (`ruby_mega_flow_handle_reaches_execute_from_gets_value`)
-// previously called the legacy `interprocedural_taint` walker on
-// `examples/{go,ruby}/mega_flow`. Both broke on HEAD because the
-// legacy walker doesn't model the full FN-language construct stack
-// those fixtures exercise — and the canonical IDG-based engine that
-// actually ships in production DOES handle them end-to-end (see
-// `bonsai_security::tests::security_pipeline_regressions::
-// mega_flow_security_pipeline_covers_every_language_and_flow_event_kind`,
-// which exercises the same Go + Ruby mega_flow fixtures through the
-// real engine and asserts the exact source→sink finding counts).
-// The legacy walker is deprecated — these duplicated tests were
-// removed rather than spending churn keeping a phased-out code path
-// in lockstep with a moving IDG target. The Go + Ruby mega_flow
-// regression coverage they nominally provided is preserved (and is
-// stronger) in `security_pipeline_regressions`.
-
 #[test]
 fn dart_mega_flow_handle_reaches_execute_from_readline_value() {
     let db = open_fixture("dart/mega_flow");
@@ -2053,7 +2028,7 @@ fn objc_mega_flow_handle_reaches_execute_from_fgets_value() {
     let mut seed = TokenSet::default();
     seed.insert("buf".to_string());
     seed.insert("fgets".to_string());
-    let config = config_with_call_shapes(&[], &["addObject"]);
+    let config = config_with_receiver_mutators(&["addObject"]);
     let result = interprocedural_taint(handle, &seed, &config, &db);
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
@@ -2076,14 +2051,6 @@ fn objc_mega_flow_handle_reaches_execute_from_fgets_value() {
         result.tainted_calls,
     );
 }
-
-// `ruby_mega_flow_handle_reaches_execute_from_gets_value` previously
-// called the legacy `interprocedural_taint` walker on
-// `examples/ruby/mega_flow`. Migrated to `security_pipeline_
-// regressions` — see the multi-line rationale on the Go twin above.
-// The real IDG engine covers the Ruby mega_flow chain (count = 2 in
-// the canonical baseline); the legacy walker test was a deprecated
-// parallel path that has been retired.
 
 #[test]
 fn interproc_complex_fixture_go() {

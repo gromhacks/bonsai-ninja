@@ -763,7 +763,6 @@ pub(crate) fn cmd_dump_taint(
     root: &std::path::Path,
     source_name: &str,
     seeds: &[String],
-    sanitizers: &[String],
     sink_filter: Option<&str>,
     compact: bool,
     taint_id_filter: Option<&str>,
@@ -774,7 +773,6 @@ pub(crate) fn cmd_dump_taint(
     let filters = bonsai_sdk::TaintFilters {
         source: source_name,
         seeds: seeds.to_vec(),
-        sanitizers: sanitizers.to_vec(),
         sink: sink_filter,
         taint_id: taint_id_filter,
         ..Default::default()
@@ -785,14 +783,7 @@ pub(crate) fn cmd_dump_taint(
     let spin = progress::ScopedSpinner::new("propagating taint");
     let outcome = project.dump().taint(filters);
     spin.finish();
-    let filters_hash = dump_taint_filters_hash(
-        source_name,
-        seeds,
-        sanitizers,
-        sink_filter,
-        compact,
-        taint_id_filter,
-    );
+    let filters_hash = dump_taint_filters_hash(source_name, seeds, sink_filter, compact, taint_id_filter);
     match outcome {
         bonsai_sdk::TaintOutcome::SourceNotFound => anyhow::bail!(
             "dump-taint: no callable decl named `{source_name}` in the workspace. \
@@ -894,7 +885,6 @@ fn render_taint_report_json_paged(
             let payload = serde_json::json!({
                 "source": &report.source,
                 "seeds": &report.seeds,
-                "sanitizers": &report.sanitizers,
                 "analysis_complete": report.analysis_complete
                     && presentation_complete
                     && combined_incomplete_reasons.is_empty(),
@@ -905,7 +895,6 @@ fn render_taint_report_json_paged(
                 "presentation_incomplete_reasons": presentation_incomplete_reasons,
                 "precision": &report.precision,
                 "pairs_analyzed": report.pairs_analyzed,
-                "saturated": report.saturated,
                 "records": records,
                 "page": page_info_to_json(info),
             });
@@ -919,18 +908,15 @@ fn render_taint_report_json_paged(
 fn dump_taint_filters_hash(
     source_name: &str,
     seeds: &[String],
-    sanitizers: &[String],
     sink_filter: Option<&str>,
     compact: bool,
     taint_id_filter: Option<&str>,
 ) -> u64 {
     let seeds_joined = seeds.join("\0");
-    let sanitizers_joined = sanitizers.join("\0");
     let compact_text = if compact { "1" } else { "0" };
     paging::hash_filters(&[
         ("source", source_name),
         ("seeds", &seeds_joined),
-        ("sanitizers", &sanitizers_joined),
         ("sink", sink_filter.unwrap_or("")),
         ("compact", compact_text),
         ("taint", taint_id_filter.unwrap_or("")),
@@ -968,31 +954,24 @@ fn render_taint_report_text_paged(
 
 fn render_taint_report_text(report: &bonsai_sdk::TaintReport, compact: bool) {
     let u = ui();
-    // Header — source, seed, sanitizers, precision, pair count.
+    // Header — source, seed, precision, pair count.
     let mut seed_preview = report.seeds.clone();
     seed_preview.sort();
     cli_println!(
-        "{} {} {} {} {} {} {} {}",
+        "{} {} {} {} {} {}",
         u.label("taint"),
         u.name(&report.source),
         u.dim("seed:"),
         u.name(&format!("{{{}}}", seed_preview.join(", "))),
-        u.dim("sanitizers:"),
-        u.name(&format!("{{{}}}", report.sanitizers.join(", "))),
         u.dim("→"),
         precision_tag(u, &report.precision),
     );
     cli_println!(
-        "  {} {} {} {} {}",
+        "  {} {} {} {}",
         u.dim("pairs analyzed:"),
         u.name(&report.pairs_analyzed.to_string()),
         u.dim("· propagations:"),
         u.name(&report.records.len().to_string()),
-        if report.saturated {
-            u.warn("  [saturated: budget cap hit]")
-        } else {
-            String::new()
-        },
     );
     if report.analysis_complete {
         cli_println!("  {}", u.dim("analysis: complete"));

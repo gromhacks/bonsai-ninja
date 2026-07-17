@@ -411,7 +411,7 @@ fn snapshot_rejects_malformed_file_indexes_without_panic() {
 }
 
 #[test]
-fn sanitizer_profile_compatibility_does_not_change_indexed_graph_scope() {
+fn cache_exposes_one_canonical_graph_profile() {
     let ws = ws_with(
         &[(
             "/w/m.py",
@@ -437,43 +437,28 @@ def sink(y):\n\
             )
         })
         .count();
-    let mut sanitizers = bonsai_taint::TokenSet::default();
-    sanitizers.insert("clean".to_string());
-    assert_eq!(
-        ws.dataflow().pending_count_with_sanitizers(ws.db(), &sanitizers),
-        0,
-        "compatibility sanitizer argument should not create work after canonical prewarm"
-    );
-    ws.dataflow().clear();
-    assert_eq!(
-        ws.dataflow().pending_count_with_sanitizers(ws.db(), &sanitizers),
-        func_count,
-        "compatibility sanitizer argument should use the same cold graph scope"
-    );
-    ws.dataflow().prewarm_all_with_sanitizers(ws.db(), &sanitizers);
-    assert_eq!(
-        ws.dataflow().pending_count_with_sanitizers(ws.db(), &sanitizers),
-        0,
-        "prewarm should populate the canonical graph regardless of sanitizer names"
-    );
     assert_eq!(
         ws.dataflow().pending_count(ws.db()),
         0,
-        "sanitizer names must not create a separate graph profile"
+        "the workspace starts with the canonical graph prewarmed"
+    );
+    ws.dataflow().clear();
+    assert_eq!(
+        ws.dataflow().pending_count(ws.db()),
+        func_count,
+        "clearing the cache should expose every callable as pending"
+    );
+    ws.dataflow().prewarm_all(ws.db());
+    assert_eq!(
+        ws.dataflow().pending_count(ws.db()),
+        0,
+        "prewarm should repopulate the canonical graph"
     );
     let snap = ws.dataflow().snapshot(ws.db());
-    assert_ne!(
-        snap.sanitizer_fingerprint, 0,
-        "snapshot keeps a non-zero compatibility fingerprint for the canonical graph"
-    );
     assert_eq!(
         snap.matcher_policy_fingerprint,
         bonsai_common::MATCHER_POLICY_FINGERPRINT,
         "snapshot records the current matcher policy fingerprint"
-    );
-    assert!(
-        snap.sanitizer_tokens.is_empty(),
-        "sanitizer names are reporting evidence, not sidecar graph inputs"
     );
 }
 

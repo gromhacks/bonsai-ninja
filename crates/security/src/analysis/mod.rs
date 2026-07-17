@@ -1428,8 +1428,6 @@ where
     let global = ws.db().global_index();
     let transfer_languages = workspace_languages(ws);
     let source_graph_config = InterTaintConfig {
-        sanitizers: TokenSet::default(),
-        source_bearing_functions: AHashSet::default(),
         clean_output_overwrites: clean_output_overwrites_from_rulepack_for_languages(
             pack,
             &transfer_languages,
@@ -2853,17 +2851,7 @@ fn build_call_evidence<'a>(
     canonical_chain_index: &CanonicalChainIndex<'a>,
     source_func: FuncId,
     call: &TaintedCall,
-    graph_saturated: bool,
 ) -> Option<CallEvidence> {
-    // Public findings are semantic-only. A saturated graph means the
-    // requested source scope did not produce complete evidence, so do
-    // not downgrade it to a broad precision class and report it as a
-    // finding. Current IDG-backed graphs are built to completion and
-    // set `saturated = false`; this guard protects compatibility
-    // callers that still hand in an older graph shape.
-    if graph_saturated {
-        return None;
-    }
     let original_records = lineage_records_for_call_indexed(trace_index, call).unwrap_or_default();
     let (chain_funcs, sanitizer_candidate_funcs, chain_precision, taint_path) =
         if let Some(primary) = chain_funcs_for_lineage(&original_records, source_func, call.caller) {
@@ -5152,8 +5140,6 @@ where
     on_progress(AnalysisProgress::PhaseFinished);
 
     let config = InterTaintConfig {
-        sanitizers: TokenSet::default(),
-        source_bearing_functions: AHashSet::default(),
         clean_output_overwrites: clean_output_overwrites_from_rulepack_for_languages(
             pack,
             &transfer_languages,
@@ -6007,14 +5993,7 @@ where
                         continue;
                     }
                     let evidence = cached_evidence.get_or_insert_with(|| {
-                        build_call_evidence(
-                            ws,
-                            &trace_index,
-                            &canonical_chain_index,
-                            src_func_id,
-                            call,
-                            graph.saturated,
-                        )
+                        build_call_evidence(ws, &trace_index, &canonical_chain_index, src_func_id, call)
                     });
                     let Some(evidence) = evidence.as_ref() else {
                         lineage_misses = lineage_misses.saturating_add(1);

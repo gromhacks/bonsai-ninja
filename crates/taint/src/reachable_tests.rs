@@ -113,7 +113,7 @@ fn call_event_summaries_are_shared_across_source_queries() {
 }
 
 #[test]
-fn legacy_descendant_seeds_require_wildcard_and_exclude_clean_writes() {
+fn token_descendant_seeds_require_wildcard_and_exclude_clean_writes() {
     let func = FuncId::new(1);
     let mut segment = IdgSegment::new();
     let base = segment.strings.intern("args");
@@ -126,10 +126,10 @@ fn legacy_descendant_seeds_require_wildcard_and_exclude_clean_writes() {
     let service = service_from_segment(segment);
 
     assert!(
-        legacy_descendant_read_seed_nodes(func, &["args".to_string()], &service).is_empty(),
+        token_descendant_read_seed_nodes(func, &["args".to_string()], &service).is_empty(),
         "a scalar seed must not promote the carrier's fields"
     );
-    let seeds = legacy_descendant_read_seed_nodes(func, &["args.*".to_string()], &service);
+    let seeds = token_descendant_read_seed_nodes(func, &["args.*".to_string()], &service);
     assert_eq!(
         seeds.len(),
         1,
@@ -141,7 +141,7 @@ fn legacy_descendant_seeds_require_wildcard_and_exclude_clean_writes() {
 }
 
 #[test]
-fn legacy_call_and_buffer_seed_pair_identifies_source_output_carrier() {
+fn token_call_and_buffer_seed_pair_identifies_source_output_carrier() {
     let events = vec![FlowEvent::Call {
         span: span(),
         name: "fgets".to_string(),
@@ -263,7 +263,7 @@ fn graph_seed_skips_singular_call_target_source_name() {
                 target: "restored".to_string(),
                 source_name: Some(source_name.to_string()),
                 source_call: Some("pickle.loads".to_string()),
-                // Rendering-only legacy text must not become a carrier.
+                // Rendering-only fallback text must not become a carrier.
                 source_call_args: vec!["must_not_be_seeded".to_string()],
                 source_names: Vec::new(),
                 declares_new_binding: false,

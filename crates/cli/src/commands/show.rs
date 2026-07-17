@@ -28,7 +28,6 @@ pub(crate) struct ShowArgs<'a> {
     pub(crate) in_file: Option<&'a str>,
     pub(crate) taint_source: Option<&'a str>,
     pub(crate) taint_seeds: &'a [String],
-    pub(crate) taint_sanitizers: &'a [String],
     pub(crate) taint_sink: Option<&'a str>,
     pub(crate) compact: bool,
     pub(crate) context: Option<&'a str>,
@@ -44,7 +43,7 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
     let prefix = id_prefix(id)?;
     if prefix != "T" && args.has_dump_taint_context() {
         anyhow::bail!(
-            "dump-taint show options (`--taint-source`, `--taint-seed`, `--taint-sanitizer`, `--taint-sink`) only apply to T: ids"
+            "dump-taint show options (`--taint-source`, `--taint-seed`, `--taint-sink`) only apply to T: ids"
         );
     }
     match prefix {
@@ -108,10 +107,7 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
 
 impl ShowArgs<'_> {
     fn has_dump_taint_context(&self) -> bool {
-        self.taint_source.is_some()
-            || !self.taint_seeds.is_empty()
-            || !self.taint_sanitizers.is_empty()
-            || self.taint_sink.is_some()
+        self.taint_source.is_some() || !self.taint_seeds.is_empty() || self.taint_sink.is_some()
     }
 }
 
@@ -323,7 +319,6 @@ fn show_dump_taint_propagation(args: ShowArgs<'_>, id: &str, paging_cfg: paging:
         args.workspace,
         source,
         args.taint_seeds,
-        args.taint_sanitizers,
         args.taint_sink,
         args.compact,
         Some(id),

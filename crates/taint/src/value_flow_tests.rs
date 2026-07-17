@@ -180,11 +180,6 @@ fn closures_do_not_traverse_diagnostic_precision_edges() {
 }
 
 #[test]
-fn lattice_mode_default_is_token_set() {
-    assert_eq!(LatticeMode::default(), LatticeMode::TokenSet);
-}
-
-#[test]
 fn return_edges_use_current_straight_line_definition() {
     let decl = decl(
         &["a", "b"],
@@ -292,8 +287,8 @@ fn call_arg_edges_merge_branch_definitions_at_call_site() {
 
 #[test]
 fn try_catch_links_thrown_value_to_catch_binding() {
-    // R3: `throw a; catch (e) { sink(e); }` — on the legacy value-flow
-    // walker the thrown param must reach the catch binding `e` and
+    // R3: `throw a; catch (e) { sink(e); }` — in the local value-flow
+    // projection the thrown param must reach the catch binding `e` and
     // onward to the sink. Before the fix the Try arm seeded `e` with no
     // incoming edge from the body's thrown value, so the param `a` had
     // no forward lineage at all.

@@ -7251,28 +7251,6 @@ fn dump_taint_unknown_source_errors_cleanly() {
 }
 
 #[test]
-fn dump_taint_sanitizer_argument_is_compatibility_only() {
-    // Python fixture where update_user calls run_admin_command with
-    // `action`. Passing a sanitizer name should not change the
-    // propagation graph; the flag remains accepted for compatibility.
-    let Some(out) = run(&[
-        "dump-taint",
-        ws_path().to_str().unwrap(),
-        "--source",
-        "update_user",
-        "--seed",
-        "action",
-        "--sanitizer",
-        "verify_token",
-    ]) else {
-        return;
-    };
-    // Should at least produce the run_admin_command propagation
-    // (verify_token being a sanitizer doesn't affect that edge).
-    assert!(out.contains("run_admin_command"));
-}
-
-#[test]
 fn dump_resolve_unknown_candidate_id_errors() {
     let Some(bin) = bin_path() else {
         return;

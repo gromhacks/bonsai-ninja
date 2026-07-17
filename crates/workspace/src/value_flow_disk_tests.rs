@@ -40,7 +40,6 @@ fn empty_entry_roundtrips() {
     // sentinel) — distinct from `ValueFlowGraph::new()` which uses
     // `Exact` as its starting precision.
     assert_eq!(decoded.graph.precision, Precision::Unknown);
-    assert!(!decoded.graph.saturated);
 }
 
 #[test]
@@ -150,7 +149,6 @@ fn unknown_string_id_is_typed_error() {
         forward: Vec::new(),
         backward: Vec::new(),
         precision: Precision::Exact,
-        saturated: false,
         returning_seeds: Vec::new(),
     };
     let bytes = bincode::serialize(&on_disk).unwrap();
@@ -192,7 +190,6 @@ fn unknown_node_idx_is_typed_error() {
         forward: Vec::new(),
         backward: Vec::new(),
         precision: Precision::Exact,
-        saturated: false,
         returning_seeds: Vec::new(),
     };
     let bytes = bincode::serialize(&on_disk).unwrap();

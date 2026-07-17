@@ -818,9 +818,6 @@ fn semantic_slice_from_value_flow(
     nodes.sort_by(|a, b| compare_semantic_nodes(ws, &targets, target_line, a, b));
 
     let mut reasons = BTreeSet::new();
-    if graph.saturated {
-        reasons.insert("semantic value-flow graph saturated before completion".to_string());
-    }
     if nodes.len() > cap {
         reasons.insert(format!("slice truncated by --max-steps {max_steps}"));
         nodes.truncate(cap);

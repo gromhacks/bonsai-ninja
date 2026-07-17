@@ -68,7 +68,7 @@ pub(crate) fn compiler_idg_service_without_default_seed(db: &AnalyzerDb) -> Arc<
     configured_idg_service(db, &transfer_options)
 }
 
-/// Build the compatibility IDG for a public API call that supplied
+/// Build a configured IDG for a public API call that supplied
 /// transfer-time source/overwrite shapes. These shapes change graph edges,
 /// so this variant deliberately does not replace the database's shared
 /// service: a later caller may use a different configuration.

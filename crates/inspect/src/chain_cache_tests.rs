@@ -365,7 +365,7 @@ fn disabled_cache_never_populates_maps() {
 }
 
 #[test]
-fn taint_facts_cache_ignores_configured_sanitizer_profile() {
+fn taint_facts_cache_reuses_the_canonical_graph_profile() {
     let ws = ws_with_python(
         r"
 def sanitize(x):
@@ -379,26 +379,21 @@ def entry(user_input):
     sink(cleaned)
 ",
     );
-    let mut sanitizers = bonsai_taint::TokenSet::default();
-    sanitizers.insert("sanitize".to_string());
-    ws.dataflow().prewarm_all_with_sanitizers(ws.db(), &sanitizers);
+    ws.dataflow().prewarm_all(ws.db());
     assert_eq!(
-        ws.dataflow().pending_count_with_sanitizers(ws.db(), &sanitizers),
+        ws.dataflow().pending_count(ws.db()),
         0,
         "test setup must start from a fully warmed graph"
     );
 
-    // Explicit sanitizer-name filters are report evidence, not
-    // ChainCache inputs: building a ChainCache with `new` is
-    // byte-identical to the previous `new_with_sanitizers` shim
-    // (which just dropped the TokenSet). Rulepack-declared
-    // passthrough transfers are applied by the exact security/dump
-    // query paths, not this cache constructor.
+    // Rulepack classifications are report evidence, not cache profiles.
+    // Transfer semantics are applied by the exact security/dump query paths,
+    // while ChainCache reads the one canonical compiler graph.
     let cache = ChainCache::new(&ws);
     let _ = cache.taint_facts_for_entry(func_id(&ws, "entry"));
 
     assert_eq!(
-        ws.dataflow().pending_count_with_sanitizers(ws.db(), &sanitizers),
+        ws.dataflow().pending_count(ws.db()),
         0,
         "inspect taint lookups must not treat sanitizer names as a distinct graph profile"
     );

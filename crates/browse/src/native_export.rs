@@ -114,7 +114,6 @@ struct ExportIntraTaintParam {
     param_index: usize,
     param_name: String,
     iterations: u32,
-    saturated: bool,
     /// One entry per basic block. `block_in` / `block_out` are
     /// the taint set at entry / exit of the block.
     blocks: Vec<ExportIntraBlock>,
@@ -212,7 +211,6 @@ struct ExportTaintPropagationsRef<'a> {
     /// during the interprocedural pass from this entry.
     precision: &'static str,
     pairs_analyzed: u32,
-    saturated: bool,
     records: Vec<&'a ExportTaintRecord>,
 }
 
@@ -2020,10 +2018,7 @@ fn export_intra_taint(ws: &Workspace, functions: &[ExportTaintFunction]) -> Vec<
                 }
                 let mut seed = bonsai_taint::TokenSet::default();
                 seed.insert(param.clone());
-                let cfg_config = bonsai_taint::TaintConfig {
-                    sources: seed,
-                    sanitizers: bonsai_taint::TokenSet::default(),
-                };
+                let cfg_config = bonsai_taint::TaintConfig { sources: seed };
                 let result = bonsai_taint::intraprocedural_taint(&cfg, &cfg_config);
                 let mut blocks: Vec<ExportIntraBlock> = Vec::new();
                 // Emit blocks whose in OR out is non-empty — the
@@ -2055,7 +2050,6 @@ fn export_intra_taint(ws: &Workspace, functions: &[ExportTaintFunction]) -> Vec<
                     param_index: idx,
                     param_name: param.clone(),
                     iterations: result.iterations,
-                    saturated: result.saturated,
                     blocks,
                 });
             }
@@ -2256,7 +2250,7 @@ fn export_taint_propagation_row_ref<'a>(
     ep: &'a ExportEntryPoint,
     entry_func: bonsai_common::FuncId,
 ) -> ExportTaintPropagationsRef<'a> {
-    let seed_nodes = canonical_legacy_seed_nodes(idg, entry_func, &ep.params, global);
+    let seed_nodes = canonical_token_seed_nodes(idg, entry_func, &ep.params, global);
     let mut cross_calls = idg.cross_call_edges_in_closure_with_max_precision(
         &seed_nodes,
         Some(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
@@ -2278,12 +2272,11 @@ fn export_taint_propagation_row_ref<'a>(
         entry_line: ep.line,
         precision: export_precision_label(aggregate_precision),
         pairs_analyzed: u32::try_from(pairs_analyzed).unwrap_or(u32::MAX),
-        saturated: false,
         records,
     }
 }
 
-fn canonical_legacy_seed_nodes(
+fn canonical_token_seed_nodes(
     idg: &bonsai_idg::IdgQueryService,
     entry_func: bonsai_common::FuncId,
     names: &[String],
@@ -2291,7 +2284,7 @@ fn canonical_legacy_seed_nodes(
 ) -> Vec<bonsai_idg::WsNodeId> {
     let seeds: bonsai_taint::TokenSet = names.iter().cloned().collect();
     bonsai_taint::compose_idg_seed_nodes(
-        bonsai_taint::IdgSeedRequest::legacy_tokens(entry_func, &seeds),
+        bonsai_taint::IdgSeedRequest::token_api(entry_func, &seeds),
         global,
         idg,
     )
