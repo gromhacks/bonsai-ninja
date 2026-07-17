@@ -327,7 +327,7 @@ pub struct ResolveContext<'a> {
 pub type PeerClassIndex = AHashMap<(String, ModulePath), Vec<SymbolId>>;
 
 === retrieval ===
-pub const RETRIEVAL_SCHEMA_VERSION: u32 = 9;
+pub const RETRIEVAL_SCHEMA_VERSION: u32 = 10;
 pub const RETRIEVAL_TABLE_ID: u32 = 0x5254_5631;
 pub enum RetrievalSidecarStatus {
 pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
@@ -494,6 +494,7 @@ pub mod value_flow_disk;
 pub struct FileRefresh {
 pub struct PrecisionReport {
 pub struct SourceFileFingerprint {
+pub struct SourceFileStamp {
 pub struct SourceReachableCallGraph {
 pub struct Workspace {
 pub struct WorkspaceOpenOptions {
