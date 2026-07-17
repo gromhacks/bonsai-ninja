@@ -1011,6 +1011,38 @@ fn receiver_type_uses_declared_class_facts_without_factory_name_knowledge() {
 }
 
 #[test]
+fn receiver_type_joins_sigiled_ast_aliases_by_canonical_binding_name() {
+    let mut idx = DeclIndex::default();
+    let mut child = m9_func_decl(0, "Child", None, Vec::new());
+    child.kind = DeclKind::Class;
+    let mut entry = m9_func_decl(
+        1,
+        "entry",
+        None,
+        vec![FlowEvent::Call {
+            span: Span::new(FileId::new(0), 10, 20),
+            name: "obj.consume".to_string(),
+            receiver: Some("obj".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        }],
+    );
+    entry.type_aliases.push(crate::TypeAliasBinding {
+        name: "$obj".to_string(),
+        type_name: "Child".to_string(),
+    });
+    idx.defs.extend([child, entry]);
+
+    apply_call_receiver_types(&mut idx);
+
+    assert!(matches!(
+        &idx.defs[1].flow_events[0],
+        FlowEvent::Call { receiver_types, .. } if receiver_types == &["Child"]
+    ));
+}
+
+#[test]
 fn address_arguments_emit_writeback_mode_from_ast_nodes() {
     for (pack, source) in [
         ("c", "void f(void) { int out; helper(&out); }"),

@@ -9490,12 +9490,14 @@ fn receiver_types_for_expr(
     // where the tail genuinely names a field the alias map can resolve.
     let allow_bare_tail = !has_member_projection || base_is_implicit;
     for alias in aliases {
-        if alias.name == normalized || (allow_bare_tail && alias.name == tail) {
+        let normalized_alias = normalize_receiver_type_expr(&alias.name);
+        if normalized_alias == normalized || (allow_bare_tail && normalized_alias == tail) {
             push_receiver_type_and_bases(&mut out, alias.type_name.clone(), class_facts);
         }
     }
     for alias in aliases {
-        if receiver_projected_alias_matches(&normalized, &alias.name) {
+        let normalized_alias = normalize_receiver_type_expr(&alias.name);
+        if receiver_projected_alias_matches(&normalized, &normalized_alias) {
             push_receiver_type_and_bases(&mut out, alias.type_name.clone(), class_facts);
         }
     }

@@ -3,14 +3,14 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_node as ast_call_arg_from_node, collect_kinds, language_from_pack, node_text,
-        parse_with, span_of,
+        call_arg_from_node as ast_call_arg_from_node, collect_kinds, first_named_child_of_kind,
+        language_from_pack, node_at_span, node_text, parse_with, span_of,
     },
     AdapterContext, AdapterError, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, DeclIndex,
     DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
     LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind, TypeAliasBinding,
 };
-use tree_sitter::{Language, Tree};
+use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("perl");
 const PACK_NAME: &str = "perl";
@@ -111,6 +111,9 @@ impl LanguageAdapter for PerlAdapter {
         // synthesize `params` so entry-point inference (G5) and
         // taint seeding work.
         for decl in &mut idx.defs {
+            if let Some((_, tree)) = parsed.as_ref() {
+                normalize_perl_foreach_binding_targets(&mut decl.flow_events, tree, source.as_bytes(), file);
+            }
             let consumes_implicit_variadic_args = perl_implicit_args_foreach(&decl.flow_events);
             let list_params =
                 rewrite_perl_list_param_bindings(&mut decl.flow_events, &source, &assignment_values);
@@ -134,21 +137,21 @@ impl LanguageAdapter for PerlAdapter {
         // scalars inside become CallArgs so the matcher can evaluate
         // arg-shape constraints and the taint engine can see them as
         // tainted-arg call sites.
-        if let Some((_, tree)) = parsed {
+        if let Some((_, tree)) = parsed.as_ref() {
             idx.refs
-                .extend(synthesize_perl_source_refs(source.as_bytes(), file));
-            let mut calls = synthesize_qx_call_events(&tree, source.as_bytes(), file);
-            calls.extend(synthesize_method_call_events(&tree, source.as_bytes(), file));
-            calls.extend(synthesize_builtin_call_events(&tree, source.as_bytes(), file));
+                .extend(extract_perl_special_variable_refs(tree, source.as_bytes(), file));
+            let mut calls = synthesize_qx_call_events(tree, source.as_bytes(), file);
+            calls.extend(synthesize_method_call_events(tree, source.as_bytes(), file));
+            calls.extend(synthesize_builtin_call_events(tree, source.as_bytes(), file));
             calls.extend(synthesize_builtin_expression_arg_call_events(
-                &tree,
+                tree,
                 source.as_bytes(),
                 file,
             ));
-            calls.extend(synthesize_match_regex_call_events(&tree, source.as_bytes(), file));
+            calls.extend(synthesize_match_regex_call_events(tree, source.as_bytes(), file));
             calls.extend(synthesize_coderef_invocation_events(source.as_bytes(), file));
             calls.extend(synthesize_map_grep_topic_call_events(
-                &tree,
+                tree,
                 source.as_bytes(),
                 file,
             ));
@@ -159,11 +162,20 @@ impl LanguageAdapter for PerlAdapter {
         for decl in &mut idx.defs {
             rewrite_perl_call_arg_texts(&mut decl.flow_events, &source);
             normalize_perl_hash_deref_flow_events(&mut decl.flow_events, &source, &assignment_values);
-            expand_perl_anonymous_hash_field_assigns(&mut decl.flow_events, &source, &assignment_values);
+            if let Some((_, tree)) = parsed.as_ref() {
+                expand_perl_anonymous_hash_field_assigns(&mut decl.flow_events, tree, source.as_bytes());
+            }
             normalize_perl_simple_scalar_renames(&mut decl.flow_events, &source, &assignment_values);
             augment_perl_collection_flow_events(&mut decl.flow_events, &source, &assignment_values);
             inject_perl_coderef_aliases(&mut decl.flow_events, &source, &assignment_values);
-            normalize_perl_eval_exception_flow_events(&mut decl.flow_events, &source, &assignment_values);
+            if let Some((_, tree)) = parsed.as_ref() {
+                normalize_perl_eval_exception_flow_events(
+                    &mut decl.flow_events,
+                    tree,
+                    &source,
+                    &assignment_values,
+                );
+            }
             // L1: lower `die` to Throw across the WHOLE sub body, not
             // just inside an `eval {}; if ($@)` region. This seeds a
             // native `try { die $x; } catch ($e) { ... }` body (the
@@ -194,9 +206,8 @@ impl LanguageAdapter for PerlAdapter {
         // the file and assign the named parents to the package
         // decl that contains them. Bare-tail (right-most segment of
         // `Foo::Bar`) is the bases entry.
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-            let src = snapshot.text.as_bytes();
-            let bases_by_span = collect_perl_class_bases(&tree, file, src, &idx);
+        if let Some((_, tree)) = parsed.as_ref() {
+            let bases_by_span = collect_perl_class_bases(tree, file, source.as_bytes(), &idx);
             for decl in &mut idx.defs {
                 if !is_class_like(decl.kind) {
                     continue;
@@ -214,7 +225,9 @@ impl LanguageAdapter for PerlAdapter {
             if decl.receiver_param_index.is_some() && matches!(decl.kind, DeclKind::Function) {
                 decl.kind = DeclKind::Method;
             }
-            enrich_perl_bless_receiver_field_writes(decl, &source);
+            if let Some((_, tree)) = parsed.as_ref() {
+                enrich_perl_bless_receiver_field_writes(decl, tree, source.as_bytes());
+            }
             let mut aliases = collect_perl_bless_type_aliases(&decl.flow_events);
             dedup_perl_type_aliases(&mut aliases);
             for alias in aliases {
@@ -252,6 +265,7 @@ impl LanguageAdapter for PerlAdapter {
         // types PascalCase callees, so language exported-function calls are unaffected.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
+        bonsai_lang_api::apply_call_receiver_types(&mut idx);
         idx
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
@@ -259,38 +273,50 @@ impl LanguageAdapter for PerlAdapter {
     }
 }
 
-fn enrich_perl_bless_receiver_field_writes(decl: &mut bonsai_lang_api::Decl, source: &str) {
+fn enrich_perl_bless_receiver_field_writes(decl: &mut bonsai_lang_api::Decl, tree: &Tree, src: &[u8]) {
     if decl.name != "new" || decl.params.len() < 2 {
         return;
     }
-    let Some(text) = source.get(decl.span.start as usize..decl.span.end as usize) else {
-        return;
-    };
     let Some(receiver) = decl.params.first().cloned() else {
         return;
     };
     let mut writes = Vec::new();
-    for hash_body in perl_bless_hash_bodies(text) {
-        for field_init in split_perl_top_level(hash_body, ',') {
-            let Some((field, value)) = field_init.split_once("=>") else {
-                continue;
-            };
-            let field = perl_hash_key_name(field);
-            if field.is_empty() {
+    for call in collect_kinds(
+        tree,
+        &["ambiguous_function_call_expression", "function_call_expression"],
+    ) {
+        let call_span = span_of(decl.span.file, &call);
+        if call_span.start < decl.span.start || call_span.end > decl.span.end {
+            continue;
+        }
+        let Some(function) = call.child_by_field_name("function") else {
+            continue;
+        };
+        if node_text(&function, src).trim() != "bless" {
+            continue;
+        }
+        let Some(arguments) = call.child_by_field_name("arguments") else {
+            continue;
+        };
+        let Some(hash) = first_descendant_of_kind(arguments, "anonymous_hash_expression") else {
+            continue;
+        };
+        for (field, value) in perl_anonymous_hash_fields(hash, src) {
+            let source_param_indices = perl_value_variable_names(value, src)
+                .into_iter()
+                .filter_map(|value_name| {
+                    decl.params
+                        .iter()
+                        .position(|param| perl_param_matches_value(param, &value_name))
+                })
+                .collect::<Vec<_>>();
+            if source_param_indices.is_empty() {
                 continue;
             }
-            let value = value.trim();
-            let Some(source_idx) = decl
-                .params
-                .iter()
-                .position(|param| perl_param_matches_value(param, value))
-            else {
-                continue;
-            };
             writes.push(FieldWrite {
-                span: decl.span,
+                span: span_of(decl.span.file, &value),
                 target: format!("{receiver}.{field}"),
-                source_param_indices: vec![source_idx],
+                source_param_indices,
             });
         }
     }
@@ -305,99 +331,83 @@ fn enrich_perl_bless_receiver_field_writes(decl: &mut bonsai_lang_api::Decl, sou
     });
 }
 
-fn perl_bless_hash_bodies(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(pos) = rest.find("bless") {
-        rest = &rest[pos + "bless".len()..];
-        let Some(open) = rest.find('{') else {
-            continue;
-        };
-        let after_open = &rest[open + 1..];
-        let Some(close) = find_matching_perl_brace(after_open) else {
-            continue;
-        };
-        out.push(&after_open[..close]);
-        rest = &after_open[close + 1..];
+fn first_descendant_of_kind<'tree>(node: Node<'tree>, expected: &str) -> Option<Node<'tree>> {
+    if node.kind() == expected {
+        return Some(node);
     }
-    out
-}
-
-fn find_matching_perl_brace(text: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (idx, ch) in text.char_indices() {
-        if let Some(quote_ch) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == quote_ch {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '{' => depth += 1,
-            '}' if depth == 0 => return Some(idx),
-            '}' => depth = depth.saturating_sub(1),
-            _ => {}
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = first_descendant_of_kind(child, expected) {
+            return Some(found);
         }
     }
     None
 }
 
-fn split_perl_top_level(text: &str, delimiter: char) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (idx, ch) in text.char_indices() {
-        if let Some(quote_ch) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == quote_ch {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '{' | '[' | '(' => depth += 1,
-            '}' | ']' | ')' => depth = depth.saturating_sub(1),
-            _ if ch == delimiter && depth == 0 => {
-                out.push(text[start..idx].trim());
-                start = idx + ch.len_utf8();
-            }
-            _ => {}
+fn perl_anonymous_hash_fields<'tree>(hash: Node<'tree>, src: &[u8]) -> Vec<(String, Node<'tree>)> {
+    if hash.kind() != "anonymous_hash_expression" {
+        return Vec::new();
+    }
+    let Some(items_root) = first_named_child_of_kind(&hash, "list_expression") else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    flatten_perl_list_expression(items_root, &mut items);
+    let mut fields = Vec::new();
+    for pair in items.chunks_exact(2) {
+        if let Some(key) = perl_static_hash_key(pair[0], src) {
+            fields.push((key, pair[1]));
         }
     }
-    out.push(text[start..].trim());
+    fields
+}
+
+fn flatten_perl_list_expression<'tree>(node: Node<'tree>, out: &mut Vec<Node<'tree>>) {
+    if node.kind() != "list_expression" {
+        out.push(node);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        flatten_perl_list_expression(child, out);
+    }
+}
+
+fn perl_static_hash_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if matches!(node.kind(), "autoquoted_bareword" | "bareword") {
+        let key = node_text(&node, src).trim();
+        return (!key.is_empty()).then(|| key.to_string());
+    }
+    if node.kind() != "string_literal" {
+        return None;
+    }
+    let content = first_descendant_of_kind(node, "string_content")?;
+    let key = node_text(&content, src).trim();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
+fn perl_value_variable_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
+    fn collect(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+        if matches!(node.kind(), "scalar" | "array" | "hash" | "container_variable") {
+            let raw = node_text(&node, src).trim();
+            if !raw.is_empty() {
+                push_unique_string(out, raw.to_string());
+                push_unique_string(out, raw.trim_start_matches(['$', '@', '%']).to_string());
+            }
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect(child, src, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    collect(node, src, &mut out);
     out
 }
 
-fn perl_hash_key_name(raw: &str) -> String {
-    raw.trim()
-        .trim_matches(|ch| matches!(ch, '\'' | '"' | '$' | '{' | '}' | ' '))
-        .to_string()
-}
-
-fn expand_perl_anonymous_hash_field_assigns(
-    events: &mut Vec<FlowEvent>,
-    source: &str,
-    assignment_values: &AssignmentValueIndex,
-) {
+fn expand_perl_anonymous_hash_field_assigns(events: &mut Vec<FlowEvent>, tree: &Tree, src: &[u8]) {
     let mut index = 0usize;
     while index < events.len() {
         match &mut events[index] {
@@ -406,11 +416,11 @@ fn expand_perl_anonymous_hash_field_assigns(
                 else_events,
                 ..
             } => {
-                expand_perl_anonymous_hash_field_assigns(then_events, source, assignment_values);
-                expand_perl_anonymous_hash_field_assigns(else_events, source, assignment_values);
+                expand_perl_anonymous_hash_field_assigns(then_events, tree, src);
+                expand_perl_anonymous_hash_field_assigns(else_events, tree, src);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                expand_perl_anonymous_hash_field_assigns(body, source, assignment_values);
+                expand_perl_anonymous_hash_field_assigns(body, tree, src);
             }
             FlowEvent::Try {
                 body,
@@ -418,14 +428,14 @@ fn expand_perl_anonymous_hash_field_assigns(
                 finally_events,
                 ..
             } => {
-                expand_perl_anonymous_hash_field_assigns(body, source, assignment_values);
-                expand_perl_anonymous_hash_field_assigns(catch_events, source, assignment_values);
-                expand_perl_anonymous_hash_field_assigns(finally_events, source, assignment_values);
+                expand_perl_anonymous_hash_field_assigns(body, tree, src);
+                expand_perl_anonymous_hash_field_assigns(catch_events, tree, src);
+                expand_perl_anonymous_hash_field_assigns(finally_events, tree, src);
             }
             _ => {}
         }
 
-        let fields = perl_anonymous_hash_fields_for_event(&events[index], source, assignment_values);
+        let fields = perl_anonymous_hash_fields_for_event(&events[index], tree, src);
         if fields.is_empty() {
             index += 1;
             continue;
@@ -436,11 +446,7 @@ fn expand_perl_anonymous_hash_field_assigns(
     }
 }
 
-fn perl_anonymous_hash_fields_for_event(
-    event: &FlowEvent,
-    source: &str,
-    assignment_values: &AssignmentValueIndex,
-) -> Vec<FlowEvent> {
+fn perl_anonymous_hash_fields_for_event(event: &FlowEvent, tree: &Tree, src: &[u8]) -> Vec<FlowEvent> {
     let FlowEvent::Assign { span, target, .. } = event else {
         return Vec::new();
     };
@@ -448,28 +454,26 @@ fn perl_anonymous_hash_fields_for_event(
     if target.is_empty() || target.contains(['.', '{', '[']) {
         return Vec::new();
     }
-    let Some(rhs) = assignment_values.rendering(*span, source) else {
+    let Some(assignment) = node_at_span(tree.root_node(), *span, &["assignment_expression"]) else {
         return Vec::new();
     };
-    let rhs = rhs.trim();
-    let Some(body) = rhs.strip_prefix('{').and_then(|body| body.strip_suffix('}')) else {
+    let rhs = assignment
+        .child_by_field_name("right")
+        .filter(tree_sitter::Node::is_named)
+        .or_else(|| {
+            let mut cursor = assignment.walk();
+            assignment.named_children(&mut cursor).last()
+        });
+    let Some(rhs) = rhs.filter(|rhs| rhs.kind() == "anonymous_hash_expression") else {
         return Vec::new();
     };
 
     let mut out = Vec::new();
-    for field_init in split_perl_top_level(body, ',') {
-        let Some((key, value)) = field_init.split_once("=>") else {
-            continue;
-        };
-        let key = perl_hash_key_name(key);
+    for (key, value) in perl_anonymous_hash_fields(rhs, src) {
         if key.is_empty() || !key.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
             continue;
         }
-        let mut sources = Vec::new();
-        for name in perl_anonymous_hash_value_identifiers(value) {
-            push_unique_string(&mut sources, name.clone());
-            push_unique_string(&mut sources, name.trim_start_matches(['$', '@', '%']).to_string());
-        }
+        let sources = perl_value_variable_names(value, src);
         out.push(FlowEvent::Assign {
             span: *span,
             target: format!("{target}.{key}"),
@@ -486,15 +490,6 @@ fn perl_anonymous_hash_fields_for_event(
         });
     }
     out
-}
-
-fn perl_anonymous_hash_value_identifiers(value: &str) -> Vec<String> {
-    let value = value.trim();
-    let interpolated_body = value
-        .strip_prefix('"')
-        .and_then(|body| body.strip_suffix('"'))
-        .or_else(|| value.strip_prefix('`').and_then(|body| body.strip_suffix('`')));
-    perl_sigiled_identifiers(interpolated_body.unwrap_or(value), ['$', '@', '%'])
 }
 
 fn perl_param_matches_value(param: &str, value: &str) -> bool {
@@ -576,8 +571,6 @@ fn collect_perl_bless_type_aliases(events: &[FlowEvent]) -> Vec<TypeAliasBinding
                     .and_then(|arg| canonical_perl_base_name(arg))
                 {
                     push_perl_type_alias(&mut out, target, &type_name);
-                    let sigiled = format!("${target}");
-                    push_perl_type_alias(&mut out, &sigiled, &type_name);
                 }
             }
             FlowEvent::Branch {
@@ -802,10 +795,11 @@ fn perl_coderef_rhs_source(rhs: &str) -> Option<String> {
 /// thrown value to the handler binding.
 fn normalize_perl_eval_exception_flow_events(
     events: &mut Vec<FlowEvent>,
+    tree: &Tree,
     source: &str,
     assignment_values: &AssignmentValueIndex,
 ) {
-    let eval_blocks = perl_eval_block_ranges(source);
+    let eval_blocks = perl_eval_block_ranges(tree);
     if eval_blocks.is_empty() {
         return;
     }
@@ -819,52 +813,20 @@ struct PerlEvalBlockRange {
     body_end: usize,
 }
 
-fn perl_eval_block_ranges(source: &str) -> Vec<PerlEvalBlockRange> {
+fn perl_eval_block_ranges(tree: &Tree) -> Vec<PerlEvalBlockRange> {
     let mut out = Vec::new();
-    let bytes = source.as_bytes();
-    let mut search = 0usize;
-    while search + 4 <= bytes.len() {
-        let Some(relative) = find_bytes(&bytes[search..], b"eval") else {
-            break;
-        };
-        let start = search + relative;
-        let after_eval = start + 4;
-        if !perl_keyword_boundary(bytes, start, after_eval) {
-            search = after_eval;
-            continue;
-        }
-        let mut open = after_eval;
-        while open < bytes.len() && bytes[open].is_ascii_whitespace() {
-            open += 1;
-        }
-        if bytes.get(open).copied() != Some(b'{') {
-            search = after_eval;
-            continue;
-        }
-        let body_start = open + 1;
-        let Some(close_relative) = find_matching_perl_brace(&source[body_start..]) else {
-            search = after_eval;
+    for eval in collect_kinds(tree, &["eval_expression"]) {
+        let Some(block) = first_named_child_of_kind(&eval, "block") else {
             continue;
         };
-        let body_end = body_start + close_relative;
         out.push(PerlEvalBlockRange {
-            start,
-            body_start,
-            body_end,
+            start: eval.start_byte(),
+            body_start: block.start_byte(),
+            body_end: block.end_byte(),
         });
-        search = body_end.saturating_add(1);
     }
+    out.sort_by_key(|block| block.start);
     out
-}
-
-fn perl_keyword_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
-    let before = start.checked_sub(1).and_then(|idx| bytes.get(idx)).copied();
-    let after = bytes.get(end).copied();
-    !before.is_some_and(perl_identifier_byte) && !after.is_some_and(perl_identifier_byte)
-}
-
-fn perl_identifier_byte(byte: u8) -> bool {
-    byte == b'_' || byte.is_ascii_alphanumeric()
 }
 
 fn rewrite_perl_eval_exception_regions(
@@ -2110,6 +2072,58 @@ fn perl_implicit_args_foreach(events: &[FlowEvent]) -> bool {
     event_tree_contains_implicit_args_binding(events, &loop_spans)
 }
 
+fn normalize_perl_foreach_binding_targets(events: &mut [FlowEvent], tree: &Tree, src: &[u8], file: FileId) {
+    let mut targets = std::collections::HashMap::new();
+    for loop_node in collect_kinds(tree, &["for_statement"]) {
+        let Some(variable) = loop_node.child_by_field_name("variable") else {
+            continue;
+        };
+        let target = node_text(&variable, src).trim();
+        if !target.starts_with('$') {
+            continue;
+        }
+        targets.insert(span_of(file, &loop_node), target.to_string());
+    }
+    normalize_perl_foreach_targets_in_events(events, &targets);
+}
+
+fn normalize_perl_foreach_targets_in_events(
+    events: &mut [FlowEvent],
+    targets: &std::collections::HashMap<Span, String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { span, target, .. } => {
+                if let Some(parsed_target) = targets.get(span) {
+                    target.clone_from(parsed_target);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_perl_foreach_targets_in_events(then_events, targets);
+                normalize_perl_foreach_targets_in_events(else_events, targets);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_perl_foreach_targets_in_events(body, targets);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_perl_foreach_targets_in_events(body, targets);
+                normalize_perl_foreach_targets_in_events(catch_events, targets);
+                normalize_perl_foreach_targets_in_events(finally_events, targets);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn collect_perl_loop_spans(events: &[FlowEvent], out: &mut std::collections::HashSet<Span>) {
     for event in events {
         match event {
@@ -2182,36 +2196,37 @@ fn event_tree_contains_implicit_args_binding(
     })
 }
 
-/// Synthesize `Ref` records for Perl's implicit taint sources
-/// (`@ARGV`, `%ENV`, `STDIN`). The grammar doesn't expose a dedicated
-/// node for these, so a textual scan is the simplest reliable
-/// surface.
-fn synthesize_perl_source_refs(src: &[u8], file: FileId) -> Vec<Ref> {
-    let source = std::str::from_utf8(src).unwrap_or("");
+/// Surface Perl's intrinsic process-input variables from parsed variable and
+/// filehandle nodes. Comments and string contents never enter this walk.
+fn extract_perl_special_variable_refs(tree: &Tree, src: &[u8], file: FileId) -> Vec<Ref> {
     let mut refs = Vec::new();
-    // (literal-to-find, canonical-name) pairs — the canonical name
-    // is what taint rules query against.
-    for (needle, name) in [
-        ("$ARGV", "ARGV"),
-        ("@ARGV", "ARGV"),
-        ("$ENV", "ENV"),
-        ("%ENV", "ENV"),
-        ("STDIN", "STDIN"),
-    ] {
-        for (start, _) in source.match_indices(needle) {
-            refs.push(Ref {
-                span: Span::new(
-                    file,
-                    u64::try_from(start).unwrap_or(u64::MAX),
-                    u64::try_from(start + needle.len()).unwrap_or(u64::MAX),
-                ),
-                name: name.to_string(),
-                kind: RefKind::Read,
-                scope: None,
-                resolved: None,
-            });
+    for node in collect_kinds(tree, &["varname", "filehandle"]) {
+        let name = node_text(&node, src).trim();
+        if !matches!(name, "ARGV" | "ENV" | "STDIN") {
+            continue;
+        }
+        let anchor = if node.kind() == "varname" {
+            node.parent()
+                .filter(|parent| matches!(parent.kind(), "scalar" | "array" | "hash" | "container_variable"))
+        } else {
+            None
+        }
+        .unwrap_or(node);
+        let reference = Ref {
+            span: span_of(file, &anchor),
+            name: name.to_string(),
+            kind: RefKind::Read,
+            scope: None,
+            resolved: None,
+        };
+        if !refs
+            .iter()
+            .any(|existing: &Ref| existing.span == reference.span && existing.name == reference.name)
+        {
+            refs.push(reference);
         }
     }
+    refs.sort_by_key(|reference| (reference.span.start, reference.span.end));
     refs
 }
 
@@ -3136,7 +3151,7 @@ fn collect_perl_class_bases(
             push_perl_bases(&mut bases_by_decl, idx.defs[decl_idx].span, bases);
         }
     }
-    collect_perl_isa_assignment_bases(src, file, idx, &mut bases_by_decl);
+    collect_perl_isa_assignment_bases(tree, src, file, idx, &mut bases_by_decl);
     bases_by_decl.into_iter().collect()
 }
 
@@ -3188,85 +3203,69 @@ fn perl_package_ranges(idx: &DeclIndex, file: FileId, source_len: usize) -> Vec<
 }
 
 fn collect_perl_isa_assignment_bases(
+    tree: &Tree,
     src: &[u8],
     file: FileId,
     idx: &DeclIndex,
     bases_by_decl: &mut std::collections::HashMap<bonsai_common::Span, Vec<String>>,
 ) {
-    let source = std::str::from_utf8(src).unwrap_or("");
-    for (decl_idx, range) in perl_package_ranges(idx, file, src.len()) {
-        let start = usize::try_from(range.start)
-            .unwrap_or(usize::MAX)
-            .min(source.len());
-        let end = usize::try_from(range.end).unwrap_or(usize::MAX).min(source.len());
-        if start >= end {
-            continue;
-        }
-        let bases = perl_isa_bases_from_text(&source[start..end]);
-        if !bases.is_empty() {
-            push_perl_bases(bases_by_decl, idx.defs[decl_idx].span, bases);
-        }
-    }
-}
-
-fn perl_isa_bases_from_text(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut offset = 0;
-    while let Some(relative) = source[offset..].find("@ISA") {
-        let isa_start = offset + relative;
-        let after_isa = &source[isa_start + "@ISA".len()..];
-        let Some(eq_pos) = after_isa.find('=') else {
-            offset = isa_start + "@ISA".len();
+    for assignment in collect_kinds(tree, &["assignment_expression"]) {
+        let Some(left) = assignment.child_by_field_name("left") else {
             continue;
         };
-        let rhs = &after_isa[eq_pos + 1..];
-        let stmt_len = rhs.find(';').unwrap_or(rhs.len());
-        collect_perl_isa_rhs_bases(&rhs[..stmt_len], &mut out);
-        offset = isa_start + "@ISA".len() + eq_pos + 1 + stmt_len;
-    }
-    out
-}
-
-fn collect_perl_isa_rhs_bases(rhs: &str, out: &mut Vec<String>) {
-    let mut offset = 0;
-    while let Some(relative) = rhs[offset..].find("qw") {
-        let qw_start = offset + relative;
-        let after_qw = rhs[qw_start + 2..].trim_start();
-        if let Some(content) = after_qw.strip_prefix('(').and_then(|rest| rest.split(')').next()) {
-            for piece in content.split_whitespace() {
-                push_perl_base_name(out, piece);
+        let mut left_stack = vec![left];
+        let mut is_isa = false;
+        while let Some(node) = left_stack.pop() {
+            if node.kind() == "varname"
+                && node.parent().is_some_and(|parent| parent.kind() == "array")
+                && node_text(&node, src).trim() == "ISA"
+            {
+                is_isa = true;
+                break;
             }
+            let mut cursor = node.walk();
+            left_stack.extend(node.named_children(&mut cursor));
         }
-        offset = qw_start + 2;
-    }
-
-    let bytes = rhs.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let quote = bytes[i];
-        if quote != b'\'' && quote != b'"' {
-            i += 1;
+        if !is_isa {
             continue;
         }
-        let start = i + 1;
-        i = start;
-        while i < bytes.len() && bytes[i] != quote {
-            if bytes[i] == b'\\' {
-                i = i.saturating_add(1);
+        let right = assignment
+            .child_by_field_name("right")
+            .filter(tree_sitter::Node::is_named)
+            .or_else(|| {
+                let mut cursor = assignment.walk();
+                assignment.named_children(&mut cursor).last()
+            });
+        let Some(right) = right else {
+            continue;
+        };
+        let mut base_nodes = Vec::new();
+        let mut stack = vec![right];
+        while let Some(node) = stack.pop() {
+            if matches!(
+                node.kind(),
+                "string_content" | "bareword" | "autoquoted_bareword" | "interpolation_string_content"
+            ) {
+                base_nodes.push(node);
+                continue;
             }
-            i += 1;
+            let mut cursor = node.walk();
+            stack.extend(node.named_children(&mut cursor));
         }
-        if i <= bytes.len() {
-            push_perl_base_name(out, &rhs[start..i]);
+        base_nodes.sort_by_key(tree_sitter::Node::start_byte);
+        let mut bases = Vec::new();
+        for node in base_nodes {
+            for piece in node_text(&node, src).split_whitespace() {
+                push_perl_base_name(&mut bases, piece);
+            }
         }
-        i = i.saturating_add(1);
-    }
-
-    for token in rhs.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':')) {
-        if matches!(token, "" | "qw" | "ISA" | "our" | "my") {
+        if bases.is_empty() {
             continue;
         }
-        push_perl_base_name(out, token);
+        let assignment_span = span_of(file, &assignment);
+        if let Some(decl_idx) = perl_class_decl_for_span(assignment_span, idx, file, src.len()) {
+            push_perl_bases(bases_by_decl, idx.defs[decl_idx].span, bases);
+        }
     }
 }
 

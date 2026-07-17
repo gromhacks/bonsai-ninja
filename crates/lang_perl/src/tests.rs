@@ -8,6 +8,81 @@ fn parse_import_specs(src: &str) -> Vec<ImportSpec> {
     parse_imports(&tree, src.as_bytes(), FileId::new(0))
 }
 
+#[test]
+fn special_process_inputs_come_only_from_parsed_nodes() {
+    let src = r#"
+# $ARGV %ENV STDIN are comments, not reads.
+my $ignored = '$ARGV %ENV STDIN';
+my $arg = $ARGV[0];
+my $home = $ENV{'HOME'};
+my $line = <STDIN>;
+"#;
+    let language = language_from_pack(PACK_NAME).expect("perl grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set perl grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse perl source");
+    let refs = extract_perl_special_variable_refs(&tree, src.as_bytes(), FileId::new(0));
+    let names = refs
+        .iter()
+        .map(|reference| reference.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["ARGV", "ENV", "STDIN"]);
+    for reference in refs {
+        let start = usize::try_from(reference.span.start).expect("span start");
+        let end = usize::try_from(reference.span.end).expect("span end");
+        assert!(!src[start..end].contains(' '));
+    }
+}
+
+#[test]
+fn isa_assignment_shape_is_structured() {
+    let src = "package Child;\nour @ISA = ('Base', Other::Role);\n";
+    let language = language_from_pack(PACK_NAME).expect("perl grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set perl grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse perl source");
+    let assignments = collect_kinds(&tree, &["assignment_expression"]);
+    assert_eq!(assignments.len(), 1);
+    let assignment = assignments[0];
+    let left = assignment.child_by_field_name("left").expect("assignment left");
+    let right = assignment
+        .child_by_field_name("right")
+        .filter(tree_sitter::Node::is_named)
+        .or_else(|| {
+            let mut cursor = assignment.walk();
+            assignment.named_children(&mut cursor).last()
+        })
+        .expect("assignment right");
+    let varnames = collect_kinds_below(left, &["varname"]);
+    assert!(varnames.iter().any(|node| {
+        node_text(node, src.as_bytes()) == "ISA"
+            && node.parent().is_some_and(|parent| parent.kind() == "array")
+    }));
+    let base_nodes = collect_kinds_below(right, &["string_content", "bareword"])
+        .into_iter()
+        .map(|node| node_text(&node, src.as_bytes()).to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(base_nodes, ["Base", "Other::Role"]);
+}
+
+fn collect_kinds_below<'tree>(
+    node: tree_sitter::Node<'tree>,
+    kinds: &[&str],
+) -> Vec<tree_sitter::Node<'tree>> {
+    let mut out = Vec::new();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if kinds.contains(&current.kind()) {
+            out.push(current);
+        }
+        let mut cursor = current.walk();
+        stack.extend(current.named_children(&mut cursor));
+    }
+    out.sort_by_key(tree_sitter::Node::start_byte);
+    out
+}
+
 fn assignment_fixture(src: &str) -> (Span, AssignmentValueIndex) {
     let language = language_from_pack(PACK_NAME).expect("perl grammar");
     let mut parser = tree_sitter::Parser::new();
@@ -17,6 +92,13 @@ fn assignment_fixture(src: &str) -> (Span, AssignmentValueIndex) {
         bonsai_lang_api::extract_assignment_value_facts(&tree, FileId::new(0), &HANDLER, src.as_bytes());
     let span = facts.first().expect("assignment syntax fact").assignment_span;
     (span, AssignmentValueIndex::new(&facts))
+}
+
+fn parse_perl_tree(src: &str) -> Tree {
+    let language = language_from_pack(PACK_NAME).expect("perl grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set perl grammar");
+    parser.parse(src.as_bytes(), None).expect("parse perl source")
 }
 
 #[test]
@@ -248,7 +330,8 @@ fn scalar_deref_assignment_stays_compound() {
 #[test]
 fn anonymous_hash_assignment_emits_field_scoped_writes() {
     let src = "my $envelope = { kind => 'run', cmd => \"$raw\", user => $user, clean => 'ok' };";
-    let (span, assignment_values) = assignment_fixture(src);
+    let (span, _) = assignment_fixture(src);
+    let tree = parse_perl_tree(src);
     let mut events = vec![FlowEvent::Assign {
         span,
         target: "$envelope".to_string(),
@@ -260,7 +343,7 @@ fn anonymous_hash_assignment_emits_field_scoped_writes() {
         value_kind: Some(AssignValueKind::Compound),
     }];
 
-    expand_perl_anonymous_hash_field_assigns(&mut events, src, &assignment_values);
+    expand_perl_anonymous_hash_field_assigns(&mut events, &tree, src.as_bytes());
 
     assert!(
         events.iter().any(|event| matches!(
