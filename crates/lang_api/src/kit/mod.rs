@@ -3482,6 +3482,7 @@ struct LocalClosureCapturePlan {
     lambda_index: usize,
     caller_index: usize,
     binding_name: String,
+    rename_to_binding: bool,
     captures: Vec<String>,
 }
 
@@ -3505,6 +3506,12 @@ pub fn apply_local_closure_captures(index: &mut crate::DeclIndex) {
 /// to that local callable, exactly like a compiler closure-conversion pass.
 fn lower_local_closure_captures(defs: &mut [crate::Decl]) {
     let mut plans = Vec::new();
+    // Export aliases and other semantic aliases can deliberately share one
+    // callable body span. Closure conversion owns the body once; renaming or
+    // injecting captures into every alias would erase those public identities
+    // and duplicate hidden parameters. Declaration order keeps the adapter's
+    // canonical body declaration first, followed by its aliases.
+    let mut planned_callable_spans = ahash::AHashSet::new();
     for lambda_index in 0..defs.len() {
         let lambda = &defs[lambda_index];
         let lambda_width = lambda.span.end.saturating_sub(lambda.span.start);
@@ -3539,6 +3546,9 @@ fn lower_local_closure_captures(defs: &mut [crate::Decl]) {
         let Some(binding_name) = local_callable_binding_for_span(&caller.flow_events, lambda.span) else {
             continue;
         };
+        if !planned_callable_spans.insert(lambda.span) {
+            continue;
+        }
         let mut visible = caller.params.clone();
         for implicit in &caller.implicit_receiver_names {
             push_unique_name(&mut visible, implicit.clone());
@@ -3573,14 +3583,26 @@ fn lower_local_closure_captures(defs: &mut [crate::Decl]) {
             lambda_index,
             caller_index,
             binding_name,
+            // A direct name node inside the callable span is a compiler fact
+            // for an explicitly named function expression. Its assignment
+            // binding is an alias, not a replacement identity. Anonymous
+            // closures instead carry a binding span outside (or equal to)
+            // the callable span and are named by that binding.
+            rename_to_binding: lambda.name_span == lambda.span
+                || !span_contains(lambda.span, lambda.name_span),
             captures,
         });
     }
 
     for plan in plans {
-        // Expression-bodied closures are invoked through their local binding;
-        // make that AST-proven binding their declaration identity as well.
-        defs[plan.lambda_index].name.clone_from(&plan.binding_name);
+        if plan.rename_to_binding {
+            // Anonymous expression-bodied closures are invoked through their
+            // local binding; make that AST-proven binding their declaration
+            // identity as well. Explicitly named function expressions retain
+            // their syntax-declared identity and resolve the outer binding
+            // through the existing local-callable binding table.
+            defs[plan.lambda_index].name.clone_from(&plan.binding_name);
+        }
         if plan.captures.is_empty() {
             continue;
         }

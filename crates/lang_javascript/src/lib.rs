@@ -420,22 +420,26 @@ pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tre
     let mut aliases = Vec::new();
     let mut seen_sources = Vec::new();
     for target in default_exports {
-        let Some(source) = decl_index.defs.iter().find(|decl| match &target {
-            DefaultExportTarget::Span(span) => decl.span == *span,
-            DefaultExportTarget::Name(name) => decl.name == *name,
-        }) else {
+        let Some(source) = decl_index
+            .defs
+            .iter()
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    bonsai_lang_api::DeclKind::Function
+                        | bonsai_lang_api::DeclKind::Method
+                        | bonsai_lang_api::DeclKind::Constructor
+                        | bonsai_lang_api::DeclKind::Class
+                )
+            })
+            .find(|decl| match &target {
+                DefaultExportTarget::Span(span) => decl.span == *span,
+                DefaultExportTarget::Name(name) => decl.name == *name,
+            })
+        else {
             continue;
         };
         if seen_sources.contains(&source.symbol) {
-            continue;
-        }
-        if !matches!(
-            source.kind,
-            bonsai_lang_api::DeclKind::Function
-                | bonsai_lang_api::DeclKind::Method
-                | bonsai_lang_api::DeclKind::Constructor
-                | bonsai_lang_api::DeclKind::Class
-        ) {
             continue;
         }
         seen_sources.push(source.symbol);
