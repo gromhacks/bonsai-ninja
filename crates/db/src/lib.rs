@@ -18,7 +18,7 @@ use bonsai_lang_api::{AdapterContext, DeclIndex, DynAdapter, ImportIndex, Import
 use bonsai_parser::{ParseError, ParsedFile, ParserCache, ParserOptions};
 use bonsai_trace::{finalize, TraceResult};
 use bonsai_vfs::Vfs;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::sync::{Arc, OnceLock};
 
 /// Immutable handle shared across threads. Cheap to clone.
@@ -57,6 +57,11 @@ struct DbInner {
     pub diagnostics: RwLock<DiagnosticSink>,
     parser: ParserCache,
     cache: RwLock<Caches>,
+    /// Single-flight guard for the workspace-global syntax index. Rule
+    /// matching asks for global facts from parallel file workers; without a
+    /// dedicated build guard every racing caller can lower the entire
+    /// workspace before the cache's final compare-and-install step.
+    global_index_build: Mutex<()>,
     /// Workspace root path. Set by the workspace at open/index time
     /// via `set_workspace_root`. Adapters use this through
     /// `AdapterContext.workspace_root` to derive workspace-relative
@@ -129,6 +134,7 @@ impl AnalyzerDb {
                 diagnostics: RwLock::new(DiagnosticSink::new()),
                 parser: ParserCache::with_options(parser_options),
                 cache: RwLock::new(Caches::default()),
+                global_index_build: Mutex::new(()),
                 workspace_root: RwLock::new(None),
                 idg_service: RwLock::new(None),
                 idg_services_by_semantics: RwLock::new(AHashMap::new()),
@@ -471,8 +477,13 @@ impl AnalyzerDb {
         if let Some(v) = cached {
             return v;
         }
+        let _build = self.inner.global_index_build.lock();
+        let cached = self.inner.cache.read().global_index.clone();
+        if let Some(v) = cached {
+            return v;
+        }
         let files = self.inner.vfs.all_files();
-        let consume_decl_index_cache = should_consume_decl_index_cache_for_global(files.len());
+        let consume_decl_index_cache = should_consume_decl_index_cache_for_global();
         let mut gi = GlobalIndex::new();
         if consume_decl_index_cache {
             self.populate_global_index_consuming(&mut gi, &files);
@@ -486,17 +497,12 @@ impl AnalyzerDb {
         gi.finalize_semantic_facts();
         let arc = Arc::new(gi);
         let mut cache = self.inner.cache.write();
-        // Re-check under the write lock so a peer thread that beat
-        // us to it doesn't have its `Arc<GlobalIndex>` replaced.
-        if let Some(existing) = cache.global_index.clone() {
-            return existing;
-        }
         cache.global_index = Some(arc.clone());
         arc
     }
 
     fn populate_global_index_consuming(&self, gi: &mut GlobalIndex, files: &[FileId]) {
-        let workers = global_index_worker_count(files.len());
+        let workers = global_index_worker_count();
         if workers <= 1 || files.len() <= 1 {
             for &file in files {
                 if let Some(idx) = self.take_decl_index_for_global(file) {
@@ -651,6 +657,10 @@ impl AnalyzerDb {
     /// Invalidate everything that depends on a given file. Coarse-grained
     /// but correct; refine as needed.
     pub fn invalidate_file(&self, file: FileId) {
+        // Serialize invalidation with the global-index builder. A file edit
+        // that lands during construction must invalidate the completed
+        // snapshot instead of allowing that snapshot to publish afterward.
+        let _build = self.inner.global_index_build.lock();
         self.inner.parser.invalidate(file);
         // Snapshot the GLOBAL FuncIds for `file` from the current
         // `global_index` BEFORE we wipe it. The per-file
@@ -702,17 +712,17 @@ impl AnalyzerDb {
     }
 }
 
-fn should_consume_decl_index_cache_for_global(file_count: usize) -> bool {
+fn should_consume_decl_index_cache_for_global() -> bool {
     if let Some(keep_cache) = std::env::var("BONSAI_KEEP_DECL_INDEX_CACHE")
         .ok()
         .and_then(|raw| parse_env_bool(&raw))
     {
         return !keep_cache;
     }
-    file_count >= 10_000
+    true
 }
 
-fn global_index_worker_count(file_count: usize) -> usize {
+fn global_index_worker_count() -> usize {
     let available = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
@@ -721,22 +731,15 @@ fn global_index_worker_count(file_count: usize) -> usize {
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
     {
-        return requested.clamp(1, available);
+        return requested.max(1);
     }
     if let Some(requested) = std::env::var("RAYON_NUM_THREADS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
     {
-        return requested.clamp(1, available);
+        return requested.max(1);
     }
-    let default = if file_count >= 20_000 {
-        4
-    } else if file_count >= 10_000 {
-        6
-    } else {
-        available
-    };
-    default.clamp(1, available)
+    available
 }
 
 fn global_index_worker_stack_bytes() -> usize {
