@@ -215,6 +215,14 @@ struct ContextualSummaryRuntime {
     returns_by_from: AHashMap<NodeId, Vec<ContextBoundaryEdge>>,
 }
 
+#[derive(Copy, Clone)]
+struct SymbolicClosurePolicy<'a> {
+    max_precision: Option<Precision>,
+    allowed_funcs: Option<&'a AHashSet<FuncId>>,
+    contextual: Option<&'a ContextualSummaryRuntime>,
+    activate_seed_callers: bool,
+}
+
 enum RootClosureVisited {
     Dense(NodeBitSet),
     Sparse {
@@ -760,10 +768,12 @@ impl IdgQueryService {
             &unified,
             &contextual.reach,
             &seed_nodes,
-            max_precision,
-            Some(allowed_funcs),
-            Some(contextual),
-            false,
+            SymbolicClosurePolicy {
+                max_precision,
+                allowed_funcs: Some(allowed_funcs),
+                contextual: Some(contextual),
+                activate_seed_callers: false,
+            },
             None,
         )
         .into_iter()
@@ -823,10 +833,12 @@ impl IdgQueryService {
             &unified,
             &contextual.reach,
             &seed_nodes,
-            None,
-            None,
-            Some(contextual.as_ref()),
-            true,
+            SymbolicClosurePolicy {
+                max_precision: None,
+                allowed_funcs: None,
+                contextual: Some(contextual.as_ref()),
+                activate_seed_callers: true,
+            },
             None,
         )
         .into_iter()
@@ -857,10 +869,12 @@ impl IdgQueryService {
             &unified,
             &contextual.reach,
             &seed_nodes,
-            Some(max_precision),
-            None,
-            Some(contextual.as_ref()),
-            true,
+            SymbolicClosurePolicy {
+                max_precision: Some(max_precision),
+                allowed_funcs: None,
+                contextual: Some(contextual.as_ref()),
+                activate_seed_callers: true,
+            },
             None,
         )
         .into_iter()
@@ -889,10 +903,12 @@ impl IdgQueryService {
                 &unified,
                 &contextual.reach,
                 &seed_nodes,
-                max_precision,
-                None,
-                Some(contextual.as_ref()),
-                true,
+                SymbolicClosurePolicy {
+                    max_precision,
+                    allowed_funcs: None,
+                    contextual: Some(contextual.as_ref()),
+                    activate_seed_callers: true,
+                },
                 Some(&mut symbolic_cross_calls),
             )
             .into_iter()
@@ -2150,7 +2166,7 @@ impl IdgQueryService {
         (local_node.0 < end.saturating_sub(start)).then(|| WsNodeId(start + local_node.0))
     }
 
-    fn ws_node_func(&self, unified: &UnifiedAddressSpace, node: NodeId) -> Option<FuncId> {
+    fn ws_node_func(unified: &UnifiedAddressSpace, node: NodeId) -> Option<FuncId> {
         unified.node_funcs.get(node.0 as usize).copied()
     }
 
@@ -2211,30 +2227,30 @@ impl IdgQueryService {
         // scalar InterCallArg / InterReturn / InterThrow edges remain exact
         // stack boundaries.
         let mut heap_by_from: AHashMap<NodeId, Vec<NodeId>> = AHashMap::default();
-        let mut record_non_call_relation = |from_segment: SegmentId,
-                                            to_segment: SegmentId,
-                                            edge: &IdgEdge| {
-            let projected_heap_relation = edge.meta.kind.is_inter()
-                && (self.node_is_projected_storage(from_segment, edge.from)
-                    || self.node_is_projected_storage(to_segment, edge.to));
-            if (edge.meta.kind.is_inter() && !projected_heap_relation)
-                || max_precision.is_some_and(|max| edge.meta.precision > max)
-            {
-                return;
-            }
-            let Some(from) = Self::ws_node_for(&unified, from_segment, edge.from) else {
-                return;
+        let mut record_non_call_relation =
+            |from_segment: SegmentId, to_segment: SegmentId, edge: &IdgEdge| {
+                let projected_heap_relation = edge.meta.kind.is_inter()
+                    && (self.node_is_projected_storage(from_segment, edge.from)
+                        || self.node_is_projected_storage(to_segment, edge.to));
+                if (edge.meta.kind.is_inter() && !projected_heap_relation)
+                    || max_precision.is_some_and(|max| edge.meta.precision > max)
+                {
+                    return;
+                }
+                let Some(from) = Self::ws_node_for(&unified, from_segment, edge.from) else {
+                    return;
+                };
+                let Some(to) = Self::ws_node_for(&unified, to_segment, edge.to) else {
+                    return;
+                };
+                if projected_heap_relation {
+                    heap_by_from.entry(NodeId(from.0)).or_default().push(NodeId(to.0));
+                } else if Self::ws_node_func(&unified, NodeId(from.0))
+                    != Self::ws_node_func(&unified, NodeId(to.0))
+                {
+                    pairs.push((from.0, to.0));
+                }
             };
-            let Some(to) = Self::ws_node_for(&unified, to_segment, edge.to) else {
-                return;
-            };
-            if projected_heap_relation {
-                heap_by_from.entry(NodeId(from.0)).or_default().push(NodeId(to.0));
-            } else if self.ws_node_func(&unified, NodeId(from.0)) != self.ws_node_func(&unified, NodeId(to.0))
-            {
-                pairs.push((from.0, to.0));
-            }
-        };
         for (segment_id, segment) in self.workspace.segments() {
             for edge in &segment.edges {
                 record_non_call_relation(segment_id, segment_id, edge);
@@ -2303,22 +2319,22 @@ impl IdgQueryService {
                     return;
                 }
                 let key = match edge.meta.kind {
-                    IdgEdgeKind::InterCallArg => self
-                        .ws_node_func(&unified, NodeId(from.0))
-                        .zip(self.ws_node_func(&unified, NodeId(to.0)))
+                    IdgEdgeKind::InterCallArg => Self::ws_node_func(&unified, NodeId(from.0))
+                        .zip(Self::ws_node_func(&unified, NodeId(to.0)))
                         .map(|(caller, callee)| ContextBoundaryKey {
                             caller,
                             callee,
                             span: edge.meta.via_span,
                         }),
-                    IdgEdgeKind::InterReturn | IdgEdgeKind::InterThrow => self
-                        .ws_node_func(&unified, NodeId(to.0))
-                        .zip(self.ws_node_func(&unified, NodeId(from.0)))
-                        .map(|(caller, callee)| ContextBoundaryKey {
-                            caller,
-                            callee,
-                            span: edge.meta.via_span,
-                        }),
+                    IdgEdgeKind::InterReturn | IdgEdgeKind::InterThrow => {
+                        Self::ws_node_func(&unified, NodeId(to.0))
+                            .zip(Self::ws_node_func(&unified, NodeId(from.0)))
+                    }
+                    .map(|(caller, callee)| ContextBoundaryKey {
+                        caller,
+                        callee,
+                        span: edge.meta.via_span,
+                    }),
                     _ => None,
                 };
                 if let Some(key) = key {
@@ -2360,14 +2376,14 @@ impl IdgQueryService {
                 return;
             };
             let Some(caller_callee) = (match edge.meta.kind {
-                IdgEdgeKind::InterCallArg => self
-                    .ws_node_func(&unified, NodeId(from.0))
-                    .zip(self.ws_node_func(&unified, NodeId(to.0)))
+                IdgEdgeKind::InterCallArg => Self::ws_node_func(&unified, NodeId(from.0))
+                    .zip(Self::ws_node_func(&unified, NodeId(to.0)))
                     .map(|(caller, callee)| (caller, callee, true)),
-                IdgEdgeKind::InterReturn | IdgEdgeKind::InterThrow => self
-                    .ws_node_func(&unified, NodeId(to.0))
-                    .zip(self.ws_node_func(&unified, NodeId(from.0)))
-                    .map(|(caller, callee)| (caller, callee, false)),
+                IdgEdgeKind::InterReturn | IdgEdgeKind::InterThrow => {
+                    Self::ws_node_func(&unified, NodeId(to.0))
+                        .zip(Self::ws_node_func(&unified, NodeId(from.0)))
+                }
+                .map(|(caller, callee)| (caller, callee, false)),
                 _ => None,
             }) else {
                 return;
@@ -2426,12 +2442,15 @@ impl IdgQueryService {
         unified: &Arc<UnifiedAddressSpace>,
         reach: &ReachabilityIndex,
         seeds: &[NodeId],
-        max_precision: Option<Precision>,
-        allowed_funcs: Option<&AHashSet<FuncId>>,
-        contextual: Option<&ContextualSummaryRuntime>,
-        activate_seed_callers: bool,
+        policy: SymbolicClosurePolicy<'_>,
         mut symbolic_cross_calls: Option<&mut Vec<CrossCallEdge>>,
     ) -> Vec<NodeId> {
+        let SymbolicClosurePolicy {
+            max_precision,
+            allowed_funcs,
+            contextual,
+            activate_seed_callers,
+        } = policy;
         let symbolic = self.workspace.symbolic_field();
         if symbolic.transforms().is_empty() && contextual.is_none() {
             return reach.forward_closure_nodes(seeds);
@@ -2444,8 +2463,7 @@ impl IdgQueryService {
         for seed in seeds.iter().copied() {
             if (seed.0 as usize) < unified.reverse.len()
                 && allowed_funcs.is_none_or(|allowed| {
-                    self.ws_node_func(unified, seed)
-                        .is_some_and(|func| allowed.contains(&func))
+                    Self::ws_node_func(unified, seed).is_some_and(|func| allowed.contains(&func))
                 })
                 && reached.insert(seed, 0)
             {
@@ -2476,8 +2494,7 @@ impl IdgQueryService {
                 for target in reach.forward_neighbours(state.node) {
                     let target = NodeId(*target);
                     if allowed_funcs.is_none_or(|allowed| {
-                        self.ws_node_func(unified, target)
-                            .is_some_and(|func| allowed.contains(&func))
+                        Self::ws_node_func(unified, target).is_some_and(|func| allowed.contains(&func))
                     }) && reached.insert(target, state.context)
                     {
                         ordinary.push(ClosureNodeState {
@@ -2490,7 +2507,7 @@ impl IdgQueryService {
                     if let Some(targets) = contextual.heap_by_from.get(&state.node) {
                         for &target in targets {
                             if allowed_funcs.is_none_or(|allowed| {
-                                self.ws_node_func(unified, target)
+                                Self::ws_node_func(unified, target)
                                     .is_some_and(|func| allowed.contains(&func))
                             }) && reached.insert(target, 0)
                             {
@@ -2504,7 +2521,7 @@ impl IdgQueryService {
                     if let Some(calls) = contextual.calls_by_from.get(&state.node) {
                         for call in calls {
                             if allowed_funcs.is_some_and(|allowed| {
-                                self.ws_node_func(unified, call.target)
+                                Self::ws_node_func(unified, call.target)
                                     .is_none_or(|func| !allowed.contains(&func))
                             }) {
                                 continue;
@@ -2513,7 +2530,7 @@ impl IdgQueryService {
                                 contexts.register_call(state.context, call.key);
                             for target in returned_nodes {
                                 if allowed_funcs.is_none_or(|allowed| {
-                                    self.ws_node_func(unified, target)
+                                    Self::ws_node_func(unified, target)
                                         .is_some_and(|func| allowed.contains(&func))
                                 }) && reached.insert(target, state.context)
                                 {
@@ -2540,7 +2557,7 @@ impl IdgQueryService {
                     if let Some(returns) = contextual.returns_by_from.get(&state.node) {
                         for returned in returns {
                             if allowed_funcs.is_some_and(|allowed| {
-                                self.ws_node_func(unified, returned.target)
+                                Self::ws_node_func(unified, returned.target)
                                     .is_none_or(|func| !allowed.contains(&func))
                             }) {
                                 continue;
@@ -2571,7 +2588,7 @@ impl IdgQueryService {
             while fact_cursor < pending_facts.len() {
                 let fact = pending_facts[fact_cursor];
                 fact_cursor += 1;
-                self.seed_symbolic_fact_consumers(
+                Self::seed_symbolic_fact_consumers(
                     unified,
                     runtime,
                     fact,
@@ -2604,7 +2621,7 @@ impl IdgQueryService {
                                     contexts.register_call(fact.context, boundary);
                                 for node in returned_nodes {
                                     if allowed_funcs.is_none_or(|allowed| {
-                                        self.ws_node_func(unified, node)
+                                        Self::ws_node_func(unified, node)
                                             .is_some_and(|func| allowed.contains(&func))
                                     }) && reached.insert(node, fact.context)
                                     {
@@ -2656,7 +2673,7 @@ impl IdgQueryService {
                                 for node in nodes {
                                     let node = NodeId(node.0);
                                     if allowed_funcs.is_some_and(|allowed| {
-                                        self.ws_node_func(unified, node)
+                                        Self::ws_node_func(unified, node)
                                             .is_none_or(|func| !allowed.contains(&func))
                                     }) {
                                         continue;
@@ -2738,7 +2755,6 @@ impl IdgQueryService {
     }
 
     fn seed_symbolic_fact_consumers(
-        &self,
         unified: &UnifiedAddressSpace,
         runtime: &SymbolicRuntimeIndex,
         fact: SymbolicNodeFact,
@@ -2751,8 +2767,7 @@ impl IdgQueryService {
             for node in nodes {
                 let node = NodeId(node.0);
                 if allowed_funcs.is_none_or(|allowed| {
-                    self.ws_node_func(unified, node)
-                        .is_some_and(|func| allowed.contains(&func))
+                    Self::ws_node_func(unified, node).is_some_and(|func| allowed.contains(&func))
                 }) && reached.insert(node, fact.context)
                 {
                     ordinary.push(ClosureNodeState {
@@ -2766,8 +2781,7 @@ impl IdgQueryService {
             for node in nodes {
                 let node = NodeId(node.0);
                 if allowed_funcs.is_none_or(|allowed| {
-                    self.ws_node_func(unified, node)
-                        .is_some_and(|func| allowed.contains(&func))
+                    Self::ws_node_func(unified, node).is_some_and(|func| allowed.contains(&func))
                 }) && reached.insert(node, fact.context)
                 {
                     ordinary.push(ClosureNodeState {

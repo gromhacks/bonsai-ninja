@@ -758,12 +758,14 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
     let constructor_return_sites = constructor_return_sites.into_sites();
     if include_field_argument_forwarding {
         stitch_field_argument_forwarding(
-            &field_arg_sites,
-            &return_field_sites,
-            &scalar_return_sites,
-            &constructor_return_sites,
-            &receiver_mutation_sites,
-            &passthrough_field_copy_sites,
+            FieldForwardingSites {
+                field_args: &field_arg_sites,
+                return_fields: &return_field_sites,
+                scalar_returns: &scalar_return_sites,
+                constructor_returns: &constructor_return_sites,
+                receiver_mutations: &receiver_mutation_sites,
+                passthrough_copies: &passthrough_field_copy_sites,
+            },
             &stitch_data,
             &mut ws,
             symbolic_field_forwarding,
@@ -1239,6 +1241,12 @@ fn stitch_call_site(
     passthrough_field_copy_sites: &mut Vec<FieldCopySite>,
     mut stats: Option<&mut StitchStats>,
 ) {
+    let caller_receiver = CallerReceiverContext {
+        params: caller_params,
+        receiver_param_index: caller_receiver_param_index,
+        implicit_receiver_bases: caller_implicit_receiver_bases,
+        receiver_names: caller_receiver_names,
+    };
     if let Some(stats) = &mut stats {
         stats.sites = stats.sites.saturating_add(1);
     }
@@ -1444,10 +1452,7 @@ fn stitch_call_site(
                     let actual_receiver = receiver_field_forwarding_base(
                         site,
                         receiver,
-                        caller_params,
-                        caller_receiver_param_index,
-                        caller_implicit_receiver_bases,
-                        caller_receiver_names,
+                        &caller_receiver,
                         is_ancestor_dispatch,
                         false,
                     );
@@ -1534,10 +1539,7 @@ fn stitch_call_site(
                     let actual_receiver = receiver_field_forwarding_base(
                         site,
                         receiver,
-                        caller_params,
-                        caller_receiver_param_index,
-                        caller_implicit_receiver_bases,
-                        caller_receiver_names,
+                        &caller_receiver,
                         is_ancestor_dispatch,
                         true,
                     );
@@ -2351,10 +2353,7 @@ fn constructor_implicit_receiver_base(
 fn receiver_field_forwarding_base(
     site: &CallSiteRef,
     receiver: &str,
-    caller_params: &[String],
-    caller_receiver_param_index: Option<usize>,
-    caller_implicit_receiver_bases: &[String],
-    caller_receiver_names: &[String],
+    caller: &CallerReceiverContext<'_>,
     is_ancestor_dispatch: bool,
     allow_implicit_receiver_rewrite: bool,
 ) -> String {
@@ -2362,30 +2361,21 @@ fn receiver_field_forwarding_base(
         return base.to_string();
     }
     if allow_implicit_receiver_rewrite {
-        return implicit_receiver_actual_base(
-            receiver,
-            caller_params,
-            caller_receiver_param_index,
-            caller_implicit_receiver_bases,
-            caller_receiver_names,
-            is_ancestor_dispatch,
-        );
+        return implicit_receiver_actual_base(receiver, caller, is_ancestor_dispatch);
     }
     receiver.trim().to_string()
 }
 
 fn implicit_receiver_actual_base(
     receiver: &str,
-    caller_params: &[String],
-    caller_receiver_param_index: Option<usize>,
-    caller_implicit_receiver_bases: &[String],
-    caller_receiver_names: &[String],
+    caller: &CallerReceiverContext<'_>,
     is_ancestor_dispatch: bool,
 ) -> String {
     let trimmed = receiver.trim();
-    if receiver_name_matches(trimmed, caller_receiver_names) {
-        if let Some(param) = caller_receiver_param_index
-            .and_then(|idx| caller_params.get(idx))
+    if receiver_name_matches(trimmed, caller.receiver_names) {
+        if let Some(param) = caller
+            .receiver_param_index
+            .and_then(|idx| caller.params.get(idx))
             .map(String::as_str)
             .map(str::trim)
             .filter(|name| !name.is_empty())
@@ -2394,14 +2384,21 @@ fn implicit_receiver_actual_base(
         }
         if let Some(base) = constructor_implicit_receiver_base(
             trimmed,
-            caller_implicit_receiver_bases,
-            caller_receiver_names,
+            caller.implicit_receiver_bases,
+            caller.receiver_names,
             is_ancestor_dispatch,
         ) {
             return base;
         }
     }
     trimmed.to_string()
+}
+
+struct CallerReceiverContext<'a> {
+    params: &'a [String],
+    receiver_param_index: Option<usize>,
+    implicit_receiver_bases: &'a [String],
+    receiver_names: &'a [String],
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the explicit FieldArgStitch metadata.
@@ -2658,18 +2655,30 @@ fn named_arg_param_index(
         .map(|(idx, _)| idx)
 }
 
+struct FieldForwardingSites<'a> {
+    field_args: &'a [Arc<FieldArgStitch>],
+    return_fields: &'a [Arc<ReturnFieldStitch>],
+    scalar_returns: &'a [Arc<ScalarReturnStitch>],
+    constructor_returns: &'a [Arc<ConstructorReturnStitch>],
+    receiver_mutations: &'a [Arc<ReceiverMutationStitch>],
+    passthrough_copies: &'a [FieldCopySite],
+}
+
 fn stitch_field_argument_forwarding(
-    sites: &[Arc<FieldArgStitch>],
-    return_field_sites: &[Arc<ReturnFieldStitch>],
-    scalar_return_sites: &[Arc<ScalarReturnStitch>],
-    constructor_return_sites: &[Arc<ConstructorReturnStitch>],
-    receiver_mutation_sites: &[Arc<ReceiverMutationStitch>],
-    passthrough_field_copy_sites: &[FieldCopySite],
+    sites: FieldForwardingSites<'_>,
     stitch_data: &AHashMap<FuncId, FunctionStitchData>,
     ws: &mut IdgWorkspace,
     symbolic: bool,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
 ) {
+    let FieldForwardingSites {
+        field_args: sites,
+        return_fields: return_field_sites,
+        scalar_returns: scalar_return_sites,
+        constructor_returns: constructor_return_sites,
+        receiver_mutations: receiver_mutation_sites,
+        passthrough_copies: passthrough_field_copy_sites,
+    } = sites;
     let mut copy_sites = collect_field_copy_sites(ws, stitch_data);
     copy_sites.extend_from_slice(passthrough_field_copy_sites);
     copy_sites.sort_by(|a, b| {
@@ -3570,7 +3579,7 @@ fn apply_outbound_field_write(
     call_kind: CallEdgeKind,
     source: &FieldPlaceHit,
     inter_call_arg_entries: &mut InterCallArgEntryIndex,
-    synthetic_field_writes: &mut SyntheticFieldWriteCache,
+    _synthetic_field_writes: &mut SyntheticFieldWriteCache,
     ws: &mut IdgWorkspace,
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
@@ -3584,7 +3593,7 @@ fn apply_outbound_field_write(
         return;
     }
     let Some((target_field_write, target_field_span, is_new_field_write)) =
-        synthetic_field_writes.ensure(ws, to_seg, to_func, target_base, &source.field, write_span)
+        SyntheticFieldWriteCache::ensure(ws, to_seg, to_func, target_base, &source.field, write_span)
     else {
         return;
     };
@@ -4508,7 +4517,6 @@ impl SyntheticFieldWriteCache {
     }
 
     fn ensure(
-        &mut self,
         ws: &mut IdgWorkspace,
         seg_id: SegmentId,
         func: FuncId,
@@ -4544,7 +4552,7 @@ impl SyntheticFieldWriteCache {
         if let Some((node, span)) = self.parameter_nodes.get(&key).copied() {
             return Some((node, span, false));
         }
-        let created = self.ensure(ws, seg_id, func, &key.2, &key.3, fallback_span)?;
+        let created = Self::ensure(ws, seg_id, func, &key.2, &key.3, fallback_span)?;
         self.parameter_nodes.insert(key, (created.0, created.1));
         Some(created)
     }

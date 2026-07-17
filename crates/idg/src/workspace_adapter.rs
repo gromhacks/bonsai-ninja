@@ -2433,16 +2433,7 @@ where
         let phase_started = Instant::now();
         let before_edges = ws.total_edge_count();
         let before_field_links = ws.field_flow().len();
-        stitch_receiver_method_propagation(
-            &mut ws,
-            global,
-            call_graph,
-            &resolver,
-            &maps.func_to_language,
-            &maps.file_to_language,
-            &maps.func_to_scope,
-            &maps.symbol_to_scope,
-        );
+        stitch_receiver_method_propagation(&mut ws, global, call_graph, &resolver, &maps);
         idg_build_log(format_args!(
             "receiver-method-propagation: {:.3}s edge_delta={} field_link_delta={} total_edges={} field_links={}",
             phase_started.elapsed().as_secs_f64(),
@@ -2789,14 +2780,15 @@ fn stitch_receiver_method_propagation(
     global: &GlobalIndex,
     call_graph: &ResolvedCallGraph,
     resolver: &WorkspaceCalleeResolver<'_>,
-    func_to_language: &AHashMap<FuncId, &'static str>,
-    file_to_language: &AHashMap<FileId, &'static str>,
-    func_to_scope: &AHashMap<FuncId, LocalScopeKey>,
-    symbol_to_scope: &AHashMap<bonsai_common::SymbolId, LocalScopeKey>,
+    maps: &WorkspaceMaps,
 ) {
     use crate::edge::IdgEdgeKind;
     use bonsai_common::SymbolId;
     use bonsai_lang_api::DeclKind;
+    let func_to_language = &maps.func_to_language;
+    let file_to_language = &maps.file_to_language;
+    let func_to_scope = &maps.func_to_scope;
+    let symbol_to_scope = &maps.symbol_to_scope;
     let scope_files = propagation_scope_files(global, file_to_language);
     let offsets = SegmentOffsets::new(ws);
     // Group decls by parent so we know each class's known fields.
