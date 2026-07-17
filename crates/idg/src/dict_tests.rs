@@ -53,8 +53,8 @@ fn place_dict_rebuild_lookup_after_serde_roundtrip() {
     let mut d = PlaceDict::new();
     d.intern(Place::Return);
     let id_param = d.intern(Place::Param { idx: 5 });
-    let bytes = bincode::serialize(&d).expect("serialize");
-    let mut restored: PlaceDict = bincode::deserialize(&bytes).expect("deserialize");
+    let bytes = bonsai_common::wire::encode(&d).expect("serialize");
+    let mut restored: PlaceDict = bonsai_common::wire::decode(&bytes).expect("deserialize");
     // After deserialise, by_place is empty (skip). lookup returns None.
     assert_eq!(restored.lookup(&Place::Return), None);
     restored.rebuild_lookup();
@@ -110,8 +110,8 @@ fn node_dict_rebuild_lookup_after_serde_roundtrip() {
     let mut d = NodeDict::new();
     let a = d.intern(FuncId::new(7), PlaceId(11));
     let b = d.intern(FuncId::new(8), PlaceId(11));
-    let bytes = bincode::serialize(&d).expect("serialize");
-    let mut restored: NodeDict = bincode::deserialize(&bytes).expect("deserialize");
+    let bytes = bonsai_common::wire::encode(&d).expect("serialize");
+    let mut restored: NodeDict = bonsai_common::wire::decode(&bytes).expect("deserialize");
     assert_eq!(restored.lookup(FuncId::new(7), PlaceId(11)), None);
     restored.rebuild_lookup();
     assert_eq!(restored.lookup(FuncId::new(7), PlaceId(11)), Some(a));

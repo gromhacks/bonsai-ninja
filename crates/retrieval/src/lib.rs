@@ -7,7 +7,7 @@
 //! before rendering public analysis facts.
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{cached_span_map_arc, workspace_bonsai_dir, Precision, Span, SymbolId};
+use bonsai_common::{cached_span_map_arc, wire, workspace_bonsai_dir, Precision, Span, SymbolId};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter, LookupHit};
 use bonsai_hash::{fnv1a_bytes64, fnv1a_str_slice64, Hasher as StableHasher};
 use bonsai_lang_api::{
@@ -42,7 +42,8 @@ use std::path::{Path, PathBuf};
 // v8 (2026-07-13): persisted documents use an interned string dictionary and
 // streaming zstd compression. Canonical FactDoc semantics are unchanged; the
 // representation removes workspace-scale repetition from the sidecar.
-pub const RETRIEVAL_SCHEMA_VERSION: u32 = 8;
+// v9 (2026-07-16): MessagePack replaces the retired binary codec.
+pub const RETRIEVAL_SCHEMA_VERSION: u32 = 9;
 
 /// Factstore table id for retrieval snapshots.
 pub const RETRIEVAL_TABLE_ID: u32 = 0x5254_5631;
@@ -1215,7 +1216,7 @@ fn save_docs_snapshot(
     let doc_count = docs.len();
     let snapshot = CompactFactSnapshot::from_docs(schema_version, pipeline, docs);
     let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1)?;
-    bincode::serialize_into(&mut encoder, &snapshot).map_err(invalid_data)?;
+    wire::encode_to_writer(&mut encoder, &snapshot).map_err(invalid_data)?;
     let bytes = encoder.finish()?;
     let body_hash = fnv1a_bytes64(&bytes);
     let writer = FactStoreWriter::create(path, RETRIEVAL_TABLE_ID, pipeline).map_err(map_factstore_io)?;
@@ -1247,7 +1248,7 @@ fn decode_snapshot_hit(hit: LookupHit, pipeline: u64) -> std::io::Result<FactSna
         ));
     }
     let decoder = zstd::stream::Decoder::new(std::io::Cursor::new(&hit.payload))?;
-    let compact: CompactFactSnapshot = bincode::deserialize_from(decoder).map_err(invalid_data)?;
+    let compact: CompactFactSnapshot = wire::decode_from_reader(decoder).map_err(invalid_data)?;
     let snapshot = compact.expand()?;
     validate_snapshot(&snapshot, pipeline)?;
     Ok(snapshot)
@@ -2282,8 +2283,8 @@ mod tests {
             pipeline_fingerprint: 11,
             docs: vec![sample_doc("handle_request", "function", 1)],
         };
-        let encoded = bincode::serialize(&snapshot).expect("serialize");
-        let decoded: FactSnapshot = bincode::deserialize(&encoded).expect("deserialize");
+        let encoded = wire::encode(&snapshot).expect("serialize");
+        let decoded: FactSnapshot = wire::decode(&encoded).expect("deserialize");
         assert_eq!(decoded.docs[0].fact_id, snapshot.docs[0].fact_id);
         assert_eq!(
             decoded.docs[0].normalized_search_text,
@@ -2938,7 +2939,7 @@ mod tests {
             pipeline_fingerprint: 101,
             docs: vec![sample_doc("handle_request", "function", 1)],
         };
-        let bytes = bincode::serialize(&snapshot).expect("serialize");
+        let bytes = wire::encode(&snapshot).expect("serialize");
         let writer = FactStoreWriter::create(&path, RETRIEVAL_TABLE_ID, snapshot.pipeline_fingerprint)
             .expect("create factstore");
         writer

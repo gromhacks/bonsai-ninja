@@ -258,9 +258,9 @@ fn snapshot_roundtrip_preserves_structured_taint_graph() {
     );
 
     let snap = ws.dataflow().snapshot(ws.db());
-    let bytes = bincode::serialize(&snap).expect("bincode serialise");
+    let bytes = bonsai_common::wire::encode(&snap).expect("snapshot serialise");
     let decoded: bonsai_workspace::dataflow::SerializableSnapshot =
-        bincode::deserialize(&bytes).expect("bincode deserialise");
+        bonsai_common::wire::decode(&bytes).expect("snapshot deserialise");
 
     let registry = Arc::new(LanguageRegistry::new());
     registry.register(python_adapter());
@@ -618,12 +618,12 @@ fn corrupt_sidecar_loads_as_empty_cache() {
     );
     let dir = std::env::temp_dir().join(unique);
     std::fs::create_dir_all(&dir).expect("create temp dataflow dir");
-    let sidecar = dir.join("dataflow.v2.bin");
-    std::fs::write(&sidecar, b"not a bincode sidecar").expect("write corrupt sidecar");
+    let sidecar = dir.join("dataflow.factstore");
+    std::fs::write(&sidecar, b"not a valid factstore").expect("write corrupt sidecar");
 
     let loaded = ws
         .dataflow()
-        .load_from_disk(&sidecar, ws.db())
+        .load_factstore_sidecar(&sidecar, ws.db())
         .expect("corrupt sidecar is non-fatal");
     assert_eq!(loaded, 0);
 
@@ -646,9 +646,9 @@ fn snapshot_roundtrip_preserves_facts() {
     let handle = func_id_by_name(&ws, "handle");
     let before = ws.dataflow().facts_for(handle, ws.db()).flattened();
     let snap = ws.dataflow().snapshot(ws.db());
-    let bytes = bincode::serialize(&snap).expect("bincode serialise");
+    let bytes = bonsai_common::wire::encode(&snap).expect("snapshot serialise");
     let decoded: bonsai_workspace::dataflow::SerializableSnapshot =
-        bincode::deserialize(&bytes).expect("bincode deserialise");
+        bonsai_common::wire::decode(&bytes).expect("snapshot deserialise");
 
     // Reconstruct a fresh workspace from the SAME sources and load
     // the snapshot — mimics "process restart, sidecar present."

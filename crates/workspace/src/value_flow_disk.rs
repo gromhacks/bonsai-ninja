@@ -23,7 +23,7 @@
 //! `ValueFlowGraph` shape is a public type many consumers depend on).
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{FileId, FuncId, Precision, Span};
+use bonsai_common::{wire, FileId, FuncId, Precision, Span};
 use bonsai_factstore::{StrId, StringPoolView};
 use bonsai_taint::{ValueFlowEdge, ValueFlowGraph, ValueFlowNode, ValueFlowNodeKind};
 use serde::{Deserialize, Serialize};
@@ -48,10 +48,19 @@ pub struct ValueFlowEntry {
 /// Errors surfaced when reading a corrupt or out-of-range entry.
 #[derive(Debug, Error)]
 pub enum DecodeError {
-    /// The bytes failed bincode parsing — the file was truncated,
+    /// The bytes failed MessagePack parsing — the file was truncated,
     /// hand-edited, or written by a future format version.
-    #[error("bincode: {0}")]
-    Bincode(#[from] bincode::Error),
+    #[error("MessagePack: {0}")]
+    Wire(#[from] wire::DecodeError),
+
+    /// A persisted node kind does not map to a known semantic variant.
+    #[error("unknown ValueFlowNodeKind discriminant {kind} at node {index}")]
+    UnknownNodeKind {
+        /// Unknown persisted discriminant.
+        kind: u8,
+        /// Node-table index containing the invalid discriminant.
+        index: usize,
+    },
 
     /// A string id referenced by the entry is outside the pool's
     /// id range.
@@ -84,7 +93,7 @@ pub enum DecodeError {
     },
 }
 
-/// Encode an entry into bincode bytes, interning every `value_text`
+/// Encode an entry into MessagePack bytes, interning every `value_text`
 /// into the caller's string pool via the closure `intern`.
 ///
 /// The closure shape lets the caller hold the writer's mutex once
@@ -95,18 +104,18 @@ where
     F: FnMut(&str) -> StrId,
 {
     let on_disk = build_on_disk(entry, intern);
-    bincode::serialize(&on_disk).expect("bincode encoding of ValueFlowEntry never fails")
+    wire::encode(&on_disk).expect("MessagePack encoding of ValueFlowEntry never fails")
 }
 
 /// Decode bytes produced by [`encode`] back into a [`ValueFlowEntry`].
 /// `pool` must be the string pool from the same fact-store file the
 /// bytes were read from — string ids are scoped to that file.
 pub fn decode(bytes: &[u8], pool: &StringPoolView<'_>) -> Result<ValueFlowEntry, DecodeError> {
-    let on_disk: OnDiskEntry = bincode::deserialize(bytes)?;
+    let on_disk: OnDiskEntry = wire::decode(bytes)?;
     on_disk.into_in_memory(pool)
 }
 
-/// On-disk shape persisted via bincode. Every reference to a `String`
+/// On-disk shape persisted via MessagePack. Every reference to a `String`
 /// has been replaced by a [`StrId`] into the workspace-wide pool;
 /// edges are stored once and referenced by index from both adjacency
 /// maps.
@@ -294,14 +303,9 @@ impl OnDiskEntry {
                 func: FuncId::new(node.func),
                 span: Span::new(FileId::new(node.span_file), node.span_start, node.span_end),
                 value_text,
-                kind: decode_node_kind(node.kind).ok_or_else(|| {
-                    DecodeError::Bincode(
-                        bincode::ErrorKind::Custom(format!(
-                            "unknown ValueFlowNodeKind discriminant {} at node {i}",
-                            node.kind
-                        ))
-                        .into(),
-                    )
+                kind: decode_node_kind(node.kind).ok_or(DecodeError::UnknownNodeKind {
+                    kind: node.kind,
+                    index: i,
                 })?,
             });
         }

@@ -35,6 +35,7 @@ use std::{
 /// Monotonic bump. Increment every time the on-disk format changes
 /// (shape of `KindedTokens`, serialisation layout, propagation
 /// semantics) so old sidecars are rejected on open.
+// v33 (2026-07-16): MessagePack replaces the retired binary codec.
 // v32 (2026-07-16): remove the retired sanitizer-profile fields.
 // v30 (2026-07-09): call arguments carry AST-derived passing modes and
 // destructuring assignments carry an explicit aggregate-binding kind.
@@ -45,7 +46,7 @@ use std::{
 // method-receiver-base source exemption + container-input span
 // containment, service.rs return-position source-seeding fallback) and
 // adapter member synthesis alter propagated taint facts.
-pub const DATAFLOW_CACHE_VERSION: u32 = 32;
+pub const DATAFLOW_CACHE_VERSION: u32 = 33;
 
 type DataFlowMemoryEntry = (FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>, AHashSet<FileId>);
 
@@ -84,7 +85,7 @@ pub struct SnapshotEntry {
     pub graph: EntryTaintGraph,
 }
 
-/// Serialisable snapshot — round-trips via `bincode`. Every entry
+/// Serialisable snapshot — round-trips via Serde. Every entry
 /// carries enough identity to find its function in a
 /// freshly-reopened workspace.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -557,8 +558,8 @@ impl DataFlowCache {
         inner.facts.clear();
         inner.graphs.clear();
         inner.dependencies.clear();
-        // Record file content hashes so reload validation works the
-        // same as the legacy bincode path.
+        // Record file content hashes so snapshot reload validation uses the
+        // same source state as the disk-backed entries.
         for file in db.vfs().all_files() {
             if let Ok(snap) = db.vfs().snapshot(file) {
                 inner.file_hashes.insert(file, content_hash(snap.text.as_bytes()));
@@ -649,7 +650,7 @@ impl DataFlowCache {
         mem_empty && disk_empty
     }
 
-    /// Serialise the cache to a `bincode`-compatible snapshot. Each
+    /// Serialise the cache to a transport-independent snapshot. Each
     /// entry carries `(func_name, file_index, name_span_start)`
     /// so a later `load_snapshot` can map it back to the right
     /// function even if `SymbolId`/`FuncId` counters land on
@@ -659,8 +660,8 @@ impl DataFlowCache {
         // Hydrate every disk-backed entry into the in-memory caches
         // before iterating below. The streaming prewarm path
         // (`prewarm_to_disk`) clears in-memory facts after writing
-        // the factstore sidecar, so without this the bincode v2.bin
-        // snapshot would be empty even though the v3.factstore
+        // the factstore sidecar, so without this the compatibility
+        // snapshot would be empty even though the factstore
         // sidecar holds the data. Idempotent: a hot in-memory hit
         // skips the disk seek.
         if self.disk.read().is_some() {
@@ -727,8 +728,8 @@ impl DataFlowCache {
                 graph: inner.graphs.get(func).map(|g| (**g).clone()).unwrap_or_default(),
             });
         }
-        // Sort entries deterministically so `bincode::serialize`
-        // produces identical bytes across runs with identical
+        // Sort entries deterministically so serialization produces
+        // identical bytes across runs with identical
         // workspace state. Without this `inner.facts.iter()`
         // (AHashMap) iterates in random order and the on-disk
         // sidecar isn't content-addressable.
@@ -892,50 +893,18 @@ impl DataFlowCache {
         self.prewarm_to_disk(path, db, |_| {}).map(|_| ())
     }
 
-    /// Load a legacy bincode sidecar written by pre-factstore releases.
-    /// New writers exclusively use [`Self::prewarm_to_disk`]; this reader
-    /// remains as a migration fallback until old workspace caches age out.
-    /// Returns the number of entries that survived version / content
-    /// validation. Non-existent sidecar returns `Ok(0)` — nothing to
-    /// load, not an error.
-    pub fn load_from_disk(&self, path: &Path, db: &AnalyzerDb) -> std::io::Result<usize> {
-        if !path.exists() {
-            return Ok(0);
-        }
-        let bytes = std::fs::read(path)?;
-        if snapshot_version_prefix(&bytes).is_some_and(|version| version != DATAFLOW_CACHE_VERSION) {
-            return Ok(0);
-        }
-        let snap: SerializableSnapshot = match bincode::deserialize(&bytes) {
-            Ok(s) => s,
-            // Corrupt sidecar — treat as "nothing to load."
-            Err(error) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %error,
-                    "ignoring corrupt dataflow sidecar"
-                );
-                return Ok(0);
-            }
-        };
-        if snap.dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path) {
-            return Ok(0);
-        }
-        Ok(self.load_snapshot(snap, db))
-    }
-
-    /// Conventional location for the legacy bincode dataflow sidecar.
-    /// Kept for backward-compatible warm-cache reloads written by
-    /// older bonsai-ninja builds. New code should prefer
-    /// [`Self::factstore_sidecar_path`] which is the streaming-prewarm
-    /// target and bounds peak RAM.
+    /// Conventional location of the retired eager dataflow sidecar.
+    ///
+    /// Kept only so cache diagnostics and cleanup can identify artifacts
+    /// written by old releases. Current readers never load this file; derived
+    /// facts rebuild into [`Self::factstore_sidecar_path`].
     #[must_use]
     pub fn sidecar_path(workspace_root: &Path) -> PathBuf {
         workspace_bonsai_dir(workspace_root).join("dataflow.v2.bin")
     }
 
-    /// Conventional location for the new disk-backed fact-store
-    /// dataflow sidecar. Co-resides with the legacy sidecar; readers
+    /// Conventional location for the disk-backed fact-store
+    /// dataflow sidecar. Readers
     /// validate version + pipeline hash on open so a stale file is
     /// silently dropped.
     #[must_use]
@@ -1012,13 +981,6 @@ impl DataFlowCache {
     }
 }
 
-fn snapshot_version_prefix(bytes: &[u8]) -> Option<u32> {
-    let prefix = bytes.get(..std::mem::size_of::<u32>())?;
-    let mut raw = [0u8; std::mem::size_of::<u32>()];
-    raw.copy_from_slice(prefix);
-    Some(u32::from_le_bytes(raw))
-}
-
 fn content_hash(bytes: &[u8]) -> u64 {
     bonsai_hash::fnv1a_bytes64(bytes)
 }
@@ -1035,7 +997,7 @@ fn current_file_hashes(db: &AnalyzerDb) -> AHashMap<FileId, u64> {
 }
 
 /// Funnel `bonsai_factstore::FactStoreError` into `std::io::Error`
-/// so the dataflow API stays uniform with the legacy bincode path.
+/// so the dataflow API exposes ordinary I/O failures to callers.
 fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
     match err {
         bonsai_factstore::FactStoreError::Io(e) => e,

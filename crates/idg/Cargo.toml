@@ -8,7 +8,6 @@ description = "Workspace-wide Interprocedural Dataflow Graph (IFDS-style) — si
 
 [dependencies]
 ahash.workspace = true
-bincode.workspace = true
 bonsai_callgraph.workspace = true
 bonsai_common.workspace = true
 bonsai_diagnostics.workspace = true

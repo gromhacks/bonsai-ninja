@@ -151,7 +151,7 @@ fn unknown_string_id_is_typed_error() {
         precision: Precision::Exact,
         returning_seeds: Vec::new(),
     };
-    let bytes = bincode::serialize(&on_disk).unwrap();
+    let bytes = bonsai_common::wire::encode(&on_disk).unwrap();
     let pool_bytes = Vec::<u8>::new();
     let mut offsets = Vec::new();
     offsets.extend_from_slice(&0u32.to_le_bytes());
@@ -192,7 +192,7 @@ fn unknown_node_idx_is_typed_error() {
         precision: Precision::Exact,
         returning_seeds: Vec::new(),
     };
-    let bytes = bincode::serialize(&on_disk).unwrap();
+    let bytes = bonsai_common::wire::encode(&on_disk).unwrap();
     let pool_bytes = pool.bytes().to_vec();
     let pool_offsets = pool.offsets_bytes();
     let view = StringPoolView::new(&pool_bytes, &pool_offsets, 1).expect("pool");

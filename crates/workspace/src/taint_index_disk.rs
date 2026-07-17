@@ -8,7 +8,7 @@
 //! hit, so a hash collision (1 in 2^64) is a miss rather than a
 //! false hit.
 //!
-//! Payload shape (bincode):
+//! Payload shape (MessagePack):
 //!
 //! ```ignore
 //! struct OnDiskTaintGraphEntry {
@@ -18,7 +18,7 @@
 //! }
 //! ```
 
-use bonsai_common::FuncId;
+use bonsai_common::{wire, FuncId};
 use bonsai_hash::Hasher;
 use bonsai_taint::EntryTaintGraph;
 use serde::{Deserialize, Serialize};
@@ -41,10 +41,10 @@ pub struct TaintGraphEntry {
 /// Errors returned by [`decode`] / key validation.
 #[derive(Debug, Error)]
 pub enum DecodeError {
-    /// Bincode could not parse the bytes — the file was truncated or
+    /// MessagePack could not parse the bytes — the file was truncated or
     /// corrupt.
-    #[error("bincode: {0}")]
-    Bincode(#[from] bincode::Error),
+    #[error("MessagePack: {0}")]
+    Wire(#[from] wire::DecodeError),
 
     /// The decoded entry's `(func_raw, seeds)` did not match the
     /// caller's expected key. Most likely a hash collision with a
@@ -64,12 +64,12 @@ pub enum DecodeError {
 
 /// Encode an entry for the fact store.
 pub fn encode(entry: &TaintGraphEntry) -> Vec<u8> {
-    bincode::serialize(entry).expect("bincode encoding of TaintGraphEntry never fails")
+    wire::encode(entry).expect("MessagePack encoding of TaintGraphEntry never fails")
 }
 
 /// Decode bytes produced by [`encode`] back into a [`TaintGraphEntry`].
 pub fn decode(bytes: &[u8]) -> Result<TaintGraphEntry, DecodeError> {
-    Ok(bincode::deserialize(bytes)?)
+    Ok(wire::decode(bytes)?)
 }
 
 /// Decode and verify the entry's key matches the caller's

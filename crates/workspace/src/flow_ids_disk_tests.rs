@@ -25,7 +25,7 @@ fn entry_with_labels_roundtrips() {
 fn corrupt_bytes_surface_typed_error() {
     let bytes = vec![0xFFu8; 16];
     match decode(&bytes) {
-        Err(DecodeError::Bincode(_)) => {}
+        Err(DecodeError::Wire(_)) => {}
         other => panic!("expected Bincode error, got {other:?}"),
     }
 }

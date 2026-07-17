@@ -1,12 +1,13 @@
 //! On-disk encoding for [`super::flow_ids::FlowIdCache`] entries.
 //!
-//! Each per-function entry is the bincode-encoded `(labels,
+//! Each per-function entry is the MessagePack-encoded `(labels,
 //! truncated)` pair: the cached `Arc<[String]>` of hashed flow-id
 //! labels and the flag indicating whether the chain enumeration hit
 //! its cap. Strings are kept inline (not interned across entries)
 //! because flow-id labels are short hex hashes (8-16 chars) and the
 //! per-entry list is bounded at `MAX_LABELS_PER_FUNC`.
 
+use bonsai_common::wire;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -24,19 +25,19 @@ pub struct FlowIdEntry {
 /// Errors returned by [`decode`].
 #[derive(Debug, Error)]
 pub enum DecodeError {
-    /// Bincode could not parse the bytes.
-    #[error("bincode: {0}")]
-    Bincode(#[from] bincode::Error),
+    /// MessagePack could not parse the bytes.
+    #[error("MessagePack: {0}")]
+    Wire(#[from] wire::DecodeError),
 }
 
-/// Encode an entry into bincode bytes.
+/// Encode an entry into MessagePack bytes.
 pub fn encode(entry: &FlowIdEntry) -> Vec<u8> {
-    bincode::serialize(entry).expect("bincode encoding of FlowIdEntry never fails")
+    wire::encode(entry).expect("MessagePack encoding of FlowIdEntry never fails")
 }
 
 /// Decode bytes produced by [`encode`].
 pub fn decode(bytes: &[u8]) -> Result<FlowIdEntry, DecodeError> {
-    Ok(bincode::deserialize(bytes)?)
+    Ok(wire::decode(bytes)?)
 }
 
 #[cfg(test)]

@@ -637,8 +637,7 @@ pub struct WorkspaceOpenOptions {
     /// accidentally force every query command to rebuild the callgraph.
     #[serde(default = "default_load_callgraph_sidecar")]
     pub load_callgraph_sidecar: bool,
-    /// Load the canonical dataflow factstore before queries run, with a
-    /// read-only fallback for legacy `dataflow.v2.bin` caches.
+    /// Load the canonical dataflow factstore before queries run.
     pub load_dataflow_sidecar: bool,
     /// Compute every missing dataflow entry during open.
     pub prewarm_dataflow: bool,
@@ -1972,14 +1971,11 @@ impl Workspace {
             });
         }
         if options.load_dataflow_sidecar && !skip_prewarm {
-            // Prefer the new disk-backed factstore sidecar if one
-            // exists — opening it is just an mmap, and it'll keep
-            // peak RAM bounded for the rest of the session. Fall
-            // back to the legacy bincode sidecar otherwise so older
-            // `.bonsai/dataflow.v2.bin` files continue to warm-start
-            // a session.
+            // Opening the disk-backed factstore is just an mmap and keeps
+            // peak RAM bounded for the rest of the session. Retired eager
+            // snapshots are derived caches and intentionally rebuild.
             let factstore_sidecar = DataFlowCache::factstore_sidecar_path(root);
-            let loaded = match ws
+            match ws
                 .inner
                 .dataflow
                 .load_factstore_sidecar(&factstore_sidecar, ws.db())
@@ -1990,7 +1986,6 @@ impl Workspace {
                         status: cache_status_for_entries(entries),
                         entries,
                     });
-                    entries
                 }
                 Err(_) => {
                     on_event(WorkspaceOpenEvent::CacheChecked {
@@ -1998,33 +1993,13 @@ impl Workspace {
                         status: WorkspaceCacheStatus::Error,
                         entries: 0,
                     });
-                    0
-                }
-            };
-            if loaded == 0 {
-                let legacy_sidecar = DataFlowCache::sidecar_path(root);
-                match ws.inner.dataflow.load_from_disk(&legacy_sidecar, ws.db()) {
-                    Ok(entries) => {
-                        on_event(WorkspaceOpenEvent::CacheChecked {
-                            cache: "dataflow legacy",
-                            status: cache_status_for_entries(entries),
-                            entries,
-                        });
-                    }
-                    Err(_) => {
-                        on_event(WorkspaceOpenEvent::CacheChecked {
-                            cache: "dataflow legacy",
-                            status: WorkspaceCacheStatus::Error,
-                            entries: 0,
-                        });
-                    }
                 }
             }
         }
         // Try to load the persisted call graph before any cache
         // that depends on it asks for one. Saves several seconds
         // on every CLI invocation against a workspace with a
-        // fresh `.bonsai/callgraph.v10.bin`.
+        // fresh versioned callgraph sidecar.
         if options.load_callgraph_sidecar {
             let hit = ws.load_callgraph_sidecar(root);
             on_event(WorkspaceOpenEvent::CacheChecked {
@@ -2232,20 +2207,10 @@ impl Workspace {
         Ok(ws)
     }
 
-    /// Load the canonical factstore dataflow sidecar for `root`, falling
-    /// back to the read-only legacy bincode cache when necessary.
+    /// Load the canonical factstore dataflow sidecar for `root`.
     pub fn load_dataflow_sidecar(&self, root: &Path) -> std::io::Result<usize> {
         let factstore = DataFlowCache::factstore_sidecar_path(root);
-        let loaded = self
-            .inner
-            .dataflow
-            .load_factstore_sidecar(&factstore, self.db())?;
-        if loaded > 0 {
-            return Ok(loaded);
-        }
-        self.inner
-            .dataflow
-            .load_from_disk(&DataFlowCache::sidecar_path(root), self.db())
+        self.inner.dataflow.load_factstore_sidecar(&factstore, self.db())
     }
 
     /// Persist the complete current dataflow cache to the canonical,

@@ -18,6 +18,7 @@ pub mod policy;
 pub mod precision;
 pub mod span;
 pub mod span_cache;
+pub mod wire;
 
 pub use atomic_file::write_atomic_bytes;
 pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, TypeId, ValueId};

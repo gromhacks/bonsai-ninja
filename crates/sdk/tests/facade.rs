@@ -127,7 +127,7 @@ fn facade_indexes_and_exposes_workspace_basics() {
     );
     assert!(
         !stats.dataflow_sidecar_exists,
-        "cache rebuild must not create a legacy bincode dataflow sidecar"
+        "cache rebuild must not create a retired eager dataflow sidecar"
     );
     project.cache().clear_dataflow_only().expect("clear dataflow");
     let stats = project.cache().stats().expect("cache stats after clear");

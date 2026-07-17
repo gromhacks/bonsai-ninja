@@ -1,6 +1,6 @@
 //! On-disk encoding for `DataFlowCache` entries.
 //!
-//! Each per-function entry is the bincode-encoded triple
+//! Each per-function entry is the MessagePack-encoded triple
 //! `(KindedTokens, EntryTaintGraph, Vec<FileId>)` — facts, the
 //! per-entry semantic taint graph, and the transitive file
 //! dependencies used for invalidation.
@@ -17,7 +17,7 @@
 //! Decode errors surface as typed [`DecodeError`] so callers can
 //! distinguish a corrupt blob from missing data.
 
-use bonsai_common::FileId;
+use bonsai_common::{wire, FileId};
 use bonsai_taint::{EntryTaintGraph, KindedTokens};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -36,8 +36,8 @@ pub struct DataFlowEntry {
     /// Indexed semantic taint graph for the entry.
     pub graph: EntryTaintGraph,
     /// Transitive callee file dependencies. Stored as a `Vec<u32>`
-    /// (raw `FileId`s) rather than `AHashSet<FileId>` because bincode
-    /// of an unsorted `AHashSet` is order-dependent and the resulting
+    /// (raw `FileId`s) rather than `AHashSet<FileId>` because encoding
+    /// an unsorted `AHashSet` is order-dependent and the resulting
     /// bytes would differ between runs even when the logical set is
     /// equal. The decoder reconstructs the set.
     pub dependency_files: Vec<u32>,
@@ -72,20 +72,20 @@ impl DataFlowEntry {
 /// Errors returned by [`decode`].
 #[derive(Debug, Error)]
 pub enum DecodeError {
-    /// Bincode could not parse the bytes — the file was truncated or
+    /// MessagePack could not parse the bytes — the file was truncated or
     /// corrupt.
-    #[error("bincode: {0}")]
-    Bincode(#[from] bincode::Error),
+    #[error("MessagePack: {0}")]
+    Wire(#[from] wire::DecodeError),
 }
 
-/// Encode an entry into bincode bytes.
+/// Encode an entry into MessagePack bytes.
 pub fn encode(entry: &DataFlowEntry) -> Vec<u8> {
-    bincode::serialize(entry).expect("bincode encoding of DataFlowEntry never fails")
+    wire::encode(entry).expect("MessagePack encoding of DataFlowEntry never fails")
 }
 
 /// Decode bytes produced by [`encode`] back into a [`DataFlowEntry`].
 pub fn decode(bytes: &[u8]) -> Result<DataFlowEntry, DecodeError> {
-    let entry: DataFlowEntry = bincode::deserialize(bytes)?;
+    let entry: DataFlowEntry = wire::decode(bytes)?;
     Ok(entry)
 }
 

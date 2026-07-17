@@ -488,7 +488,7 @@ fn sidecar_load_returns_zero_when_path_missing() {
 fn sidecar_with_corrupt_bytes_is_ignored() {
     let dir = tempdir_for("bonsai-taint-corrupt");
     let path = dir.join("taint_graph.bin");
-    std::fs::write(&path, b"not a valid bincode payload").expect("write corrupt sidecar");
+    std::fs::write(&path, b"not a valid factstore payload").expect("write corrupt sidecar");
 
     let idx = TaintGraphIndex::new();
     let ws = ws_with_python_source("def app(x):\n    return x\n");

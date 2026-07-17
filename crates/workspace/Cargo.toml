@@ -23,7 +23,6 @@ bonsai_taint = { workspace = true }
 bonsai_factstore = { workspace = true }
 bonsai_idg = { workspace = true }
 rayon = { workspace = true }
-bincode = { workspace = true }
 serde = { workspace = true }
 ahash = { workspace = true }
 thiserror = { workspace = true }

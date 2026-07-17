@@ -37,12 +37,13 @@ use std::sync::Arc;
 /// On-disk snapshot version for the workspace-wide taint graph.
 /// Disk format is the streaming factstore; bumping this invalidates
 /// every cached sidecar so consumers get a fresh build on next open.
+// v11 (2026-07-16): MessagePack replaces the retired binary codec.
 // v10 (2026-07-01): taint graph/dataflow cache semantics changed to avoid
 // seeding callee/module target components as value carriers and to keep exact
 // RHS call spans for assignment-derived terminal calls.
 // v9 (2026-05-27): taint graph derives from the IDG, whose construction
 // and seeding changed enough that old graphs are no longer equivalent.
-pub const TAINT_GRAPH_CACHE_VERSION: u32 = 10;
+pub const TAINT_GRAPH_CACHE_VERSION: u32 = 11;
 
 /// Caller-defined table id stamped into the factstore header. 4 is
 /// the next slot after dataflow (2), value-flow (1), flow-ids (3).
@@ -78,7 +79,7 @@ fn taint_graph_pipeline_hash(db: &AnalyzerDb, config_fingerprint: u64, sidecar_p
     // Mix in the caller's config fingerprint so a `--rules-dir` swap
     // produces a different pipeline hash and the new file invalidates
     // the old. `0` is the sentinel "no fingerprint set" value the
-    // legacy bincode path used; treat it as opting out of the
+    // backward-compatible API used; treat it as opting out of the
     // config-bound check.
     let build_fp = crate::build_fingerprint_hash();
     if config_fingerprint == 0 {
