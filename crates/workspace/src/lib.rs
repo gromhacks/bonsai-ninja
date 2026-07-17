@@ -1756,7 +1756,7 @@ impl Workspace {
         on_event(WorkspaceOpenEvent::IngestFinished { files: file_count });
         let files = ws.vfs().all_files();
         on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
-        index_workspace_files_with_bounded_parallelism(&ws, &files, on_event);
+        index_workspace_files_in_parallel(&ws, &files, on_event);
         on_event(WorkspaceOpenEvent::ParseFinished);
         Ok(ws)
     }
@@ -1842,7 +1842,7 @@ impl Workspace {
         if options.eager_decl_index {
             let files = ws.vfs().all_files();
             on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
-            index_workspace_files_with_bounded_parallelism(&ws, &files, on_event);
+            index_workspace_files_in_parallel(&ws, &files, on_event);
             on_event(WorkspaceOpenEvent::ParseFinished);
         }
         Ok(ws)
@@ -1942,15 +1942,12 @@ impl Workspace {
         let files = ws.vfs().all_files();
         on_event(WorkspaceOpenEvent::IngestFinished { files: files.len() });
         if options.eager_decl_index {
-            // Pass 1: per-file decl + import indexing. Large Java/JVM
-            // workspaces can have tens of thousands of files whose adapter
-            // lowering performs receiver-type enrichment; letting the global
-            // rayon pool fan that across every core can spike RSS before the
-            // first query phase begins. Keep the work parallel, but cap the
-            // parse workers for large workspaces so explicit index/prewarm
-            // commands stay bounded without changing which facts are indexed.
+            // Pass 1: per-file declaration + import indexing. Each syntax
+            // tree is independent, so use the host's available parallelism as
+            // a compiler frontend would. Repository size must not silently
+            // change the scheduler or impose a project-shaped ceiling.
             on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
-            index_workspace_files_with_bounded_parallelism(&ws, &files, on_event);
+            index_workspace_files_in_parallel(&ws, &files, on_event);
             on_event(WorkspaceOpenEvent::ParseFinished);
         }
         // Optional sidecar load / explicit workspace-wide prewarm.
@@ -2832,11 +2829,11 @@ impl Workspace {
     }
 }
 
-fn index_workspace_files_with_bounded_parallelism<F>(ws: &Workspace, files: &[FileId], on_event: &F)
+fn index_workspace_files_in_parallel<F>(ws: &Workspace, files: &[FileId], on_event: &F)
 where
     F: Fn(WorkspaceOpenEvent) + Sync,
 {
-    let workers = workspace_parse_worker_count(files.len());
+    let workers = workspace_parse_worker_count();
     if workers <= 1 || files.len() <= 1 {
         for &file in files {
             let _ = ws.db().decl_index(file);
@@ -2868,7 +2865,7 @@ where
     }
 }
 
-fn workspace_parse_worker_count(file_count: usize) -> usize {
+fn workspace_parse_worker_count() -> usize {
     let available = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
@@ -2877,22 +2874,15 @@ fn workspace_parse_worker_count(file_count: usize) -> usize {
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
     {
-        return requested.clamp(1, available);
+        return requested.max(1);
     }
     if let Some(requested) = std::env::var("RAYON_NUM_THREADS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
     {
-        return requested.clamp(1, available);
+        return requested.max(1);
     }
-    let default = if file_count >= 20_000 {
-        4
-    } else if file_count >= 10_000 {
-        6
-    } else {
-        available
-    };
-    default.clamp(1, available)
+    available
 }
 
 fn workspace_parse_worker_stack_bytes() -> usize {
