@@ -1352,43 +1352,40 @@ fn synthetic_field_write_interning_canonicalizes_storage_split_views() {
         &StaticF2S(AHashMap::from([(FuncId::new(1), SegmentId(0))])),
     );
     let initial_nodes = ws.segment(SegmentId(0)).expect("segment").nodes.len();
-    let mut cache = SyntheticFieldWriteCache::from_workspace(&ws);
+    let cache = SyntheticFieldWriteCache::from_workspace(&ws);
 
-    let (first, _, first_is_new) = cache
-        .ensure(
-            &mut ws,
-            SegmentId(0),
-            FuncId::new(1),
-            "box",
-            "nested.cmd",
-            span(10, 18),
-        )
-        .expect("first synthetic write");
-    let (second, _, second_is_new) = cache
-        .ensure(
-            &mut ws,
-            SegmentId(0),
-            FuncId::new(1),
-            "box.nested",
-            "cmd",
-            span(10, 18),
-        )
-        .expect("same storage through another split");
+    let (first, _, first_is_new) = SyntheticFieldWriteCache::ensure(
+        &mut ws,
+        SegmentId(0),
+        FuncId::new(1),
+        "box",
+        "nested.cmd",
+        span(10, 18),
+    )
+    .expect("first synthetic write");
+    let (second, _, second_is_new) = SyntheticFieldWriteCache::ensure(
+        &mut ws,
+        SegmentId(0),
+        FuncId::new(1),
+        "box.nested",
+        "cmd",
+        span(10, 18),
+    )
+    .expect("same storage through another split");
 
     assert!(first_is_new);
     assert!(!second_is_new);
     assert_eq!(first, second);
     assert!(cache.is_generated(SegmentId(0), FuncId::new(1), first));
-    let (third, _, third_is_new) = cache
-        .ensure(
-            &mut ws,
-            SegmentId(0),
-            FuncId::new(1),
-            "box.nested",
-            "cmd",
-            span(20, 28),
-        )
-        .expect("same storage at a distinct statement");
+    let (third, _, third_is_new) = SyntheticFieldWriteCache::ensure(
+        &mut ws,
+        SegmentId(0),
+        FuncId::new(1),
+        "box.nested",
+        "cmd",
+        span(20, 28),
+    )
+    .expect("same storage at a distinct statement");
     assert!(third_is_new);
     assert_ne!(
         first, third,
