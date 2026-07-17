@@ -46,7 +46,6 @@ use bonsai_cfg::Cfg;
 use bonsai_common::{BasicBlockId, FileId, Span};
 use bonsai_diagnostics::{Diagnostic, Severity};
 use bonsai_lang_api::FlowEvent;
-use std::collections::VecDeque;
 
 /// Configuration driving an intraprocedural analysis run.
 #[derive(Clone, Debug, Default)]
@@ -132,13 +131,12 @@ pub fn intraprocedural_taint(cfg: &Cfg, config: &TaintConfig) -> IntraTaintResul
     }
     block_in.insert(cfg.entry, config.sources.clone());
 
-    let mut worklist: VecDeque<BasicBlockId> = VecDeque::new();
-    worklist.push_back(cfg.entry);
+    let mut worklist: Vec<BasicBlockId> = vec![cfg.entry];
     let mut enqueued: AHashSet<BasicBlockId> = AHashSet::new();
     enqueued.insert(cfg.entry);
 
     let mut iterations: u32 = 0;
-    while let Some(block_id) = worklist.pop_front() {
+    while let Some(block_id) = worklist.pop() {
         enqueued.remove(&block_id);
         iterations = iterations.saturating_add(1);
 
@@ -177,7 +175,7 @@ pub fn intraprocedural_taint(cfg: &Cfg, config: &TaintConfig) -> IntraTaintResul
             for successor in &block.successors {
                 // `enqueued.insert` doubles as a presence check — skip if already queued.
                 if enqueued.insert(*successor) {
-                    worklist.push_back(*successor);
+                    worklist.push(*successor);
                 }
             }
         }

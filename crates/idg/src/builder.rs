@@ -39,7 +39,6 @@ use bonsai_common::{FuncId, Precision, Span};
 use bonsai_factstore::StrId;
 use bonsai_lang_api::CallKind;
 use smallvec::SmallVec;
-use std::collections::VecDeque;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
@@ -2751,7 +2750,7 @@ fn stitch_field_argument_forwarding(
     // Every transform left after the symbolic partition touches at least one
     // adapter with incomplete field places, so it is materialized eagerly.
     let transform_count = transforms.values().map(Vec::len).sum::<usize>();
-    let mut pending = VecDeque::new();
+    let mut pending = Vec::new();
     let mut enqueued = AHashSet::default();
     seed_field_write_worklist(&field_index, &transforms, &mut pending, &mut enqueued);
 
@@ -2773,7 +2772,7 @@ fn stitch_field_argument_forwarding(
     );
     let mut processed = 0usize;
     let mut processed_transforms = 0usize;
-    while let Some(write) = pending.pop_front() {
+    while let Some(write) = pending.pop() {
         processed += 1;
         let Some((storage, write_span)) = ws.segment(write.seg_id).and_then(|segment| {
             let node = segment.nodes.get(write.node)?;
@@ -3060,7 +3059,7 @@ fn field_write_key(seg_id: SegmentId, func: FuncId, base: &str) -> FieldPlaceKey
 fn seed_field_write_worklist(
     field_index: &FieldPlaceIndex,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut VecDeque<PendingFieldWrite>,
+    pending: &mut Vec<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
     let mut keys: Vec<FieldPlaceKey> = transforms.keys().cloned().collect();
@@ -3089,7 +3088,7 @@ fn sort_field_keys(keys: &mut [FieldPlaceKey]) {
 fn enqueue_field_write(
     key: &FieldPlaceKey,
     hit: &FieldPlaceHit,
-    pending: &mut VecDeque<PendingFieldWrite>,
+    pending: &mut Vec<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
     let write = PendingFieldWrite {
@@ -3098,14 +3097,14 @@ fn enqueue_field_write(
         node: hit.node,
     };
     if enqueued.insert(write) {
-        pending.push_back(write);
+        pending.push(write);
     }
 }
 
 fn enqueue_recorded_field_writes(
     writes: Vec<(FieldPlaceKey, FieldPlaceHit)>,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut VecDeque<PendingFieldWrite>,
+    pending: &mut Vec<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
     for (key, hit) in writes {
@@ -3130,7 +3129,7 @@ fn apply_field_write_transform(
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut VecDeque<PendingFieldWrite>,
+    pending: &mut Vec<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
     stitch_data: &AHashMap<FuncId, FunctionStitchData>,
 ) {
@@ -3257,7 +3256,7 @@ fn apply_field_argument_write(
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut VecDeque<PendingFieldWrite>,
+    pending: &mut Vec<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
     if (!site.allow_out_of_order_source
@@ -3345,7 +3344,7 @@ fn apply_return_field_write(
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut VecDeque<PendingFieldWrite>,
+    pending: &mut Vec<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
     apply_outbound_field_write(
@@ -3417,7 +3416,7 @@ fn apply_constructor_return_field_write(
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut VecDeque<PendingFieldWrite>,
+    pending: &mut Vec<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
     apply_outbound_field_write(
@@ -3453,7 +3452,7 @@ fn apply_receiver_mutation_field_write(
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut VecDeque<PendingFieldWrite>,
+    pending: &mut Vec<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
     apply_outbound_field_write(
@@ -3489,7 +3488,7 @@ fn apply_intra_field_copy_write(
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut VecDeque<PendingFieldWrite>,
+    pending: &mut Vec<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
     flow_control: Option<&FlowControlFacts>,
 ) {
@@ -3580,7 +3579,7 @@ fn apply_outbound_field_write(
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut VecDeque<PendingFieldWrite>,
+    pending: &mut Vec<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
     edge_kind: crate::edge::IdgEdgeKind,
     skip_self_edge: bool,
@@ -3731,7 +3730,7 @@ fn stitch_field_copy_fallbacks(
     inter_call_arg_entries: &mut InterCallArgEntryIndex,
     synthetic_field_writes: &mut SyntheticFieldWriteCache,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    pending: &mut VecDeque<PendingFieldWrite>,
+    pending: &mut Vec<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
     stitch_data: &AHashMap<FuncId, FunctionStitchData>,
 ) -> usize {

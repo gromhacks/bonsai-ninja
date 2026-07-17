@@ -37,7 +37,7 @@ use bonsai_taint::{
 use bonsai_workspace::Workspace;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -6534,8 +6534,8 @@ fn extend_corridor_with_summary_dependency_support(
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
     max_precision: Option<Precision>,
 ) {
-    let mut pending: VecDeque<FuncId> = corridor.lineage_funcs.iter().copied().collect();
-    while let Some(func) = pending.pop_front() {
+    let mut pending: Vec<FuncId> = corridor.lineage_funcs.iter().copied().collect();
+    while let Some(func) = pending.pop() {
         for edge in call_graph.callees_of(func) {
             if max_precision.is_some_and(|max| edge.precision > max) {
                 continue;
@@ -6544,7 +6544,7 @@ fn extend_corridor_with_summary_dependency_support(
                 continue;
             }
             if corridor.lineage_funcs.insert(edge.to) {
-                pending.push_back(edge.to);
+                pending.push(edge.to);
             }
         }
     }
