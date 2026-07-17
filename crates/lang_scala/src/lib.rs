@@ -1047,131 +1047,34 @@ fn nearest_scala_owner(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<
 fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     let mut imports = Vec::new();
     for import_node in collect_kinds(tree, &["import_declaration"]) {
-        let text = node_text(&import_node, src)
-            .trim_start_matches("import ")
-            .trim()
-            .to_string();
-        if text.is_empty() {
+        let path = scala_import_path(&import_node, src);
+        if path.is_empty() {
             continue;
         }
-        let is_wildcard = text.ends_with("._") || text.ends_with(".*");
         let span = span_of(file, &import_node);
-        if let Some((path, brace_body)) = text.rsplit_once(".{") {
-            // Validate the path: Scala doesn't permit nested brace-list
-            // groups (`{c.{X}}`), so any brace inside `path` indicates a
-            // malformed source. Skip emission rather than producing an
-            // ugly module string.
-            if path.contains('{') || path.contains('}') {
-                continue;
-            }
-            // Multi-entry braced selectors: `import x.y.{A, B => BB, C}`
-            // emits ONE ImportSpec per selector. Splitting on ',' first
-            // and then per-selector rsplit on ` => ` / ` as ` matches
-            // the grammar's expansion (one binding per entry).
-            let inside = brace_body.trim_end_matches('}').trim();
-            let module = path.to_string();
-            for raw in inside.split(',') {
-                let mut entry = raw.trim().to_string();
-                if entry.is_empty() {
-                    continue;
-                }
-                // Scala 3 `given` selector: bare `given` is the
-                // "all givens" wildcard; `given Foo` (with any
-                // intervening whitespace) records the trait name.
-                // Tokenise so multi-space variants don't fall
-                // through with a literal "given  Foo" original_name.
-                {
-                    let tokens: Vec<&str> = entry.split_whitespace().collect();
-                    if tokens.first().copied() == Some("given") {
-                        if tokens.len() == 1 {
-                            imports.push(ImportSpec {
-                                span,
-                                module: module.clone(),
-                                alias: None,
-                                is_wildcard: true,
-                                original_name: None,
-                                scope: ImportScope::Module,
-                            });
-                            continue;
-                        }
-                        // `given X` (and `given X => Y` / `given X as Y` —
-                        // the rename arms below handle those after
-                        // we strip the `given` token).
-                        entry = tokens[1..].join(" ");
-                    }
-                }
-                // Braced wildcard: `{Foo, *}` / `{Foo, _}` mark the
-                // ImportSpec as a wildcard rather than a leaf with
-                // a literal `*`/`_` original_name.
-                if entry == "*" || entry == "_" {
-                    imports.push(ImportSpec {
-                        span,
-                        module: module.clone(),
-                        alias: None,
-                        is_wildcard: true,
-                        original_name: None,
-                        scope: ImportScope::Module,
-                    });
-                    continue;
-                }
-                if entry.is_empty() {
-                    continue;
-                }
-                // Per-selector rename: Scala 2 uses `=>`, Scala 3
-                // accepts `as` as well. Try the Scala 3 form first
-                // since it's the more recent convention; fall back
-                // to `=>`.
-                let (original, alias) = if let Some((orig, alias_text)) = entry.rsplit_once(" as ") {
-                    (Some(orig.trim().to_string()), Some(alias_text.trim().to_string()))
-                } else if let Some((orig, alias_text)) = entry.rsplit_once(" => ") {
-                    (Some(orig.trim().to_string()), Some(alias_text.trim().to_string()))
-                } else {
-                    (Some(entry.clone()), None)
-                };
-                imports.push(ImportSpec {
-                    span,
-                    module: module.clone(),
-                    alias,
-                    is_wildcard: false,
-                    original_name: original,
-                    scope: ImportScope::Module,
-                });
-            }
+        let mut cursor = import_node.walk();
+        let children: Vec<Node<'_>> = import_node.named_children(&mut cursor).collect();
+
+        if let Some(selectors) = children
+            .iter()
+            .find(|child| child.kind() == "namespace_selectors")
+        {
+            append_scala_selectors(*selectors, &path, span, src, &mut imports);
             continue;
         }
-        // Scala 3 top-level rename without braces: `import a.b.Foo as Bar`.
-        // Scala 2 syntax requires braces; Scala 3 makes them optional.
-        if let Some((path, alias)) = text.rsplit_once(" as ") {
-            let alias = alias.trim();
-            let (module, original) = if let Some((mod_path, last)) = path.rsplit_once('.') {
-                (mod_path.to_string(), Some(last.trim().to_string()))
-            } else {
-                // No dotted path — entire `path` is the symbol name.
-                (String::new(), Some(path.trim().to_string()))
-            };
-            if !alias.is_empty() {
-                imports.push(ImportSpec {
-                    span,
-                    module,
-                    alias: Some(alias.to_string()),
-                    is_wildcard: false,
-                    original_name: original,
-                    scope: ImportScope::Module,
-                });
-                continue;
-            }
+
+        if let Some(rename) = children
+            .iter()
+            .find(|child| matches!(child.kind(), "as_renamed_identifier" | "arrow_renamed_identifier"))
+        {
+            append_scala_renamed_selector(*rename, &path, span, src, &mut imports);
+            continue;
         }
-        // Bare unaliased import `import a.b.X`: keep the full
-        // dotted path as `module` for parity with Java/Kotlin and
-        // existing downstream resolve logic. (The cross-adapter
-        // smell that flagged `original_name=Some(last_segment)`
-        // was a documentation request, not a correctness fix —
-        // changing the shape would invalidate downstream callers
-        // that key on the fully-qualified module path.)
-        let module = text.trim_end_matches("._").trim_end_matches(".*").to_string();
+
+        let is_wildcard = children.iter().any(|child| child.kind() == "namespace_wildcard");
         imports.push(ImportSpec {
             span,
-            module,
+            module: path,
             alias: None,
             is_wildcard,
             original_name: None,
@@ -1179,6 +1082,98 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+fn scala_import_path(import_node: &Node<'_>, src: &[u8]) -> String {
+    let mut segments = Vec::new();
+    for index in 0..import_node.child_count() {
+        let Ok(field_index) = u32::try_from(index) else {
+            continue;
+        };
+        if import_node.field_name_for_child(field_index) != Some("path") {
+            continue;
+        }
+        let Some(child) = import_node.child(field_index) else {
+            continue;
+        };
+        if !child.is_named() {
+            continue;
+        }
+        let segment = node_text(&child, src).trim();
+        if !segment.is_empty() {
+            segments.push(segment);
+        }
+    }
+    segments.join(".")
+}
+
+fn append_scala_selectors(
+    selectors: Node<'_>,
+    module: &str,
+    span: Span,
+    src: &[u8],
+    imports: &mut Vec<ImportSpec>,
+) {
+    let mut cursor = selectors.walk();
+    for selector in selectors.named_children(&mut cursor) {
+        match selector.kind() {
+            "namespace_wildcard" => imports.push(ImportSpec {
+                span,
+                module: module.to_string(),
+                alias: None,
+                is_wildcard: true,
+                original_name: None,
+                scope: ImportScope::Module,
+            }),
+            "as_renamed_identifier" | "arrow_renamed_identifier" => {
+                append_scala_renamed_selector(selector, module, span, src, imports);
+            }
+            _ => {
+                let original = node_text(&selector, src).trim();
+                if !original.is_empty() {
+                    imports.push(ImportSpec {
+                        span,
+                        module: module.to_string(),
+                        alias: None,
+                        is_wildcard: false,
+                        original_name: Some(original.to_string()),
+                        scope: ImportScope::Module,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn append_scala_renamed_selector(
+    selector: Node<'_>,
+    module: &str,
+    span: Span,
+    src: &[u8],
+    imports: &mut Vec<ImportSpec>,
+) {
+    let (Some(name_node), Some(alias_node)) = (
+        selector.child_by_field_name("name"),
+        selector.child_by_field_name("alias"),
+    ) else {
+        return;
+    };
+    if alias_node.kind() == "wildcard" {
+        return;
+    }
+    let original = node_text(&name_node, src).trim();
+    let alias = node_text(&alias_node, src).trim();
+    if original.is_empty() || alias.is_empty() {
+        return;
+    }
+    imports.push(ImportSpec {
+        span,
+        module: module.to_string(),
+        alias: Some(alias.to_string()),
+        is_wildcard: false,
+        original_name: Some(original.to_string()),
+        scope: ImportScope::Module,
+    });
 }
 
 /// Scala-aware visibility collector that recognises scoped forms:
@@ -1685,4 +1680,48 @@ fn synthesize_scala_case_class_accessors(idx: &mut DeclIndex, file: FileId, ctx:
         }
     }
     idx.defs.extend(synthesized);
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    fn parse_import_specs(src: &str) -> Vec<ImportSpec> {
+        let language = language_from_pack(PACK_NAME).expect("scala grammar");
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set scala grammar");
+        let tree = parser.parse(src.as_bytes(), None).expect("parse scala source");
+        parse_imports(&tree, src.as_bytes(), FileId::new(0))
+    }
+
+    #[test]
+    fn selectors_are_lowered_from_cst_nodes() {
+        let imports = parse_import_specs(
+            "import a.b.{A, B => BB, C as CC, *, given, given Foo}\n\
+             import a.b.Item as Renamed\n",
+        );
+
+        assert!(
+            imports.iter().any(|spec| {
+                spec.module == "a.b" && spec.original_name.as_deref() == Some("A") && spec.alias.is_none()
+            }),
+            "{imports:#?}"
+        );
+        assert!(imports.iter().any(|spec| {
+            spec.module == "a.b"
+                && spec.original_name.as_deref() == Some("B")
+                && spec.alias.as_deref() == Some("BB")
+        }));
+        assert!(imports
+            .iter()
+            .any(|spec| spec.module == "a.b" && spec.is_wildcard));
+        assert!(imports.iter().any(|spec| {
+            spec.module == "a.b" && spec.original_name.as_deref() == Some("Foo") && spec.alias.is_none()
+        }));
+        assert!(imports.iter().any(|spec| {
+            spec.module == "a.b"
+                && spec.original_name.as_deref() == Some("Item")
+                && spec.alias.as_deref() == Some("Renamed")
+        }));
+    }
 }

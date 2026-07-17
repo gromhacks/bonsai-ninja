@@ -29,6 +29,15 @@ fn using_static_emits_statement_import_and_local_wildcard_binding() {
 }
 
 #[test]
+fn using_static_classification_comes_from_the_grammar_token() {
+    let imports = parse_import_specs("using /* trivia */ static App.Util;\n");
+
+    assert!(imports
+        .iter()
+        .any(|spec| { spec.module == "App.Util" && spec.is_wildcard && spec.scope == ImportScope::Local }));
+}
+
+#[test]
 fn ordinary_using_does_not_emit_local_wildcard_binding() {
     let imports = parse_import_specs("using App;\n");
 

@@ -2,6 +2,40 @@ use super::*;
 use bonsai_testkit::workspace_with;
 use std::sync::Arc;
 
+fn parse_import_specs(src: &str) -> Vec<ImportSpec> {
+    let language = language_from_pack(PACK_NAME).expect("rust grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set rust grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse rust source");
+    parse_imports(&tree, src.as_bytes(), FileId::new(0))
+}
+
+#[test]
+fn use_trees_are_lowered_from_cst_nodes() {
+    let imports =
+        parse_import_specs("use foo::{self, bar, baz as qux, nested::{A, B as C}, /* trivia */ *};\n");
+
+    assert!(imports.iter().any(|spec| {
+        spec.module == "foo" && spec.alias.as_deref() == Some("foo") && spec.original_name.is_none()
+    }));
+    assert!(imports.iter().any(|spec| {
+        spec.module == "foo" && spec.alias.is_none() && spec.original_name.as_deref() == Some("bar")
+    }));
+    assert!(imports.iter().any(|spec| {
+        spec.module == "foo"
+            && spec.alias.as_deref() == Some("qux")
+            && spec.original_name.as_deref() == Some("baz")
+    }));
+    assert!(imports.iter().any(|spec| {
+        spec.module == "foo::nested"
+            && spec.alias.as_deref() == Some("C")
+            && spec.original_name.as_deref() == Some("B")
+    }));
+    assert!(imports
+        .iter()
+        .any(|spec| spec.module == "foo" && spec.is_wildcard));
+}
+
 #[test]
 fn extracts_top_level_function() {
     let ws = workspace_with(
