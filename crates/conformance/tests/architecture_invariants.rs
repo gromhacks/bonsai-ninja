@@ -3095,14 +3095,26 @@ fn typed_lang_adapters_emit_decl_type_aliases() {
 fn syntax_index_parallelism_is_not_project_size_capped() {
     let root = repo_root();
     let workspace = read(&root.join("crates/workspace/src/lib.rs"));
-    let body = function_body(&workspace, "workspace_parse_worker_count");
+    let database = read(&root.join("crates/db/src/lib.rs"));
 
+    for (source, function) in [
+        (&workspace, "workspace_parse_worker_count"),
+        (&database, "global_index_worker_count"),
+    ] {
+        let body = function_body(source, function);
+        assert!(
+            body.contains("available_parallelism"),
+            "{function} must derive default syntax-index parallelism from the host"
+        );
+        assert!(
+            !body.contains("file_count") && !body.contains("files.len()"),
+            "{function} must not select workers from project size"
+        );
+    }
+
+    let retention = function_body(&database, "should_consume_decl_index_cache_for_global");
     assert!(
-        body.contains("available_parallelism"),
-        "default syntax-index parallelism must be derived from the host"
-    );
-    assert!(
-        !body.contains("file_count") && !body.contains("files.len()"),
-        "syntax-index worker selection must not depend on project size"
+        !retention.contains("file_count") && !retention.contains("files.len()"),
+        "global-index IR retention must not change at a project-size threshold"
     );
 }

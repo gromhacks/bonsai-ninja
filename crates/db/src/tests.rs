@@ -44,6 +44,49 @@ struct RecordingPythonAdapter {
     trees: Arc<parking_lot::Mutex<Vec<Arc<bonsai_lang_api::SyntaxTree>>>>,
 }
 
+struct CountingPythonAdapter {
+    declaration_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl LanguageAdapter for CountingPythonAdapter {
+    fn language_id(&self) -> LanguageId {
+        LanguageId::new("python")
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Python declaration counter"
+    }
+
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &["py"]
+    }
+
+    fn tree_sitter_language(&self) -> Result<tree_sitter::Language, AdapterError> {
+        bonsai_lang_python::PythonAdapter::new().tree_sitter_language()
+    }
+
+    fn capabilities(&self) -> bonsai_lang_api::LanguageCapabilities {
+        bonsai_lang_api::LanguageCapabilities::unsupported()
+    }
+
+    fn extract_declarations(&self, file: FileId, _ctx: &AdapterContext<'_>) -> DeclIndex {
+        self.declaration_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        DeclIndex {
+            file,
+            ..Default::default()
+        }
+    }
+
+    fn extract_imports(&self, file: FileId, _ctx: &AdapterContext<'_>) -> ImportIndex {
+        ImportIndex {
+            file,
+            imports: Vec::new(),
+        }
+    }
+}
+
 impl RecordingPythonAdapter {
     fn record_tree(&self, file: FileId, ctx: &AdapterContext<'_>) {
         if let Some((_, tree)) = bonsai_lang_api::kit::parse_with("python", file, ctx) {
@@ -126,6 +169,45 @@ fn declaration_and_import_adapter_passes_share_the_canonical_tree_arc() {
     assert_eq!(trees.len(), 2);
     assert!(Arc::ptr_eq(&trees[0], &trees[1]));
     assert!(Arc::ptr_eq(&trees[0], &parsed.tree));
+}
+
+#[test]
+fn global_index_concurrent_callers_lower_each_file_once() {
+    use std::sync::{atomic::AtomicUsize, Barrier};
+
+    let vfs = Arc::new(Vfs::new());
+    vfs.write("fixture.py", "def shared():\n    return 1\n");
+    let declaration_calls = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(CountingPythonAdapter {
+        declaration_calls: Arc::clone(&declaration_calls),
+    }));
+    let db = AnalyzerDb::new(vfs, registry);
+    let start = Arc::new(Barrier::new(3));
+
+    let callers: Vec<_> = (0..2)
+        .map(|_| {
+            let db = db.clone();
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                db.global_index()
+            })
+        })
+        .collect();
+    start.wait();
+    let mut indexes = callers
+        .into_iter()
+        .map(|caller| caller.join().expect("global-index caller"));
+    let left = indexes.next().expect("first global index");
+    let right = indexes.next().expect("second global index");
+
+    assert_eq!(
+        declaration_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "parallel callers must share one workspace lowering pass"
+    );
+    assert!(Arc::ptr_eq(&left, &right));
 }
 
 #[test]
