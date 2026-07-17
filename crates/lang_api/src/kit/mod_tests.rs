@@ -5,11 +5,11 @@ use super::{
     annotate_tuple_call_result_bindings, apply_assign_call_result_types, apply_call_receiver_types,
     apply_constructor_result_type_aliases, argument_place, assignment_value_node, build_call_event,
     callable_reference_name, canonical_simple_type_name, collect_kinds, expression_flow_from_node,
-    extract_assignment_value_facts, extract_return_value_name, extract_rhs_expr_operands, language_from_pack,
-    lower_local_closure_captures, node_text, normalize_call_name_whitespace,
-    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
-    receiver_projected_alias_matches, span_of, walk_flow_events, GENERIC_HANDLER,
-    SYNTHETIC_TUPLE_RESULT_PREFIX,
+    extract_assignment_value_facts, extract_call_receiver_facts, extract_return_value_name,
+    extract_rhs_expr_operands, language_from_pack, lower_local_closure_captures, node_text,
+    normalize_call_name_whitespace, normalize_call_result_assignment_sources,
+    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, span_of,
+    walk_flow_events, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
     AssignValueKind, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent,
@@ -1284,6 +1284,82 @@ fn rust_shorthand_struct_initializer_is_an_exact_aggregate_field() {
     assert_eq!(flow.aggregate_fields.len(), 1, "{flow:?}");
     assert_eq!(flow.aggregate_fields[0].name, "data");
     assert_eq!(flow.aggregate_fields[0].value.place.as_deref(), Some("data"));
+}
+
+#[test]
+fn postfix_method_receiver_keeps_nested_call_arguments_structural() {
+    let source = r#"Seq("sh", "-c", command).!"#;
+    let tree = parse_language("scala", source.as_bytes());
+    let file = FileId::new(0);
+    let events = collect_kinds(&tree, &["call_expression"])
+        .into_iter()
+        .filter_map(|node| build_call_event(node, file, source.as_bytes(), &GENERIC_HANDLER, &[]))
+        .collect::<Vec<_>>();
+    let calls = events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Call { span, name, args, .. } => Some((*span, name.as_str(), args)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let (constructor_span, _, constructor_args) = calls
+        .iter()
+        .find(|(_, name, _)| *name == "Seq")
+        .expect("receiver constructor call");
+    assert!(constructor_args.iter().any(|arg| {
+        arg.place.as_deref() == Some("command") || arg.source_names.iter().any(|name| name == "command")
+    }));
+
+    let postfix = collect_kinds(&tree, &["field_expression"])
+        .into_iter()
+        .next()
+        .expect("postfix field expression");
+    let facts = extract_call_receiver_facts(&tree, file, &GENERIC_HANDLER, source.as_bytes());
+    let receiver = facts
+        .iter()
+        .find(|fact| fact.call_span == span_of(file, &postfix))
+        .expect("postfix receiver fact");
+    assert!(receiver
+        .value_flow
+        .call_sites
+        .iter()
+        .any(|span| span.start <= constructor_span.start && constructor_span.end <= span.end));
+}
+
+#[test]
+fn kotlin_method_chain_receivers_join_every_semantic_call_span() {
+    let source = r#"fun flow(cmd: String) = cmd.splitToSequence(" ")
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .fold("", makeJoiner(" "))"#;
+    let tree = parse_language("kotlin", source.as_bytes());
+    let file = FileId::new(0);
+    let facts = extract_call_receiver_facts(&tree, file, &GENERIC_HANDLER, source.as_bytes());
+    let mut chain_calls = collect_kinds(&tree, &["call_expression"])
+        .into_iter()
+        .filter_map(|call| {
+            let text = node_text(&call, source.as_bytes()).trim();
+            if !text.starts_with("cmd.splitToSequence") {
+                return None;
+            }
+            let target = super::parsed_call_target(&call, source.as_bytes())?;
+            Some((span_of(file, &target.node), text))
+        })
+        .collect::<Vec<_>>();
+    chain_calls.sort_by_key(|(span, _)| span.end - span.start);
+    assert_eq!(chain_calls.len(), 4, "facts={facts:#?}");
+    for (index, (span, name)) in chain_calls.into_iter().enumerate() {
+        let fact = facts
+            .iter()
+            .find(|fact| fact.call_span == span)
+            .unwrap_or_else(|| panic!("missing receiver fact for {name} at {span:?}; facts={facts:#?}"));
+        if index > 0 {
+            assert!(
+                !fact.value_flow.call_sites.is_empty(),
+                "nested receiver for {name} must reference its inner call: {fact:#?}"
+            );
+        }
+    }
 }
 
 fn m9_func_decl(raw: u32, name: &str, return_type: Option<&str>, flow_events: Vec<FlowEvent>) -> Decl {

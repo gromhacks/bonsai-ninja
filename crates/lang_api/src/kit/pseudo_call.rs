@@ -241,6 +241,24 @@ fn infix_expression_args(node: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallA
 /// alphabetic-identifier operator so symbolic/comparison operators (`+`,
 /// `==`, `::`) stay out — `+` keeps its dedicated string-concat lowering.
 fn infix_method_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
+    let (left, name) = infix_method_receiver(node, src)?;
+    let right = node.child_by_field_name("right")?;
+    // The single infix argument is the right operand.
+    let arg = call_arg_from_node(right, file, src, None)?;
+    Some(FlowEvent::Call {
+        span: span_of(file, node),
+        receiver: Some(normalize_call_name_whitespace(node_text(&left, src))),
+        receiver_types: Vec::new(),
+        name,
+        call_kind: CallKind::Method,
+        args: vec![arg],
+    })
+}
+
+/// Grammar-proven receiver and method name for an alphabetic infix call.
+/// Shared with receiver-fact extraction so the synthesized call and its
+/// value-flow carrier cannot classify the same CST node differently.
+pub(super) fn infix_method_receiver<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<(Node<'tree>, String)> {
     let operator = node.child_by_field_name("operator")?;
     let name = node_text(&operator, src).trim().to_string();
     // Only method-name operators; symbolic operators are not method calls.
@@ -254,18 +272,7 @@ fn infix_method_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<
     if matches!(name.as_str(), "object" | "companion") {
         return None;
     }
-    let left = node.child_by_field_name("left")?;
-    let right = node.child_by_field_name("right")?;
-    // The single infix argument is the right operand.
-    let arg = call_arg_from_node(right, file, src, None)?;
-    Some(FlowEvent::Call {
-        span: span_of(file, node),
-        receiver: Some(normalize_call_name_whitespace(node_text(&left, src))),
-        receiver_types: Vec::new(),
-        name,
-        call_kind: CallKind::Method,
-        args: vec![arg],
-    })
+    Some((node.child_by_field_name("left")?, name))
 }
 
 /// Read the operator-marker text on an `infix_expression` node, or `None`

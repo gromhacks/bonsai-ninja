@@ -106,7 +106,7 @@ use direct_calls::{
 };
 use identifiers::has_direct_child_kind;
 use param_extraction::extract_param_names;
-use pseudo_call::pseudo_call_event;
+use pseudo_call::{infix_method_receiver, pseudo_call_event};
 use qualified::{
     binary_operator_is_assignment, normalise_qualified_text, qualified_assign_target,
     type_only_declaration_without_initializer,
@@ -2523,6 +2523,15 @@ fn walk_into(
     // child, NOT as a call. Emit a Call event here so the sink
     // surfaces in the flow.
     if kind == "field_expression" && is_scala_operator_method_call(&node) {
+        let receiver_node = node
+            .child_by_field_name("value")
+            .or_else(|| first_named_child(&node));
+        if let Some(receiver_node) = receiver_node {
+            // Evaluate the receiver before invoking its postfix method. This
+            // preserves nested calls such as `Seq(a, value).!` as ordinary
+            // Call/CallArg facts instead of flattening their source text.
+            walk_into(receiver_node, file, src, handler, class_names, out, false);
+        }
         let name = node_text(&node, src).trim().to_string();
         if !name.is_empty() {
             out.push(FlowEvent::Call {
@@ -3928,13 +3937,15 @@ fn walk_method_chain_receivers(
     }
 }
 
-fn build_call_event(
-    node: Node<'_>,
-    file: FileId,
-    src: &[u8],
-    handler: &GrammarHandler,
-    class_names: &[String],
-) -> Option<FlowEvent> {
+struct ParsedCallTarget<'tree> {
+    node: Node<'tree>,
+    full_text: String,
+}
+
+/// Select the semantic callee node once from grammar fields. Both call-event
+/// lowering and file-local receiver facts use this result, so their span join
+/// cannot drift and receiver collection does not rebuild every argument list.
+fn parsed_call_target<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<ParsedCallTarget<'tree>> {
     // Method-invocation shapes across grammars use different field
     // names for the receiver and the method identifier. Concatenate
     // them into a `receiver.method` string so the full callee path
@@ -3946,8 +3957,8 @@ fn build_call_event(
     // Without this, `Runtime.getRuntime().exec(x)` in Java would
     // collapse to just `exec` (losing the qualified path) and
     // `$conn->query($q)` in PHP would collapse to just `query`.
-    let method_compound = method_receiver_name(&node, src);
-    let erlang_remote = erlang_remote_callee(&node, src);
+    let method_compound = method_receiver_name(node, src);
+    let erlang_remote = erlang_remote_callee(node, src);
     let callee_node = node
         .child_by_field_name("function")
         .or_else(|| node.child_by_field_name("constructor"))
@@ -3959,9 +3970,9 @@ fn build_call_event(
         // Many grammars (Kotlin, Swift) don't name the callee field; the
         // first named child IS the call target (e.g. a navigation_expression
         // for `list.add`). Prefer that over walking to the first identifier.
-        .or_else(|| first_named_child(&node))
-        .or_else(|| first_identifier_like_child(&node))
-        .or_else(|| first_identifier_descendant(node))?;
+        .or_else(|| first_named_child(node))
+        .or_else(|| first_identifier_like_child(node))
+        .or_else(|| first_identifier_descendant(*node))?;
     let mut full_text = erlang_remote
         .as_ref()
         .map(|(_, name)| name.as_str())
@@ -3969,7 +3980,7 @@ fn build_call_event(
         .unwrap_or_else(|| node_text(&callee_node, src).trim())
         .to_string();
     if node.kind() == "macro_invocation" && !full_text.ends_with('!') {
-        let node_src = node_text(&node, src);
+        let node_src = node_text(node, src);
         let rest = node_src.trim_start().strip_prefix(&full_text).unwrap_or_default();
         if rest.trim_start().starts_with('!') {
             full_text.push('!');
@@ -3978,6 +3989,22 @@ fn build_call_event(
     if full_text.is_empty() {
         return None;
     }
+    Some(ParsedCallTarget {
+        node: callee_node,
+        full_text,
+    })
+}
+
+fn build_call_event(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+) -> Option<FlowEvent> {
+    let target = parsed_call_target(&node, src)?;
+    let callee_node = target.node;
+    let full_text = target.full_text;
     let is_method = full_text.contains('.') || full_text.contains("->") || full_text.contains("::");
     let short = short_name_of(&full_text);
     let is_ctor = class_names.iter().any(|c| c == &full_text || c == short);
@@ -4742,23 +4769,42 @@ fn call_receiver_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
         .or_else(|| node.child_by_field_name("object"))
         .or_else(|| node.child_by_field_name("invocant"))
         .or_else(|| {
-            let function = node.child_by_field_name("function")?;
-            let inner = if function.kind() == "expression" {
-                first_named_child(&function).unwrap_or(function)
-            } else {
-                function
-            };
-            if MEMBER_EXPR_KINDS.contains(&inner.kind()) {
-                inner
-                    .child_by_field_name("object")
-                    .or_else(|| inner.child_by_field_name("receiver"))
-                    .or_else(|| inner.child_by_field_name("target"))
-                    // tree-sitter-rust field expressions use `value` for
-                    // the receiver (`joined.trim`), unlike JS/C#/Java.
-                    .or_else(|| inner.child_by_field_name("value"))
-            } else {
-                None
-            }
+            let callee = node
+                .child_by_field_name("function")
+                .or_else(|| node.child_by_field_name("callee"))
+                // Kotlin and Swift call expressions expose their callee as
+                // the first named child rather than through a field.
+                .or_else(|| first_named_child(node))?;
+            member_receiver_node(callee)
+        })
+}
+
+/// Select the value side of a member expression from grammar structure.
+/// Kotlin/Swift navigation expressions use positional children; the other
+/// supported grammars expose one of the named receiver fields below.
+fn member_receiver_node<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
+    let member = if node.kind() == "expression" {
+        first_named_child(&node).unwrap_or(node)
+    } else {
+        node
+    };
+    if !MEMBER_EXPR_KINDS.contains(&member.kind()) {
+        return None;
+    }
+    member
+        .child_by_field_name("object")
+        .or_else(|| member.child_by_field_name("receiver"))
+        .or_else(|| member.child_by_field_name("target"))
+        .or_else(|| member.child_by_field_name("expression"))
+        // tree-sitter-rust field expressions use `value` for the receiver.
+        .or_else(|| member.child_by_field_name("value"))
+        .or_else(|| {
+            matches!(
+                member.kind(),
+                "navigation_expression" | "qualified_access_expression"
+            )
+            .then(|| first_named_child(&member))
+            .flatten()
         })
 }
 
@@ -5524,6 +5570,49 @@ pub fn extract_assignment_value_facts(
     facts
 }
 
+/// Collect receiver-expression dependencies directly from call CST nodes.
+/// The call event's own span is the stable join key used by IDG transfer;
+/// receiver rendering remains available for diagnostics but is never parsed
+/// for value carriers.
+pub fn extract_call_receiver_facts(
+    tree: &Tree,
+    file: FileId,
+    handler: &GrammarHandler,
+    src: &[u8],
+) -> Vec<crate::CallReceiverFact> {
+    let mut facts = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let receiver_and_span = if handler.is_call(node.kind()) {
+            call_receiver_node(&node)
+                .zip(parsed_call_target(&node, src))
+                .map(|(receiver, target)| (receiver, span_of(file, &target.node)))
+        } else if node.kind() == "field_expression" && is_scala_operator_method_call(&node) {
+            node.child_by_field_name("value")
+                .or_else(|| first_named_child(&node))
+                .map(|receiver| (receiver, span_of(file, &node)))
+        } else if node.kind() == "infix_expression" {
+            infix_method_receiver(&node, src).map(|(receiver, _)| (receiver, span_of(file, &node)))
+        } else {
+            None
+        };
+        if let Some((receiver, call_span)) = receiver_and_span {
+            let value_flow = expression_flow_from_node(receiver, file, src);
+            if !value_flow.is_empty() {
+                facts.push(crate::CallReceiverFact {
+                    call_span,
+                    value_flow,
+                });
+            }
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    facts.sort_by_key(|fact| (fact.call_span.start, fact.call_span.end));
+    facts.dedup();
+    facts
+}
+
 /// Full adapter pipeline: parse with `pack_name`, scan for declarations,
 /// populate each function's `flow_events` via [`walk_flow_events`], and
 /// collect top-level call refs for legacy consumers.
@@ -6059,11 +6148,13 @@ pub fn decl_index_with_handler(
     let strings = extract_string_literals(&tree, file, src);
     let comments = extract_comments(&tree, file, src);
     let assignment_values = extract_assignment_value_facts(&tree, file, handler, src);
+    let call_receivers = extract_call_receiver_facts(&tree, file, handler, src);
     crate::DeclIndex {
         file,
         defs,
         refs,
         assignment_values,
+        call_receivers,
         aggregate_layouts: Vec::new(),
         strings,
         comments,

@@ -173,6 +173,7 @@ fn build_index(decls: Vec<Decl>) -> GlobalIndex {
             defs,
             refs: Vec::new(),
             assignment_values: Vec::new(),
+            call_receivers: Vec::new(),
             aggregate_layouts: Vec::new(),
             strings: Vec::new(),
             comments: Vec::new(),

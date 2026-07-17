@@ -716,8 +716,8 @@ pub enum AssignValueKind {
     /// return-value edge.
     CallableReference,
     /// RHS is a compound expression (member access, binary op,
-    /// template literal, ternary, conditional, …). Engine
-    /// tokenises identifiers and bridges every carrier.
+    /// template literal, ternary, conditional, …). Adapters provide its
+    /// AST-derived carriers through structured expression-flow facts.
     Compound,
     /// RHS shape couldn't be classified (or the adapter doesn't
     /// surface enough info). Engine treats as `Compound` for
@@ -1493,6 +1493,27 @@ pub struct AssignmentValueFact {
     pub call_sites: Vec<Span>,
 }
 
+/// Compiler-owned value flow for a method-call receiver.
+///
+/// `call_span` is the exact span used by the sibling [`FlowEvent::Call`].
+/// `value_flow` comes from the receiver's tree-sitter expression node, so
+/// graph builders never need to tokenize the rendered `Call::receiver` or
+/// callee name to recover nested calls and value operands.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallReceiverFact {
+    pub call_span: Span,
+    pub value_flow: ExpressionFlow,
+}
+
+/// Locate receiver-flow facts for a semantic call in the sorted file table.
+#[must_use]
+pub fn call_receiver_fact_for_span(facts: &[CallReceiverFact], call_span: Span) -> Option<&CallReceiverFact> {
+    let key = |span: Span| (span.file.raw(), span.start, span.end);
+    let wanted = key(call_span);
+    let index = facts.partition_point(|fact| key(fact.call_span) < wanted);
+    facts.get(index).filter(|fact| fact.call_span == call_span)
+}
+
 /// Locate one exact assignment syntax fact in the sorted file-local fact
 /// table emitted by [`crate::kit::extract_assignment_value_facts`].
 #[must_use]
@@ -1605,6 +1626,9 @@ pub struct DeclIndex {
     /// the source snapshot rather than duplicated strings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assignment_values: Vec<AssignmentValueFact>,
+    /// Parsed receiver-expression dependencies keyed by semantic call span.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_receivers: Vec<CallReceiverFact>,
     /// Grammar-declared aggregate field layouts in this file. These are
     /// workspace-level type facts rather than function declarations, so they
     /// live beside the per-file declaration index and remain available for

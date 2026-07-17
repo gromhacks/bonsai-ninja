@@ -73,8 +73,8 @@
 use bonsai_common::{FuncId, Precision, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
 use bonsai_lang_api::{
-    kit::SYNTHETIC_TUPLE_RESULT_PREFIX, AssignValueKind, AssignmentValueFact, CallArg, CallKind, Decl,
-    DeclKind, ExpressionFlow, ExpressionProjection, FlowEvent,
+    call_receiver_fact_for_span, kit::SYNTHETIC_TUPLE_RESULT_PREFIX, AssignValueKind, AssignmentValueFact,
+    CallArg, CallKind, CallReceiverFact, Decl, DeclKind, ExpressionFlow, ExpressionProjection, FlowEvent,
 };
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -86,8 +86,7 @@ use crate::place::{CallSiteId, Place, TypeId};
 
 pub(crate) const RETURN_FIELD_BASE: &str = "__bonsai_return";
 pub(crate) const YIELD_FIELD_BASE: &str = "__bonsai_yield";
-pub(crate) const INLINE_RECEIVER_BASE_PREFIX: &str = "__bonsai_inline_recv";
-pub(crate) const INLINE_CALL_RESULT_RECEIVER_BASE_PREFIX: &str = "__bonsai_inline_call_recv";
+pub(crate) const TEMPORARY_RECEIVER_BASE_PREFIX: &str = "__bonsai_receiver";
 
 /// Transfer-time options supplied by higher layers.
 ///
@@ -473,20 +472,25 @@ pub struct CallSiteRef {
     /// against the workspace `ResolvedCallGraph` to a list of
     /// candidate `FuncId`s with their precision.
     pub callee_name: String,
-    /// Receiver expression text for method calls. Used by Phase 3's
-    /// receiver-type resolution.
+    /// Adapter rendering of the receiver for resolution and diagnostics.
+    /// Value-flow lowering uses `receiver_storage_base`, which comes from
+    /// the file-local Tree-sitter receiver fact rather than this string.
     pub receiver: Option<String>,
-    /// Adapter-derived static receiver types. Phase 3 prefers these
-    /// over textual receiver inference.
+    /// Adapter-derived static receiver types used by Phase 3 resolution.
     pub receiver_types: Vec<String>,
+    /// Compiler-owned storage identity for receiver field forwarding. A
+    /// normal addressable receiver uses its canonical place; a nested call
+    /// receiver uses a span-derived temporary populated from structured
+    /// receiver flow. Phase 3 never derives this by parsing `receiver`.
+    pub receiver_storage_base: Option<String>,
     /// Adapter's classification for this call (Free / Method /
     /// Constructor / etc.). Mirrors the FlowEvent::Call::call_kind.
     pub call_kind: CallKind,
     /// Number of arguments at the site. Phase 3 uses this to bound
     /// the param-index edges it stitches.
     pub args_count: u32,
-    /// Number of source-level arguments before the transfer pass adds
-    /// synthetic carrier args for flattened no-arg expressions.
+    /// Number of explicit source-level arguments. The implicit receiver is
+    /// represented separately by `receiver_arg_node`.
     pub explicit_args_count: u32,
     /// Caller-side `CallRet(site)` node interned in the function's
     /// segment. Phase 3 connects each candidate callee's
@@ -845,12 +849,12 @@ impl NameInterner {
 /// places, so the segment merge can resolve local StrIds back to
 /// strings and re-intern them in the segment-level pool.
 pub fn transfer_function_for(decl: &Decl) -> TransferOutput {
-    transfer_function_for_with_options_and_assignment_values(decl, &TransferOptions::default(), &[])
+    transfer_function_for_with_options_and_syntax_facts(decl, &TransferOptions::default(), &[], &[])
 }
 
 /// Run the transfer-function pass with caller-provided options.
 pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions) -> TransferOutput {
-    transfer_function_for_with_options_and_assignment_values(decl, options, &[])
+    transfer_function_for_with_options_and_syntax_facts(decl, options, &[], &[])
 }
 
 /// Run the transfer pass with exact assignment-to-RHS syntax facts from the
@@ -861,6 +865,18 @@ pub fn transfer_function_for_with_options_and_assignment_values(
     decl: &Decl,
     options: &TransferOptions,
     assignment_values: &[AssignmentValueFact],
+) -> TransferOutput {
+    transfer_function_for_with_options_and_syntax_facts(decl, options, assignment_values, &[])
+}
+
+/// Run the transfer pass with all file-local compiler syntax facts needed by
+/// graph lowering. Receiver and assignment semantics arrive as structured
+/// tree-sitter facts; rendered source strings are not reparsed here.
+pub fn transfer_function_for_with_options_and_syntax_facts(
+    decl: &Decl,
+    options: &TransferOptions,
+    assignment_values: &[AssignmentValueFact],
+    call_receivers: &[CallReceiverFact],
 ) -> TransferOutput {
     let func = FuncId::new(decl.symbol.raw());
     let mut out = TransferOutput::new(func);
@@ -889,9 +905,9 @@ pub fn transfer_function_for_with_options_and_assignment_values(
         method_selector_fields,
         field_precise_source_projections,
         yield_callback_names: collect_yield_callback_names(&decl.flow_events),
-        pattern_bindings: collect_pattern_bindings(&decl.flow_events),
         pending_expression_calls: Vec::new(),
         assignment_values,
+        call_receivers,
         in_loop_replay: false,
     };
 
@@ -968,8 +984,6 @@ pub fn transfer_function_for_with_options_and_assignment_values(
     ctx.out.call_sites.dedup_by_key(|site| site.site.0);
     bridge_expression_value_calls(&mut ctx);
     bridge_compound_expression_calls(&mut ctx);
-    bridge_inline_call_result_receivers(&mut ctx);
-    bridge_inline_constructor_receivers(&mut ctx);
     out
 }
 
@@ -1433,328 +1447,6 @@ fn bridge_expression_value_calls(ctx: &mut TransferCtx<'_>) {
     }
 }
 
-fn bridge_inline_constructor_receivers(ctx: &mut TransferCtx<'_>) {
-    let sites = ctx.out.call_sites.clone();
-    for outer in &sites {
-        if !matches!(outer.call_kind, CallKind::Method) {
-            continue;
-        }
-        let Some(receiver) = outer.receiver.as_deref() else {
-            continue;
-        };
-        let Some((ctor_name, ctor_args)) = inline_constructor_receiver_parts(receiver) else {
-            continue;
-        };
-        let Some(target_base) = inline_constructor_receiver_base(receiver, outer.site.0) else {
-            continue;
-        };
-        let Some(inner) = sites
-            .iter()
-            .filter(|site| inline_constructor_site_matches(site, outer.site.0, &ctor_name, &ctor_args))
-            .max_by_key(|site| site.site.0.start)
-        else {
-            continue;
-        };
-        let write_node = ctx.write_node(&target_base, outer.site.0);
-        ctx.emit(IdgEdge {
-            from: inner.call_ret_node,
-            to: write_node,
-            meta: crate::edge::EdgeMeta {
-                precision: Precision::Exact,
-                kind: IdgEdgeKind::IntraAssign,
-                call_kind: bonsai_callgraph::EdgeKind::Direct,
-                via_span: outer.site.0,
-            },
-        });
-    }
-}
-
-fn bridge_inline_call_result_receivers(ctx: &mut TransferCtx<'_>) {
-    let sites = ctx.out.call_sites.clone();
-    for outer in &sites {
-        if !matches!(outer.call_kind, CallKind::Method) {
-            continue;
-        }
-        let Some(receiver) = outer.receiver.as_deref() else {
-            continue;
-        };
-        if receiver.trim().is_empty() {
-            continue;
-        }
-        let Some(target_base) = inline_call_result_receiver_base(receiver, outer.site.0) else {
-            continue;
-        };
-        let Some(receiver_arg_node) = outer.receiver_arg_node else {
-            continue;
-        };
-        let Some(inner) = sites
-            .iter()
-            .filter(|site| inline_receiver_call_site_matches(site, outer.site.0, receiver))
-            .max_by_key(|site| site.site.0.start)
-        else {
-            continue;
-        };
-        let write_node = ctx.write_node(&target_base, outer.site.0);
-        ctx.emit(IdgEdge {
-            from: inner.call_ret_node,
-            to: write_node,
-            meta: crate::edge::EdgeMeta {
-                precision: Precision::Exact,
-                kind: IdgEdgeKind::IntraAssign,
-                call_kind: bonsai_callgraph::EdgeKind::Direct,
-                via_span: outer.site.0,
-            },
-        });
-        for arg_node in &inner.call_arg_nodes {
-            ctx.emit(IdgEdge {
-                from: *arg_node,
-                to: write_node,
-                meta: crate::edge::EdgeMeta {
-                    precision: Precision::Narrowed,
-                    kind: IdgEdgeKind::IntraAssign,
-                    call_kind: bonsai_callgraph::EdgeKind::Direct,
-                    via_span: outer.site.0,
-                },
-            });
-        }
-        ctx.emit(IdgEdge {
-            from: inner.call_ret_node,
-            to: receiver_arg_node,
-            meta: crate::edge::EdgeMeta {
-                precision: Precision::Exact,
-                kind: IdgEdgeKind::IntraRead,
-                call_kind: bonsai_callgraph::EdgeKind::Direct,
-                via_span: inner.site.0,
-            },
-        });
-        for arg_node in &inner.call_arg_nodes {
-            ctx.emit(IdgEdge {
-                from: *arg_node,
-                to: receiver_arg_node,
-                meta: crate::edge::EdgeMeta {
-                    precision: Precision::Narrowed,
-                    kind: IdgEdgeKind::IntraRead,
-                    call_kind: bonsai_callgraph::EdgeKind::Direct,
-                    via_span: inner.site.0,
-                },
-            });
-        }
-    }
-}
-
-pub(crate) fn inline_call_result_receiver_base(receiver: &str, site: Span) -> Option<String> {
-    if inline_constructor_receiver_parts(receiver).is_some() {
-        return None;
-    }
-    inline_call_result_receiver_head(receiver)?;
-    Some(format!(
-        "{}_{}_{}_{}",
-        INLINE_CALL_RESULT_RECEIVER_BASE_PREFIX,
-        site.file.raw(),
-        site.start,
-        site.end
-    ))
-}
-
-fn inline_receiver_call_site_matches(site: &CallSiteRef, outer_span: Span, receiver: &str) -> bool {
-    let site_span = site.site.0;
-    if site_span.file != outer_span.file || site_span.start > outer_span.start {
-        return false;
-    }
-    let receiver = receiver.trim();
-    if receiver.is_empty() {
-        return false;
-    }
-    site_span_text_matches_receiver(site, receiver)
-}
-
-fn site_span_text_matches_receiver(site: &CallSiteRef, receiver: &str) -> bool {
-    let callee = site.callee_name.trim();
-    if callee.is_empty() {
-        return false;
-    }
-    if let Some(head) = inline_call_result_receiver_head(receiver) {
-        return same_call_head(callee, &head);
-    }
-    same_call_head(callee, receiver.trim_end_matches("()"))
-}
-
-fn inline_call_result_receiver_head(receiver: &str) -> Option<String> {
-    let receiver = receiver.trim();
-    if receiver.starts_with("new ") {
-        return None;
-    }
-    let open = receiver.find('(')?;
-    let head = receiver[..open].trim();
-    if head.is_empty() {
-        return None;
-    }
-    Some(head.to_string())
-}
-
-fn same_call_head(left: &str, right: &str) -> bool {
-    let left = normalize_call_head(left);
-    let right = normalize_call_head(right);
-    !left.is_empty() && left == right
-}
-
-fn normalize_call_head(text: &str) -> String {
-    text.trim()
-        .trim_start_matches("new ")
-        .trim_end_matches("()")
-        .replace("->", ".")
-        .replace("::", ".")
-        .replace([' ', '\t', '\n', '\r'], "")
-}
-
-fn inline_constructor_site_matches(
-    site: &CallSiteRef,
-    outer_span: Span,
-    ctor_name: &str,
-    ctor_args: &[String],
-) -> bool {
-    if !matches!(site.call_kind, CallKind::Constructor) {
-        return false;
-    }
-    let site_span = site.site.0;
-    if site_span.file != outer_span.file || site_span.start > outer_span.start {
-        return false;
-    }
-    if !same_bare_type_name(&site.callee_name, ctor_name) {
-        return false;
-    }
-    if site.call_arg_places.len() != ctor_args.len() {
-        return false;
-    }
-    site.call_arg_places
-        .iter()
-        .zip(ctor_args)
-        .all(|(place, expected)| place.trim().is_empty() || place.trim() == expected.trim())
-}
-
-pub(crate) fn inline_constructor_receiver_base(receiver: &str, site: Span) -> Option<String> {
-    inline_constructor_receiver_parts(receiver)?;
-    Some(format!(
-        "{}_{}_{}_{}",
-        INLINE_RECEIVER_BASE_PREFIX,
-        site.file.raw(),
-        site.start,
-        site.end
-    ))
-}
-
-fn inline_constructor_receiver_parts(receiver: &str) -> Option<(String, Vec<String>)> {
-    let receiver = receiver.trim();
-    let rest = receiver.strip_prefix("new ")?;
-    let open = rest.find('(')?;
-    let close = matching_close_paren(rest, open)?;
-    if rest[close + 1..].trim().is_empty() {
-        // `new Type(args)` as a bare receiver.
-    } else {
-        return None;
-    }
-    let raw_type = rest[..open].trim();
-    let type_name = bare_constructor_type_name(raw_type)?;
-    let args = split_top_level_args(&rest[open + 1..close]);
-    Some((type_name, args))
-}
-
-fn matching_close_paren(text: &str, open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_string: Option<char> = None;
-    let mut escape = false;
-    for (idx, ch) in text.char_indices().skip_while(|(idx, _)| *idx < open) {
-        if let Some(quote) = in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == quote {
-                in_string = None;
-            }
-            continue;
-        }
-        match ch {
-            '"' | '\'' => in_string = Some(ch),
-            '(' => depth = depth.saturating_add(1),
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(idx);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn bare_constructor_type_name(raw_type: &str) -> Option<String> {
-    let without_generics = raw_type.split('<').next().unwrap_or(raw_type).trim();
-    let bare = without_generics
-        .rsplit(['.', ':'])
-        .next()
-        .unwrap_or(without_generics)
-        .trim();
-    (!bare.is_empty()
-        && bare
-            .chars()
-            .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$'))
-    .then(|| bare.to_string())
-}
-
-fn split_top_level_args(args: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0usize;
-    let mut in_string: Option<char> = None;
-    let mut escape = false;
-    for (idx, ch) in args.char_indices() {
-        if let Some(quote) = in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == quote {
-                in_string = None;
-            }
-            continue;
-        }
-        match ch {
-            '"' | '\'' => in_string = Some(ch),
-            '(' | '[' | '{' => depth = depth.saturating_add(1),
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                push_trimmed_arg(&mut out, &args[start..idx]);
-                start = idx + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    push_trimmed_arg(&mut out, &args[start..]);
-    out
-}
-
-fn push_trimmed_arg(out: &mut Vec<String>, arg: &str) {
-    let arg = arg.trim();
-    if !arg.is_empty() {
-        out.push(arg.to_string());
-    }
-}
-
-fn same_bare_type_name(left: &str, right: &str) -> bool {
-    let Some(left) = bare_constructor_type_name(left.trim_start_matches("new ").trim()) else {
-        return false;
-    };
-    let Some(right) = bare_constructor_type_name(right.trim_start_matches("new ").trim()) else {
-        return false;
-    };
-    left == right
-}
-
-/// True when `outer` strictly contains `inner` — i.e. inner is
-/// fully inside outer with at least one different endpoint. Used
-/// to detect compound-expression nesting.
 fn span_strictly_contains(outer: Span, inner: Span) -> bool {
     if outer.file != inner.file {
         return false;
@@ -1816,11 +1508,6 @@ struct TransferCtx<'a> {
     /// as Ruby's `callback = Proc.new { |part| yield part }`. Calls
     /// through these names forward their arguments into `Place::Yield`.
     yield_callback_names: ahash::AHashSet<String>,
-    /// Pattern bindings from conditions such as
-    /// `let Some(value) = Some(routed)`. Some adapters emit the
-    /// enclosing assignment before the branch condition, so the
-    /// binding must be materialized before lowering that assignment.
-    pattern_bindings: Vec<PatternBinding>,
     /// AST call spans and the exact Return/Yield/aggregate node that consumes
     /// each result. Resolved after all Call events have been lowered so event
     /// order cannot affect dataflow.
@@ -1829,6 +1516,8 @@ struct TransferCtx<'a> {
     /// facts are sorted by assignment span, so lookups remain logarithmic and
     /// do not turn transfer into an assignments-squared pass on large files.
     assignment_values: &'a [AssignmentValueFact],
+    /// Tree-sitter receiver-expression facts keyed by semantic call span.
+    call_receivers: &'a [CallReceiverFact],
     /// Whether the walker is replaying an enclosing loop body to establish
     /// loop-carried edges. A nested loop encountered during replay gets one
     /// body visit: its own normal visit already established its local carry
@@ -1843,13 +1532,6 @@ struct PendingExpressionCall {
     call_span: Span,
     target: NodeId,
     meta: crate::edge::EdgeMeta,
-}
-
-#[derive(Clone, Debug)]
-struct PatternBinding {
-    span: Span,
-    binding: String,
-    source: String,
 }
 
 impl<'a> TransferCtx<'a> {
@@ -2299,106 +1981,6 @@ fn events_contain_yield(events: &[FlowEvent]) -> bool {
         }
         _ => false,
     })
-}
-
-fn collect_pattern_bindings(events: &[FlowEvent]) -> Vec<PatternBinding> {
-    let mut out = Vec::new();
-    collect_pattern_bindings_into(events, &mut out);
-    out.sort_by(|a, b| {
-        (
-            a.span.file.raw(),
-            a.span.start,
-            a.binding.as_str(),
-            a.source.as_str(),
-        )
-            .cmp(&(
-                b.span.file.raw(),
-                b.span.start,
-                b.binding.as_str(),
-                b.source.as_str(),
-            ))
-    });
-    out.dedup_by(|a, b| a.span == b.span && a.binding == b.binding && a.source == b.source);
-    out
-}
-
-fn collect_pattern_bindings_into(events: &[FlowEvent], out: &mut Vec<PatternBinding>) {
-    for event in events {
-        match event {
-            FlowEvent::Branch {
-                span,
-                condition: Some(condition),
-                then_events,
-                else_events,
-            } => {
-                if let Some((binding, source)) = pattern_binding_from_condition(condition) {
-                    out.push(PatternBinding {
-                        span: *span,
-                        binding,
-                        source,
-                    });
-                }
-                collect_pattern_bindings_into(then_events, out);
-                collect_pattern_bindings_into(else_events, out);
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_pattern_bindings_into(then_events, out);
-                collect_pattern_bindings_into(else_events, out);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_pattern_bindings_into(body, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_pattern_bindings_into(body, out);
-                collect_pattern_bindings_into(catch_events, out);
-                collect_pattern_bindings_into(finally_events, out);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn pattern_binding_from_condition(condition: &str) -> Option<(String, String)> {
-    let condition = condition.trim();
-    let rest = condition.strip_prefix("let ")?;
-    let (pattern, source) = rest.split_once('=')?;
-    let binding = single_pattern_binding_arg(pattern.trim()).unwrap_or_else(|| pattern.trim().to_string());
-    // The scrutinee is already the adapter's AST-derived expression. Do not
-    // guess that an arbitrary call wrapper preserves its argument value.
-    let source = source.trim().to_string();
-    if !is_bare_identifier(&binding) || source.is_empty() {
-        return None;
-    }
-    Some((binding, source))
-}
-
-fn single_pattern_binding_arg(text: &str) -> Option<String> {
-    let open = text.find('(')?;
-    let close = text.rfind(')')?;
-    if close <= open {
-        return None;
-    }
-    // Tuple/variant pattern names are user-defined. The grammar proves this is
-    // the binding side of `let PATTERN = EXPR`; the IDG must not maintain an
-    // enum-constructor inventory.
-    let wrapper = text[..open].trim();
-    if !is_bare_identifier(wrapper) {
-        return None;
-    }
-    let inner = text[open + 1..close].trim();
-    if inner.is_empty() || inner.contains(',') {
-        return None;
-    }
-    Some(inner.to_string())
 }
 
 fn collect_method_receiver_projections_into(events: &[FlowEvent], out: &mut ahash::AHashSet<String>) {
@@ -2964,212 +2546,6 @@ fn copy_expression_descendants_to_special_base(
     }
 }
 
-fn bridge_value_expr_to_node(
-    value: &str,
-    target: NodeId,
-    span: Span,
-    kind: IdgEdgeKind,
-    ctx: &mut TransferCtx<'_>,
-) {
-    let mut bridged: ahash::AHashSet<StrId> = ahash::AHashSet::default();
-    bridge_value_expr_to_node_with_bridged(value, target, span, kind, ctx, &mut bridged);
-}
-
-/// Like [`bridge_value_expr_to_node`] but dedups against a caller-owned
-/// `bridged` set. This remains the legacy textual boundary for assignment
-/// shapes whose adapters have not yet promoted RHS operands into HIR; return
-/// and yield lowering never calls it.
-fn bridge_value_expr_to_node_with_bridged(
-    value: &str,
-    target: NodeId,
-    span: Span,
-    kind: IdgEdgeKind,
-    ctx: &mut TransferCtx<'_>,
-    bridged: &mut ahash::AHashSet<StrId>,
-) {
-    let meta = crate::edge::EdgeMeta {
-        precision: Precision::Exact,
-        kind,
-        call_kind: bonsai_callgraph::EdgeKind::Direct,
-        via_span: span,
-    };
-    bridge_value_expr_fragment_to_node(value, target, meta, ctx, bridged);
-    for expression in template_interpolation_expressions(value) {
-        bridge_value_expr_fragment_to_node(&expression, target, meta, ctx, bridged);
-    }
-}
-
-fn bridge_value_expr_fragment_to_node(
-    value: &str,
-    target: NodeId,
-    meta: crate::edge::EdgeMeta,
-    ctx: &mut TransferCtx<'_>,
-    bridged: &mut ahash::AHashSet<StrId>,
-) {
-    let qualified_accesses = extract_qualified_accesses_outside_strings(value);
-    for (access, start, end) in &qualified_accesses {
-        let sid = ctx.intern_name(access);
-        if bridged.insert(sid) {
-            ctx.bridge_read(access, target, meta);
-        }
-        if let Some(parent) = immediate_qualified_parent(access) {
-            let sid = ctx.intern_name(parent);
-            if bridged.insert(sid) {
-                ctx.bridge_read(parent, target, meta);
-            }
-        }
-        let source_slice = value.get(*start..*end).unwrap_or(access);
-        if !source_slice.contains('[') && ctx.method_receiver_projections.contains(access) {
-            if let Some(receiver) = method_chain_receiver_carrier(access) {
-                let sid = ctx.intern_name(&receiver);
-                if bridged.insert(sid) {
-                    ctx.bridge_read(&receiver, target, meta);
-                }
-            }
-        } else if !source_slice.trim_end().ends_with(']') {
-            if let Some(receiver) = static_subscript_method_receiver(access) {
-                let sid = ctx.intern_name(&receiver);
-                if bridged.insert(sid) {
-                    ctx.bridge_read(&receiver, target, meta);
-                }
-            }
-        }
-    }
-    let token_text = text_without_qualified_ranges(value, &qualified_accesses);
-    for token in extract_identifiers_outside_strings(&token_text) {
-        if token.is_empty() || is_non_value_token(&token) {
-            continue;
-        }
-        let sid = ctx.intern_name(&token);
-        if bridged.insert(sid) {
-            ctx.bridge_read(&token, target, meta);
-        }
-    }
-}
-
-fn template_interpolation_expressions(text: &str) -> Vec<String> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    let mut quote: Option<u8> = None;
-    let mut escaped = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-                i += 1;
-                continue;
-            }
-            if b == b'\\' {
-                escaped = true;
-                i += 1;
-                continue;
-            }
-            if q == b'`' && b == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-                if let Some((expression, end)) = parse_template_interpolation(text, i + 2) {
-                    out.push(expression);
-                    i = end;
-                    continue;
-                }
-            }
-            if b == q {
-                quote = None;
-            }
-            i += 1;
-            continue;
-        }
-        if matches!(b, b'\'' | b'"' | b'`') {
-            quote = Some(b);
-            escaped = false;
-        }
-        i += 1;
-    }
-    out
-}
-
-fn parse_template_interpolation(text: &str, start: usize) -> Option<(String, usize)> {
-    let bytes = text.as_bytes();
-    let mut i = start;
-    let mut depth = 1usize;
-    let mut quote: Option<u8> = None;
-    let mut escaped = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-                i += 1;
-                continue;
-            }
-            if b == b'\\' {
-                escaped = true;
-                i += 1;
-                continue;
-            }
-            if q == b'`' && b == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-                depth = depth.saturating_add(1);
-                i += 2;
-                continue;
-            }
-            if b == q {
-                quote = None;
-            }
-            i += 1;
-            continue;
-        }
-        match b {
-            b'\'' | b'"' | b'`' => {
-                quote = Some(b);
-                escaped = false;
-                i += 1;
-            }
-            b'{' => {
-                depth = depth.saturating_add(1);
-                i += 1;
-            }
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some((text[start..i].to_string(), i + 1));
-                }
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    None
-}
-
-fn immediate_qualified_parent(access: &str) -> Option<&str> {
-    let (parent, _) = access.rsplit_once('.')?;
-    parent
-        .contains('.')
-        .then(|| parent.trim())
-        .filter(|parent| !parent.is_empty())
-}
-
-fn is_non_value_token(token: &str) -> bool {
-    matches!(
-        token,
-        "return"
-            | "yield"
-            | "from"
-            | "lambda"
-            | "if"
-            | "else"
-            | "case"
-            | "match"
-            | "true"
-            | "false"
-            | "True"
-            | "False"
-            | "None"
-            | "null"
-            | "nil"
-    )
-}
-
 fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCallSiteHint> {
     let FlowEvent::Assign {
         span: assign_span,
@@ -3476,8 +2852,6 @@ fn walk_assign(
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
     };
-    emit_pattern_bindings_for_assign_span(span, ctx);
-
     // A compound RHS can contain calls without being a direct call itself:
     // PHP's `$raw = readline(...) ?: ""` is one example. The declaration
     // index records the exact RHS call nodes, so join those CallRet places to
@@ -3613,6 +2987,7 @@ fn walk_assign(
                     callee_name: callee.to_string(),
                     receiver: None,
                     receiver_types: Vec::new(),
+                    receiver_storage_base: None,
                     call_kind: CallKind::Function,
                     args_count: u32::try_from(source_call_args.len()).unwrap_or(u32::MAX),
                     explicit_args_count: u32::try_from(source_call_args.len()).unwrap_or(u32::MAX),
@@ -3650,26 +3025,6 @@ fn walk_assign(
     // therefore see the prior `x` on the RHS and still update to
     // a fresh writer node post-assign.
     ctx.commit_writer(target, write_node);
-}
-
-fn emit_pattern_bindings_for_assign_span(span: Span, ctx: &mut TransferCtx<'_>) {
-    let bindings = ctx
-        .pattern_bindings
-        .iter()
-        .filter(|binding| span_contains_or_equal(span, binding.span))
-        .cloned()
-        .collect::<Vec<_>>();
-    for binding in bindings {
-        let write_node = ctx.write_node(&binding.binding, binding.span);
-        bridge_value_expr_to_node(
-            &binding.source,
-            write_node,
-            binding.span,
-            IdgEdgeKind::IntraAssign,
-            ctx,
-        );
-        ctx.commit_writer(&binding.binding, write_node);
-    }
 }
 
 fn is_structural_index_metadata_target(target: &str) -> bool {
@@ -3834,17 +3189,9 @@ fn walk_call(
             if !place.is_empty() && !source_filter.is_structural_base_token(place) {
                 let sid = ctx.intern_name(place);
                 if emitted.insert(sid) {
-                    if place.contains('[') {
-                        // Subscripted places (`args["q"]`, `env[@"cmd"]`)
-                        // must intern under the same canonical dotted
-                        // form (`args.q`) the assign / return paths
-                        // produce — otherwise the arg's read node is a
-                        // literal-text island no field-precise writer or
-                        // descendant seed (`args.*`) can ever address.
-                        bridge_value_expr_to_node(place, arg_node, span, IdgEdgeKind::IntraRead, ctx);
-                    } else {
-                        ctx.bridge_read(place, arg_node, arg_meta);
-                    }
+                    // `CallArg::place` is already canonicalized from the
+                    // tree-sitter argument node by the adapter layer.
+                    ctx.bridge_read(place, arg_node, arg_meta);
                 }
             }
         }
@@ -3893,8 +3240,11 @@ fn walk_call(
     // captures the flow from `t` into the call. Method calls only —
     // free functions don't carry implicit receiver flow.
     let mut receiver_arg_node = None;
+    let mut receiver_storage_base = None;
     if matches!(call_kind, CallKind::Method) {
-        if let Some(recv) = receiver.filter(|r| !r.is_empty()) {
+        let receiver_flow =
+            call_receiver_fact_for_span(ctx.call_receivers, span).map(|fact| fact.value_flow.clone());
+        if receiver_flow.is_some() || receiver.is_some_and(|recv| !recv.is_empty()) {
             let recv_meta = crate::edge::EdgeMeta {
                 precision: Precision::Exact,
                 kind: IdgEdgeKind::IntraRead,
@@ -3906,73 +3256,38 @@ fn walk_call(
             // indices the call may have.
             let recv_slot = ctx.intern_node(Place::CallArg { site, idx: u32::MAX });
             receiver_arg_node = Some(recv_slot);
-            // A receiver that is already an addressable AST place must keep
-            // its full projection (`self.data`, `repo.0`). Splitting it into
-            // unrelated identifier tokens loses field identity and prevents
-            // compiler-style receiver-state flow. Only flattened compound
-            // expression text falls back to token carriers.
-            if is_static_receiver_place(recv) {
+            if let Some(flow) = receiver_flow.as_ref() {
+                emit_expression_scalar_to_node(flow, recv_slot, recv_meta, ctx);
+                if !flow.call_sites.is_empty() {
+                    let base = format!(
+                        "{}_{}_{}_{}",
+                        TEMPORARY_RECEIVER_BASE_PREFIX,
+                        span.file.raw(),
+                        span.start,
+                        span.end
+                    );
+                    let write = ctx.write_node(&base, span);
+                    emit_expression_scalar_to_node(flow, write, recv_meta, ctx);
+                    ctx.commit_writer(&base, write);
+                    receiver_storage_base = Some(base);
+                } else {
+                    receiver_storage_base = flow.place.as_ref().and_then(|place| {
+                        // A bare implicit receiver is a callee-relative token,
+                        // not the caller object's storage identity. Leave it
+                        // unresolved so Phase 3 can map it through the
+                        // declaration's adapter-provided receiver metadata.
+                        (!receiver_name_matches(place, &ctx.out.receiver_names)).then(|| place.clone())
+                    });
+                }
+            } else if let Some(recv) = receiver.filter(|recv| !recv.is_empty()) {
+                // Adapter-specific calls without a file-level receiver fact
+                // may still provide an already-normalized place. Treat it as
+                // opaque compiler IR for the receiver edge, but leave the
+                // storage base unset: Phase 3 must still map an implicit
+                // `this`/`self` token onto the caller's declared object-state
+                // base instead of freezing the token as literal storage.
                 ctx.bridge_read(recv, recv_slot, recv_meta);
-            } else {
-                for token in extract_identifiers_outside_strings(recv) {
-                    if !token.is_empty() {
-                        ctx.bridge_read(&token, recv_slot, recv_meta);
-                    }
-                }
             }
-        }
-    }
-
-    // Receiver / call-name tokenisation: when an adapter encodes the
-    // entire call expression (`Seq("sh", "-c", tmp).!`) into the
-    // call name + receiver and reports `args.len() == 0`, the IDG
-    // would otherwise miss every name embedded in that text. Mirror
-    // the engine's identifier-tokenisation fallback so closure
-    // analysis stays consistent. Each tokenised name flows into
-    // `CallArg{site, idx=0}` as a synthetic carrier — we deliberately
-    // collapse onto idx 0 since the underlying expression has no
-    // positional argument shape from the IDG's perspective. Only
-    // engages when the caller passed no explicit args.
-    if args.is_empty() {
-        let mut emitted_arg_zero: Option<NodeId> = None;
-        // Tokenise the call name and receiver — both are raw
-        // expression text in adapters that flatten compound
-        // method-chains. Each token routes through CFG-narrowing
-        // bridge_read so a clean overwrite later in the function
-        // doesn't keep an old value alive on this synthetic CallArg.
-        let mut seen_tokens: ahash::AHashSet<String> = ahash::AHashSet::new();
-        let token_meta = crate::edge::EdgeMeta {
-            precision: Precision::Exact,
-            kind: IdgEdgeKind::IntraRead,
-            call_kind: bonsai_callgraph::EdgeKind::Direct,
-            via_span: span,
-        };
-        for source_text in [Some(name), receiver].iter().flatten() {
-            for token in extract_identifiers_outside_strings(source_text) {
-                if token.is_empty() || !seen_tokens.insert(token.clone()) {
-                    continue;
-                }
-                let arg_zero = match emitted_arg_zero {
-                    Some(n) => n,
-                    None => {
-                        let n = ctx.intern_node(Place::CallArg { site, idx: 0 });
-                        emitted_arg_zero = Some(n);
-                        n
-                    }
-                };
-                ctx.bridge_read(&token, arg_zero, token_meta);
-            }
-        }
-        // Synchronise arg_nodes so Phase 3 stitching sees this
-        // synthetic CallArg{idx=0} when resolving the callee's
-        // Param(0). Otherwise cross-call edges miss the synthetic
-        // edge entirely.
-        if let Some(n) = emitted_arg_zero {
-            arg_nodes.push(n);
-            arg_places.push(String::new());
-            arg_values.push(String::new());
-            arg_writeback_targets.push(None);
-            arg_names.push(None);
         }
     }
 
@@ -3980,26 +3295,11 @@ fn walk_call(
     for arg in args {
         arg_spans.push(arg.span);
     }
-    // The synthetic args.is_empty() fallback above pushes one
-    // extra arg_node into `arg_nodes` without a corresponding
-    // arg span — pad `arg_spans` with the call's own span so
-    // the two vectors stay aligned for the post-walk
-    // compound-expression bridger.
-    while arg_spans.len() < arg_nodes.len() {
-        arg_spans.push(span);
-    }
-    while arg_places.len() < arg_nodes.len() {
-        arg_places.push(String::new());
-    }
-    while arg_values.len() < arg_nodes.len() {
-        arg_values.push(String::new());
-    }
-    while arg_writeback_targets.len() < arg_nodes.len() {
-        arg_writeback_targets.push(None);
-    }
-    while arg_names.len() < arg_nodes.len() {
-        arg_names.push(None);
-    }
+    debug_assert_eq!(arg_spans.len(), arg_nodes.len());
+    debug_assert_eq!(arg_places.len(), arg_nodes.len());
+    debug_assert_eq!(arg_values.len(), arg_nodes.len());
+    debug_assert_eq!(arg_writeback_targets.len(), arg_nodes.len());
+    debug_assert_eq!(arg_names.len(), arg_nodes.len());
     apply_call_result_passthrough_edges(
         span,
         name,
@@ -4014,6 +3314,7 @@ fn walk_call(
         callee_name: name.to_string(),
         receiver: receiver.map(str::to_string),
         receiver_types: receiver_types.to_vec(),
+        receiver_storage_base,
         call_kind,
         args_count: u32::try_from(arg_nodes.len()).unwrap_or(u32::MAX),
         explicit_args_count: u32::try_from(args.len()).unwrap_or(u32::MAX),
@@ -4824,370 +4125,7 @@ fn bare_function_name(name: &str) -> &str {
     &name[last..]
 }
 
-fn method_chain_receiver_carrier(source_call: &str) -> Option<String> {
-    let text = source_call
-        .trim()
-        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
-        .trim();
-    if text.is_empty() || text.starts_with('(') {
-        return None;
-    }
-
-    let mut end = 0usize;
-    for (idx, ch) in text.char_indices() {
-        if idx == 0 {
-            if !(ch.is_alphabetic() || ch == '_') {
-                return None;
-            }
-        } else if !(ch.is_alphanumeric() || ch == '_') {
-            break;
-        }
-        end = idx + ch.len_utf8();
-    }
-    let candidate = text[..end].trim();
-    if !is_bare_identifier(candidate) {
-        return None;
-    }
-    let tail = text[end..].trim_start();
-    if !(tail.starts_with('.') || tail.starts_with("->") || tail.starts_with('[')) {
-        return None;
-    }
-    if candidate.chars().next().is_some_and(|ch| ch.is_uppercase()) {
-        return None;
-    }
-    Some(candidate.to_string())
-}
-
-fn static_subscript_method_receiver(access: &str) -> Option<String> {
-    let (receiver, field_or_method) = access.rsplit_once('.')?;
-    if field_or_method.starts_with('@') || !receiver.contains('.') {
-        return None;
-    }
-    Some(receiver.to_string())
-}
-
-/// Extract every bare-identifier token from legacy expression text, ignoring
-/// runs inside string literals (`"..."`, `'...'`, `` `...` ``). Call
-/// arguments never use this fallback: their carriers are compiler facts in
-/// `CallArg.place` / `CallArg.source_names`.
-pub(crate) fn extract_identifiers_outside_strings(text: &str) -> Vec<String> {
-    // First strip every `sizeof(...)` / `alignof(...)` / `_Alignof(...)`
-    // / `typeof(...)` payload — these are type-introspection
-    // expressions whose enclosed identifier is structural, not a
-    // value-bearing read. Treating them as taint carriers leaks
-    // structural reads into argument-tainted constraint checks:
-    // a size/type expression should not become tainted just because
-    // the referenced identifier's runtime value is tainted. The
-    // replacement preserves source length so any
-    // downstream span reasoning stays consistent.
-    let scrubbed = strip_typeof_subexpressions(text);
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for c in scrubbed.chars() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(c, '\'' | '"' | '`') {
-            push_id_token(&mut tokens, &mut current);
-            quote = Some(c);
-            continue;
-        }
-        if (matches!(c, '@' | '$' | '%') && current.is_empty()) || c == '_' || c.is_alphanumeric() {
-            current.push(c);
-        } else {
-            push_id_token(&mut tokens, &mut current);
-        }
-    }
-    push_id_token(&mut tokens, &mut current);
-    tokens
-}
-
-fn extract_qualified_accesses_outside_strings(text: &str) -> Vec<(String, usize, usize)> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    let mut quote: Option<u8> = None;
-    let mut escaped = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == q {
-                quote = None;
-            }
-            i += 1;
-            continue;
-        }
-        if matches!(b, b'\'' | b'"' | b'`') {
-            quote = Some(b);
-            i += 1;
-            continue;
-        }
-        if !is_ident_start_byte_for_access(bytes, i) {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        i += 1;
-        while i < bytes.len() && is_ident_continue_byte_for_access(bytes[i]) {
-            i += 1;
-        }
-        let mut access = text[start..i].to_string();
-        let mut end = i;
-        let mut saw_field = false;
-        loop {
-            if i < bytes.len() && bytes[i] == b'.' {
-                let field_start = i + 1;
-                if field_start >= bytes.len() || !is_ident_start_byte_for_access(bytes, field_start) {
-                    break;
-                }
-                let mut field_end = field_start + 1;
-                while field_end < bytes.len() && is_ident_continue_byte_for_access(bytes[field_end]) {
-                    field_end += 1;
-                }
-                access.push('.');
-                access.push_str(&text[field_start..field_end]);
-                saw_field = true;
-                i = field_end;
-                end = i;
-                continue;
-            }
-            if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'>' {
-                let field_start = i + 2;
-                if field_start >= bytes.len() || !is_ident_start_byte_for_access(bytes, field_start) {
-                    break;
-                }
-                let mut field_end = field_start + 1;
-                while field_end < bytes.len() && is_ident_continue_byte_for_access(bytes[field_end]) {
-                    field_end += 1;
-                }
-                access.push('.');
-                access.push_str(&text[field_start..field_end]);
-                saw_field = true;
-                i = field_end;
-                end = i;
-                continue;
-            }
-            if i < bytes.len() && bytes[i] == b'[' {
-                let Some((field, field_end)) = parse_static_subscript_access_segment(text, bytes, i) else {
-                    break;
-                };
-                access.push('.');
-                access.push_str(&field);
-                saw_field = true;
-                i = field_end;
-                end = i;
-                continue;
-            }
-            break;
-        }
-        if saw_field && !out.iter().any(|(existing, _, _)| existing == &access) {
-            out.push((access, start, end));
-        }
-    }
-    out
-}
-
-fn parse_static_subscript_access_segment(text: &str, bytes: &[u8], open: usize) -> Option<(String, usize)> {
-    let mut cursor = open.checked_add(1)?;
-    skip_ascii_ws(bytes, &mut cursor);
-    if cursor >= bytes.len() {
-        return None;
-    }
-
-    let mut objc_string_key = false;
-    let mut symbol_key = false;
-    if bytes[cursor] == b':' {
-        symbol_key = true;
-        cursor += 1;
-        skip_ascii_ws(bytes, &mut cursor);
-    } else if bytes[cursor] == b'@' {
-        objc_string_key = true;
-        cursor += 1;
-        skip_ascii_ws(bytes, &mut cursor);
-    }
-
-    let key = if cursor < bytes.len() && matches!(bytes[cursor], b'\'' | b'"') {
-        let quote = bytes[cursor];
-        cursor += 1;
-        let key_start = cursor;
-        let mut escaped = false;
-        while cursor < bytes.len() {
-            let b = bytes[cursor];
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == quote {
-                break;
-            }
-            cursor += 1;
-        }
-        if cursor >= bytes.len() || bytes[cursor] != quote {
-            return None;
-        }
-        let key = &text[key_start..cursor];
-        cursor += 1;
-        key
-    } else if symbol_key {
-        let key_start = cursor;
-        if key_start >= bytes.len() || !is_ident_start_byte_for_access(bytes, key_start) {
-            return None;
-        }
-        cursor += 1;
-        while cursor < bytes.len() && is_ident_continue_byte_for_access(bytes[cursor]) {
-            cursor += 1;
-        }
-        &text[key_start..cursor]
-    } else {
-        return None;
-    };
-
-    skip_ascii_ws(bytes, &mut cursor);
-    if cursor >= bytes.len() || bytes[cursor] != b']' {
-        return None;
-    }
-    if key.is_empty() || !key.bytes().all(is_static_field_key_byte) {
-        return None;
-    }
-
-    let mut field = String::with_capacity(key.len() + usize::from(objc_string_key));
-    if objc_string_key {
-        field.push('@');
-    }
-    field.push_str(key);
-    Some((field, cursor + 1))
-}
-
-fn skip_ascii_ws(bytes: &[u8], cursor: &mut usize) {
-    while *cursor < bytes.len() && bytes[*cursor].is_ascii_whitespace() {
-        *cursor += 1;
-    }
-}
-
-fn text_without_qualified_ranges(text: &str, ranges: &[(String, usize, usize)]) -> String {
-    if ranges.is_empty() {
-        return text.to_string();
-    }
-    let mut bytes = text.as_bytes().to_vec();
-    for (_, start, end) in ranges {
-        for idx in *start..(*end).min(bytes.len()) {
-            bytes[idx] = b' ';
-        }
-    }
-    String::from_utf8(bytes).unwrap_or_else(|_| text.to_string())
-}
-
-fn is_ident_start_byte_for_access(bytes: &[u8], i: usize) -> bool {
-    let b = bytes[i];
-    (b == b'_' || b.is_ascii_alphabetic()) && (i == 0 || !is_ident_continue_byte_for_access(bytes[i - 1]))
-}
-
-fn is_ident_continue_byte_for_access(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphanumeric()
-}
-
-fn is_static_field_key_byte(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphanumeric()
-}
-
-/// Replace every `sizeof(...)` / `alignof(...)` / `_Alignof(...)`
-/// / `typeof(...)` / `__typeof__(...)` payload with whitespace,
-/// so the surrounding tokeniser doesn't pull identifiers out of
-/// them. C's `sizeof EXPR` (no parens) form is a corner case the
-/// adapters reliably surface with parens, so the parsed rewrite
-/// covers the common path. The replacement preserves source
-/// length so any downstream span reasoning stays consistent.
-fn strip_typeof_subexpressions(text: &str) -> String {
-    const KEYWORDS: &[&str] = &["sizeof", "alignof", "_Alignof", "typeof", "__typeof__"];
-    let bytes = text.as_bytes();
-    let mut out: Vec<u8> = bytes.to_vec();
-    let mut i = 0;
-    while i < bytes.len() {
-        // Identifier-shaped prefix at byte i?
-        let start = i;
-        while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
-            i += 1;
-        }
-        let ident = &bytes[start..i];
-        let matched_keyword = KEYWORDS.iter().any(|kw| kw.as_bytes() == ident);
-        if !matched_keyword {
-            if i == start {
-                i += 1;
-            }
-            continue;
-        }
-        // Skip whitespace before the open paren.
-        let mut j = i;
-        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        if j >= bytes.len() || bytes[j] != b'(' {
-            // `sizeof EXPR` form — adapters rarely emit; bail out
-            // so we don't accidentally erase the whole tail.
-            continue;
-        }
-        let open = j;
-        let mut depth: i32 = 1;
-        let mut k = open + 1;
-        while k < bytes.len() && depth > 0 {
-            match bytes[k] {
-                b'(' => depth += 1,
-                b')' => depth -= 1,
-                _ => {}
-            }
-            if depth == 0 {
-                break;
-            }
-            k += 1;
-        }
-        if depth != 0 {
-            continue;
-        }
-        // Replace bytes (start..=k) with spaces — clears the
-        // keyword AND the parenthesised payload while keeping the
-        // overall byte length identical.
-        for byte in out.iter_mut().take(k + 1).skip(start) {
-            *byte = b' ';
-        }
-        i = k + 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Flush `current` as an identifier token if it looks like one
-/// (starts with a letter or underscore, not a digit).
-fn push_id_token(tokens: &mut Vec<String>, current: &mut String) {
-    let token = current.as_str();
-    let stripped = token.trim_start_matches(['@', '$', '%']);
-    if !stripped.is_empty()
-        && stripped
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_alphabetic() || c == '_')
-    {
-        tokens.push(std::mem::take(current));
-    } else {
-        current.clear();
-    }
-}
-
-/// which the adapter emits as raw expression text. The strict shape
-/// is "ASCII alphanumeric + underscore, starts with non-digit".
-/// Matches the convention the existing engine uses for bare-identifier
-/// detection.
+/// Validate a canonical identifier carried by adapter-owned compiler facts.
 fn is_bare_identifier(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -5198,17 +4136,6 @@ fn is_bare_identifier(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_alphanumeric() || c == '_')
-}
-
-fn is_static_receiver_place(receiver: &str) -> bool {
-    let receiver = normalized_call_arg_storage_place(receiver);
-    if receiver.is_empty() || receiver.chars().any(char::is_whitespace) {
-        return false;
-    }
-    receiver.split('.').all(|segment| {
-        let segment = segment.trim_start_matches(['@', '$', '%']);
-        !segment.is_empty() && (segment.chars().all(|ch| ch.is_ascii_digit()) || is_bare_identifier(segment))
-    })
 }
 
 /// Convenience re-export for callers driving the transfer pass

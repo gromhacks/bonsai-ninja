@@ -675,8 +675,8 @@ fn receiver_only_policy_stitches_syntax_classified_method_receiver_to_result() {
     let out_f = transfer_function_for_with_options(&f, &options);
     assert_eq!(out_f.call_sites[0].explicit_args_count, 0);
     assert!(
-        !out_f.call_sites[0].call_arg_nodes.is_empty(),
-        "the adapter-shaped zero-arg method should still expose its synthetic carrier"
+        out_f.call_sites[0].receiver_arg_node.is_some(),
+        "the adapter-shaped zero-arg method should expose its receiver carrier"
     );
 
     let mut f2s_map = AHashMap::new();

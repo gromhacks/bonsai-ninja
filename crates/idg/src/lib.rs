@@ -39,10 +39,10 @@
 //!
 //! ## Hybrid path
 //!
-//! The IDG forward-closure correctly models clean-overwrite kills
-//! and branch joins for most adapter shapes, and public query
-//! defaults cap reachability at `Precision::Narrowed` so diagnostic
-//! edges do not become evidence. Full
+//! The IDG forward closure models clean-overwrite kills and branch joins,
+//! and public queries accept evidence through `Precision::Narrowed` while
+//! excluding diagnostic-only edges. This is an evidence classification, not
+//! a traversal or result cap. Full
 //! security migration also needs adapter-uniform source-event
 //! anchoring for side-effecting output arguments, blockchain
 //! environment reads, and framework-specific patterns; those source
@@ -99,9 +99,9 @@ pub use symbolic::{
 pub use transfer::{
     transfer_for_many, transfer_for_many_with_options, transfer_function_for,
     transfer_function_for_with_options, transfer_function_for_with_options_and_assignment_values,
-    CallResultPassthroughSpec, CallSiteRef, CleanOutputOverwriteSpec, NameInterner, OutputArgFlowSpec,
-    ReceiverStatePropagationSpec, SourceCallbackArgSpec, SourceOutputArgSpec, ThrowSite, TransferOptions,
-    TransferOutput,
+    transfer_function_for_with_options_and_syntax_facts, CallResultPassthroughSpec, CallSiteRef,
+    CleanOutputOverwriteSpec, NameInterner, OutputArgFlowSpec, ReceiverStatePropagationSpec,
+    SourceCallbackArgSpec, SourceOutputArgSpec, ThrowSite, TransferOptions, TransferOutput,
 };
 pub use workspace::{CrossFileEdge, CrossFileEdges, FieldFlowLink, IdgWorkspace, SegmentId};
 

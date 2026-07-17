@@ -1772,6 +1772,52 @@ fn rust_mega_flow_preserves_nested_field_projection_through_newtype_factory() {
 }
 
 #[test]
+fn kotlin_mega_flow_preserves_implicit_getter_receiver_state() {
+    let ws = index_real_fixture("kotlin", "mega_flow");
+    let global = ws.db().global_index();
+    let idg = ensure_idg_service(ws.db());
+    let handle = ws.lookup_function("handle").expect("Kotlin mega-flow entry");
+    let seeds = TokenSet::from_iter(["raw".to_string()]);
+    let seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::legacy_tokens(handle, &seeds),
+        global.as_ref(),
+        idg.as_ref(),
+    );
+    let closure = idg.forward_closure(&seed_nodes);
+    let (repository_run, execute_span) = ws
+        .vfs()
+        .all_files()
+        .into_iter()
+        .flat_map(|file| global.decls_in(file).iter())
+        .filter(|decl| decl.name == "run")
+        .find_map(|decl| {
+            decl.flow_events.iter().find_map(|event| match event {
+                FlowEvent::Call { span, name, .. } if name == "Executor.execute" => {
+                    Some((bonsai_common::FuncId::new(decl.symbol.raw()), *span))
+                }
+                _ => None,
+            })
+        })
+        .expect("Repository.run execute call");
+    let execute_nodes = idg.nodes_at_span(repository_run, execute_span);
+    let points = closure
+        .iter()
+        .filter_map(|node| idg.resolve_point(*node))
+        .collect::<Vec<_>>();
+
+    assert!(
+        execute_nodes.iter().any(|node| {
+            closure.contains(node)
+                && idg
+                    .resolve_point(*node)
+                    .is_some_and(|point| point.kind == PointKind::CallArg && point.name == "arg0")
+        }),
+        "raw -> constructor state -> implicit cmd getter must reach Executor.execute(c); \
+         execute_nodes={execute_nodes:#?}; closure={points:#?}"
+    );
+}
+
+#[test]
 fn dart_mega_flow_stitches_repository_argument_into_execute_parameter() {
     let ws = index_real_fixture("dart", "mega_flow");
     let global = ws.db().global_index();
