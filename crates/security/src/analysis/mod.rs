@@ -7132,7 +7132,7 @@ fn source_analysis_worker_count() -> usize {
     std::env::var("BONSAI_SOURCE_ANALYSIS_JOBS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
-        .map(|requested| requested.clamp(1, available))
+        .map(|requested| requested.max(1))
         .unwrap_or(available)
 }
 
@@ -7144,12 +7144,12 @@ fn security_taint_worker_count() -> usize {
     let default = std::env::var("RAYON_NUM_THREADS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
-        .map(|requested| requested.clamp(1, available))
+        .map(|requested| requested.max(1))
         .unwrap_or(available);
     std::env::var("BONSAI_TAINT_ANALYSIS_JOBS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
-        .map(|requested| requested.clamp(1, available))
+        .map(|requested| requested.max(1))
         .unwrap_or(default)
 }
 
