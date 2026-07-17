@@ -177,7 +177,6 @@ impl LanguageAdapter for KotlinAdapter {
             // any flow_events mutation so this final enrichment is
             // the authoritative type fact.
             for decl in &mut idx.defs {
-                inject_kotlin_function_reference_aliases(&mut decl.flow_events, src);
                 populate_kotlin_exception_types(&mut decl.flow_events, &tree, src);
             }
         } else {
@@ -448,84 +447,6 @@ fn qualify_kotlin_implicit_member_reads(index: &mut DeclIndex) {
             }
         });
     }
-}
-
-/// Add exact callable-alias facts for Kotlin function references such
-/// as `val cb = ::helper`.
-fn inject_kotlin_function_reference_aliases(events: &mut Vec<FlowEvent>, src: &[u8]) {
-    for event in events.iter_mut() {
-        match event {
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                inject_kotlin_function_reference_aliases(then_events, src);
-                inject_kotlin_function_reference_aliases(else_events, src);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                inject_kotlin_function_reference_aliases(body, src);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                inject_kotlin_function_reference_aliases(body, src);
-                inject_kotlin_function_reference_aliases(catch_events, src);
-                inject_kotlin_function_reference_aliases(finally_events, src);
-            }
-            _ => {}
-        }
-    }
-
-    let mut rewritten = Vec::with_capacity(events.len());
-    for event in events.drain(..) {
-        let alias = kotlin_function_reference_alias_assignment(&event, src);
-        rewritten.push(event);
-        if let Some(alias) = alias {
-            rewritten.push(alias);
-        }
-    }
-    *events = rewritten;
-}
-
-fn kotlin_function_reference_alias_assignment(event: &FlowEvent, src: &[u8]) -> Option<FlowEvent> {
-    let FlowEvent::Assign { span, target, .. } = event else {
-        return None;
-    };
-    let rhs = span_rhs_text(src, *span)?;
-    let source_name = kotlin_function_reference_rhs(&rhs)?;
-    Some(FlowEvent::Assign {
-        span: *span,
-        target: target.trim().to_string(),
-        source_name: Some(source_name),
-        source_call: None,
-        source_call_args: Vec::new(),
-        source_names: Vec::new(),
-        declares_new_binding: true,
-        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
-    })
-}
-
-fn span_rhs_text(src: &[u8], span: bonsai_common::Span) -> Option<String> {
-    let start = usize::try_from(span.start).ok()?.min(src.len());
-    let end = usize::try_from(span.end).ok()?.min(src.len());
-    if start >= end {
-        return None;
-    }
-    let text = std::str::from_utf8(&src[start..end]).ok()?;
-    let (_, rhs) = text.split_once('=')?;
-    Some(rhs.trim().trim_end_matches(';').trim().to_string())
-}
-
-fn kotlin_function_reference_rhs(rhs: &str) -> Option<String> {
-    let name = rhs.trim().strip_prefix("::")?.trim();
-    if name.is_empty() || !name.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
-        return None;
-    }
-    Some(name.to_string())
 }
 
 /// Lift each `import_header` into an `ImportSpec`. The aliased shape

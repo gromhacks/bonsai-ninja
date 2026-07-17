@@ -82,8 +82,11 @@ impl LanguageAdapter for RubyAdapter {
         if !is_erb {
             let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
             if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-                idx.refs
-                    .extend(synthesize_rack_query_string_refs(snapshot.text.as_bytes(), file));
+                idx.refs.extend(extract_ruby_static_element_key_refs(
+                    &tree,
+                    snapshot.text.as_bytes(),
+                    file,
+                ));
                 // Apply Ruby's scope-marker visibility: `private`,
                 // `protected`, `public` keywords inside a class body
                 // change the default visibility of subsequent method
@@ -296,7 +299,7 @@ impl LanguageAdapter for RubyAdapter {
         let mut refs = bonsai_lang_api::kit::extract_call_refs(&tree, file, src);
         refs.extend(bonsai_lang_api::kit::extract_decorators(&tree, file, src));
         refs.extend(bonsai_lang_api::kit::extract_read_write_refs(&tree, file, src));
-        refs.extend(synthesize_rack_query_string_refs(src, file));
+        refs.extend(extract_ruby_static_element_key_refs(&tree, src, file));
         let strings = bonsai_lang_api::kit::extract_string_literals(&tree, file, src);
         let comments = bonsai_lang_api::kit::extract_comments(&tree, file, src);
         let assignment_values =
@@ -1664,31 +1667,11 @@ fn collect_ruby_class_bases(
                 }
             }
         }
-        // Header fallback for grammar variants that don't expose the
-        // superclass via a labelled field.
-        if bases.is_empty() {
-            if let Some(name) = ruby_class_superclass_from_header(node_text(&class_node, src)) {
-                bases.push(name);
-            }
-        }
         if !bases.is_empty() {
             bases_table.push((span_of(file, &class_node), class_name, bases));
         }
     }
     bases_table
-}
-
-/// Textual fallback that scrapes `class Foo < Bar` from the raw class
-/// node text. Used only when the grammar omits the `superclass` field
-/// for a parsed class — kept for resilience across tree-sitter-ruby
-/// releases.
-fn ruby_class_superclass_from_header(raw: &str) -> Option<String> {
-    let header = raw.lines().next().unwrap_or(raw);
-    let (_, rest) = header.split_once('<')?;
-    let candidate = rest
-        .split(|ch: char| ch.is_whitespace() || ch == ';')
-        .find(|part| !part.trim().is_empty())?;
-    canonical_ruby_base_name(candidate)
 }
 
 /// Strip `Foo::Bar::Baz` down to the bare tail (`Baz`). Resolver
@@ -1702,26 +1685,63 @@ fn canonical_ruby_base_name(raw: &str) -> Option<String> {
     Some(bare.to_string())
 }
 
-/// Surface every textual occurrence of `QUERY_STRING` as a Read ref.
-/// Rack passes the request query string through `env['QUERY_STRING']`,
-/// and our taint sources match on the bare name; without these refs
-/// the matcher has no anchor to bind the source to.
-fn synthesize_rack_query_string_refs(src: &[u8], file: FileId) -> Vec<Ref> {
-    let source = std::str::from_utf8(src).unwrap_or("");
-    source
-        .match_indices("QUERY_STRING")
-        .map(|(start, text)| Ref {
-            span: Span::new(
-                file,
-                u64::try_from(start).unwrap_or(u64::MAX),
-                u64::try_from(start + text.len()).unwrap_or(u64::MAX),
-            ),
-            name: "QUERY_STRING".to_string(),
-            kind: RefKind::Read,
-            scope: None,
-            resolved: None,
-        })
-        .collect()
+/// Lower Ruby's static string-key element reads into field-like compiler
+/// facts. `env["QUERY_STRING"]` becomes `env.QUERY_STRING`; comments,
+/// unrelated string literals, interpolated keys, and element writes do not
+/// create reads. Security policy remains in the rulepack rather than in this
+/// adapter.
+fn extract_ruby_static_element_key_refs(tree: &Tree, src: &[u8], file: FileId) -> Vec<Ref> {
+    let mut refs = Vec::new();
+    for element in collect_kinds(tree, &["element_reference"]) {
+        if ruby_element_reference_is_write(&element) {
+            continue;
+        }
+        let Some(object) = element.child_by_field_name("object") else {
+            continue;
+        };
+        let object_name = node_text(&object, src).trim();
+        if object_name.is_empty() {
+            continue;
+        }
+        let mut cursor = element.walk();
+        for argument in element.named_children(&mut cursor) {
+            if argument.id() == object.id() || argument.kind() != "string" {
+                continue;
+            }
+            let mut string_cursor = argument.walk();
+            let parts = argument.named_children(&mut string_cursor).collect::<Vec<_>>();
+            let [content] = parts.as_slice() else {
+                continue;
+            };
+            if content.kind() != "string_content" {
+                continue;
+            }
+            let key = node_text(content, src).trim();
+            if key.is_empty() {
+                continue;
+            }
+            refs.push(Ref {
+                span: span_of(file, content),
+                name: format!("{object_name}.{key}"),
+                kind: RefKind::Read,
+                scope: None,
+                resolved: None,
+            });
+        }
+    }
+    refs
+}
+
+fn ruby_element_reference_is_write(node: &tree_sitter::Node<'_>) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    if !matches!(parent.kind(), "assignment" | "operator_assignment") {
+        return false;
+    }
+    parent
+        .child_by_field_name("left")
+        .is_some_and(|left| left.id() == node.id())
 }
 
 /// Pre-process an ERB / RHTML template source: replace HTML wrapping

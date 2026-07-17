@@ -10,8 +10,8 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_node, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
-        parse_with, span_of,
+        call_arg_from_node, collect_kinds, expression_flow_from_node, first_named_child_of_kind,
+        language_from_pack, node_at_span, node_text, parse_with, span_of,
     },
     with_fn_kinds, AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
     ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind, Visibility,
@@ -91,18 +91,14 @@ impl LanguageAdapter for ElixirAdapter {
                 apply_elixir_module_identity(&mut decl_index, &module_spans);
             }
             for decl in &mut decl_index.defs {
-                if let Some(params) = elixir_clause_param_slots(snapshot.text.as_ref(), decl.span, &decl.name)
-                {
-                    decl.params = params;
-                    augment_elixir_param_pattern_bindings(decl, snapshot.text.as_ref());
+                if let Some(param_nodes) = elixir_clause_param_nodes(&tree, src, decl.span, &decl.name) {
+                    decl.params = elixir_clause_param_slots(&param_nodes, src);
+                    augment_elixir_param_pattern_bindings(decl, &param_nodes, src);
                 }
                 inject_elixir_local_callable_invocations(decl, &local_callable_invocations);
                 insert_elixir_map_field_assigns_in_events(&mut decl.flow_events, &map_field_assigns);
                 remove_elixir_value_field_access_calls(&mut decl.flow_events, &value_field_access_spans);
-                normalize_elixir_control_expression_assignments(
-                    &mut decl.flow_events,
-                    snapshot.text.as_ref(),
-                );
+                normalize_elixir_control_expression_assignments(&mut decl.flow_events, &tree, src);
                 bonsai_lang_api::kit::annotate_tuple_call_result_bindings(&mut decl.flow_events, &tree, src);
             }
             let private_spans = collect_elixir_defp_spans(&tree, src);
@@ -695,117 +691,95 @@ fn innermost_module_for_span(modules: &[ElixirModuleSpan], span: bonsai_common::
         .map(|module| module.module.as_str())
 }
 
-fn elixir_clause_param_slots(src: &str, span: bonsai_common::Span, name: &str) -> Option<Vec<String>> {
-    let args = elixir_clause_raw_params(src, span, name)?;
-    Some(
-        args.iter()
-            .enumerate()
-            .map(|(idx, arg)| elixir_pattern_param_name(arg).unwrap_or_else(|| format!("_arg{idx}")))
-            .collect(),
-    )
-}
-
-fn elixir_clause_raw_params(src: &str, span: bonsai_common::Span, name: &str) -> Option<Vec<String>> {
-    let text = elixir_span_text(src, span)?;
-    let name_start = find_elixir_clause_name(text, name)?;
-    let after_name = &text[name_start + name.len()..];
-    let leading_ws = after_name.len().saturating_sub(after_name.trim_start().len());
-    let after_name = &after_name[leading_ws..];
-    if !after_name.starts_with('(') {
+/// Recover a function clause's positional parameter nodes from the parsed
+/// `def`/`defp` macro shape. A guarded head is a `when` binary operator whose
+/// left operand is the actual head call; inline `do:` pairs and block bodies
+/// remain outside that call's `arguments` node.
+fn elixir_clause_param_nodes<'tree>(
+    tree: &'tree Tree,
+    src: &[u8],
+    span: bonsai_common::Span,
+    name: &str,
+) -> Option<Vec<Node<'tree>>> {
+    let definition = node_at_span(tree.root_node(), span, &["call"])?;
+    let macro_name = definition
+        .child_by_field_name("target")
+        .map(|target| node_text(&target, src).trim())?;
+    if !matches!(macro_name, "def" | "defp") {
+        return None;
+    }
+    let definition_args = definition
+        .child_by_field_name("arguments")
+        .or_else(|| first_named_child_of_kind(&definition, "arguments"))?;
+    let mut definition_cursor = definition_args.walk();
+    let first_arg = definition_args.named_children(&mut definition_cursor).next()?;
+    let head = if first_arg.kind() == "binary_operator" && elixir_binary_operator_is(&first_arg, "when") {
+        first_arg.child_by_field_name("left")?
+    } else {
+        first_arg
+    };
+    if head.kind() == "identifier" {
+        return (node_text(&head, src).trim() == name).then(Vec::new);
+    }
+    if head.kind() != "call" {
+        return None;
+    }
+    let head_name = head
+        .child_by_field_name("target")
+        .map(|target| node_text(&target, src).trim())?;
+    if head_name != name {
+        return None;
+    }
+    let Some(arguments) = head
+        .child_by_field_name("arguments")
+        .or_else(|| first_named_child_of_kind(&head, "arguments"))
+    else {
         return Some(Vec::new());
-    }
-    let close = find_matching_elixir_delim(after_name, 0, '(', ')')?;
-    Some(split_elixir_top_level_args(&after_name[1..close]))
+    };
+    let mut cursor = arguments.walk();
+    Some(arguments.named_children(&mut cursor).collect())
 }
 
-fn find_elixir_clause_name(text: &str, name: &str) -> Option<usize> {
-    if name.is_empty() {
+fn elixir_clause_param_slots(params: &[Node<'_>], src: &[u8]) -> Vec<String> {
+    params
+        .iter()
+        .enumerate()
+        .map(|(idx, param)| elixir_pattern_param_name(param, src).unwrap_or_else(|| format!("_arg{idx}")))
+        .collect()
+}
+
+fn elixir_pattern_param_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() == "identifier" {
+        let name = node_text(node, src).trim();
+        return elixir_variable_name(name).then(|| name.to_string());
+    }
+    if node.kind() == "pair" {
+        return node
+            .child_by_field_name("value")
+            .and_then(|value| elixir_pattern_param_name(&value, src));
+    }
+    if node.kind() == "keywords" && node.named_child_count() == 1 {
+        return node
+            .named_child(0)
+            .and_then(|pair| elixir_pattern_param_name(&pair, src));
+    }
+    if node.kind() != "binary_operator" {
         return None;
     }
-    text.match_indices(name).find_map(|(idx, _)| {
-        let before = text[..idx].chars().next_back();
-        let after = text[idx + name.len()..].chars().next();
-        let before_ok = before.is_none_or(|ch| !elixir_ident_char(ch));
-        let after_ok = after.is_none_or(|ch| !elixir_ident_char(ch));
-        (before_ok && after_ok).then_some(idx)
-    })
-}
-
-fn elixir_ident_char(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
-}
-
-fn elixir_span_text(src: &str, span: bonsai_common::Span) -> Option<&str> {
-    let start = usize::try_from(span.start).ok()?.min(src.len());
-    let end = usize::try_from(span.end).ok()?.min(src.len());
-    if start >= end || !src.is_char_boundary(start) || !src.is_char_boundary(end) {
-        return None;
+    let left = node.child_by_field_name("left")?;
+    let right = node.child_by_field_name("right")?;
+    if elixir_binary_operator_is(node, "\\\\") {
+        return elixir_pattern_param_name(&left, src);
     }
-    Some(&src[start..end])
-}
-
-fn elixir_pattern_param_name(arg: &str) -> Option<String> {
-    let arg = arg.trim();
-    if elixir_variable_name(arg) {
-        return Some(arg.to_string());
-    }
-    if let Some((left, right)) = split_elixir_top_level_match(arg) {
-        for candidate in [left.trim(), right.trim()] {
-            if elixir_variable_name(candidate) {
-                return Some(candidate.to_string());
-            }
-        }
-    }
-    if let Some((_, binding)) = split_elixir_top_level_on(arg, ':') {
-        let binding = binding.trim();
-        if elixir_variable_name(binding) {
-            return Some(binding.to_string());
-        }
-    }
-    // A default argument keeps the binding on its left side. This is a
-    // grammar shape, not an inventory of parameter names.
-    if let Some((binding, _)) = arg.split_once("\\\\") {
-        let binding = binding.trim();
-        if elixir_variable_name(binding) {
-            return Some(binding.to_string());
-        }
+    if elixir_binary_operator_is(node, "=") {
+        return elixir_pattern_param_name(&left, src).or_else(|| elixir_pattern_param_name(&right, src));
     }
     None
 }
 
-fn split_elixir_top_level_match(text: &str) -> Option<(&str, &str)> {
-    split_elixir_top_level_on(text, '=')
-}
-
-fn split_elixir_top_level_on(text: &str, separator: char) -> Option<(&str, &str)> {
-    let mut depth = 0usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (idx, ch) in text.char_indices() {
-        if let Some(open) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == open {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '"' | '\'') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => depth = depth.saturating_add(1),
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            ch if ch == separator && depth == 0 => {
-                return Some((&text[..idx], &text[idx + ch.len_utf8()..]));
-            }
-            _ => {}
-        }
-    }
-    None
+fn elixir_binary_operator_is(node: &Node<'_>, expected: &str) -> bool {
+    node.child_by_field_name("operator")
+        .is_some_and(|operator| operator.kind() == expected)
 }
 
 /// Lower destructured function-head parameters into explicit storage reads.
@@ -813,16 +787,13 @@ fn split_elixir_top_level_on(text: &str, separator: char) -> Option<(&str, &str)
 /// one AST-proven binding (`cmd = _arg0.cmd`). Keeping the slot distinct from
 /// the binding prevents interprocedural field forwarding from inventing
 /// `cmd.cmd` when the body reads the scalar `cmd`.
-fn augment_elixir_param_pattern_bindings(decl: &mut bonsai_lang_api::Decl, src: &str) {
-    let Some(args) = elixir_clause_raw_params(src, decl.span, &decl.name) else {
-        return;
-    };
+fn augment_elixir_param_pattern_bindings(decl: &mut bonsai_lang_api::Decl, params: &[Node<'_>], src: &[u8]) {
     let mut bindings = Vec::new();
-    for (idx, arg) in args.iter().enumerate() {
+    for (idx, param) in params.iter().enumerate() {
         let Some(slot) = decl.params.get(idx).cloned() else {
             continue;
         };
-        for (field, target) in elixir_map_pattern_bindings(arg) {
+        for (field, target) in elixir_map_pattern_bindings(param, src) {
             let source = format!("{slot}.{field}");
             bindings.push(FlowEvent::Assign {
                 span: decl.name_span,
@@ -842,27 +813,41 @@ fn augment_elixir_param_pattern_bindings(decl: &mut bonsai_lang_api::Decl, src: 
     }
 }
 
-fn elixir_map_pattern_bindings(text: &str) -> Vec<(String, String)> {
-    let Some(open) = text.find('{') else {
-        return Vec::new();
-    };
-    let Some(close) = find_matching_elixir_delim(text, open, '{', '}') else {
-        return Vec::new();
-    };
+fn elixir_map_pattern_bindings(node: &Node<'_>, src: &[u8]) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for field in split_elixir_top_level_args(&text[open + 1..close]) {
-        let Some((key, value)) = field.split_once(':') else {
+    let mut stack = vec![*node];
+    while let Some(current) = stack.pop() {
+        if current.kind() != "map" {
+            let mut cursor = current.walk();
+            stack.extend(current.named_children(&mut cursor));
             continue;
-        };
-        let key = key.trim().trim_start_matches(':').trim_matches(['"', '\'']);
-        let value = value.trim();
-        if !key.is_empty()
-            && key
-                .chars()
-                .all(|ch| ch == '_' || ch == '@' || ch.is_ascii_alphanumeric())
-            && elixir_variable_name(value)
-        {
-            out.push((key.to_string(), value.to_string()));
+        }
+        let mut map_stack = vec![current];
+        while let Some(part) = map_stack.pop() {
+            if part.kind() == "pair" {
+                let Some(key_node) = part.child_by_field_name("key") else {
+                    continue;
+                };
+                let Some(value_node) = part.child_by_field_name("value") else {
+                    continue;
+                };
+                if value_node.kind() != "identifier" {
+                    continue;
+                }
+                let key = node_text(&key_node, src).trim().trim_end_matches(':').trim();
+                let value = node_text(&value_node, src).trim();
+                if !key.is_empty()
+                    && key
+                        .chars()
+                        .all(|ch| ch == '_' || ch == '@' || ch.is_ascii_alphanumeric())
+                    && elixir_variable_name(value)
+                {
+                    out.push((key.to_string(), value.to_string()));
+                }
+                continue;
+            }
+            let mut cursor = part.walk();
+            map_stack.extend(part.named_children(&mut cursor));
         }
     }
     out.sort();
@@ -880,7 +865,7 @@ fn elixir_variable_name(text: &str) -> bool {
         && !matches!(text, "do" | "end" | "fn" | "true" | "false" | "nil")
 }
 
-fn normalize_elixir_control_expression_assignments(events: &mut [FlowEvent], src: &str) {
+fn normalize_elixir_control_expression_assignments(events: &mut [FlowEvent], tree: &Tree, src: &[u8]) {
     for event in events {
         match event {
             FlowEvent::Assign {
@@ -894,7 +879,7 @@ fn normalize_elixir_control_expression_assignments(events: &mut [FlowEvent], src
                 .as_deref()
                 .is_some_and(elixir_control_expression_macro) =>
             {
-                if let Some(branch_sources) = elixir_control_expression_value_sources(src, *span) {
+                if let Some(branch_sources) = elixir_control_expression_value_sources(tree, src, *span) {
                     *source_call = None;
                     source_call_args.clear();
                     *source_names = branch_sources;
@@ -910,11 +895,11 @@ fn normalize_elixir_control_expression_assignments(events: &mut [FlowEvent], src
                 else_events,
                 ..
             } => {
-                normalize_elixir_control_expression_assignments(then_events, src);
-                normalize_elixir_control_expression_assignments(else_events, src);
+                normalize_elixir_control_expression_assignments(then_events, tree, src);
+                normalize_elixir_control_expression_assignments(else_events, tree, src);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                normalize_elixir_control_expression_assignments(body, src);
+                normalize_elixir_control_expression_assignments(body, tree, src);
             }
             FlowEvent::Try {
                 body,
@@ -922,9 +907,9 @@ fn normalize_elixir_control_expression_assignments(events: &mut [FlowEvent], src
                 finally_events,
                 ..
             } => {
-                normalize_elixir_control_expression_assignments(body, src);
-                normalize_elixir_control_expression_assignments(catch_events, src);
-                normalize_elixir_control_expression_assignments(finally_events, src);
+                normalize_elixir_control_expression_assignments(body, tree, src);
+                normalize_elixir_control_expression_assignments(catch_events, tree, src);
+                normalize_elixir_control_expression_assignments(finally_events, tree, src);
             }
             _ => {}
         }
@@ -935,232 +920,114 @@ fn elixir_control_expression_macro(name: &str) -> bool {
     matches!(name, "if" | "unless")
 }
 
-fn elixir_control_expression_value_sources(src: &str, span: bonsai_common::Span) -> Option<Vec<String>> {
-    let text = elixir_span_text(src, span)?;
-    let rhs = text.split_once('=').map_or(text, |(_, rhs)| rhs).trim();
-    let body = elixir_do_else_body(rhs)?;
+fn elixir_control_expression_value_sources(
+    tree: &Tree,
+    src: &[u8],
+    span: bonsai_common::Span,
+) -> Option<Vec<String>> {
+    let assignment = node_at_span(tree.root_node(), span, &["binary_operator"])?;
+    if !elixir_binary_operator_is(&assignment, "=") {
+        return None;
+    }
+    let conditional = assignment.child_by_field_name("right")?;
+    if conditional.kind() != "call" {
+        return None;
+    }
+    let macro_name = conditional
+        .child_by_field_name("target")
+        .map(|target| node_text(&target, src).trim())?;
+    if !elixir_control_expression_macro(macro_name) {
+        return None;
+    }
     let mut out = Vec::new();
-    collect_elixir_branch_value_names(body.then_body, &mut out);
-    if let Some(else_body) = body.else_body {
-        collect_elixir_branch_value_names(else_body, &mut out);
+    for value in elixir_control_expression_value_nodes(&conditional, src) {
+        let flow = expression_flow_from_node(value, span.file, src);
+        if let Some(place) = flow.place {
+            push_elixir_value_source(&mut out, place);
+        }
+        for source in flow.source_names {
+            push_elixir_value_source(&mut out, source);
+        }
+        collect_elixir_value_call_names(value, src, &mut out);
     }
     out.sort();
     out.dedup();
     Some(out)
 }
 
-#[derive(Copy, Clone)]
-struct ElixirDoElseBody<'a> {
-    then_body: &'a str,
-    else_body: Option<&'a str>,
-}
-
-fn elixir_do_else_body(text: &str) -> Option<ElixirDoElseBody<'_>> {
-    // Inline keyword-list form first: `if cond, do: <then>[, else: <else>]`.
-    // The block form below requires a standalone `do` AND a closing `end`; the
-    // inline form has neither (`do`/`else` are keyword-pair keys, no `end`), so
-    // the block parser returned None and the assignment never got its branch
-    // sources -> taint was dropped (e.g. `cmd = if flag, do: input, else: ""`).
-    if let Some(inline) = elixir_inline_keyword_do_else_body(text) {
-        return Some(inline);
-    }
-    let mut scanner = ElixirKeywordScanner::new(text);
-    let mut do_end = None;
-    let mut else_range = None;
-    let mut end_start = None;
-    let mut depth = 0usize;
-    while let Some((word, start, end)) = scanner.next_word() {
-        match word {
-            "do" => {
-                depth = depth.saturating_add(1);
-                do_end.get_or_insert(end);
-            }
-            "else" if depth == 1 => {
-                else_range = Some((start, end));
-            }
-            "end" if depth > 0 => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    end_start = Some(start);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let do_end = do_end?;
-    let end_start = end_start?;
-    let (then_end, else_body) = if let Some((else_start, else_end)) = else_range {
-        (else_start, Some(text[else_end..end_start].trim()))
-    } else {
-        (end_start, None)
-    };
-    Some(ElixirDoElseBody {
-        then_body: text[do_end..then_end].trim(),
-        else_body,
-    })
-}
-
-/// Parse the INLINE keyword-list conditional form `if cond, do: then[, else: else]`
-/// (also `unless`). Returns `None` for the block `do ... end` form (handled by the
-/// caller's block parser) — distinguished by whether the standalone `do` word is
-/// immediately followed by `:`. Everything after `do:` is returned as the branch
-/// text: it carries BOTH the then-value and any `else:`-value identifiers, while
-/// the condition (which precedes `do:`) is excluded. `else:` and string literals
-/// are harmless to over-collect (never tainted); the value-name collector skips
-/// string contents.
-fn elixir_inline_keyword_do_else_body(text: &str) -> Option<ElixirDoElseBody<'_>> {
-    let mut scanner = ElixirKeywordScanner::new(text);
-    while let Some((word, _start, end)) = scanner.next_word() {
-        if word == "do" {
-            return if text[end..].starts_with(':') {
-                Some(ElixirDoElseBody {
-                    then_body: text[end + 1..].trim(),
-                    else_body: None,
-                })
-            } else {
-                // Standalone `do` -> block form; let the block parser handle it.
-                None
-            };
-        }
-    }
-    None
-}
-
-struct ElixirKeywordScanner<'a> {
-    text: &'a str,
-    offset: usize,
-    quote: Option<char>,
-    escaped: bool,
-}
-
-impl<'a> ElixirKeywordScanner<'a> {
-    fn new(text: &'a str) -> Self {
-        Self {
-            text,
-            offset: 0,
-            quote: None,
-            escaped: false,
-        }
-    }
-
-    fn next_word(&mut self) -> Option<(&'a str, usize, usize)> {
-        while self.offset < self.text.len() {
-            let rest = &self.text[self.offset..];
-            let mut chars = rest.char_indices();
-            let (_, ch) = chars.next()?;
-            let ch_len = ch.len_utf8();
-            if let Some(open_quote) = self.quote {
-                self.offset += ch_len;
-                if self.escaped {
-                    self.escaped = false;
-                } else if ch == '\\' {
-                    self.escaped = true;
-                } else if ch == open_quote {
-                    self.quote = None;
-                }
+fn elixir_control_expression_value_nodes<'tree>(conditional: &Node<'tree>, src: &[u8]) -> Vec<Node<'tree>> {
+    let mut values = Vec::new();
+    if let Some(arguments) = conditional
+        .child_by_field_name("arguments")
+        .or_else(|| first_named_child_of_kind(conditional, "arguments"))
+    {
+        let mut cursor = arguments.walk();
+        for child in arguments.named_children(&mut cursor) {
+            if child.kind() != "keywords" {
                 continue;
             }
-            if matches!(ch, '"' | '\'') {
-                self.quote = Some(ch);
-                self.offset += ch_len;
-                continue;
-            }
-            if !elixir_ident_char(ch) {
-                self.offset += ch_len;
-                continue;
-            }
-            let start = self.offset;
-            let mut end = self.offset + ch_len;
-            for (relative_idx, next) in chars {
-                if !elixir_ident_char(next) {
-                    break;
+            let mut keywords_cursor = child.walk();
+            for pair in child.named_children(&mut keywords_cursor) {
+                if pair.kind() != "pair" {
+                    continue;
                 }
-                end = self.offset + relative_idx + next.len_utf8();
+                let Some(key) = pair.child_by_field_name("key") else {
+                    continue;
+                };
+                let key = node_text(&key, src).trim().trim_end_matches(':').trim();
+                if matches!(key, "do" | "else") {
+                    if let Some(value) = pair.child_by_field_name("value") {
+                        values.push(value);
+                    }
+                }
             }
-            self.offset = end;
-            return Some((&self.text[start..end], start, end));
         }
-        None
+    }
+    if let Some(block) = first_named_child_of_kind(conditional, "do_block") {
+        let mut cursor = block.walk();
+        let children = block
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() != "comment")
+            .collect::<Vec<_>>();
+        let else_position = children.iter().position(|child| child.kind() == "else_block");
+        let then_end = else_position.unwrap_or(children.len());
+        if let Some(value) = children[..then_end].last().copied() {
+            values.push(value);
+        }
+        if let Some(else_block) = else_position.and_then(|position| children.get(position)).copied() {
+            let mut else_cursor = else_block.walk();
+            if let Some(value) = else_block
+                .named_children(&mut else_cursor)
+                .filter(|child| child.kind() != "comment")
+                .last()
+            {
+                values.push(value);
+            }
+        }
+    }
+    values
+}
+
+fn collect_elixir_value_call_names(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "call" {
+            if let Some(target) = current.child_by_field_name("target") {
+                let name = node_text(&target, src).trim();
+                if !name.is_empty() {
+                    push_elixir_value_source(out, name.to_string());
+                }
+            }
+        }
+        let mut cursor = current.walk();
+        stack.extend(current.named_children(&mut cursor));
     }
 }
 
-fn collect_elixir_branch_value_names(text: &str, out: &mut Vec<String>) {
-    let mut scanner = ElixirKeywordScanner::new(text);
-    while let Some((word, _, _)) = scanner.next_word() {
-        if elixir_variable_name(word) && !out.iter().any(|existing| existing == word) {
-            out.push(word.to_string());
-        }
+fn push_elixir_value_source(out: &mut Vec<String>, source: String) {
+    if !source.is_empty() && !out.iter().any(|existing| existing == &source) {
+        out.push(source);
     }
-}
-
-fn find_matching_elixir_delim(text: &str, open_idx: usize, open: char, close: char) -> Option<usize> {
-    if !text.is_char_boundary(open_idx) || !text[open_idx..].starts_with(open) {
-        return None;
-    }
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth = 0usize;
-    for (idx, ch) in text.char_indices().skip_while(|(idx, _)| *idx < open_idx) {
-        if let Some(open_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == open_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '"' | '\'') {
-            quote = Some(ch);
-            continue;
-        }
-        if ch == open {
-            depth = depth.saturating_add(1);
-        } else if ch == close {
-            depth = depth.saturating_sub(1);
-            if depth == 0 {
-                return Some(idx);
-            }
-        }
-    }
-    None
-}
-
-fn split_elixir_top_level_args(text: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut arg_start = 0usize;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut depth = 0usize;
-    for (idx, ch) in text.char_indices() {
-        if let Some(open_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == open_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '"' | '\'') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => depth = depth.saturating_add(1),
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                args.push(text[arg_start..idx].trim().to_string());
-                arg_start = idx + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    args.push(text[arg_start..].trim().to_string());
-    args
 }
 
 /// Extract `alias`, `import`, `require`, `use` directives from an Elixir
