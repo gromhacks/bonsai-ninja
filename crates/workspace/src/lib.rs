@@ -352,33 +352,35 @@ pub(crate) fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_call
     let global = db.global_index();
     bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens(
         global.as_ref(),
-        |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
-        |file| {
-            bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
-                .into_iter()
-                .collect()
-        },
-        |file| {
-            db.vfs()
-                .path(file)
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned())
-        },
-        |file| {
-            db.adapter_for(file)
-                .map(|adapter| adapter.capabilities().module_export_aliases)
-                .unwrap_or(&[])
-        },
-        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-        |file| {
-            db.adapter_for(file)
-                .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                .unwrap_or(&[])
-        },
-        |file| {
-            db.adapter_for(file)
-                .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
-        },
+        bonsai_callgraph::CallGraphFileSemantics::new(
+            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+            |file| {
+                bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
+                    .into_iter()
+                    .collect()
+            },
+            |file| {
+                db.vfs()
+                    .path(file)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            },
+            |file| {
+                db.adapter_for(file)
+                    .map(|adapter| adapter.capabilities().module_export_aliases)
+                    .unwrap_or(&[])
+            },
+            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+            |file| {
+                db.adapter_for(file)
+                    .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
+                    .unwrap_or(&[])
+            },
+            |file| {
+                db.adapter_for(file)
+                    .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
+            },
+        ),
     )
 }
 
@@ -389,33 +391,35 @@ pub(crate) fn build_resolved_call_graph_snapshot_for_files(
     let global = db.global_index();
     bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens_for_files(
         global.as_ref(),
-        |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
-        |file| {
-            bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
-                .into_iter()
-                .collect()
-        },
-        |file| {
-            db.vfs()
-                .path(file)
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned())
-        },
-        |file| {
-            db.adapter_for(file)
-                .map(|adapter| adapter.capabilities().module_export_aliases)
-                .unwrap_or(&[])
-        },
-        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-        |file| {
-            db.adapter_for(file)
-                .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                .unwrap_or(&[])
-        },
-        |file| {
-            db.adapter_for(file)
-                .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
-        },
+        bonsai_callgraph::CallGraphFileSemantics::new(
+            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+            |file| {
+                bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
+                    .into_iter()
+                    .collect()
+            },
+            |file| {
+                db.vfs()
+                    .path(file)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            },
+            |file| {
+                db.adapter_for(file)
+                    .map(|adapter| adapter.capabilities().module_export_aliases)
+                    .unwrap_or(&[])
+            },
+            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+            |file| {
+                db.adapter_for(file)
+                    .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
+                    .unwrap_or(&[])
+            },
+            |file| {
+                db.adapter_for(file)
+                    .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
+            },
+        ),
         included_files,
     )
 }

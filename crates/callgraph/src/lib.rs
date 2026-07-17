@@ -796,6 +796,43 @@ pub struct ResolvedCallGraphBuildContext {
     constructor_index: Arc<ConstructorIndex>,
 }
 
+/// Compiler-facing callbacks used to derive per-file call-resolution facts.
+///
+/// Keeping these capabilities together prevents production call sites from
+/// accidentally swapping two same-shaped callbacks while preserving static
+/// dispatch and monomorphization.
+pub struct CallGraphFileSemantics<F, T, P, L, G, S, B> {
+    aliases: F,
+    alias_targets: T,
+    path: P,
+    export_aliases: L,
+    language: G,
+    super_receiver_tokens: S,
+    bare_call_constructor_syntax: B,
+}
+
+impl<F, T, P, L, G, S, B> CallGraphFileSemantics<F, T, P, L, G, S, B> {
+    pub fn new(
+        aliases_for_file: F,
+        alias_targets_for_file: T,
+        path_for_file: P,
+        export_aliases_for_file: L,
+        language_for_file: G,
+        super_receiver_tokens_for_file: S,
+        bare_call_constructor_syntax_for_file: B,
+    ) -> Self {
+        Self {
+            aliases: aliases_for_file,
+            alias_targets: alias_targets_for_file,
+            path: path_for_file,
+            export_aliases: export_aliases_for_file,
+            language: language_for_file,
+            super_receiver_tokens: super_receiver_tokens_for_file,
+            bare_call_constructor_syntax: bare_call_constructor_syntax_for_file,
+        }
+    }
+}
+
 type ConstructorIndex = AHashMap<SymbolId, Vec<FuncId>>;
 
 fn build_constructor_index(global: &GlobalIndex) -> Arc<ConstructorIndex> {
@@ -884,13 +921,15 @@ impl ResolvedCallGraph {
     {
         Self::build_with_file_info_and_super_tokens(
             global,
-            aliases_for_file,
-            alias_targets_for_file,
-            path_for_file,
-            export_aliases_for_file,
-            language_for_file,
-            |_| &[],
-            |_| false,
+            CallGraphFileSemantics::new(
+                aliases_for_file,
+                alias_targets_for_file,
+                path_for_file,
+                export_aliases_for_file,
+                language_for_file,
+                |_| &[] as &'static [&'static str],
+                |_| false,
+            ),
         )
     }
 
@@ -901,13 +940,7 @@ impl ResolvedCallGraph {
     /// meaningful.
     pub fn build_with_file_info_and_super_tokens<F, T, P, L, G, S, B>(
         global: &GlobalIndex,
-        aliases_for_file: F,
-        alias_targets_for_file: T,
-        path_for_file: P,
-        export_aliases_for_file: L,
-        language_for_file: G,
-        super_receiver_tokens_for_file: S,
-        bare_call_constructor_syntax_for_file: B,
+        file_semantics: CallGraphFileSemantics<F, T, P, L, G, S, B>,
     ) -> Self
     where
         F: FnMut(FileId) -> AHashMap<String, String>,
@@ -918,17 +951,7 @@ impl ResolvedCallGraph {
         S: Fn(FileId) -> &'static [&'static str],
         B: Fn(FileId) -> bool,
     {
-        Self::build_with_file_info_and_super_tokens_scoped(
-            global,
-            aliases_for_file,
-            alias_targets_for_file,
-            path_for_file,
-            export_aliases_for_file,
-            language_for_file,
-            super_receiver_tokens_for_file,
-            bare_call_constructor_syntax_for_file,
-            None,
-        )
+        Self::build_with_file_info_and_super_tokens_scoped(global, file_semantics, None)
     }
 
     /// Build the resolved call graph for a subset of caller files.
@@ -938,16 +961,9 @@ impl ResolvedCallGraph {
     /// contribute outgoing call edges. Security scans use this to keep
     /// production-scope runs from walking tests, fixtures, and generated
     /// trees before the file-scoped IDG build.
-    #[allow(clippy::too_many_arguments)] // Mirrors the public builder shape and adds the required file scope.
     pub fn build_with_file_info_and_super_tokens_for_files<F, T, P, L, G, S, B>(
         global: &GlobalIndex,
-        aliases_for_file: F,
-        alias_targets_for_file: T,
-        path_for_file: P,
-        export_aliases_for_file: L,
-        language_for_file: G,
-        super_receiver_tokens_for_file: S,
-        bare_call_constructor_syntax_for_file: B,
+        file_semantics: CallGraphFileSemantics<F, T, P, L, G, S, B>,
         included_files: &[FileId],
     ) -> Self
     where
@@ -959,17 +975,7 @@ impl ResolvedCallGraph {
         S: Fn(FileId) -> &'static [&'static str],
         B: Fn(FileId) -> bool,
     {
-        Self::build_with_file_info_and_super_tokens_scoped(
-            global,
-            aliases_for_file,
-            alias_targets_for_file,
-            path_for_file,
-            export_aliases_for_file,
-            language_for_file,
-            super_receiver_tokens_for_file,
-            bare_call_constructor_syntax_for_file,
-            Some(included_files),
-        )
+        Self::build_with_file_info_and_super_tokens_scoped(global, file_semantics, Some(included_files))
     }
 
     pub fn build_context<P, G, B>(
@@ -1019,7 +1025,6 @@ impl ResolvedCallGraph {
         }
     }
 
-    #[allow(clippy::too_many_arguments)] // Scoped iterative callers prebuild the expensive workspace context once.
     pub fn build_with_file_info_and_super_tokens_for_files_with_context<F, T, L, S>(
         global: &GlobalIndex,
         mut aliases_for_file: F,
@@ -1127,16 +1132,9 @@ impl ResolvedCallGraph {
         Self { cg }
     }
 
-    #[allow(clippy::too_many_arguments)] // Mirrors the public builder shape and adds the optional file scope.
     fn build_with_file_info_and_super_tokens_scoped<F, T, P, L, G, S, B>(
         global: &GlobalIndex,
-        mut aliases_for_file: F,
-        mut alias_targets_for_file: T,
-        path_for_file: P,
-        export_aliases_for_file: L,
-        language_for_file: G,
-        super_receiver_tokens_for_file: S,
-        bare_call_constructor_syntax_for_file: B,
+        file_semantics: CallGraphFileSemantics<F, T, P, L, G, S, B>,
         included_files: Option<&[FileId]>,
     ) -> Self
     where
@@ -1148,6 +1146,15 @@ impl ResolvedCallGraph {
         S: Fn(FileId) -> &'static [&'static str],
         B: Fn(FileId) -> bool,
     {
+        let CallGraphFileSemantics {
+            aliases: mut aliases_for_file,
+            alias_targets: mut alias_targets_for_file,
+            path: path_for_file,
+            export_aliases: export_aliases_for_file,
+            language: language_for_file,
+            super_receiver_tokens: super_receiver_tokens_for_file,
+            bare_call_constructor_syntax: bare_call_constructor_syntax_for_file,
+        } = file_semantics;
         let alias_index = WorkspaceAliasIndex::build(global);
         let callable_index = WorkspaceCallableBindingIndex::build(global);
         let all_files = global.all_files().collect::<Vec<_>>();
@@ -1306,6 +1313,13 @@ fn add_resolved_call_edges(
     callable_target_cache: &mut CallableTargetCache,
     cg: &mut CallGraph,
 ) {
+    let constructor_context = ConstructorResolutionContext {
+        global,
+        caller_decl,
+        alias_targets,
+        path_for_file,
+        constructor_index: Some(constructor_index),
+    };
     for event in events {
         match event {
             FlowEvent::Call {
@@ -1373,15 +1387,11 @@ fn add_resolved_call_edges(
                     // with the same arity. Resolve the rewritten direct-base
                     // callee identity before the generic receiver pipeline.
                     candidates = collect_constructor_targets_for_class_call(
-                        global,
-                        caller_decl,
-                        alias_targets,
-                        path_for_file,
+                        &constructor_context,
                         name,
                         None,
                         &[],
                         false,
-                        Some(constructor_index),
                     );
                 }
                 if candidates.is_empty() && *call_kind == CallKind::Constructor {
@@ -1391,15 +1401,11 @@ fn add_resolved_call_edges(
                     // companion/member for the constructor and prevent the
                     // exact class edge from being considered.
                     candidates = collect_constructor_targets_for_class_call(
-                        global,
-                        caller_decl,
-                        alias_targets,
-                        path_for_file,
+                        &constructor_context,
                         name,
                         receiver.as_deref(),
                         receiver_types,
                         true,
-                        Some(constructor_index),
                     );
                 }
                 if candidates.is_empty() {
@@ -1597,15 +1603,11 @@ fn add_resolved_call_edges(
                     && semantic_receiver.is_none()
                 {
                     candidates = collect_constructor_targets_for_class_call(
-                        global,
-                        caller_decl,
-                        alias_targets,
-                        path_for_file,
+                        &constructor_context,
                         name,
                         None,
                         &[],
                         false,
-                        Some(constructor_index),
                     );
                 }
                 if !candidates.is_empty() {
@@ -2090,26 +2092,25 @@ fn add_callback_arg_edges(
     callable_target_cache: &mut CallableTargetCache,
     cg: &mut CallGraph,
 ) {
+    let mut resolver = CallableArgResolutionContext {
+        global,
+        alias_targets,
+        local_bindings,
+        caller_decl,
+        caller_language,
+        path_for_file,
+        file_path_parts,
+        method_candidate_cache,
+        callable_target_cache,
+    };
     let mut seen = AHashSet::new();
     for arg in args {
-        let targets = resolve_callable_arg(
-            global,
-            alias_targets,
-            local_bindings,
-            &arg.value_text,
-            arg.span,
-            caller_decl,
-            caller_language,
-            path_for_file,
-            file_path_parts,
-            method_candidate_cache,
-            callable_target_cache,
-        );
+        let targets = resolver.resolve(&arg.value_text, arg.span);
         let [to] = targets.as_slice() else {
             continue;
         };
         let to = *to;
-        if !func_language_matches(global, caller_language, language_for_file, to) {
+        if !func_language_matches(resolver.global, resolver.caller_language, language_for_file, to) {
             continue;
         }
         if !seen.insert(to) {
@@ -2782,81 +2783,82 @@ fn normalize_type_name(name: &str) -> String {
 /// Resolve an argument expression that might be a callable reference
 /// (`&fn_name`, `Module::fn`, `:method_symbol`, …) to the workspace
 /// functions it could point at.
-fn resolve_callable_arg(
-    global: &GlobalIndex,
-    alias_targets: &AHashMap<String, AliasTarget>,
-    local_bindings: &AHashMap<String, FuncId>,
-    raw: &str,
-    arg_span: Span,
-    caller_decl: &Decl,
+struct CallableArgResolutionContext<'a> {
+    global: &'a GlobalIndex,
+    alias_targets: &'a AHashMap<String, AliasTarget>,
+    local_bindings: &'a AHashMap<String, FuncId>,
+    caller_decl: &'a Decl,
     caller_language: Option<&'static str>,
-    path_for_file: &dyn Fn(FileId) -> Option<String>,
-    file_path_parts: &AHashMap<FileId, Vec<String>>,
-    method_candidate_cache: &mut MethodCandidateCache,
-    callable_target_cache: &mut CallableTargetCache,
-) -> Vec<FuncId> {
-    if !call_arg_can_be_callable_reference(raw, caller_language) {
-        return Vec::new();
-    }
-    let variants = callable_reference_variants(raw);
-    let Some(first) = variants.first() else {
-        return Vec::new();
-    };
-    // Lambda / template literals aren't callable references that
-    // resolve to a workspace function — bail before we try.
-    if first.contains("=>") || first.starts_with('`') {
-        return Vec::new();
-    }
-    let original_alias_qualified = variants.iter().any(|variant| {
-        let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
-        alias_target_qualified_name(trimmed, alias_targets)
-    });
-    for variant in &variants {
-        let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
-        if trimmed.is_empty() {
-            continue;
-        }
-        let short = short_callee(trimmed);
-        let alias_qualified_reference = alias_target_qualified_name(trimmed, alias_targets);
-        if original_alias_qualified && !alias_qualified_reference {
-            continue;
-        }
-        let receiver = receiver_name_from_call_name(trimmed);
-        let local_targets = collect_local_callable_binding_targets(
-            local_bindings,
-            trimmed,
-            receiver,
-            alias_qualified_reference,
-        );
-        if !local_targets.is_empty() {
-            return local_targets;
-        }
-        // Lexical values shadow same-spelled declarations. A simple argument
-        // such as `analyzer` or `envelope` is not a callable merely because a
-        // workspace method or constructor has a matching name; the compiler
-        // resolves the parameter/local binding first. Explicit callable
-        // bindings above remain eligible, while ordinary parameters and
-        // earlier value assignments stop global callable lookup here.
-        if !alias_qualified_reference
-            && (caller_decl.params.iter().any(|param| param == trimmed)
-                || local_value_binding_shadows_callable(&caller_decl.flow_events, trimmed, arg_span))
-        {
-            continue;
-        }
-        let mut targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
+    path_for_file: &'a dyn Fn(FileId) -> Option<String>,
+    file_path_parts: &'a AHashMap<FileId, Vec<String>>,
+    method_candidate_cache: &'a mut MethodCandidateCache,
+    callable_target_cache: &'a mut CallableTargetCache,
+}
+
+impl CallableArgResolutionContext<'_> {
+    fn resolve(&mut self, raw: &str, arg_span: Span) -> Vec<FuncId> {
+        let Self {
             global,
-            trimmed,
-            caller_decl,
             alias_targets,
+            local_bindings,
+            caller_decl,
+            caller_language,
             path_for_file,
             file_path_parts,
-            callable_target_cache,
             method_candidate_cache,
-        );
-        if targets.is_empty() && short != trimmed && !alias_qualified_reference {
-            targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
+            callable_target_cache,
+        } = self;
+        if !call_arg_can_be_callable_reference(raw, *caller_language) {
+            return Vec::new();
+        }
+        let variants = callable_reference_variants(raw);
+        let Some(first) = variants.first() else {
+            return Vec::new();
+        };
+        // Lambda / template literals aren't callable references that
+        // resolve to a workspace function — bail before we try.
+        if first.contains("=>") || first.starts_with('`') {
+            return Vec::new();
+        }
+        let original_alias_qualified = variants.iter().any(|variant| {
+            let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+            alias_target_qualified_name(trimmed, alias_targets)
+        });
+        for variant in &variants {
+            let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+            if trimmed.is_empty() {
+                continue;
+            }
+            let short = short_callee(trimmed);
+            let alias_qualified_reference = alias_target_qualified_name(trimmed, alias_targets);
+            if original_alias_qualified && !alias_qualified_reference {
+                continue;
+            }
+            let receiver = receiver_name_from_call_name(trimmed);
+            let local_targets = collect_local_callable_binding_targets(
+                local_bindings,
+                trimmed,
+                receiver,
+                alias_qualified_reference,
+            );
+            if !local_targets.is_empty() {
+                return local_targets;
+            }
+            // Lexical values shadow same-spelled declarations. A simple argument
+            // such as `analyzer` or `envelope` is not a callable merely because a
+            // workspace method or constructor has a matching name; the compiler
+            // resolves the parameter/local binding first. Explicit callable
+            // bindings above remain eligible, while ordinary parameters and
+            // earlier value assignments stop global callable lookup here.
+            if !alias_qualified_reference
+                && (caller_decl.params.iter().any(|param| param == trimmed)
+                    || local_value_binding_shadows_callable(&caller_decl.flow_events, trimmed, arg_span))
+            {
+                continue;
+            }
+            let mut targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
                 global,
-                short,
+                trimmed,
                 caller_decl,
                 alias_targets,
                 path_for_file,
@@ -2864,12 +2866,24 @@ fn resolve_callable_arg(
                 callable_target_cache,
                 method_candidate_cache,
             );
+            if targets.is_empty() && short != trimmed && !alias_qualified_reference {
+                targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
+                    global,
+                    short,
+                    caller_decl,
+                    alias_targets,
+                    path_for_file,
+                    file_path_parts,
+                    callable_target_cache,
+                    method_candidate_cache,
+                );
+            }
+            if !targets.is_empty() {
+                return targets;
+            }
         }
-        if !targets.is_empty() {
-            return targets;
-        }
+        Vec::new()
     }
-    Vec::new()
 }
 
 fn call_arg_can_be_callable_reference(raw: &str, caller_language: Option<&'static str>) -> bool {
@@ -3927,17 +3941,29 @@ fn collect_type_qualified_method_targets(
     targets
 }
 
+#[derive(Clone, Copy)]
+struct ConstructorResolutionContext<'a> {
+    global: &'a GlobalIndex,
+    caller_decl: &'a Decl,
+    alias_targets: &'a AHashMap<String, AliasTarget>,
+    path_for_file: &'a dyn Fn(FileId) -> Option<String>,
+    constructor_index: Option<&'a ConstructorIndex>,
+}
+
 fn collect_constructor_targets_for_class_call(
-    global: &GlobalIndex,
-    caller_decl: &Decl,
-    alias_targets: &AHashMap<String, AliasTarget>,
-    path_for_file: &dyn Fn(FileId) -> Option<String>,
+    resolution: &ConstructorResolutionContext<'_>,
     call_name: &str,
     receiver: Option<&str>,
     receiver_types: &[String],
     allow_implicit_enclosing_class: bool,
-    constructor_index: Option<&ConstructorIndex>,
 ) -> Vec<FuncId> {
+    let ConstructorResolutionContext {
+        global,
+        caller_decl,
+        alias_targets,
+        path_for_file,
+        constructor_index,
+    } = *resolution;
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
         return Vec::new();
     };
@@ -5787,30 +5813,23 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
     let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
     let mut callable_target_cache = CallableTargetCache::default();
     let file_path_parts: AHashMap<FileId, Vec<String>> = AHashMap::new();
+    let constructor_context = ConstructorResolutionContext {
+        global,
+        caller_decl,
+        alias_targets,
+        path_for_file,
+        constructor_index: None,
+    };
     if targets.is_empty() && explicit_ancestor_constructor {
-        targets = collect_constructor_targets_for_class_call(
-            global,
-            caller_decl,
-            alias_targets,
-            path_for_file,
-            name,
-            None,
-            &[],
-            false,
-            None,
-        );
+        targets = collect_constructor_targets_for_class_call(&constructor_context, name, None, &[], false);
     }
     if targets.is_empty() && call_kind == CallKind::Constructor {
         targets = collect_constructor_targets_for_class_call(
-            global,
-            caller_decl,
-            alias_targets,
-            path_for_file,
+            &constructor_context,
             name,
             receiver,
             receiver_types,
             true,
-            None,
         );
     }
     if targets.is_empty() {

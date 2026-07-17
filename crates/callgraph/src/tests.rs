@@ -160,6 +160,7 @@ fn insert_file(global: &mut GlobalIndex, file: FileId, defs: Vec<Decl>) {
         aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
+        call_receivers: Vec::new(),
     });
 }
 
@@ -1650,13 +1651,15 @@ fn super_receiver_resolves_base_method_from_override_context() {
 
     let cg = ResolvedCallGraph::build_with_file_info_and_super_tokens(
         &global,
-        |_| ahash::AHashMap::new(),
-        |_| ahash::AHashMap::new(),
-        |_| None,
-        |_| &[],
-        |_| Some("swift"),
-        |_| &["super"],
-        |_| false,
+        CallGraphFileSemantics::new(
+            |_| ahash::AHashMap::new(),
+            |_| ahash::AHashMap::new(),
+            |_| None,
+            |_| &[] as &'static [&'static str],
+            |_| Some("swift"),
+            |_| &["super"] as &'static [&'static str],
+            |_| false,
+        ),
     );
     let from = func_id_by_name_and_parent(&global, "run", "AuditedRepository");
     let to = func_id_by_name_and_parent(&global, "run", "Repository");
@@ -3345,13 +3348,15 @@ fn super_constructor_resolves_direct_parent_not_transitive_ancestors() {
 
     let graph = ResolvedCallGraph::build_with_file_info_and_super_tokens(
         &global,
-        |_| AHashMap::new(),
-        |_| AHashMap::new(),
-        |_| None,
-        |_| &[],
-        |_| Some("java"),
-        |_| &["super"],
-        |_| false,
+        CallGraphFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| AHashMap::new(),
+            |_| None,
+            |_| &[] as &'static [&'static str],
+            |_| Some("java"),
+            |_| &["super"] as &'static [&'static str],
+            |_| false,
+        ),
     );
     let audited = func_id_by_name_and_parent(&global, "Audited", "Audited");
     let repository = func_id_by_name_and_parent(&global, "Repository", "Repository");
@@ -3420,13 +3425,15 @@ fn ambiguous_bare_call_constructs_only_with_adapter_capability_and_resolved_clas
 
     let graph = ResolvedCallGraph::build_with_file_info_and_super_tokens(
         &global,
-        |_| ahash::AHashMap::new(),
-        |_| ahash::AHashMap::new(),
-        |_| None,
-        |_| &[],
-        |_| Some("python"),
-        |_| &[],
-        |_| true,
+        CallGraphFileSemantics::new(
+            |_| ahash::AHashMap::new(),
+            |_| ahash::AHashMap::new(),
+            |_| None,
+            |_| &[] as &'static [&'static str],
+            |_| Some("python"),
+            |_| &[] as &'static [&'static str],
+            |_| true,
+        ),
     );
     let entry = FuncId::new(global.find_by_name("entry")[0].raw());
     let constructor = func_id_by_name_and_parent(&global, "allocate", "Widget");
