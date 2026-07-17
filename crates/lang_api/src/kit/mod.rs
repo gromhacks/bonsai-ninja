@@ -41,10 +41,10 @@
 //!    Dart selector chains) here.
 //! 8. **Assignment / qualified-target normalization** (~2353-2487):
 //!    `qualified_assign_target`, `normalise_qualified_text`.
-//! 9. **Foreach header parsing** (~3256-3300): `split_foreach_header`,
-//!    binding-keyword stripping.
-//! 10. **Param extraction** (~5400-): `extract_param_names`,
-//!     `extract_param_annotations`.
+//! 9. **Pattern and loop bindings**: `kit/bindings.rs` lowers parsed
+//!    pattern/iterable nodes into assignment facts.
+//! 10. **Param extraction**: `kit/param_extraction.rs` lowers parsed
+//!     parameter nodes.
 //!
 //! Each section can become its own file (`kit/walker.rs`, `kit/branch_repair.rs`, ...)
 //! during normal maintenance. Pure-data items (`GENERIC_HANDLER`,
@@ -58,7 +58,6 @@ mod decorators;
 mod direct_calls;
 mod elixir;
 mod expression_flow;
-mod foreach_header;
 mod identifiers;
 mod imports;
 mod param_extraction;
@@ -72,7 +71,6 @@ mod syntax_errors;
 #[path = "mod_tests.rs"]
 mod tests;
 
-pub use bindings::foreach_binding_assigns_from_text;
 use bindings::{
     binding_targets_from_pattern_node, dedup_assign_events, extract_comprehension_for_clause_assigns,
     extract_elixir_case_stab_clause_bindings, extract_foreach_binding_assigns, extract_match_binding_assigns,
@@ -130,7 +128,6 @@ use std::sync::Arc;
 use tree_sitter::{Language, Node, Tree};
 
 use branch_repair::{looks_like_branch_arm_node, repair_branch_events_by_else_keyword};
-use foreach_header::split_foreach_header;
 
 /// Internal carrier name for language-level rest/varargs values that
 /// have no user-visible identifier, such as Lua `...` and C-family
@@ -4611,88 +4608,6 @@ fn skip_unary_operand_text(text: &str, offset: usize) -> usize {
 /// Identifier-continue byte: `_`, `$`, or ASCII alphanumeric.
 pub(crate) fn is_ident_continue_byte(byte: u8) -> bool {
     byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
-}
-
-fn iterable_source_names_from_text(text: &str) -> Vec<String> {
-    let mut source_names = identifier_tokens_from_text(text);
-    if text.contains("...") && !source_names.iter().any(|name| name == SYNTHETIC_VARARGS_PARAM) {
-        source_names.push(SYNTHETIC_VARARGS_PARAM.to_string());
-    }
-    source_names.sort();
-    source_names.dedup();
-    source_names
-}
-
-/// Extract bare-identifier-shaped tokens from arbitrary expression
-/// text. Used as a fallback by adapters when the AST walk doesn't
-/// surface every operand structurally (loop iterables, match
-/// subjects, comprehension binders, assignment-RHS fallback).
-///
-/// Critical correctness property: contents inside string / template
-/// literal delimiters are SKIPPED. Without this, hardcoded strings
-/// like `".category == \"electronics\""` would surface
-/// `["category", "electronics"]` as bare identifiers, polluting
-/// `source_names` and creating cross-cutting over-taint across
-/// every adapter that uses the fallback.
-///
-/// Three quote styles cover every supported grammar: `"..."` (most
-/// languages), `'...'` (Python/Ruby/PHP/Perl/Lua/etc.) and
-/// `` `...` `` (template literals in JS/TS/Scala, raw strings in
-/// Go). f-string / template-literal interpolation is intentionally
-/// NOT walked here — interpolated identifiers are surfaced from real
-/// AST children by `extract_rhs_expr_operands` and attached to
-/// assignment or call-argument `source_names`. The taint engine does
-/// not parse interpolation syntax out of raw string text.
-fn identifier_tokens_from_text(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut in_quote: Option<char> = None;
-    let mut escaped = false;
-    for c in text.chars() {
-        if let Some(q) = in_quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if c == '\\' {
-                escaped = true;
-                continue;
-            }
-            if c == q {
-                in_quote = None;
-            }
-            continue;
-        }
-        if matches!(c, '"' | '\'' | '`') {
-            if !current.is_empty() {
-                push_text_identifier(&mut out, &mut current);
-            }
-            in_quote = Some(c);
-            continue;
-        }
-        if c == '_' || c == '$' || c.is_ascii_alphanumeric() {
-            current.push(c);
-        } else if !current.is_empty() {
-            push_text_identifier(&mut out, &mut current);
-        }
-    }
-    if !current.is_empty() {
-        push_text_identifier(&mut out, &mut current);
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn push_text_identifier(out: &mut Vec<String>, current: &mut String) {
-    let cleaned = current.trim_start_matches('$');
-    if looks_like_bare_identifier(cleaned) {
-        out.push(cleaned.to_string());
-        if cleaned != current {
-            out.push(current.clone());
-        }
-    }
-    current.clear();
 }
 
 /// True when `op` is a compound (read-modify-write) assignment operator

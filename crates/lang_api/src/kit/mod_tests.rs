@@ -1,3 +1,6 @@
+use super::bindings::{
+    extract_comprehension_for_clause_assigns, extract_foreach_binding_assigns, extract_match_binding_assigns,
+};
 use super::{
     annotate_tuple_call_result_bindings, apply_assign_call_result_types, apply_call_receiver_types,
     apply_constructor_result_type_aliases, argument_place, assignment_value_node, build_call_event,
@@ -12,6 +15,236 @@ use crate::{
     ModulePath, Visibility,
 };
 use bonsai_common::{FileId, Span, SymbolId};
+
+fn parse_language(pack: &str, src: &[u8]) -> tree_sitter::Tree {
+    let language = language_from_pack(pack).expect("language grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set language grammar");
+    parser.parse(src, None).expect("parse source")
+}
+
+fn assign_facts(events: &[FlowEvent]) -> Vec<(&str, Option<&str>, Vec<&str>)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_names,
+                ..
+            } => Some((
+                target.as_str(),
+                source_name.as_deref(),
+                source_names.iter().map(String::as_str).collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn python_match_patterns_lower_only_ast_binding_positions() {
+    let src = br#"match subject:
+    case {"value": value, "nested": {"item": item}, **rest} if limit:
+        sink(value, item, rest)
+    case Point(x=px, y=py) as point:
+        sink(px, py, point)
+"#;
+    let tree = parse_language("python", src);
+    let statement = collect_kinds(&tree, &["match_statement"])[0];
+    let events = extract_match_binding_assigns(FileId::new(0), &statement, src);
+    let facts = assign_facts(&events);
+
+    for target in ["value", "item", "rest", "px", "py", "point"] {
+        assert!(
+            facts
+                .iter()
+                .any(|(actual, source, _)| *actual == target && *source == Some("subject")),
+            "missing binding {target}: {facts:?}"
+        );
+    }
+    for non_binding in ["nested", "x", "y", "Point", "limit"] {
+        assert!(
+            facts.iter().all(|(actual, _, _)| *actual != non_binding),
+            "syntax/value name became a binding: {non_binding}: {facts:?}"
+        );
+    }
+}
+
+#[test]
+fn rust_pattern_and_foreach_bindings_follow_ast_fields() {
+    let src = br#"fn handle(subject: Option<(String, usize)>, rows: Vec<(String, usize)>) {
+    if let Some((value, index)) = subject { sink(value, index); }
+    match subject { Some((part, count)) => sink(part, count), None => (), }
+    for (row, offset) in rows { sink(row, offset); }
+}"#;
+    let tree = parse_language("rust", src);
+    let if_expr = collect_kinds(&tree, &["if_expression"])[0];
+    let match_expr = collect_kinds(&tree, &["match_expression"])[0];
+    let for_expr = collect_kinds(&tree, &["for_expression"])[0];
+
+    let mut events = extract_match_binding_assigns(FileId::new(0), &if_expr, src);
+    events.extend(extract_match_binding_assigns(FileId::new(0), &match_expr, src));
+    events.extend(extract_foreach_binding_assigns(FileId::new(0), &for_expr, src));
+    let facts = assign_facts(&events);
+
+    for (target, source) in [
+        ("value", "subject"),
+        ("index", "subject"),
+        ("part", "subject"),
+        ("count", "subject"),
+        ("row", "rows"),
+        ("offset", "rows"),
+    ] {
+        assert!(
+            facts
+                .iter()
+                .any(|(actual, actual_source, _)| *actual == target && *actual_source == Some(source)),
+            "missing {target} <- {source}: {facts:?}"
+        );
+    }
+    assert!(facts
+        .iter()
+        .all(|(target, _, _)| !matches!(*target, "Some" | "None")));
+}
+
+#[test]
+fn ruby_and_elixir_map_patterns_do_not_bind_keys_or_atoms() {
+    let ruby = br#"case subject
+in {value:, nested: {item:}, **rest}
+  sink(value, item, rest)
+end"#;
+    let ruby_tree = parse_language("ruby", ruby);
+    let case_match = collect_kinds(&ruby_tree, &["case_match"])[0];
+    let ruby_events = extract_match_binding_assigns(FileId::new(0), &case_match, ruby);
+    let ruby_facts = assign_facts(&ruby_events);
+    for target in ["value", "item", "rest"] {
+        assert!(ruby_facts.iter().any(|(actual, _, _)| *actual == target));
+    }
+    assert!(ruby_facts.iter().all(|(target, _, _)| *target != "nested"));
+
+    let elixir = br#"case subject do
+  %{value: value, nested: %{item: item}} -> sink(value, item)
+  {:ok, result} -> sink(result)
+end"#;
+    let elixir_tree = parse_language("elixir", elixir);
+    let case_call = collect_kinds(&elixir_tree, &["call"])
+        .into_iter()
+        .find(|node| {
+            node.child_by_field_name("target")
+                .is_some_and(|target| node_text(&target, elixir) == "case")
+        })
+        .expect("case call");
+    let elixir_events = extract_match_binding_assigns(FileId::new(0), &case_call, elixir);
+    let elixir_facts = assign_facts(&elixir_events);
+    for target in ["value", "item", "result"] {
+        assert!(elixir_facts.iter().any(|(actual, _, _)| *actual == target));
+    }
+    assert!(elixir_facts
+        .iter()
+        .all(|(target, _, _)| !matches!(*target, "nested" | "ok")));
+}
+
+#[test]
+fn comprehension_binding_uses_fielded_pattern_and_iterable_nodes() {
+    let src = b"[(part, index) for (part, index) in rows]";
+    let tree = parse_language("python", src);
+    let clause = collect_kinds(&tree, &["for_in_clause"])[0];
+    let events = extract_comprehension_for_clause_assigns(FileId::new(0), &clause, src);
+    let facts = assign_facts(&events);
+
+    assert_eq!(
+        facts,
+        vec![
+            ("part", Some("rows"), vec!["rows"]),
+            ("index", Some("rows"), vec!["rows"]),
+        ]
+    );
+}
+
+#[test]
+fn foreach_bindings_cover_fielded_and_wrapped_grammar_shapes() {
+    type ForeachCase<'a> = (&'a str, &'a [u8], &'a str, &'a [&'a str], &'a str);
+    let cases: &[ForeachCase<'_>] = &[
+        (
+            "php",
+            b"<?php foreach ($rows as $key => $value) { sink($key, $value); }",
+            "foreach_statement",
+            &["key", "value"],
+            "rows",
+        ),
+        (
+            "go",
+            b"package p\nfunc f(rows []string) { for index, row := range rows { sink(index, row) } }",
+            "for_statement",
+            &["index", "row"],
+            "rows",
+        ),
+        (
+            "lua",
+            b"for index, row in ipairs(rows) do sink(index, row) end",
+            "for_statement",
+            &["index", "row"],
+            "rows",
+        ),
+        (
+            "scala",
+            b"def f(rows: List[(String, Int)]) = for ((row, index) <- rows) yield sink(row, index)",
+            "for_expression",
+            &["row", "index"],
+            "rows",
+        ),
+        (
+            "perl",
+            b"foreach my $row (@$rows) { sink($row); }",
+            "for_statement",
+            &["row"],
+            "rows",
+        ),
+        (
+            "swift",
+            b"for (row, index) in rows { sink(row, index) }",
+            "for_statement",
+            &["row", "index"],
+            "rows",
+        ),
+        (
+            "cpp",
+            b"void f(auto rows) { for (const auto& row : rows) { sink(row); } }",
+            "for_range_loop",
+            &["row"],
+            "rows",
+        ),
+        (
+            "kotlin",
+            b"fun f(rows: List<Pair<String, Int>>) { for ((row, index) in rows) sink(row, index) }",
+            "for_statement",
+            &["row", "index"],
+            "rows",
+        ),
+    ];
+
+    for (pack, src, kind, expected_targets, expected_source) in cases {
+        let tree = parse_language(pack, src);
+        let loop_node = collect_kinds(&tree, &[*kind])
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("missing {pack} {kind}"));
+        let events = extract_foreach_binding_assigns(FileId::new(0), &loop_node, src);
+        let facts = assign_facts(&events);
+        let actual_targets: Vec<&str> = facts.iter().map(|(target, _, _)| *target).collect();
+        assert_eq!(actual_targets, *expected_targets, "{pack}: {facts:?}");
+        for (_, source_name, source_names) in &facts {
+            assert!(
+                source_name.is_some_and(|name| name.trim_start_matches(['$', '@', '%']) == *expected_source)
+                    || source_names
+                        .iter()
+                        .any(|name| name.trim_start_matches(['$', '@', '%']) == *expected_source),
+                "{pack}: missing source {expected_source}: {facts:?}"
+            );
+        }
+    }
+}
 
 #[test]
 fn tuple_call_result_bindings_keep_source_positions() {
