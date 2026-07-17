@@ -42,10 +42,7 @@ pub fn seed(names: &[&str]) -> TokenSet {
 }
 
 pub fn cfg() -> InterTaintConfig {
-    InterTaintConfig {
-        budget: 256,
-        ..Default::default()
-    }
+    InterTaintConfig::default()
 }
 
 /// True when there is any tainted_call whose name matches `sink_name`

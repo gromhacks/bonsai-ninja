@@ -41,10 +41,7 @@ fn seed(names: &[&str]) -> TokenSet {
 }
 
 fn config(_: &[&str]) -> InterTaintConfig {
-    InterTaintConfig {
-        budget: 512,
-        ..Default::default()
-    }
+    InterTaintConfig::default()
 }
 
 fn super_target_in_chain(

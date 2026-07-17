@@ -79,7 +79,6 @@ fn config(sources: &[&str], sanitizers: &[&str]) -> TaintConfig {
     TaintConfig {
         sources: seed(sources),
         sanitizers: seed(sanitizers),
-        worklist_cap: None,
     }
 }
 
@@ -333,15 +332,6 @@ fn uncapped_worklist_runs_to_fixed_point() {
     }
     let (result, _) = run(events, &config(&["recv"], &[]));
     assert!(!result.saturated, "50 sequential assigns must converge");
-}
-
-#[test]
-fn compatibility_worklist_cap_never_truncates_compiler_dataflow() {
-    let mut capped = config(&["recv"], &[]);
-    capped.worklist_cap = Some(0);
-    let (result, _) = run(vec![assign("x", Some("recv"))], &capped);
-    assert!(!result.saturated);
-    assert!(result.block_out.values().any(|tokens| tokens.contains("x")));
 }
 
 #[test]

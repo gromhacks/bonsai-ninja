@@ -38,10 +38,7 @@ fn seed(names: &[&str]) -> TokenSet {
 }
 
 fn config() -> InterTaintConfig {
-    InterTaintConfig {
-        budget: 512,
-        ..Default::default()
-    }
+    InterTaintConfig::default()
 }
 
 fn body_calls_sink_with_taint(

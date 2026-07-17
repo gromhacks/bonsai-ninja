@@ -14,9 +14,7 @@ use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::DeclKind;
 use serde::{Deserialize, Serialize};
 
-use crate::inter::{
-    interprocedural_taint_to_completion_with_caches, InterTaintCaches, InterTaintConfig, InterTaintResult,
-};
+use crate::inter::{interprocedural_taint_with_caches, InterTaintCaches, InterTaintConfig, InterTaintResult};
 use crate::reachable::collect_assign_targets;
 use crate::TokenSet;
 
@@ -297,7 +295,7 @@ pub fn value_flow_for_function_with_caches(
         return ValueFlowGraph::new();
     }
 
-    let result = interprocedural_taint_to_completion_with_caches(entry_func, &seed_set, config, db, caches);
+    let result = interprocedural_taint_with_caches(entry_func, &seed_set, config, db, caches);
     build_graph_from_result(entry_func, &decl, &result)
 }
 

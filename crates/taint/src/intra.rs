@@ -56,9 +56,6 @@ pub struct TaintConfig {
     /// sanitizer list. Sanitizers are classification evidence, not a
     /// taint-transfer input, so this set does not alter propagation.
     pub sanitizers: TokenSet,
-    /// Retained for source compatibility. Compiler dataflow always runs to
-    /// its least fixed point; this value never limits semantic work.
-    pub worklist_cap: Option<u32>,
 }
 
 /// Per-block taint state after the fixed point converges. Callers
@@ -115,7 +112,7 @@ use crate::tokens::{canonical_bare_name, qualified_wildcard_seed_matches, rhs_ha
 ///
 /// Worklist iteration until convergence. Every block is visited at least
 /// once; blocks whose `in` state changes force their successors back onto the
-/// worklist. The compatibility `worklist_cap` is intentionally ignored.
+/// worklist.
 #[must_use]
 pub fn intraprocedural_taint(cfg: &Cfg, config: &TaintConfig) -> IntraTaintResult {
     let predecessors = build_predecessor_map(cfg);

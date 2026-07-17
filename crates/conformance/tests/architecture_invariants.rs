@@ -2212,7 +2212,7 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     let value_entry_body = function_body(&taint_value_flow, "value_flow_for_function_with_caches");
     let value_result_body = function_body(&taint_value_flow, "build_graph_from_result");
     assert!(
-        value_entry_body.contains("interprocedural_taint_to_completion_with_caches")
+        value_entry_body.contains("interprocedural_taint_with_caches")
             && value_entry_body.contains("build_graph_from_result")
             && value_result_body.contains("find_call_arg_node"),
         "the single IDG-backed value-flow path must lift concrete call-site argument nodes from its canonical engine result"

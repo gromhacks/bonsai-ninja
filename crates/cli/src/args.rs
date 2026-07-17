@@ -601,12 +601,6 @@ pub(crate) enum Cmd {
         /// Sink filter for structured dump-taint `T:` propagation ids.
         #[arg(long = "taint-sink")]
         taint_sink: Option<String>,
-        /// Compatibility budget for structured dump-taint `T:` propagation ids.
-        #[arg(long = "taint-budget")]
-        taint_budget: Option<u32>,
-        /// Compatibility knob retained for structured dump-taint `T:` ids; IDG closure is uncapped.
-        #[arg(long = "taint-intra-worklist-cap")]
-        taint_intra_worklist_cap: Option<u32>,
         /// Render compact source/flow output when the delegated command supports it.
         #[arg(long, default_value_t = false)]
         compact: bool,
@@ -1144,18 +1138,6 @@ pub(crate) enum Cmd {
         /// taint still runs globally; only the render is narrowed.
         #[arg(long)]
         sink: Option<String>,
-        /// Compatibility knob for the legacy interprocedural
-        /// worklist. The IDG-backed dump-taint path computes the
-        /// requested closure exactly and does not cap evidence with
-        /// this value.
-        #[arg(long)]
-        budget: Option<u32>,
-        /// Compatibility knob for the legacy intraprocedural CFG
-        /// worklist. The IDG-backed dump-taint path computes the
-        /// requested closure exactly and does not cap evidence with
-        /// this value.
-        #[arg(long = "intra-worklist-cap")]
-        intra_worklist_cap: Option<u32>,
         /// One-line-per-propagation render (the headline table).
         #[arg(long, default_value_t = false)]
         compact: bool,
@@ -3172,12 +3154,6 @@ pub(crate) enum SecurityAction {
         /// on unsanitized findings.
         #[arg(long = "show-sanitized", default_value_t = false)]
         show_sanitized: bool,
-        /// Compatibility knob for the retired interprocedural engine; IDG closure is unchunked.
-        #[arg(long = "taint-budget")]
-        taint_budget: Option<u32>,
-        /// Compatibility knob for the retired engine; security IDG closure is uncapped.
-        #[arg(long = "intra-worklist-cap")]
-        intra_worklist_cap: Option<u32>,
         /// Token-budget ceiling for rendered output. Shorthand `4k` /
         /// `32k` / `128k` / `1m`; `0` / `all` / `uncapped` disables.
         #[arg(long)]

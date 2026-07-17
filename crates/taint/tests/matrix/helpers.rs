@@ -50,10 +50,7 @@ pub fn seed(names: &[&str]) -> TokenSet {
 }
 
 pub fn cfg() -> InterTaintConfig {
-    InterTaintConfig {
-        budget: 256,
-        ..Default::default()
-    }
+    InterTaintConfig::default()
 }
 
 fn sink_name_matches(actual: &str, sink: &str) -> bool {

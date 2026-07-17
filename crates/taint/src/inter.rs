@@ -2,8 +2,8 @@
 //!
 //! The former per-function worklist lived in `inter/mod.rs`. All public
 //! entry points now derive their result from one IDG forward closure. The
-//! configuration/result types remain source-compatible for SDK consumers,
-//! while scheduling-only fields such as `budget` are retained as no-ops.
+//! configuration/result types describe semantic transfer behavior only;
+//! scheduling knobs from the retired engine are not part of this API.
 
 mod summary;
 
@@ -29,10 +29,6 @@ pub struct InterTaintConfig {
     /// Compatibility-only sanitizer inventory. Sanitizer attribution belongs
     /// to the security layer and does not kill propagation in the IDG.
     pub sanitizers: TokenSet,
-    /// Retained for source compatibility. IDG closure is not chunked.
-    pub budget: u32,
-    /// Retained for source compatibility. IDG closure has no CFG worklist cap.
-    pub intra_worklist_cap: Option<u32>,
     /// Retained for source compatibility; IDG sources are the composed seed
     /// nodes supplied to the query.
     pub source_bearing_functions: AHashSet<FuncId>,
@@ -58,8 +54,6 @@ impl Default for InterTaintConfig {
     fn default() -> Self {
         Self {
             sanitizers: TokenSet::default(),
-            budget: 512,
-            intra_worklist_cap: None,
             source_bearing_functions: AHashSet::default(),
             clean_output_overwrites: Vec::new(),
             source_output_args: Vec::new(),
@@ -162,29 +156,12 @@ pub struct InterTaintResult {
     pub precision: Precision,
     pub pairs_analyzed: u32,
     pub saturated: bool,
-    pub continuation: Option<InterTaintContinuation>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct InterTaintWorkItem {
-    pub func: FuncId,
-    pub seed: TokenSet,
-    pub dyn_bindings: AHashMap<String, FuncId>,
-    pub const_bindings: AHashMap<String, ConstValue>,
-    pub lineage: Option<u64>,
-    pub lineage_history: AHashSet<FunctionSeedBase>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ConstValue {
     Bool(bool),
     Int(i64),
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct InterTaintContinuation {
-    pub pending: Vec<InterTaintWorkItem>,
-    pub seen: AHashSet<FunctionSeed>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -367,7 +344,6 @@ fn entry_taint_graph_to_inter_result(
         precision: graph.precision,
         pairs_analyzed: graph.pairs_analyzed,
         saturated: graph.saturated,
-        continuation: None,
     }
 }
 
@@ -381,30 +357,6 @@ pub fn interprocedural_taint_with_caches(
 ) -> InterTaintResult {
     caches.mark_used();
     idg_backed_interprocedural_taint(entry_func, entry_sources, config, db)
-}
-
-#[must_use]
-pub fn resume_interprocedural_taint_with_caches(
-    mut previous: InterTaintResult,
-    _config: &InterTaintConfig,
-    _db: &AnalyzerDb,
-    caches: &InterTaintCaches,
-) -> InterTaintResult {
-    caches.mark_used();
-    previous.continuation = None;
-    previous.saturated = false;
-    previous
-}
-
-#[must_use]
-pub fn interprocedural_taint_to_completion_with_caches(
-    entry_func: FuncId,
-    entry_sources: &TokenSet,
-    config: &InterTaintConfig,
-    db: &AnalyzerDb,
-    caches: &InterTaintCaches,
-) -> InterTaintResult {
-    interprocedural_taint_with_caches(entry_func, entry_sources, config, db, caches)
 }
 
 #[must_use]

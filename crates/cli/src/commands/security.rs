@@ -429,8 +429,6 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             include_pattern_only,
             mut exclude_tests,
             show_sanitized,
-            taint_budget,
-            intra_worklist_cap,
             mut context,
             page,
             all,
@@ -470,8 +468,6 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 include_pattern_only,
                 exclude_tests,
                 show_sanitized,
-                taint_budget,
-                intra_worklist_cap,
                 paging_cfg,
                 no_compact,
                 summary,
@@ -1117,8 +1113,6 @@ fn cmd_flows(
     include_pattern_only: bool,
     exclude_tests: bool,
     show_sanitized: bool,
-    taint_budget: Option<u32>,
-    intra_worklist_cap: Option<u32>,
     paging_cfg: paging::PagingConfig,
     no_compact: bool,
     summary_only: bool,
@@ -1143,8 +1137,6 @@ fn cmd_flows(
     // Render-time diff input — does NOT enter the analysis cache key.
     let baseline_ids = baseline.map(load_baseline_finding_ids).transpose()?;
     let include_pattern_only = include_pattern_only || matches!(format, BrowseFormat::Sarif);
-    let taint_budget_filter = taint_budget.map(|v| v.to_string()).unwrap_or_default();
-    let intra_worklist_cap_filter = intra_worklist_cap.map(|v| v.to_string()).unwrap_or_default();
     // SEMANTIC analysis key: every input that changes the FINDING SET,
     // and nothing else. Output-shaping flags (format, paging, the
     // secondary `--contains` / `--not-contains` filters) are
@@ -1171,8 +1163,6 @@ fn cmd_flows(
         ("inferred_sources", if inferred_sources { "1" } else { "0" }),
         ("exclude_tests", if exclude_tests { "1" } else { "0" }),
         ("show_sanitized", if show_sanitized { "1" } else { "0" }),
-        ("taint_budget", &taint_budget_filter),
-        ("intra_worklist_cap", &intra_worklist_cap_filter),
         ("precision", "semantic"),
         (
             "include_pattern_only",
@@ -1269,8 +1259,6 @@ fn cmd_flows(
             include_inferred_sources: inferred_sources,
             include_pattern_only,
             show_sanitized,
-            interprocedural_budget: taint_budget,
-            intra_worklist_cap,
             max_precision,
             exclude_tests,
             attach_flow_evidence: false,
