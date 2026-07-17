@@ -49,6 +49,32 @@ fn callable_func_ids(db: &AnalyzerDb) -> Vec<FuncId> {
 }
 
 #[test]
+fn parallel_prewarm_establishes_the_compiler_idg_before_entry_closures() {
+    let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
+    let db = build_db_with(
+        &[(
+            "a.py",
+            "def entry(args):\n    return helper(args)\n\n\
+             def helper(p):\n    return sink(p)\n\n\
+             def sink(p):\n    return p\n",
+        )],
+        adapter,
+    );
+    assert!(db.idg_service().is_none(), "fixture starts with a cold IDG");
+
+    let cache = DataFlowCache::new();
+    cache.prewarm_all_with_progress(&db, |_| {
+        assert!(
+            db.idg_service().is_some(),
+            "entry closures must never initialize the shared compiler graph"
+        );
+    });
+
+    assert!(cache.is_prewarmed());
+    assert_eq!(cache.len(), callable_func_ids(&db).len());
+}
+
+#[test]
 fn factstore_sidecar_file_validator_rejects_corrupt_payload_even_when_size_matches() {
     let tmp = std::env::temp_dir().join(format!(
         "dataflow_corrupt_validator_{}.factstore",

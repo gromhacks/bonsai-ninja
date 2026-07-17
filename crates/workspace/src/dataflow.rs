@@ -392,6 +392,15 @@ impl DataFlowCache {
             self.inner.write().prewarmed = true;
             return;
         }
+        // Establish the shared compiler graph before scheduling per-entry
+        // closures.  Building it lazily inside this `par_iter` creates nested
+        // Rayon work: one entry owns the IDG `OnceLock` while sibling entries
+        // block on it, and the owner's transfer pass can then steal those
+        // blocked siblings instead of the work needed to finish the graph.
+        // Keeping graph construction as its own compiler phase removes that
+        // dependency cycle; the exact, cap-free closure queries below remain
+        // parallel and all consume the same AST-derived IDG.
+        let _compiler_idg = bonsai_taint::ensure_idg_service(db);
         let computed: Vec<(FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>)> = todo
             .par_iter()
             .map(|&f| {
@@ -481,6 +490,11 @@ impl DataFlowCache {
                 true
             })
             .collect();
+        // As in the in-memory prewarm, materialize the shared compiler graph
+        // before the parallel entry closures.  Besides avoiding recursive
+        // single-flight initialization, this ensures disk and memory prewarm
+        // execute the same compiler pipeline.
+        let _compiler_idg = (!todo.is_empty()).then(|| bonsai_taint::ensure_idg_service(db));
         // Channel-based writer: workers push entries to a queue
         // drained by a dedicated I/O thread, so file writes never
         // block the rayon worker pool.
