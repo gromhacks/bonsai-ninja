@@ -426,7 +426,7 @@ pub use sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recogniz
 pub mod idg_build;
 pub mod value_flow;
 pub use assignment::{assign_chain_taints, target_is_tainted};
-pub use idg_build::ensure_idg_service;
+pub use idg_build::{compiler_idg_service, ensure_idg_service};
 pub use inter::{
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{

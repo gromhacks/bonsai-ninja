@@ -20,7 +20,7 @@ mod tokens;
 pub mod value_flow;
 
 pub use assignment::{assign_chain_taints, target_is_tainted};
-pub use idg_build::ensure_idg_service;
+pub use idg_build::{compiler_idg_service, ensure_idg_service};
 pub use inter::{
     call_site_receives_taint, call_site_receives_taint_with_caches, function_summary, interprocedural_taint,
     interprocedural_taint_with_caches, CallPropagation, CallResultPassthrough, CleanOutputOverwrite,

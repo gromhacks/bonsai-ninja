@@ -4094,34 +4094,45 @@ fn run_transfer_in_parallel_for_files(
             funcs.push((file, decl));
         }
     }
-    funcs
-        .into_par_iter()
-        .map(|(file, decl)| {
-            let file_index = global.file_index(file);
-            let assignment_values = file_index.map_or(&[][..], |index| index.assignment_values.as_slice());
-            let call_receivers = file_index.map_or(&[][..], |index| index.call_receivers.as_slice());
-            if aggregate_layouts.is_empty() || !flow_events_contain_aggregate_assign(&decl.flow_events) {
-                return transfer_function_for_with_options_and_syntax_facts(
-                    decl,
-                    transfer_options,
-                    assignment_values,
-                    call_receivers,
-                );
-            }
-            let mut resolved = decl.clone();
-            resolve_aggregate_assignments(
-                &mut resolved.flow_events,
-                &resolved.type_aliases,
-                &aggregate_layouts,
-            );
-            transfer_function_for_with_options_and_syntax_facts(
-                &resolved,
+    let lower = |(file, decl): (FileId, &bonsai_lang_api::Decl)| {
+        let file_index = global.file_index(file);
+        let assignment_values = file_index.map_or(&[][..], |index| index.assignment_values.as_slice());
+        let call_receivers = file_index.map_or(&[][..], |index| index.call_receivers.as_slice());
+        if aggregate_layouts.is_empty() || !flow_events_contain_aggregate_assign(&decl.flow_events) {
+            return transfer_function_for_with_options_and_syntax_facts(
+                decl,
                 transfer_options,
                 assignment_values,
                 call_receivers,
-            )
-        })
-        .collect()
+            );
+        }
+        let mut resolved = decl.clone();
+        resolve_aggregate_assignments(
+            &mut resolved.flow_events,
+            &resolved.type_aliases,
+            &aggregate_layouts,
+        );
+        transfer_function_for_with_options_and_syntax_facts(
+            &resolved,
+            transfer_options,
+            assignment_values,
+            call_receivers,
+        )
+    };
+
+    // A cold IDG may be requested by a caller that is already executing a
+    // batch of closure queries on Rayon. The semantic service is single-flight:
+    // sibling queries wait for the first graph build. Starting another Rayon
+    // traversal from that initializer lets work stealing select those blocked
+    // siblings and can starve the transfer jobs needed to release them. Lower
+    // serially on the owning worker in that case. Top-level compiler builds
+    // retain the parallel path, and both branches run the identical AST-to-IDG
+    // transfer with no semantic budget or depth limit.
+    if rayon::current_thread_index().is_some() {
+        funcs.into_iter().map(lower).collect()
+    } else {
+        funcs.into_par_iter().map(lower).collect()
+    }
 }
 
 fn unambiguous_aggregate_layouts(global: &GlobalIndex) -> AHashMap<String, Vec<String>> {

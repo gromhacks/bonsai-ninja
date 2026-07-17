@@ -318,6 +318,11 @@ impl<'a> ChainCache<'a> {
             return;
         }
         let db = self.ws.db();
+        // Inspect can open a syntax-only workspace and still batch exact
+        // filter evidence. Prepare the non-default compiler service before
+        // entering Rayon so its AST lowering stays parallel and per-entry
+        // closures only query the established graph.
+        let _compiler_idg = bonsai_taint::compiler_idg_service(db);
         let computed: Vec<(FuncId, Arc<bonsai_taint::KindedTokens>)> = missing
             .into_par_iter()
             .map(|entry| (entry, self.ws.dataflow().facts_for(entry, db)))

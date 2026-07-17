@@ -60,13 +60,24 @@ fn parallel_prewarm_establishes_the_compiler_idg_before_entry_closures() {
         )],
         adapter,
     );
-    assert!(db.idg_service().is_none(), "fixture starts with a cold IDG");
+    assert!(
+        db.idg_service().is_none(),
+        "fixture starts with a cold default IDG"
+    );
+    let compiler_options =
+        bonsai_idg::TransferOptions::compiler_semantics(db.complete_field_place_languages());
+    let compiler_fingerprint = compiler_options.semantic_fingerprint();
+    assert!(db.idg_service_for_semantics(compiler_fingerprint).is_none());
 
     let cache = DataFlowCache::new();
     cache.prewarm_all_with_progress(&db, |_| {
         assert!(
-            db.idg_service().is_some(),
+            db.idg_service_for_semantics(compiler_fingerprint).is_some(),
             "entry closures must never initialize the shared compiler graph"
+        );
+        assert!(
+            db.idg_service().is_none(),
+            "dataflow prewarm must preserve the cold default-service lifecycle"
         );
     });
 

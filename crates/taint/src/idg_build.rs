@@ -59,7 +59,8 @@ pub fn ensure_idg_service(db: &AnalyzerDb) -> Arc<IdgQueryService> {
 /// its lifecycle contract that a cold inspect query does not warm the
 /// workspace IDG slot. The semantic-fingerprint cache shares the build across
 /// subsequent dataflow misses.
-pub(crate) fn compiler_idg_service_without_default_seed(db: &AnalyzerDb) -> Arc<IdgQueryService> {
+#[must_use]
+pub fn compiler_idg_service(db: &AnalyzerDb) -> Arc<IdgQueryService> {
     if let Some(service) = db.idg_service() {
         return service;
     }
@@ -229,6 +230,7 @@ fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_callgraph::Reso
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rayon::prelude::*;
     use std::sync::Arc;
 
     #[test]
@@ -246,5 +248,40 @@ mod tests {
         let canonical = ensure_idg_service(&db);
         assert!(Arc::ptr_eq(&canonical, &default_service));
         assert!(Arc::ptr_eq(&ensure_idg_service(&db), &canonical));
+    }
+
+    #[test]
+    fn cold_compiler_service_is_single_flight_inside_a_rayon_batch() {
+        let vfs = Arc::new(bonsai_vfs::Vfs::new());
+        vfs.write(
+            "fixture.py",
+            "def entry(value):\n    return helper(value)\n\n\
+             def helper(value):\n    return sink(value)\n\n\
+             def sink(value):\n    return value\n",
+        );
+        let registry = Arc::new(bonsai_lang_api::LanguageRegistry::new());
+        registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+        let db = AnalyzerDb::new(vfs, registry);
+        for file in db.vfs().all_files() {
+            let _ = db.decl_index(file);
+        }
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("test pool");
+        let services: Vec<Arc<IdgQueryService>> = pool.install(|| {
+            (0..16_u8)
+                .into_par_iter()
+                .map(|_| compiler_idg_service(&db))
+                .collect()
+        });
+
+        let first = services.first().expect("compiler service");
+        assert!(services.iter().all(|service| Arc::ptr_eq(service, first)));
+        assert!(
+            db.idg_service().is_none(),
+            "non-default compiler preparation must preserve lifecycle state"
+        );
     }
 }
