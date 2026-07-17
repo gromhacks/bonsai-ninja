@@ -79,8 +79,12 @@ fn implicit_argument_foreach_is_a_variadic_ast_binding() {
         .expect("helper declaration");
     assert_eq!(helper.params, vec!["@_".to_string()]);
     assert!(helper.is_variadic);
-    assert!(helper.flow_events.iter().any(|event| {
-        matches!(event, FlowEvent::Assign { target, source_names, .. }
+    assert!(
+        helper.flow_events.iter().any(|event| {
+            matches!(event, FlowEvent::Assign { target, source_names, .. }
             if target == "$x" && source_names.iter().any(|source| source == "@_"))
-    }));
+        }),
+        "events={:?}",
+        helper.flow_events
+    );
 }
