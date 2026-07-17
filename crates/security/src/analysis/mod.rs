@@ -53,6 +53,7 @@ use clean_overwrite::{
     clean_conditional_helper_identifier, clean_overwrite_callee_tail, clean_overwrite_target_key,
     clean_overwrite_target_keys, interprocedural_clean_overwrite_kills_lineage_arg,
     looks_like_clean_constant, numeric_literal, quoted_literal, same_function_clean_overwrite_kills_sink_arg,
+    CleanOverwritePolicy,
 };
 #[cfg(test)]
 use clean_overwrite::{
@@ -1444,7 +1445,6 @@ where
             &transfer_languages,
         ),
         max_edge_precision: Some(Precision::Narrowed),
-        ..Default::default()
     };
     // Exact source-seeded graphs are cached through the workspace
     // `TaintGraphIndex`, which is bounded in memory and keyed by a
@@ -5153,8 +5153,8 @@ where
         output_arg_flows: output_arg_flows_from_rulepack_for_languages(pack, &transfer_languages),
         receiver_state_propagations,
         max_edge_precision: max_precision,
-        ..Default::default()
     };
+    let clean_overwrite_policy = CleanOverwritePolicy::new(ws, &config.clean_output_overwrites);
     let mut source_func_ids: Vec<FuncId> = source_groups.keys().copied().collect();
     source_func_ids.sort_by_key(|func| func.raw());
     let resolved_call_graph = ws.cached_resolved_call_graph();
@@ -5844,7 +5844,7 @@ where
                         continue;
                     }
                     if same_function_clean_overwrite_kills_sink_arg(
-                        ws,
+                        clean_overwrite_policy,
                         src_func_id,
                         call.caller,
                         src.span,
@@ -5866,7 +5866,7 @@ where
                         continue;
                     }
                     if interprocedural_clean_overwrite_kills_lineage_arg(
-                        ws,
+                        clean_overwrite_policy,
                         src_func_id,
                         src.span,
                         &trace_index,

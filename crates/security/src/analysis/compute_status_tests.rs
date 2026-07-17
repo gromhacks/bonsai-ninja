@@ -98,6 +98,11 @@ fn clean_conditional_value_part_rejects_value_identifiers() {
 
 #[test]
 fn clean_output_call_overwrites_only_with_clean_values() {
+    let overwrites = [CleanOutputOverwrite {
+        callee: "snprintf".to_string(),
+        output_arg_index: 0,
+        value_start_arg_index: 2,
+    }];
     let args = vec![
         bonsai_lang_api::CallArg {
             passing_mode: Default::default(),
@@ -132,11 +137,35 @@ fn clean_output_call_overwrites_only_with_clean_values() {
             source_names: Vec::new(),
         },
     ];
-    assert!(clean_output_call_overwrites_target("snprintf", &args, "buf"));
+    assert!(clean_output_call_overwrites_target(
+        &overwrites,
+        "snprintf",
+        &args,
+        "buf"
+    ));
+    assert!(!clean_output_call_overwrites_target(
+        &[],
+        "snprintf",
+        &args,
+        "buf"
+    ));
+
+    let project_overwrite = [CleanOutputOverwrite {
+        callee: "project.write_clean".to_string(),
+        output_arg_index: 0,
+        value_start_arg_index: 2,
+    }];
+    assert!(clean_output_call_overwrites_target(
+        &project_overwrite,
+        "project.write_clean",
+        &args,
+        "buf"
+    ));
 
     let mut tainted_value = args;
     tainted_value[3].value_text = "user_value".to_string();
     assert!(!clean_output_call_overwrites_target(
+        &overwrites,
         "snprintf",
         &tainted_value,
         "buf"
@@ -146,20 +175,21 @@ fn clean_output_call_overwrites_only_with_clean_values() {
 #[test]
 fn try_region_clean_overwrite_requires_all_continuing_paths() {
     let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    let policy = CleanOverwritePolicy::new(&ws, &[]);
     let target = "t";
     let clean_t = clean_assign_event(target, 10, 20);
     let clean_finally = clean_assign_event(target, 30, 40);
 
     assert!(
-        !try_region_clean_overwrites_target(&ws, &[], &[clean_t.clone()], &[], target),
+        !try_region_clean_overwrites_target(policy, &[], &[clean_t.clone()], &[], target),
         "a clean catch arm alone is only one exceptional path, not a definite overwrite"
     );
     assert!(
-        try_region_clean_overwrites_target(&ws, &[clean_t.clone()], &[clean_t.clone()], &[], target),
+        try_region_clean_overwrites_target(policy, &[clean_t.clone()], &[clean_t.clone()], &[], target,),
         "normal and caught paths both overwrite the target"
     );
     assert!(
-        try_region_clean_overwrites_target(&ws, &[], &[], &[clean_finally], target),
+        try_region_clean_overwrites_target(policy, &[], &[], &[clean_finally], target),
         "finally/ensure cleanup is path-unconditional for continuing paths"
     );
 }
