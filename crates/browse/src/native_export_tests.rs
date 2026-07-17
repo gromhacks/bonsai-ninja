@@ -6,7 +6,8 @@ fn native_export_uses_versioned_flat_flow_ir() {
     let source = r#"
 def process(value):
     current = value
-    if value:
+    selected = make(value)
+    if isinstance(value, str):
         while value:
             try:
                 sink(value)
@@ -22,7 +23,7 @@ def process(value):
     let exported = native_export_json(&ws, dir.path(), false).expect("native export");
 
     assert_eq!(exported["schema"], "bonsai-native-export");
-    assert_eq!(exported["schema_version"], 5);
+    assert_eq!(exported["schema_version"], 6);
     let file = exported["files"]
         .as_array()
         .and_then(|files| {
@@ -65,6 +66,21 @@ def process(value):
                 && source.get(value_start as usize..value_end as usize) == Some("value")
         }),
         "exported byte spans must select the exact assignment, target, and RHS nodes"
+    );
+    let direct_call = assignment_values
+        .iter()
+        .find(|fact| fact["direct_call_name"] == "make")
+        .expect("direct assignment call fact");
+    assert!(
+        direct_call["value_flow"]["call_sites"]
+            .as_array()
+            .is_some_and(|sites| !sites.is_empty()),
+        "native export must carry compiler-owned RHS flow instead of requiring consumers to parse its rendering"
+    );
+    assert_eq!(
+        file["runtime_type_narrowings"].as_array().map(Vec::len),
+        Some(1),
+        "native export must expose compiler-owned branch refinements"
     );
     let ids: std::collections::BTreeSet<u64> = events
         .iter()

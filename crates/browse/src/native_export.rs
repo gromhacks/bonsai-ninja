@@ -284,6 +284,7 @@ struct ExportFile<'a> {
     imports: Vec<ExportImport>,
     refs: Vec<ExportRef>,
     assignment_values: Vec<ExportAssignmentValue>,
+    runtime_type_narrowings: Vec<bonsai_lang_api::RuntimeTypeNarrowingFact>,
     strings: Vec<ExportString>,
 }
 
@@ -683,6 +684,11 @@ struct ExportAssignmentValue {
     #[serde(rename = "value_end_byte")]
     value_end: u64,
     call_sites: Vec<Span>,
+    value_flow: bonsai_lang_api::ExpressionFlow,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direct_call_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direct_call_receiver: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -852,7 +858,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let mut map = serializer.serialize_map(None)?;
 
     map.serialize_entry("schema", "bonsai-native-export")?;
-    map.serialize_entry("schema_version", &5_u32)?;
+    map.serialize_entry("schema_version", &6_u32)?;
     map.serialize_entry("engine_version", env!("CARGO_PKG_VERSION"))?;
     map.serialize_entry("workspace_root", &root.display().to_string())?;
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
@@ -1141,6 +1147,7 @@ fn build_export_file<'a>(
             imports: Vec::new(),
             refs: Vec::new(),
             assignment_values: Vec::new(),
+            runtime_type_narrowings: Vec::new(),
             strings: Vec::new(),
         };
     };
@@ -1229,6 +1236,9 @@ fn build_export_file<'a>(
             value_start: fact.value_span.start,
             value_end: fact.value_span.end,
             call_sites: fact.call_sites.clone(),
+            value_flow: fact.value_flow.clone(),
+            direct_call_name: fact.direct_call_name.clone(),
+            direct_call_receiver: fact.direct_call_receiver.clone(),
         })
         .collect();
     let strings = index
@@ -1253,6 +1263,7 @@ fn build_export_file<'a>(
         imports,
         refs,
         assignment_values,
+        runtime_type_narrowings: index.runtime_type_narrowings.clone(),
         strings,
     }
 }

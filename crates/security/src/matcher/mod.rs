@@ -1199,7 +1199,6 @@ struct MatchRunConfig<'a, 'taint> {
 #[allow(clippy::enum_variant_names)] // deliberate `*Call` suffix — describes call-site origin
 enum CallFactOrigin {
     RealCall,
-    NestedReceiverCall,
     AssignmentSourceCall,
     SyntheticWrite,
 }
@@ -4004,50 +4003,6 @@ pub(crate) fn build_factory_returns(rules: &[&Rule]) -> Arc<FactoryReturns> {
     })
 }
 
-/// Extract the method name of the OUTERMOST call in an assignment RHS:
-/// `engine.connect().cursor()` → `cursor`, `make_cursor()` →
-/// `make_cursor`. Returns `None` when the RHS is not a call expression.
-fn final_call_callee(rhs: &str) -> Option<&str> {
-    let rhs = rhs.trim();
-    if !rhs.ends_with(')') {
-        return None;
-    }
-    // Find the `(` that opens the final argument list by scanning back
-    // with paren depth so nested calls don't confuse the split.
-    let bytes = rhs.as_bytes();
-    let mut depth = 0i32;
-    let mut open = None;
-    for (i, &b) in bytes.iter().enumerate().rev() {
-        match b {
-            b')' => depth += 1,
-            b'(' => {
-                depth -= 1;
-                if depth == 0 {
-                    open = Some(i);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    Some(rhs[..open?].trim_end())
-}
-
-fn final_call_method(rhs: &str) -> Option<&str> {
-    let callee = final_call_callee(rhs)?;
-    // The method is the last identifier segment after a `.` / `::` / `->`.
-    let start = callee.rfind(['.', ':', '>']).map_or(0, |p| p + 1);
-    let method = callee[start..].trim();
-    if method.is_empty()
-        || !method
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-    {
-        return None;
-    }
-    Some(method)
-}
-
 fn factory_path_segments(text: &str) -> Vec<String> {
     text.split(['.', ':', '>', '\\'])
         .filter_map(|part| {
@@ -4057,33 +4012,30 @@ fn factory_path_segments(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn factory_spec_matches_rhs(rhs: &str, spec: &FactoryReturnSpec) -> bool {
-    let Some(method) = final_call_method(rhs) else {
-        return false;
-    };
-    if method != spec.method {
+fn factory_spec_matches_call(call_name: &str, call_receiver: Option<&str>, spec: &FactoryReturnSpec) -> bool {
+    if !callee_tail_matches(call_name, &spec.method) {
         return false;
     }
     if spec.receiver_path.is_empty() {
         return true;
     }
-    let Some(callee) = final_call_callee(rhs) else {
+    let Some(receiver) = call_receiver else {
         return false;
     };
-    let segments = factory_path_segments(callee);
-    let needed = spec.receiver_path.len() + 1;
-    if segments.len() < needed {
+    let segments = factory_path_segments(receiver);
+    if segments.len() < spec.receiver_path.len() {
         return false;
     }
-    let start = segments.len() - needed;
-    segments[start..segments.len() - 1] == spec.receiver_path
+    let start = segments.len() - spec.receiver_path.len();
+    segments[start..] == spec.receiver_path
 }
 
 /// Synthesize `local → ReturnType` aliases for assignments whose RHS is
 /// a factory call named in the rulepack map. Empty (no allocation) when
 /// the pack ships no `returns_type` rules.
 fn synth_factory_type_aliases(
-    assignment_map: &AHashMap<String, String>,
+    events: &[FlowEvent],
+    assignment_values: &[bonsai_lang_api::AssignmentValueFact],
     factory: &FactoryReturns,
     language: &str,
 ) -> Vec<TypeAliasBinding> {
@@ -4091,17 +4043,64 @@ fn synth_factory_type_aliases(
         return Vec::new();
     };
     let mut out = Vec::new();
-    for (name, rhs) in assignment_map {
-        for spec in specs {
-            if !factory_spec_matches_rhs(rhs, spec) {
-                continue;
+    fn walk(
+        events: &[FlowEvent],
+        assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+        specs: &[FactoryReturnSpec],
+        out: &mut Vec<TypeAliasBinding>,
+    ) {
+        for event in events {
+            match event {
+                FlowEvent::Assign { span, target, .. } => {
+                    let Some(fact) =
+                        bonsai_lang_api::assignment_value_fact_for_span(assignment_values, *span)
+                    else {
+                        continue;
+                    };
+                    let Some(call_name) = fact.direct_call_name.as_deref() else {
+                        continue;
+                    };
+                    for spec in specs {
+                        if !factory_spec_matches_call(call_name, fact.direct_call_receiver.as_deref(), spec) {
+                            continue;
+                        }
+                        let binding = TypeAliasBinding {
+                            name: target.clone(),
+                            type_name: spec.type_name.clone(),
+                        };
+                        if !out.contains(&binding) {
+                            out.push(binding);
+                        }
+                    }
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    walk(then_events, assignment_values, specs, out);
+                    walk(else_events, assignment_values, specs, out);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => {
+                    walk(body, assignment_values, specs, out);
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    walk(body, assignment_values, specs, out);
+                    walk(catch_events, assignment_values, specs, out);
+                    walk(finally_events, assignment_values, specs, out);
+                }
+                _ => {}
             }
-            out.push(TypeAliasBinding {
-                name: name.clone(),
-                type_name: spec.type_name.clone(),
-            });
         }
     }
+    walk(events, assignment_values, specs, &mut out);
     out
 }
 
@@ -4194,7 +4193,9 @@ fn build_decl_match_facts_bundle(
             collect_assignment_texts(&decl.flow_events, &assignment_values, source_text.as_deref());
         let factory_type_aliases = file_language
             .as_deref()
-            .map(|lang| synth_factory_type_aliases(&assignment_map, factory, lang))
+            .map(|lang| {
+                synth_factory_type_aliases(&decl.flow_events, &file_index.assignment_values, factory, lang)
+            })
             .unwrap_or_default();
         let mut calls = collect_calls(&decl.flow_events);
         enrich_call_fact_receiver_types(&mut calls, &module_type_aliases);
@@ -4208,7 +4209,7 @@ fn build_decl_match_facts_bundle(
         let receiver_counts = receiver_method_call_counts(&calls);
         let decl_decorators = decl_decorator_names(ws, file, file_index, decl.span, decl.name_span);
         let alias_chains = collect_must_alias_pairs(&decl.flow_events);
-        let runtime_types = collect_runtime_type_narrowings(&decl.flow_events);
+        let runtime_types = collect_runtime_type_narrowings(decl.span, &file_index.runtime_type_narrowings);
         let lifecycle_transitions = collect_lifecycle_transitions(&decl.flow_events);
         by_decl_span.insert(
             decl.span,
@@ -4488,7 +4489,12 @@ fn scan_flow_reads_batch(
     let assignment_values = AssignmentValueIndex::new(&file_index.assignment_values);
     for decl in &file_index.defs {
         let mut reads = Vec::new();
-        collect_flow_read_sites(&decl.flow_events, &mut reads);
+        collect_flow_read_sites(
+            &decl.flow_events,
+            &file_index.assignment_values,
+            &file_index.call_receivers,
+            &mut reads,
+        );
         for (span, tokens) in reads {
             for prepared in rules {
                 if !decl_target_context_allows(
@@ -4744,30 +4750,32 @@ fn collect_return_sites(events: &[FlowEvent], out: &mut Vec<(Span, Option<String
     }
 }
 
-fn collect_flow_read_sites(events: &[FlowEvent], out: &mut Vec<(Span, Vec<String>)>) {
+fn collect_flow_read_sites(
+    events: &[FlowEvent],
+    assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+    call_receivers: &[bonsai_lang_api::CallReceiverFact],
+    out: &mut Vec<(Span, Vec<String>)>,
+) {
     for event in events {
         match event {
-            FlowEvent::Call {
-                span, receiver, args, ..
-            } => {
-                if let Some(receiver) = receiver {
-                    let mut tokens = Vec::new();
-                    tokens.extend(split_read_token(receiver));
-                    if !tokens.is_empty() {
-                        out.push((*span, tokens));
+            FlowEvent::Call { span, args, .. } => {
+                if let Some(receiver) = bonsai_lang_api::call_receiver_fact_for_span(call_receivers, *span) {
+                    let mut names = Vec::new();
+                    collect_expression_flow_read_names(&receiver.value_flow, &mut names);
+                    if !names.is_empty() {
+                        out.push((*span, names));
                     }
                 }
                 for arg in args {
-                    let mut tokens = Vec::new();
-                    tokens.extend(split_read_token(&arg.value_text));
+                    let mut names = Vec::new();
                     if let Some(place) = &arg.place {
-                        tokens.extend(split_read_token(place));
+                        push_structured_read_name(&mut names, place);
                     }
                     for source in &arg.source_names {
-                        tokens.extend(split_read_token(source));
+                        push_structured_read_name(&mut names, source);
                     }
-                    if !tokens.is_empty() {
-                        out.push((arg.span, tokens));
+                    if !names.is_empty() {
+                        out.push((arg.span, names));
                     }
                 }
             }
@@ -4775,52 +4783,39 @@ fn collect_flow_read_sites(events: &[FlowEvent], out: &mut Vec<(Span, Vec<String
                 span,
                 source_name,
                 source_names,
-                source_call_args,
                 ..
             } => {
-                let mut tokens = Vec::new();
+                let mut names = Vec::new();
                 if let Some(source_name) = source_name {
-                    tokens.extend(split_read_token(source_name));
+                    push_structured_read_name(&mut names, source_name);
                 }
                 for name in source_names {
-                    tokens.extend(split_read_token(name));
+                    push_structured_read_name(&mut names, name);
                 }
-                for arg in source_call_args {
-                    tokens.extend(split_read_token(arg));
+                if let Some(fact) = bonsai_lang_api::assignment_value_fact_for_span(assignment_values, *span)
+                {
+                    collect_expression_flow_read_names(&fact.value_flow, &mut names);
                 }
-                if !tokens.is_empty() {
-                    out.push((*span, tokens));
+                if !names.is_empty() {
+                    out.push((*span, names));
                 }
             }
-            FlowEvent::Return {
-                span,
-                value_text,
-                value_name,
-                ..
-            } => {
-                let mut tokens = Vec::new();
-                if let Some(value_text) = value_text {
-                    tokens.extend(split_return_read_token(value_text));
+            FlowEvent::AggregateAssign { span, value_flow, .. }
+            | FlowEvent::Return { span, value_flow, .. }
+            | FlowEvent::Yield { span, value_flow, .. } => {
+                let mut names = Vec::new();
+                collect_expression_flow_read_names(value_flow, &mut names);
+                if !names.is_empty() {
+                    out.push((*span, names));
                 }
+            }
+            FlowEvent::Throw { span, value_name, .. } | FlowEvent::Await { span, value_name } => {
                 if let Some(value_name) = value_name {
-                    tokens.extend(split_read_token(value_name));
-                }
-                if !tokens.is_empty() {
-                    out.push((*span, tokens));
-                }
-            }
-            FlowEvent::Throw {
-                span,
-                value_name,
-                thrown_type: None,
-            } => {
-                if let Some(value_name) = value_name {
-                    out.push((*span, split_read_token(value_name)));
-                }
-            }
-            FlowEvent::Yield { span, value_text, .. } => {
-                if let Some(value_text) = value_text {
-                    out.push((*span, split_read_token(value_text)));
+                    let mut names = Vec::new();
+                    push_structured_read_name(&mut names, value_name);
+                    if !names.is_empty() {
+                        out.push((*span, names));
+                    }
                 }
             }
             FlowEvent::Branch {
@@ -4828,11 +4823,11 @@ fn collect_flow_read_sites(events: &[FlowEvent], out: &mut Vec<(Span, Vec<String
                 else_events,
                 ..
             } => {
-                collect_flow_read_sites(then_events, out);
-                collect_flow_read_sites(else_events, out);
+                collect_flow_read_sites(then_events, assignment_values, call_receivers, out);
+                collect_flow_read_sites(else_events, assignment_values, call_receivers, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_flow_read_sites(body, out);
+                collect_flow_read_sites(body, assignment_values, call_receivers, out);
             }
             FlowEvent::Try {
                 body,
@@ -4840,53 +4835,46 @@ fn collect_flow_read_sites(events: &[FlowEvent], out: &mut Vec<(Span, Vec<String
                 finally_events,
                 ..
             } => {
-                collect_flow_read_sites(body, out);
-                collect_flow_read_sites(catch_events, out);
-                collect_flow_read_sites(finally_events, out);
+                collect_flow_read_sites(body, assignment_values, call_receivers, out);
+                collect_flow_read_sites(catch_events, assignment_values, call_receivers, out);
+                collect_flow_read_sites(finally_events, assignment_values, call_receivers, out);
             }
             _ => {}
         }
     }
 }
 
-/// Tokenize an expression into identifier tokens. Splits on every
-/// non-identifier char so `obj.field[i]` yields `[obj, field, i]`,
-/// while also preserving qualified chains such as `obj.field`.
-/// Used by `flow_read_rule_match` to detect read-rule hits inside
-/// argument expressions.
-fn split_read_token(value: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    fn push_unique(out: &mut Vec<String>, part: &str) {
-        let part = part.trim().trim_start_matches('$').trim_matches('.');
-        if part.is_empty() || out.iter().any(|existing| existing == part) {
-            return;
-        }
-        out.push(part.to_string());
+fn collect_expression_flow_read_names(flow: &bonsai_lang_api::ExpressionFlow, out: &mut Vec<String>) {
+    if let Some(projection) = &flow.projection {
+        push_structured_read_name(out, &projection.canonical_place());
+    } else if let Some(place) = &flow.place {
+        push_structured_read_name(out, place);
     }
-    for part in value.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' || ch == '.')) {
-        if part.contains('.') {
-            push_unique(&mut out, part);
-        }
+    for source in &flow.source_names {
+        push_structured_read_name(out, source);
     }
-    for part in value.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')) {
-        push_unique(&mut out, part);
+    for field in &flow.aggregate_fields {
+        collect_expression_flow_read_names(&field.value, out);
     }
-    out
+    for item in &flow.tuple_items {
+        collect_expression_flow_read_names(item, out);
+    }
+    for spread in &flow.spreads {
+        collect_expression_flow_read_names(spread, out);
+    }
 }
 
-/// Tokenize a `return EXPR` value. When the expression is a call,
-/// returns its ARGUMENT tokens instead of the function name — a
-/// `return f(x.y)` should expose `x` / `y` as the read tokens, not
-/// `f`. Falls back to `split_read_token` for non-call returns.
-fn split_return_read_token(value: &str) -> Vec<String> {
-    let value = value.trim();
-    if let Some((_, args)) = receiver_call_with_args(value, Span::new(FileId::new(0), 0, 0)) {
-        return args
-            .iter()
-            .flat_map(|arg| split_read_token(&arg.value_text))
-            .collect();
+/// Normalize an adapter-proven value/place name for rule matching. This never
+/// receives rendered expression text: punctuation inside an expression has
+/// already been interpreted by the Tree-sitter lowering layer.
+fn push_structured_read_name(out: &mut Vec<String>, value: &str) {
+    let value = value
+        .trim()
+        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION);
+    let value = value.trim_matches('.');
+    if !value.is_empty() && !out.iter().any(|existing| existing == value) {
+        out.push(value.to_string());
     }
-    split_read_token(value)
 }
 
 fn collect_assignment_texts(
@@ -5364,69 +5352,25 @@ struct RuntimeTypeNarrowing {
     end: u64,
 }
 
-/// Collect narrowings from type-test guards (`instanceof`,
-/// `isinstance`, `_ is X`, `typeof _ === "X"`). Else-arm
-/// narrowings are not modelled — negation handling is follow-up.
-fn collect_runtime_type_narrowings(events: &[FlowEvent]) -> Vec<RuntimeTypeNarrowing> {
-    let mut narrowings: Vec<RuntimeTypeNarrowing> = Vec::new();
-    fn walk(events: &[FlowEvent], narrowings: &mut Vec<RuntimeTypeNarrowing>) {
-        for event in events {
-            match event {
-                FlowEvent::Branch {
-                    condition,
-                    then_events,
-                    else_events,
-                    ..
-                } => {
-                    if let Some(cond) = condition {
-                        if let Some((name, ty)) = parse_type_test(cond) {
-                            if let Some((start, end)) = events_span(then_events) {
-                                narrowings.push(RuntimeTypeNarrowing {
-                                    name,
-                                    type_name: ty,
-                                    start,
-                                    end,
-                                });
-                            }
-                        }
-                    }
-                    walk(then_events, narrowings);
-                    walk(else_events, narrowings);
-                }
-                FlowEvent::Loop { body, .. } => walk(body, narrowings),
-                FlowEvent::Try {
-                    body,
-                    catch_events,
-                    finally_events,
-                    ..
-                } => {
-                    walk(body, narrowings);
-                    walk(catch_events, narrowings);
-                    walk(finally_events, narrowings);
-                }
-                _ => {}
-            }
-        }
-    }
-    walk(events, &mut narrowings);
-    narrowings
-}
-
-/// Smallest enclosing `[start, end)` byte range that covers every
-/// event in `events`. Returns `None` for an empty list.
-fn events_span(events: &[FlowEvent]) -> Option<(u64, u64)> {
-    fn flow_span(event: &FlowEvent) -> (u64, u64) {
-        let span = event.span();
-        (span.start, span.end)
-    }
-    let mut start: Option<u64> = None;
-    let mut end: Option<u64> = None;
-    for event in events {
-        let (s, e) = flow_span(event);
-        start = Some(start.map_or(s, |cur| cur.min(s)));
-        end = Some(end.map_or(e, |cur| cur.max(e)));
-    }
-    Some((start?, end?))
+/// Project file-local compiler facts into the declaration-local matcher view.
+fn collect_runtime_type_narrowings(
+    decl_span: Span,
+    facts: &[bonsai_lang_api::RuntimeTypeNarrowingFact],
+) -> Vec<RuntimeTypeNarrowing> {
+    facts
+        .iter()
+        .filter(|fact| {
+            decl_span.file == fact.branch_span.file
+                && decl_span.start <= fact.branch_span.start
+                && fact.branch_span.end <= decl_span.end
+        })
+        .map(|fact| RuntimeTypeNarrowing {
+            name: fact.subject.clone(),
+            type_name: fact.type_name.clone(),
+            start: fact.guarded_span.start,
+            end: fact.guarded_span.end,
+        })
+        .collect()
 }
 
 /// Narrowed type for `name` at byte position `call_span_start`,
@@ -5453,60 +5397,6 @@ fn runtime_type_at(narrowings: &[RuntimeTypeNarrowing], name: &str, call_span_st
         }
     }
     chosen.map(|n| n.type_name.clone())
-}
-
-/// Parse a type-test guard. Recognises `x instanceof Foo`,
-/// `isinstance(x, Foo)`, `x is Foo`, and `typeof x === "Foo"`.
-/// Bare-identifier subjects only — dotted access is rejected
-/// because the engine doesn't bind narrowings on member access yet.
-fn parse_type_test(condition: &str) -> Option<(String, String)> {
-    let cond = condition.trim();
-    // x instanceof Foo
-    if let Some((lhs, rhs)) = cond.split_once(" instanceof ") {
-        let name = lhs.trim();
-        let ty = rhs
-            .trim()
-            .trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
-        if !name.is_empty() && is_simple_ident(name) && !ty.is_empty() && is_simple_ident(ty) {
-            return Some((name.to_string(), ty.to_string()));
-        }
-    }
-    // isinstance(x, Foo) — strip optional 'not ' / leading paren
-    if let Some(after) = cond.strip_prefix("isinstance(") {
-        if let Some(close) = after.find(')') {
-            let inner = &after[..close];
-            if let Some((arg, ty)) = inner.split_once(',') {
-                let name = arg.trim();
-                let ty = ty.trim();
-                if is_simple_ident(name) && is_simple_ident(ty) {
-                    return Some((name.to_string(), ty.to_string()));
-                }
-            }
-        }
-    }
-    // x is Foo (C#, Kotlin, Swift, Rust pattern)
-    if let Some((lhs, rhs)) = cond.split_once(" is ") {
-        let name = lhs.trim();
-        let ty = rhs
-            .trim()
-            .trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
-        if !name.is_empty() && is_simple_ident(name) && !ty.is_empty() && is_simple_ident(ty) {
-            return Some((name.to_string(), ty.to_string()));
-        }
-    }
-    // typeof x === "string" / typeof x == 'string'
-    if let Some(rest) = cond.strip_prefix("typeof ") {
-        for sep in [" === ", " == "] {
-            if let Some((lhs, rhs)) = rest.split_once(sep) {
-                let name = lhs.trim();
-                let ty = rhs.trim().trim_matches(|c: char| c == '"' || c == '\'');
-                if is_simple_ident(name) && !ty.is_empty() {
-                    return Some((name.to_string(), ty.to_string()));
-                }
-            }
-        }
-    }
-    None
 }
 
 fn is_simple_ident(s: &str) -> bool {
@@ -5733,7 +5623,6 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
             FlowEvent::Call {
                 name,
                 span,
-                receiver,
                 args,
                 receiver_types,
                 call_kind,
@@ -5747,18 +5636,6 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
                     call_kind: *call_kind,
                     origin: CallFactOrigin::RealCall,
                 });
-                if let Some(receiver) = receiver.as_deref() {
-                    if let Some((callee, nested_args)) = receiver_call_with_args(receiver, *span) {
-                        out.push(CallFact {
-                            callee,
-                            span: *span,
-                            args: nested_args,
-                            receiver_types: Vec::new(),
-                            call_kind: CallKind::Function,
-                            origin: CallFactOrigin::NestedReceiverCall,
-                        });
-                    }
-                }
             }
             FlowEvent::Assign {
                 span,
@@ -5808,26 +5685,6 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
                 collect_calls_into(catch_events, out);
                 collect_calls_into(finally_events, out);
             }
-            // R5: a sink in the yielded value (`yield exec(cmd)`, C#
-            // `yield return Sink(x)`) only surfaces as a Yield event,
-            // never a Call. Lower the yielded expression into a CallFact
-            // when it is a call so sink attribution can see it.
-            FlowEvent::Yield {
-                span,
-                value_text: Some(value_text),
-                ..
-            } => {
-                if let Some((callee, args)) = receiver_call_with_args(value_text, *span) {
-                    out.push(CallFact {
-                        callee,
-                        span: *span,
-                        args,
-                        receiver_types: Vec::new(),
-                        call_kind: CallKind::Function,
-                        origin: CallFactOrigin::NestedReceiverCall,
-                    });
-                }
-            }
             _ => {}
         }
     }
@@ -5840,12 +5697,7 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
 fn drop_shadowed_assignment_call_facts(calls: &mut Vec<CallFact>) {
     let real_calls: Vec<(String, Span)> = calls
         .iter()
-        .filter(|call| {
-            matches!(
-                call.origin,
-                CallFactOrigin::RealCall | CallFactOrigin::NestedReceiverCall
-            )
-        })
+        .filter(|call| call.origin == CallFactOrigin::RealCall)
         .map(|call| (call.callee.clone(), call.span))
         .collect();
     calls.retain(|call| {
@@ -5867,31 +5719,6 @@ fn call_names_match(left: &str, right: &str) -> bool {
             .rsplit(['.', ':', '\\'])
             .next()
             .is_some_and(|left_tail| right.rsplit(['.', ':', '\\']).next() == Some(left_tail))
-}
-
-fn receiver_call_with_args(receiver: &str, span: Span) -> Option<(String, Vec<CallArg>)> {
-    let receiver = receiver.trim();
-    let close = receiver.rfind(')')?;
-    if receiver[close + 1..].trim().is_empty() {
-        let open = matching_open_paren(receiver, close)?;
-        let callee = receiver[..open].trim();
-        if callee.is_empty() {
-            return None;
-        }
-        let args = split_balanced_args(&receiver[open + 1..close])
-            .into_iter()
-            .map(|value_text| CallArg {
-                passing_mode: Default::default(),
-                span,
-                name: None,
-                value_text,
-                place: None,
-                source_names: Vec::new(),
-            })
-            .collect();
-        return Some((callee.to_string(), args));
-    }
-    None
 }
 
 fn callee_matches_with_receiver_types(
@@ -6004,99 +5831,6 @@ fn callee_tail_matches(normalized: &str, method: &str) -> bool {
         || normalized.ends_with(&format!("->{method}"))
         || normalized.ends_with(&format!("\\{method}"))
         || normalized.ends_with(&format!(":{method}"))
-}
-
-/// Find the byte offset of the `(` that opens the call ending at
-/// `close`. Walks backwards counting paren depth so nested calls
-/// `f(g(h))` resolve to the outermost open paren.
-fn matching_open_paren(text: &str, close: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut depth = 0usize;
-    for idx in (0..=close).rev() {
-        match bytes[idx] {
-            b')' => depth = depth.saturating_add(1),
-            b'(' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(idx);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Split a call's argument text on top-level commas, ignoring commas
-/// inside parens / brackets / braces / strings. Used to recover an
-/// argument list from raw source text when the adapter only emits
-/// the receiver expression.
-fn split_balanced_args(text: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let mut brace_depth = 0usize;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for ch in text.chars() {
-        if let Some(open_quote) = quote {
-            // Inside a string literal — track escapes and the closing
-            // quote, but ignore everything else.
-            current.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == open_quote {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' | '`' => {
-                quote = Some(ch);
-                current.push(ch);
-            }
-            '(' => {
-                paren_depth = paren_depth.saturating_add(1);
-                current.push(ch);
-            }
-            ')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                current.push(ch);
-            }
-            '[' => {
-                bracket_depth = bracket_depth.saturating_add(1);
-                current.push(ch);
-            }
-            ']' => {
-                bracket_depth = bracket_depth.saturating_sub(1);
-                current.push(ch);
-            }
-            '{' => {
-                brace_depth = brace_depth.saturating_add(1);
-                current.push(ch);
-            }
-            '}' => {
-                brace_depth = brace_depth.saturating_sub(1);
-                current.push(ch);
-            }
-            ',' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
-                let value = current.trim();
-                if !value.is_empty() {
-                    args.push(value.to_string());
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    let value = current.trim();
-    if !value.is_empty() {
-        args.push(value.to_string());
-    }
-    args
 }
 
 #[derive(Clone, Debug)]
@@ -6676,11 +6410,7 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 let allow_synthetic_write = ctx.call_origin == Some(CallFactOrigin::SyntheticWrite);
                 if !matches!(
                     ctx.call_origin,
-                    Some(
-                        CallFactOrigin::RealCall
-                            | CallFactOrigin::NestedReceiverCall
-                            | CallFactOrigin::SyntheticWrite
-                    )
+                    Some(CallFactOrigin::RealCall | CallFactOrigin::SyntheticWrite)
                 ) {
                     return false;
                 }
@@ -6698,10 +6428,7 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 if !*receiver_tainted {
                     return false;
                 }
-                if !matches!(
-                    ctx.call_origin,
-                    Some(CallFactOrigin::RealCall | CallFactOrigin::NestedReceiverCall)
-                ) {
+                if !matches!(ctx.call_origin, Some(CallFactOrigin::RealCall)) {
                     return false;
                 }
                 let Some(view) = ctx.taint_view else {
@@ -6721,11 +6448,7 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 let allow_synthetic_write = ctx.call_origin == Some(CallFactOrigin::SyntheticWrite);
                 if !matches!(
                     ctx.call_origin,
-                    Some(
-                        CallFactOrigin::RealCall
-                            | CallFactOrigin::NestedReceiverCall
-                            | CallFactOrigin::SyntheticWrite
-                    )
+                    Some(CallFactOrigin::RealCall | CallFactOrigin::SyntheticWrite)
                 ) {
                     return false;
                 }

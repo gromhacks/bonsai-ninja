@@ -1852,6 +1852,9 @@ mod numeric_constant_tests {
             target_span: Some(target_span),
             value_span,
             call_sites: Vec::new(),
+            value_flow: Default::default(),
+            direct_call_name: None,
+            direct_call_receiver: None,
         }
     }
 

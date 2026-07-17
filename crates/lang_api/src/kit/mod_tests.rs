@@ -6,11 +6,11 @@ use super::{
     apply_constructor_result_type_aliases, argument_place, assignment_value_node, build_call_event,
     callable_reference_name, canonical_simple_type_name, collect_kinds, expression_flow_from_node,
     extend_alias_map_with_flow_events, extract_assignment_value_facts, extract_call_receiver_facts,
-    extract_return_value_name, extract_rhs_expr_operands, extract_string_literals, language_from_pack,
-    lower_local_closure_captures, node_text, normalize_call_name_whitespace,
-    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
-    receiver_projected_alias_matches, span_of, walk_flow_events, GENERIC_HANDLER,
-    SYNTHETIC_TUPLE_RESULT_PREFIX,
+    extract_return_value_name, extract_rhs_expr_operands, extract_runtime_type_narrowing_facts,
+    extract_string_literals, language_from_pack, lower_local_closure_captures, node_text,
+    normalize_call_name_whitespace, normalize_call_result_assignment_sources,
+    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, span_of,
+    walk_flow_events, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
     AliasTarget, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind,
@@ -76,6 +76,55 @@ fn assignment_targets(events: &[FlowEvent], out: &mut Vec<String>) {
             _ => {}
         }
     }
+}
+
+#[test]
+fn runtime_type_narrowings_are_lowered_from_guard_nodes() {
+    let cases = [
+        (
+            "python",
+            "def f(value):\n    if isinstance(value, Payload):\n        sink(value)\n",
+        ),
+        (
+            "javascript",
+            "function f(value) { if (value instanceof Payload) { sink(value); } }",
+        ),
+        (
+            "typescript",
+            "function f(value: unknown) { if (typeof value === 'string') { sink(value); } }",
+        ),
+    ];
+    for (language, source) in cases {
+        let tree = parse_language(language, source.as_bytes());
+        let facts =
+            extract_runtime_type_narrowing_facts(&tree, FileId::new(0), &GENERIC_HANDLER, source.as_bytes());
+        assert_eq!(facts.len(), 1, "{language}: {facts:#?}");
+        assert_eq!(facts[0].subject, "value", "{language}");
+        let expected_type = if language == "typescript" {
+            "string"
+        } else {
+            "Payload"
+        };
+        assert_eq!(facts[0].type_name, expected_type, "{language}");
+        assert!(
+            source
+                .get(facts[0].guarded_span.start as usize..facts[0].guarded_span.end as usize)
+                .is_some_and(|guarded| guarded.contains("sink(value)")),
+            "{language}: guarded span must be the parsed then arm"
+        );
+    }
+}
+
+#[test]
+fn python_identity_guard_is_not_a_runtime_type_narrowing() {
+    let source = "def f(value, other):\n    if value is other:\n        sink(value)\n";
+    let tree = parse_language("python", source.as_bytes());
+    let facts =
+        extract_runtime_type_narrowing_facts(&tree, FileId::new(0), &GENERIC_HANDLER, source.as_bytes());
+    assert!(
+        facts.is_empty(),
+        "identity comparison is not a type fact: {facts:#?}"
+    );
 }
 
 #[test]

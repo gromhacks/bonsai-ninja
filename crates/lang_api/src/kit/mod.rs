@@ -65,6 +65,7 @@ mod pseudo_call;
 mod qualified;
 mod receiver_writes;
 mod return_extraction;
+mod runtime_types;
 mod syntax_errors;
 
 #[cfg(test)]
@@ -98,6 +99,7 @@ pub use return_extraction::{
     extract_catch_param, extract_return_value_flow, extract_return_value_name, extract_return_value_text,
     extract_throw_value_name, extract_yield_value_flow,
 };
+pub use runtime_types::extract_runtime_type_narrowing_facts;
 
 pub(crate) use direct_calls::extract_direct_call_info;
 use direct_calls::{
@@ -5540,6 +5542,12 @@ pub fn extract_assignment_value_facts(
                     && value_span.end <= span.end
                     && value_span.start < value_span.end
                 {
+                    let direct_call_name = if callable_reference_name(&value, src).is_some() {
+                        None
+                    } else {
+                        extract_direct_call_info(&value, src).and_then(|(name, _)| name)
+                    };
+                    let direct_call_receiver = direct_call_name.as_deref().and_then(call_receiver_from_name);
                     let call_sites = if callable_reference_name(&value, src).is_some() {
                         Vec::new()
                     } else {
@@ -5550,6 +5558,9 @@ pub fn extract_assignment_value_facts(
                         target_span,
                         value_span,
                         call_sites,
+                        value_flow: expression_flow_from_node(value, file, src),
+                        direct_call_name,
+                        direct_call_receiver,
                     });
                 }
             }
@@ -6150,12 +6161,14 @@ pub fn decl_index_with_handler(
     let comments = extract_comments(&tree, file, src);
     let assignment_values = extract_assignment_value_facts(&tree, file, handler, src);
     let call_receivers = extract_call_receiver_facts(&tree, file, handler, src);
+    let runtime_type_narrowings = extract_runtime_type_narrowing_facts(&tree, file, handler, src);
     crate::DeclIndex {
         file,
         defs,
         refs,
         assignment_values,
         call_receivers,
+        runtime_type_narrowings,
         aggregate_layouts: Vec::new(),
         strings,
         comments,

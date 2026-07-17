@@ -1491,6 +1491,35 @@ pub struct AssignmentValueFact {
     /// empty because it denotes a function value rather than an invocation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub call_sites: Vec<Span>,
+    /// Compiler-owned value dependencies for the exact RHS node.
+    /// Rendered source remains available through [`AssignmentValueIndex`],
+    /// but semantic consumers must use this structure instead of tokenizing
+    /// that rendering.
+    #[serde(default, skip_serializing_if = "ExpressionFlow::is_empty")]
+    pub value_flow: ExpressionFlow,
+    /// Canonical callee when the RHS is (or transparently wraps) one direct
+    /// call. This comes from the Tree-sitter call node selected by the
+    /// adapter, never from scanning the rendered RHS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_call_name: Option<String>,
+    /// Canonical receiver for [`Self::direct_call_name`], when the parsed call
+    /// is receiver-qualified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_call_receiver: Option<String>,
+}
+
+/// One branch-local runtime type refinement proven by parsed guard syntax.
+///
+/// The frontend records both the full branch and the exact arm in which the
+/// refinement holds. Matchers consume this fact directly; they must not
+/// rediscover `instanceof` / `isinstance` / `is` structure from rendered
+/// condition text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTypeNarrowingFact {
+    pub branch_span: Span,
+    pub guarded_span: Span,
+    pub subject: String,
+    pub type_name: String,
 }
 
 /// Compiler-owned value flow for a method-call receiver.
@@ -1629,6 +1658,9 @@ pub struct DeclIndex {
     /// Parsed receiver-expression dependencies keyed by semantic call span.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub call_receivers: Vec<CallReceiverFact>,
+    /// Parsed branch-local type refinements keyed by their guarded arm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_type_narrowings: Vec<RuntimeTypeNarrowingFact>,
     /// Grammar-declared aggregate field layouts in this file. These are
     /// workspace-level type facts rather than function declarations, so they
     /// live beside the per-file declaration index and remain available for

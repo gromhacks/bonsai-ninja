@@ -19,9 +19,9 @@ pub use kit::{
     collect_assign_targets, collect_constructor_result_type_aliases, collect_modifier_visibility,
     collect_param_type_aliases, decl_index_with_handler, extend_alias_map_with_flow_events,
     extract_assignment_value_facts, extract_call_receiver_facts, extract_imports_via,
-    inject_lifecycle_events, normalize_call_result_assignment_sources, populate_decl_return_types,
-    rewrite_implicit_member_reads, with_fn_kinds, AliasTarget, GrammarHandler, ImplicitMemberReadCall,
-    LifecycleTransition, ModifierVocabulary, TypeAliasVocabulary, GENERIC_HANDLER,
+    extract_runtime_type_narrowing_facts, inject_lifecycle_events, normalize_call_result_assignment_sources,
+    populate_decl_return_types, rewrite_implicit_member_reads, with_fn_kinds, AliasTarget, GrammarHandler,
+    ImplicitMemberReadCall, LifecycleTransition, ModifierVocabulary, TypeAliasVocabulary, GENERIC_HANDLER,
     WILDCARD_IMPORT_ALIAS_PREFIX,
 };
 pub use registry::{AdapterArc, LanguageRegistry};
@@ -32,8 +32,8 @@ pub use types::{
     AssignmentValueIndex, CallArg, CallKind, CallReceiverFact, Comment, CommentKind, Decl, DeclIndex,
     DeclKind, ExpressionField, ExpressionFlow, ExpressionProjection, FieldWrite, FlowEvent, ImportIndex,
     ImportScope, ImportSpec, LanguageId, LoopKind, ModulePath, Operation, OperationKind, OperationOperand,
-    OperationOperandRole, Ref, RefKind, StringCategory, StringLiteral, TypeAliasBinding,
-    UnsupportedConstruct, Visibility, WorkspaceRoot,
+    OperationOperandRole, Ref, RefKind, RuntimeTypeNarrowingFact, StringCategory, StringLiteral,
+    TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
 };
 
 use bonsai_common::FileId;
