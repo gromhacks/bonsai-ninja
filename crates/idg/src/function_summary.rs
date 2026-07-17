@@ -13,7 +13,7 @@
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{FuncId, Precision, Span};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 
 use crate::edge::{IdgEdge, IdgEdgeKind};
 use crate::node::{NodeId, PlaceId};
@@ -263,10 +263,10 @@ fn add_summary_edges_to_fixed_point(
 
     let mut initial: Vec<FuncId> = by_callee.keys().copied().collect();
     initial.sort_unstable_by_key(|func| func.raw());
-    let mut pending: VecDeque<FuncId> = initial.iter().copied().collect();
+    let mut pending = initial.clone();
     let mut queued: AHashSet<FuncId> = initial.into_iter().collect();
 
-    while let Some(callee) = pending.pop_front() {
+    while let Some(callee) = pending.pop() {
         queued.remove(&callee);
         let Some(boundary_indices) = by_callee.get(&callee) else {
             continue;
@@ -319,7 +319,7 @@ fn add_summary_edges_to_fixed_point(
         changed_callers.dedup();
         for caller in changed_callers {
             if by_callee.contains_key(&caller) && queued.insert(caller) {
-                pending.push_back(caller);
+                pending.push(caller);
             }
         }
     }
@@ -478,14 +478,14 @@ pub(crate) fn return_taint_param_indices(
     // Propagating over these compiler call/return boundaries is substantially
     // narrower than marking every transitive caller in the resolved callgraph.
     let mut symbolic_sensitive = directly_sensitive.clone();
-    let mut pending: VecDeque<FuncId> = directly_sensitive.into_iter().collect();
-    while let Some(callee) = pending.pop_front() {
+    let mut pending: Vec<FuncId> = directly_sensitive.into_iter().collect();
+    while let Some(callee) = pending.pop() {
         let Some(callers) = return_callers_by_callee.get(&callee) else {
             continue;
         };
         for caller in callers {
             if symbolic_sensitive.insert(*caller) {
-                pending.push_back(*caller);
+                pending.push(*caller);
             }
         }
     }

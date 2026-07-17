@@ -1307,7 +1307,7 @@ fn field_argument_forwarding_worklist_deduplicates_split_views_but_not_writers()
         node: NodeId(7),
         span: Some(span(10, 18)),
     };
-    let mut pending = VecDeque::new();
+    let mut pending = Vec::new();
     let mut enqueued = AHashSet::default();
 
     enqueue_field_write(&shallow_key, &shallow_hit, &mut pending, &mut enqueued);
@@ -1316,7 +1316,7 @@ fn field_argument_forwarding_worklist_deduplicates_split_views_but_not_writers()
     assert_eq!(pending.len(), 1);
     assert_eq!(enqueued.len(), 1);
     assert_eq!(
-        pending.front().copied(),
+        pending.last().copied(),
         Some(PendingFieldWrite {
             seg_id: SegmentId(0),
             func: FuncId::new(1),
