@@ -2552,30 +2552,9 @@ fn walk_into(
     // into a regular Call (which would lose the body's contents).
     if kind == "call_expression" && is_swift_defer_call(&node, src) {
         let mut body = Vec::new();
-        // The `lambda_literal` may be a direct child OR nested inside
-        // a `call_suffix` wrapper. Find it either way.
-        fn find_and_walk(
-            n: Node<'_>,
-            file: FileId,
-            src: &[u8],
-            handler: &GrammarHandler,
-            class_names: &[String],
-            out: &mut Vec<FlowEvent>,
-            depth: usize,
-        ) {
-            if depth > 3 {
-                return;
-            }
-            let mut cursor = n.walk();
-            for child in n.named_children(&mut cursor) {
-                if child.kind() == "lambda_literal" {
-                    walk_lambda_body(child, file, src, handler, class_names, out);
-                } else if child.kind() == "call_suffix" {
-                    find_and_walk(child, file, src, handler, class_names, out, depth + 1);
-                }
-            }
+        for lambda in swift_trailing_lambdas(node) {
+            walk_lambda_body(lambda, file, src, handler, class_names, &mut body);
         }
-        find_and_walk(node, file, src, handler, class_names, &mut body, 0);
         out.push(FlowEvent::Defer {
             span: span_of(file, &node),
             body,
@@ -6629,7 +6608,7 @@ pub fn extract_string_literals(
     while let Some(node) = stack.pop() {
         if STRING_KINDS.contains(&node.kind()) {
             let text = node_text(&node, src).to_string();
-            if !text.is_empty() && text.len() < 4096 {
+            if !text.is_empty() {
                 out.push(crate::StringLiteral {
                     span: span_of(file, &node),
                     category: crate::StringCategory::classify(&text),
@@ -6851,8 +6830,8 @@ pub const WILDCARD_IMPORT_ALIAS_PREFIX: &str = "__bonsai_wildcard_import__:";
 /// copy(userInput);                              // matches rule
 /// ```
 ///
-/// Iterates to fixed-point (bounded at 16 rounds) so chains of
-/// reassignments resolve. Walks the full flow tree — branches, loops,
+/// Uses a dependency worklist to reach a fixed point for arbitrarily long
+/// reassignment chains. Walks the full flow tree — branches, loops,
 /// try, await/yield, defer, etc. — so aliases introduced inside any
 /// control-flow region are visible to call sites elsewhere in the
 /// function. Language-agnostic: every adapter's assignment emission
@@ -6963,34 +6942,40 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
         let Some(type_name) = bound_type else { continue };
         map.insert(target.clone(), AliasTarget::Type { type_name });
     }
-    // Fixpoint: keep propagating bare-name aliases until no new ones
-    // appear. Bounded iterations — worst case is a long chain
-    // `a = b; b = c; …` which converges in ≤ N rounds where N =
-    // chain length. Cap at 16 so pathological test cases can't loop
-    // forever.
-    for _ in 0..16 {
-        let mut changed = false;
-        for (target, src, _, _) in &triples {
-            let Some(src) = src.as_deref().filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            // Only alias when the source is a known alias AND the
-            // target isn't already in the map with a different
-            // target.
-            let Some(resolved) = map.get(src).cloned() else {
-                continue;
-            };
-            match map.get(target) {
-                Some(existing) if existing == &resolved => continue,
-                Some(_) => continue,
-                _ => {
-                    map.insert(target.clone(), resolved);
-                    changed = true;
-                }
-            }
+    // Reverse assignment dependencies make propagation linear in the alias
+    // graph rather than repeatedly rescanning every statement. Each target
+    // is inserted at most once, so cycles terminate without a round limit.
+    let mut dependents: ahash::AHashMap<&str, Vec<&str>> = ahash::AHashMap::new();
+    for (target, source, _, _) in &triples {
+        let Some(source) = source.as_deref().filter(|source| !source.is_empty()) else {
+            continue;
+        };
+        dependents.entry(source).or_default().push(target);
+    }
+    let mut pending = std::collections::VecDeque::new();
+    let mut enqueued = ahash::AHashSet::new();
+    // Seed in source-event order so competing reassignments remain
+    // deterministic and match the adapter's lexical fact order.
+    for (_, source, _, _) in &triples {
+        let Some(source) = source.as_deref().filter(|source| map.contains_key(*source)) else {
+            continue;
+        };
+        if enqueued.insert(source) {
+            pending.push_back(source);
         }
-        if !changed {
-            break;
+    }
+    while let Some(source) = pending.pop_front() {
+        let Some(resolved) = map.get(source).cloned() else {
+            continue;
+        };
+        for target in dependents.get(source).into_iter().flatten() {
+            if map.contains_key(*target) {
+                continue;
+            }
+            map.insert((*target).to_string(), resolved.clone());
+            if enqueued.insert(*target) {
+                pending.push_back(target);
+            }
         }
     }
 }
@@ -8100,22 +8085,27 @@ fn is_swift_defer_call(node: &Node<'_>, src: &[u8]) -> bool {
     if node_text(&callee, src).trim() != "defer" {
         return false;
     }
-    fn find_lambda(n: Node<'_>, depth: usize) -> bool {
-        if depth > 3 {
-            return false;
-        }
-        let mut cursor = n.walk();
-        for child in n.named_children(&mut cursor) {
+    !swift_trailing_lambdas(*node).is_empty()
+}
+
+/// Find trailing closures through the grammar's `call_suffix` wrappers.
+/// The iterative walk is bounded by the finite CST, not an arbitrary depth.
+fn swift_trailing_lambdas(node: Node<'_>) -> Vec<Node<'_>> {
+    let mut lambdas = Vec::new();
+    let mut pending = vec![node];
+    while let Some(current) = pending.pop() {
+        let mut cursor = current.walk();
+        let children = current.named_children(&mut cursor).collect::<Vec<_>>();
+        for child in children.into_iter().rev() {
             if child.kind() == "lambda_literal" {
-                return true;
-            }
-            if child.kind() == "call_suffix" && find_lambda(child, depth + 1) {
-                return true;
+                lambdas.push(child);
+            } else if child.kind() == "call_suffix" {
+                pending.push(child);
             }
         }
-        false
     }
-    find_lambda(*node, 0)
+    lambdas.sort_by_key(tree_sitter::Node::start_byte);
+    lambdas
 }
 
 fn walk_named_children(
@@ -9408,7 +9398,18 @@ pub fn collect_constructor_result_type_aliases(
     events: &[crate::FlowEvent],
     out: &mut Vec<crate::TypeAliasBinding>,
 ) {
-    for (index, event) in events.iter().enumerate() {
+    let mut constructor_calls = events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Call { name, span, .. } => {
+                constructor_call_type_name(name).map(|type_name| (*span, type_name))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    constructor_calls.sort_by_key(|(span, _)| (span.file.raw(), span.start, span.end));
+
+    for event in events {
         match event {
             FlowEvent::Assign {
                 target,
@@ -9443,7 +9444,7 @@ pub fn collect_constructor_result_type_aliases(
                 if target.is_empty() {
                     continue;
                 }
-                if let Some(type_name) = adjacent_constructor_call_type(events, index, *span) {
+                if let Some(type_name) = contained_constructor_call_type(&constructor_calls, *span) {
                     out.push(crate::TypeAliasBinding {
                         name: target.clone(),
                         type_name,
@@ -9478,54 +9479,25 @@ pub fn collect_constructor_result_type_aliases(
 
 /// Find the constructor type for a `new`-expression RHS that the
 /// grammar surfaced as a sibling `Call` event rather than the
-/// assignment's `source_call` (the JS/TS shape). Scans `events` for a
-/// constructor `Call` whose span lies strictly inside `assign_span`'s
+/// assignment's `source_call` (the JS/TS shape). Searches a span-sorted
+/// constructor index for a `Call` whose span lies strictly inside `assign_span`'s
 /// RHS, preferring the leftmost (outermost) one so
 /// `x = new Foo(new Bar())` resolves to `Foo`. Returns `None` when no
 /// contained constructor call exists, so unrelated adjacent statements
 /// (`x = compute(); Helper();`) never mistype `x`.
-fn adjacent_constructor_call_type(
-    events: &[crate::FlowEvent],
-    assign_index: usize,
+fn contained_constructor_call_type(
+    constructor_calls: &[(Span, String)],
     assign_span: Span,
 ) -> Option<String> {
-    // The constructor `Call` for `x = new T()` is emitted immediately
-    // adjacent to the `Assign` (its span sits inside the assignment's
-    // RHS), so only a small window around the assign can match. Scanning
-    // the whole event list per assign is O(statements^2) on large
-    // functions — a 60k-statement body spent essentially all its indexing
-    // time here. Cap the scan to a bounded window so alias collection
-    // stays O(statements). The window is far wider than any real
-    // assign->RHS-constructor distance (observed: +1), and the span
-    // checks below still reject anything not inside the assignment span,
-    // so this changes no result on realistic code.
-    const BACK: usize = 4;
-    const FWD: usize = 32;
-    let lo = assign_index.saturating_sub(BACK);
-    let hi = assign_index
-        .saturating_add(FWD)
-        .min(events.len().saturating_sub(1));
-    let mut best: Option<(u64, String)> = None;
-    for (offset, event) in events[lo..=hi].iter().enumerate() {
-        if lo + offset == assign_index {
-            continue;
-        }
-        let FlowEvent::Call { name, span, .. } = event else {
-            continue;
-        };
-        // The constructor call must be the assignment's RHS: its span
-        // sits within the assign span and starts after the LHS target.
-        if span.file != assign_span.file || span.start <= assign_span.start || span.end > assign_span.end {
-            continue;
-        }
-        if let Some(type_name) = constructor_call_type_name(name) {
-            match &best {
-                Some((best_start, _)) if *best_start <= span.start => {}
-                _ => best = Some((span.start, type_name)),
-            }
-        }
-    }
-    best.map(|(_, type_name)| type_name)
+    let first = constructor_calls.partition_point(|(span, _)| {
+        span.file.raw() < assign_span.file.raw()
+            || (span.file == assign_span.file && span.start <= assign_span.start)
+    });
+    constructor_calls[first..]
+        .iter()
+        .take_while(|(span, _)| span.file == assign_span.file && span.start < assign_span.end)
+        .find(|(span, _)| span.end <= assign_span.end)
+        .map(|(_, type_name)| type_name.clone())
 }
 
 /// Apply local constructor-result type inference across every decl in

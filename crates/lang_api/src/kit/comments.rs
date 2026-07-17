@@ -51,7 +51,7 @@ pub fn extract_comments(tree: &tree_sitter::Tree, file: FileId, src: &[u8]) -> V
     while let Some(node) = stack.pop() {
         if COMMENT_KINDS.contains(&node.kind()) {
             let text = node_text(&node, src).trim().to_string();
-            if !text.is_empty() && text.len() < 4096 {
+            if !text.is_empty() {
                 let body = strip_comment_markers(&text);
                 let is_doc = is_doc_comment_kind_or_text(node.kind(), &text);
                 out.push(crate::Comment {
@@ -172,7 +172,7 @@ fn collect_python_docstrings(
                 };
                 if matches!(target.kind(), "string" | "string_literal") {
                     let text = node_text(&target, src).trim().to_string();
-                    if (text.starts_with("\"\"\"") || text.starts_with("'''")) && text.len() < 4096 {
+                    if text.starts_with("\"\"\"") || text.starts_with("'''") {
                         let body_text = strip_comment_markers(&text);
                         out.push(crate::Comment {
                             span: span_of(file, &target),
@@ -186,5 +186,24 @@ fn collect_python_docstrings(
         for child in node.children(&mut cursor) {
             stack.push(child);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extraction_preserves_large_ast_comments() {
+        let content = "x".repeat(8_192);
+        let source = format!("// {content}\nconst value = 1;");
+        let language = language_from_pack("javascript").expect("javascript grammar");
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set grammar");
+        let tree = parser.parse(source.as_bytes(), None).expect("parse source");
+
+        let comments = extract_comments(&tree, FileId::new(0), source.as_bytes());
+
+        assert!(comments.iter().any(|comment| comment.text.contains(&content)));
     }
 }

@@ -5,15 +5,16 @@ use super::{
     annotate_tuple_call_result_bindings, apply_assign_call_result_types, apply_call_receiver_types,
     apply_constructor_result_type_aliases, argument_place, assignment_value_node, build_call_event,
     callable_reference_name, canonical_simple_type_name, collect_kinds, expression_flow_from_node,
-    extract_assignment_value_facts, extract_call_receiver_facts, extract_return_value_name,
-    extract_rhs_expr_operands, language_from_pack, lower_local_closure_captures, node_text,
-    normalize_call_name_whitespace, normalize_call_result_assignment_sources,
-    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, span_of,
-    walk_flow_events, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
+    extend_alias_map_with_flow_events, extract_assignment_value_facts, extract_call_receiver_facts,
+    extract_return_value_name, extract_rhs_expr_operands, extract_string_literals, language_from_pack,
+    lower_local_closure_captures, node_text, normalize_call_name_whitespace,
+    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
+    receiver_projected_alias_matches, span_of, walk_flow_events, GENERIC_HANDLER,
+    SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
-    AssignValueKind, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent,
-    GrammarHandler, ModulePath, Visibility,
+    AliasTarget, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind,
+    FlowEvent, GrammarHandler, ModulePath, Visibility,
 };
 use bonsai_common::{FileId, Span, SymbolId};
 
@@ -1080,6 +1081,89 @@ fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
         "a constructor call outside the assign span must not type the target: {:?}",
         decl.type_aliases
     );
+}
+
+#[test]
+fn constructor_result_typing_uses_span_index_without_event_window() {
+    let file = FileId::new(0);
+    let mut events = vec![FlowEvent::Assign {
+        span: Span::new(file, 10, 1_000),
+        target: "client".to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: Some(AssignValueKind::Compound),
+    }];
+    for index in 0..64 {
+        events.push(FlowEvent::Call {
+            span: Span::new(file, 20 + index * 10, 25 + index * 10),
+            name: format!("helper_{index}"),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        });
+    }
+    events.push(FlowEvent::Call {
+        span: Span::new(file, 900, 920),
+        name: "ApolloClient".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Constructor,
+        args: Vec::new(),
+    });
+    let mut idx = DeclIndex::default();
+    idx.defs.push(m9_func_decl(0, "handler", None, events));
+
+    apply_constructor_result_type_aliases(&mut idx);
+
+    assert!(idx.defs[0]
+        .type_aliases
+        .iter()
+        .any(|alias| alias.name == "client" && alias.type_name == "ApolloClient"));
+}
+
+#[test]
+fn alias_propagation_worklist_resolves_chains_longer_than_sixteen() {
+    let file = FileId::new(0);
+    let mut events = Vec::new();
+    for index in 0..64 {
+        events.push(FlowEvent::Assign {
+            span: Span::new(file, index * 10, index * 10 + 5),
+            target: format!("alias_{index}"),
+            source_name: Some(if index == 63 {
+                "imported".to_string()
+            } else {
+                format!("alias_{}", index + 1)
+            }),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::Unknown),
+        });
+    }
+    let expected = AliasTarget::Member {
+        module: "child_process".to_string(),
+        member: "exec".to_string(),
+    };
+    let mut aliases = std::collections::HashMap::from([("imported".to_string(), expected.clone())]);
+
+    extend_alias_map_with_flow_events(&mut aliases, &events);
+
+    assert_eq!(aliases.get("alias_0"), Some(&expected));
+}
+
+#[test]
+fn string_literal_extraction_preserves_large_ast_literals() {
+    let content = "x".repeat(8_192);
+    let source = format!("const value = \"{content}\";");
+    let tree = parse_language("javascript", source.as_bytes());
+    let strings = extract_string_literals(&tree, FileId::new(0), source.as_bytes());
+
+    assert!(strings.iter().any(|literal| literal.text.contains(&content)));
 }
 
 #[test]
