@@ -3046,10 +3046,6 @@ pub struct ShowOptions<'a> {
     pub taint_sanitizers: &'a [&'a str],
     /// Optional sink-name filter when resolving `T:` propagation ids.
     pub taint_sink: Option<&'a str>,
-    /// Optional compatibility budget for structured `T:` drilldown.
-    pub taint_budget: Option<u32>,
-    /// Legacy compatibility knob; structured `T:` drilldown uses uncapped IDG closure.
-    pub taint_intra_worklist_cap: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3257,8 +3253,6 @@ impl Show<'_> {
                 .map(|sanitizer| (*sanitizer).to_string())
                 .collect(),
             sink: options.taint_sink,
-            budget: options.taint_budget,
-            intra_worklist_cap: options.taint_intra_worklist_cap,
             taint_id: Some(taint_id),
             ..Default::default()
         }) {

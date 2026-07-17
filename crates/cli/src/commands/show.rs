@@ -30,8 +30,6 @@ pub(crate) struct ShowArgs<'a> {
     pub(crate) taint_seeds: &'a [String],
     pub(crate) taint_sanitizers: &'a [String],
     pub(crate) taint_sink: Option<&'a str>,
-    pub(crate) taint_budget: Option<u32>,
-    pub(crate) taint_intra_worklist_cap: Option<u32>,
     pub(crate) compact: bool,
     pub(crate) context: Option<&'a str>,
     pub(crate) page: Option<&'a str>,
@@ -46,7 +44,7 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
     let prefix = id_prefix(id)?;
     if prefix != "T" && args.has_dump_taint_context() {
         anyhow::bail!(
-            "dump-taint show options (`--taint-source`, `--taint-seed`, `--taint-sanitizer`, `--taint-sink`, `--taint-budget`, `--taint-intra-worklist-cap`) only apply to T: ids"
+            "dump-taint show options (`--taint-source`, `--taint-seed`, `--taint-sanitizer`, `--taint-sink`) only apply to T: ids"
         );
     }
     match prefix {
@@ -114,8 +112,6 @@ impl ShowArgs<'_> {
             || !self.taint_seeds.is_empty()
             || !self.taint_sanitizers.is_empty()
             || self.taint_sink.is_some()
-            || self.taint_budget.is_some()
-            || self.taint_intra_worklist_cap.is_some()
     }
 }
 
@@ -329,8 +325,6 @@ fn show_dump_taint_propagation(args: ShowArgs<'_>, id: &str, paging_cfg: paging:
         args.taint_seeds,
         args.taint_sanitizers,
         args.taint_sink,
-        args.taint_budget,
-        args.taint_intra_worklist_cap,
         args.compact,
         Some(id),
         paging_cfg,
@@ -359,8 +353,6 @@ fn show_security_finding(args: ShowArgs<'_>, id: &str) -> Result<()> {
             include_pattern_only: true,
             exclude_tests: false,
             show_sanitized: true,
-            taint_budget: None,
-            intra_worklist_cap: None,
             context: args.context.map(str::to_string),
             page: args.page.map(str::to_string),
             all: args.all,
@@ -397,8 +389,6 @@ fn show_security_flow(args: &ShowArgs<'_>, id: &str) -> Result<()> {
             include_pattern_only: true,
             exclude_tests: false,
             show_sanitized: true,
-            taint_budget: None,
-            intra_worklist_cap: None,
             context: args.context.map(str::to_string),
             page: args.page.map(str::to_string),
             all: args.all,
@@ -435,8 +425,6 @@ fn show_security_group(args: &ShowArgs<'_>, id: &str) -> Result<()> {
             include_pattern_only: true,
             exclude_tests: false,
             show_sanitized: true,
-            taint_budget: None,
-            intra_worklist_cap: None,
             context: args.context.map(str::to_string),
             page: args.page.map(str::to_string),
             all: args.all,

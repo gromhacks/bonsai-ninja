@@ -55,13 +55,3 @@ fn default_config_carries_zero_embedded_library_knowledge() {
         "default output_arg_flows must be empty; rulepack taint_semantics supplies output-argument transfer shapes",
     );
 }
-
-#[test]
-fn compatibility_scheduling_defaults_remain_source_compatible() {
-    let config = InterTaintConfig::default();
-    assert!(
-        config.budget > 0,
-        "the retained compatibility field must preserve its historical positive default",
-    );
-    assert_eq!(config.intra_worklist_cap, None);
-}

@@ -34,10 +34,7 @@ fn func(db: &AnalyzerDb, name: &str) -> FuncId {
 }
 
 fn config() -> InterTaintConfig {
-    InterTaintConfig {
-        budget: 512,
-        ..Default::default()
-    }
+    InterTaintConfig::default()
 }
 
 fn seed(names: &[&str]) -> TokenSet {

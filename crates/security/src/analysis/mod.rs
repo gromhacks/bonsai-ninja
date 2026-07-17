@@ -162,12 +162,6 @@ pub struct TaintAnalysisOptions {
     /// propagated paths; public reports suppress paths whose relevant sink
     /// class has been sanitizer-cleared unless this is set.
     pub show_sanitized: bool,
-    /// Legacy compatibility setting. The unified IDG closure is not chunked,
-    /// so this value does not cap or otherwise change analysis.
-    pub interprocedural_budget: Option<u32>,
-    /// Legacy compatibility setting. Security taint now uses the unified IDG
-    /// closure and does not truncate it with a CFG worklist cap.
-    pub intra_worklist_cap: Option<u32>,
     /// Optional maximum tolerated flow precision. Public security
     /// analysis is semantic-only: `Some(Precision::Narrowed)` keeps
     /// exact and narrowed findings and rejects broad diagnostic
@@ -205,8 +199,6 @@ impl Default for TaintAnalysisOptions {
             include_inferred_sources: false,
             include_pattern_only: false,
             show_sanitized: false,
-            interprocedural_budget: None,
-            intra_worklist_cap: None,
             max_precision: Some(PUBLIC_SEMANTIC_MAX_PRECISION),
             exclude_tests: false,
             attach_flow_evidence: true,
@@ -1127,8 +1119,6 @@ where
         &sink_hits,
         &sanitizer_hits,
         pack,
-        options.interprocedural_budget,
-        options.intra_worklist_cap,
         options.max_precision,
         options.taint_graph_resident_cache_entries,
         &factory_returns,
@@ -5000,8 +4990,6 @@ fn build_findings_chain_aware<F>(
     sinks: &[RuleMatch],
     sanitizers: &[RuleMatch],
     pack: &Rulepack,
-    _interprocedural_budget: Option<u32>,
-    _intra_worklist_cap: Option<u32>,
     max_precision: Option<Precision>,
     taint_graph_resident_cache_entries: Option<usize>,
     factory_returns: &crate::matcher::FactoryReturns,

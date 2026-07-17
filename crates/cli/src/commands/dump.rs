@@ -765,8 +765,6 @@ pub(crate) fn cmd_dump_taint(
     seeds: &[String],
     sanitizers: &[String],
     sink_filter: Option<&str>,
-    budget: Option<u32>,
-    intra_worklist_cap: Option<u32>,
     compact: bool,
     taint_id_filter: Option<&str>,
     paging_cfg: paging::PagingConfig,
@@ -778,8 +776,6 @@ pub(crate) fn cmd_dump_taint(
         seeds: seeds.to_vec(),
         sanitizers: sanitizers.to_vec(),
         sink: sink_filter,
-        budget,
-        intra_worklist_cap,
         taint_id: taint_id_filter,
         ..Default::default()
     };
@@ -794,8 +790,6 @@ pub(crate) fn cmd_dump_taint(
         seeds,
         sanitizers,
         sink_filter,
-        budget,
-        intra_worklist_cap,
         compact,
         taint_id_filter,
     );
@@ -927,23 +921,17 @@ fn dump_taint_filters_hash(
     seeds: &[String],
     sanitizers: &[String],
     sink_filter: Option<&str>,
-    budget: Option<u32>,
-    intra_worklist_cap: Option<u32>,
     compact: bool,
     taint_id_filter: Option<&str>,
 ) -> u64 {
     let seeds_joined = seeds.join("\0");
     let sanitizers_joined = sanitizers.join("\0");
-    let budget_text = budget.map(|b| b.to_string()).unwrap_or_default();
-    let intra_text = intra_worklist_cap.map(|b| b.to_string()).unwrap_or_default();
     let compact_text = if compact { "1" } else { "0" };
     paging::hash_filters(&[
         ("source", source_name),
         ("seeds", &seeds_joined),
         ("sanitizers", &sanitizers_joined),
         ("sink", sink_filter.unwrap_or("")),
-        ("budget", &budget_text),
-        ("intra_worklist_cap", &intra_text),
         ("compact", compact_text),
         ("taint", taint_id_filter.unwrap_or("")),
     ])

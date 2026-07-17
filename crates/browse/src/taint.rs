@@ -27,13 +27,6 @@ pub struct TaintFilters<'a> {
     pub sanitizers: Vec<String>,
     /// `--sink X` — keep only records whose callee contains `X`.
     pub sink: Option<&'a str>,
-    /// `--budget N` — accepted for compatibility with the legacy
-    /// interprocedural engine. The IDG-backed dump path computes its
-    /// requested closure exactly and does not use this as a result cap.
-    pub budget: Option<u32>,
-    /// `--intra-worklist-cap N` — accepted for compatibility with the
-    /// retired engine. Unified IDG closure is never truncated by it.
-    pub intra_worklist_cap: Option<u32>,
     /// `--taint T:id` — drill into one propagation by stable id.
     pub taint_id: Option<&'a str>,
     /// Rulepack-declared method/receiver state transfers to apply
@@ -54,8 +47,6 @@ impl<'a> Default for TaintFilters<'a> {
             seeds: Vec::new(),
             sanitizers: Vec::new(),
             sink: None,
-            budget: None,
-            intra_worklist_cap: None,
             taint_id: None,
             receiver_state_propagations: Vec::new(),
             call_result_passthroughs: Vec::new(),
@@ -328,11 +319,6 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     });
     cross_calls.dedup();
     let tainted_arg_sites = idg.tainted_call_args_in_reachable_nodes(&closure_nodes);
-    // Legacy worklist knobs have no exactness-preserving surface on
-    // the IDG path: the closure is a complete bitset walk rather than
-    // a resumable chunked worklist. Keep accepting the flags for CLI
-    // compatibility, but never use them to cap emitted evidence.
-    let _ = (f.budget, f.intra_worklist_cap);
     let mut records: Vec<TaintRecord> = cross_calls
         .iter()
         .filter_map(|ce| build_taint_record_from_cross_call(ce, &global, ws))

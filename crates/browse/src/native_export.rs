@@ -2023,7 +2023,6 @@ fn export_intra_taint(ws: &Workspace, functions: &[ExportTaintFunction]) -> Vec<
                 let cfg_config = bonsai_taint::TaintConfig {
                     sources: seed,
                     sanitizers: bonsai_taint::TokenSet::default(),
-                    worklist_cap: None,
                 };
                 let result = bonsai_taint::intraprocedural_taint(&cfg, &cfg_config);
                 let mut blocks: Vec<ExportIntraBlock> = Vec::new();

@@ -63,10 +63,7 @@ fn seed(names: &[&str]) -> TokenSet {
 }
 
 fn default_config() -> InterTaintConfig {
-    InterTaintConfig {
-        budget: 512,
-        ..Default::default()
-    }
+    InterTaintConfig::default()
 }
 
 fn touches(result: &bonsai_taint::InterTaintResult, db: &AnalyzerDb, callee_name: &str) -> bool {

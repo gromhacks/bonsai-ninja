@@ -925,20 +925,7 @@ fn benchmark_shaped_security_flows_reach_sink() {
 }
 
 #[test]
-fn benchmark_shaped_security_flows_resume_budget_chunks() {
-    for fixture in fixtures() {
-        assert_finding_with_options(
-            fixture,
-            TaintAnalysisOptions {
-                interprocedural_budget: Some(1),
-                ..Default::default()
-            },
-        );
-    }
-}
-
-#[test]
-fn taint_analysis_does_not_stop_after_scan_wide_pair_budget() {
+fn taint_analysis_covers_every_source_group_in_a_wide_scan() {
     let ws = Workspace::new(bonsai_adapters::all_languages_registry());
     for i in 0..12 {
         let path = format!("/app/case_{i}.py");
@@ -956,10 +943,7 @@ fn taint_analysis_does_not_stop_after_scan_wide_pair_budget() {
     let report = run_taint_analysis(
         &ws,
         &rulepack("python", "source", "sink"),
-        TaintAnalysisOptions {
-            interprocedural_budget: Some(1),
-            ..Default::default()
-        },
+        TaintAnalysisOptions::default(),
     )
     .expect("taint analysis");
     let sink_files: BTreeSet<_> = report

@@ -320,7 +320,6 @@ fn intra_run(events: &[FlowEvent], sources: &[&str], sanitizers: &[&str]) -> Int
     let config = TaintConfig {
         sources: seed(sources),
         sanitizers: seed(sanitizers),
-        worklist_cap: None,
     };
     intraprocedural_taint(&cfg, &config)
 }
