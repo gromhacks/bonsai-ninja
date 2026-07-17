@@ -1,14 +1,10 @@
-use super::syntect_cache;
+use crate::syntax_highlight::syntax_highlight_cache;
 use crate::theme::Theme;
 
-/// Every supported language must have a syntect
-/// grammar available, otherwise `inspect` / `refs` render source
-/// as plain uniform text. Caught Swift / Kotlin / TypeScript
-/// missing when we were on syntect's defaults — now we pull from
-/// `two_face` which bundles bat's full set.
+/// Every supported language must expose its production Tree-sitter grammar.
 #[test]
-fn every_supported_lang_has_a_syntect_grammar() {
-    let cache = syntect_cache();
+fn every_supported_lang_has_a_highlight_configuration() {
+    let cache = syntax_highlight_cache();
     for adapter in bonsai_adapters::all_adapters() {
         let name = adapter.language_id().as_str();
         let extensions = adapter.file_extensions();
@@ -20,43 +16,19 @@ fn every_supported_lang_has_a_syntect_grammar() {
             let found = cache.syntax_for_extension(ext);
             assert!(
                 found.is_some(),
-                "no syntect grammar registered for .{ext} ({name}) — \
-             `inspect`'s inlined source will render uniformly for this language"
+                "no Tree-sitter grammar registered for .{ext} ({name}) — \
+                 `inspect`'s inlined source will render uniformly for this language"
             );
         }
     }
 }
 
-/// Every theme's `syntect_theme_name()` must resolve to a theme
-/// actually present in the cache. Guards against copy-paste typos
-/// in the chrome↔syntax mapping (e.g. renaming "Gruvbox Dark" to
-/// "gruvbox-dark" in `Theme::syntect_theme_name` without updating
-/// the insert key in `syntect_cache`).
-#[test]
-fn every_theme_has_a_registered_syntax_theme() {
-    let cache = syntect_cache();
-    for theme in [Theme::EarthyDark, Theme::Dracula, Theme::RetroAmber, Theme::Moss] {
-        let name = theme.syntect_theme_name();
-        assert!(
-            cache.themes.themes.contains_key(name),
-            "theme {theme:?} points at syntax theme `{name}` which \
-             isn't in the SyntectCache — `inspect` will fall back \
-             to an arbitrary theme for this chrome preset"
-        );
-    }
-}
-
 /// Mid-file one-line snippets in every supported language must
-/// produce at least two distinct token colors. Catches the class
-/// of bug where a grammar needs a file preamble to reach its
-/// proper parse state (PHP inside HTML, Solidity inside a
-/// contract / function scope) and otherwise emits every token
-/// in the default foreground. The `syntax_preamble_for` helper
-/// in [`SyntectCache::highlight`] runs that preamble through the
-/// highlighter first; this test proves it actually fires.
+/// produce at least two distinct token colors. This catches a grammar fragment
+/// that parses but exposes no useful semantic node classes.
 #[test]
 fn mid_file_snippets_produce_distinct_token_colors() {
-    let cache = syntect_cache();
+    let cache = syntax_highlight_cache();
     // One realistic snippet per language, representative of what
     // the `calls` / `vars` tables inline into the code column.
     let cases = [
@@ -98,9 +70,7 @@ fn mid_file_snippets_produce_distinct_token_colors() {
         assert!(
             distinct.len() >= 2,
             "`.{ext}` snippet `{code}` produced only {} distinct token \
-             color(s) — syntect is falling back to the default fg. \
-             Likely needs a `syntax_preamble_for` entry to reach its \
-             normal parse state.",
+             color(s) — the Tree-sitter CST is not classifying the fragment.",
             distinct.len(),
         );
     }
@@ -111,7 +81,7 @@ fn mid_file_snippets_produce_distinct_token_colors() {
 /// mis-wires where two themes both end up using the fallback.
 #[test]
 fn themes_produce_distinct_output() {
-    let cache = syntect_cache();
+    let cache = syntax_highlight_cache();
     let code =
         "fn hello(x: i32) -> String {\n    let s = \"hi\"; // note\n    return format!(\"{}\", x);\n}\n";
     let outputs: Vec<_> = [Theme::EarthyDark, Theme::Dracula, Theme::RetroAmber, Theme::Moss]

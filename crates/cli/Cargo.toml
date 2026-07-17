@@ -33,20 +33,10 @@ rayon = { workspace = true }
 ignore = { workspace = true }
 owo-colors = "4"
 comfy-table = { version = "7", features = ["custom_styling"] }
-syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "plist-load", "regex-fancy"] }
-# bat's curated syntax set: syntect's bundled defaults miss Swift,
-# Kotlin, and TypeScript (among others). two-face ships a drop-in
-# SyntaxSet covering everything bat supports, including the three
-# we were missing, so `inspect`'s inlined source gets real syntax
-# highlighting across all 21 supported languages. Keep two-face on
-# syntect's pure-Rust fancy-regex backend; the default enables onig_sys,
-# which adds an avoidable native C dependency for non-mainstream arches.
-two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
 
-# tree-sitter is used at runtime by `dump-ast` to walk the parse tree;
-# other commands access trees indirectly via `bonsai_parser` /
-# `bonsai_lang_api`, but `dump-ast` drives the cursor itself so it
-# can attach stable content-hash ids to every node.
+# Tree-sitter is the CLI's only syntax layer: `dump-ast` walks the parse
+# tree directly and source rendering uses the adapters' grammars plus the
+# language pack's highlight queries.
 tree-sitter = { workspace = true }
 
 [lints]

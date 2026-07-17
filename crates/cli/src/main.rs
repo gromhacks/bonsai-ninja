@@ -30,6 +30,7 @@ mod output;
 mod page_cache;
 mod paging;
 mod progress;
+mod syntax_highlight;
 mod theme;
 mod ui;
 
@@ -97,7 +98,7 @@ pub(crate) mod out_count {
 
     /// Count the bytes of `s` that would survive ANSI-escape stripping.
     /// Recognises the two families the CLI emits through `comfy-table`
-    /// + `owo-colors` + `syntect`:
+    /// + `owo-colors` + Tree-sitter highlighting:
     ///
     /// - **CSI**: `ESC [` … terminator in `@`..`~` (`0x40`..`0x7E`).
     ///   Covers SGR color/style (`\x1b[38;2;R;G;Bm`), cursor moves,

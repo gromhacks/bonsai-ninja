@@ -2,7 +2,7 @@
 //!
 //! Chrome (borders/headers/badges) uses [`owo_colors::Style`] with
 //! RGB palettes (independent of terminal ANSI remaps). Syntax inside
-//! `refs` / `inspect` snippets is handed to `syntect`. Chrome stays
+//! `refs` / `inspect` snippets is handed to Tree-sitter. Chrome stays
 //! subdued; the single accent slot is reserved for the user's match.
 
 use clap::builder::styling::{AnsiColor, Color, RgbColor, Style as ClapStyle, Styles as ClapStyles};
@@ -12,8 +12,7 @@ use owo_colors::{Rgb, Style};
 pub(crate) enum Theme {
     /// Muted brown-olive-amber; the default. Borders dim, accents warm.
     EarthyDark,
-    /// Popular purple/teal Dracula palette. Syntax uses the real Dracula
-    /// syntect theme; chrome stays soft so it doesn't clash.
+    /// Popular purple/teal Dracula palette.
     Dracula,
     /// Amber-on-near-black phosphor look. Four colors only.
     RetroAmber,
@@ -42,27 +41,6 @@ impl Theme {
             Self::Dracula => ChromePalette::dracula(),
             Self::RetroAmber => ChromePalette::retro_amber(),
             Self::Moss => ChromePalette::moss(),
-        }
-    }
-
-    /// Syntect theme name bundled with `syntect::highlighting::ThemeSet`
-    /// (or pulled from `two_face` / our custom tmTheme on first cache
-    /// init — see `ui::syntect_cache`).
-    ///
-    /// Each mapping picks a syntax theme whose accent colors match the
-    /// chrome's accent colors, so the inlined source doesn't clash
-    /// with the rest of the CLI output:
-    ///
-    ///   * EarthyDark (brown/olive/amber)  → Gruvbox Dark (warm earthy)
-    ///   * Dracula (purple/cyan/pink)      → Dracula (the real one)
-    ///   * RetroAmber (amber phosphor)     → base16-eighties.dark (orange/amber)
-    ///   * Moss (dark-forest / spruce-teal) → moss (our bundled tmTheme)
-    pub(crate) fn syntect_theme_name(self) -> &'static str {
-        match self {
-            Self::EarthyDark => "Gruvbox Dark",
-            Self::Dracula => "Dracula",
-            Self::RetroAmber => "base16-eighties.dark",
-            Self::Moss => "moss",
         }
     }
 
@@ -170,7 +148,7 @@ impl ChromePalette {
     fn dracula() -> Self {
         // Official Dracula swatches (https://draculatheme.com/contribute).
         // Chrome intentionally uses the paler Dracula foreground tones so
-        // it doesn't out-shout `syntect`'s Dracula syntax colors.
+        // it doesn't out-shout the Dracula syntax colors.
         let border = Style::new().color(Rgb(68, 71, 90));
         let header = Style::new().color(Rgb(189, 147, 249)).bold(); // purple
         let name = Style::new().color(Rgb(139, 233, 253)).bold(); // cyan
