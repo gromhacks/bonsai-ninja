@@ -565,7 +565,7 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
         // service, but it still uses the one canonical IDG engine. The
         // semantic-fingerprint cache shares this compiler graph across entry
         // misses without changing `AnalyzerDb::idg_service()` lifecycle.
-        let idg = crate::idg_build::compiler_idg_service_without_default_seed(db);
+        let idg = crate::idg_build::compiler_idg_service(db);
         caches.mark_used();
         let config = crate::inter::InterTaintConfig {
             max_edge_precision: Some(Precision::Narrowed),

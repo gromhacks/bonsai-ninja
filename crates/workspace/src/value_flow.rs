@@ -267,6 +267,11 @@ impl ValueFlowCache {
         if todo.is_empty() {
             return;
         }
+        // Build the canonical compiler graph as a distinct phase before the
+        // parallel provenance projections. This retains top-level parallel
+        // AST lowering and prevents sibling closures from contending with a
+        // cold single-flight initializer inside the Rayon batch.
+        let _compiler_idg = bonsai_taint::compiler_idg_service(db);
         let computed: Vec<(FuncId, Arc<ValueFlowGraph>, Arc<AHashSet<String>>)> = todo
             .par_iter()
             .map(|&f| {
@@ -315,6 +320,7 @@ impl ValueFlowCache {
             }
             return Ok(0);
         }
+        let _compiler_idg = bonsai_taint::compiler_idg_service(db);
         let (memory_entries, disk_reader): (Vec<ValueFlowMemoryEntry>, Option<Arc<FactStoreReader>>) = {
             let inner = self.inner.read();
             (
