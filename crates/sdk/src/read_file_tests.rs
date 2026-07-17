@@ -18,6 +18,7 @@ fn site(rule_id: &str, text: &str, enclosing_fn: &str) -> FindingMatch {
         tainted_args: vec![TaintedArgInfo {
             index: 0,
             value_text: text.to_string(),
+            ..TaintedArgInfo::default()
         }],
         sanitised_arg_indices: Vec::new(),
     }
