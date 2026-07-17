@@ -94,6 +94,17 @@ impl<'a> AdapterContext<'a> {
     }
 }
 
+/// Grammar-owned wrapper for parsing a source fragment outside its original
+/// file context. Most grammars accept fragments directly; adapters override
+/// this only when their root grammar has a distinct host-language mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FragmentParseContext {
+    /// Bytes inserted before the fragment solely for parsing.
+    pub prefix: &'static str,
+    /// Bytes inserted after the fragment solely for parsing.
+    pub suffix: &'static str,
+}
+
 /// The full contract an adapter must implement. See spec §5.5.
 ///
 /// The trait is intentionally object-safe so a registry can store
@@ -112,6 +123,12 @@ pub trait LanguageAdapter: Send + Sync + 'static {
     /// The Tree-sitter `Language` used for parsing. Most adapters fetch
     /// this from `tree_sitter_language_pack::get_language`.
     fn tree_sitter_language(&self) -> Result<tree_sitter::Language, AdapterError>;
+
+    /// Wrapper required to parse a standalone mid-file source fragment.
+    /// Returned bytes are adapter grammar metadata and never appear in output.
+    fn fragment_parse_context(&self) -> FragmentParseContext {
+        FragmentParseContext::default()
+    }
 
     /// What the adapter claims to support; unsupported constructs are
     /// surfaced as diagnostics by the pipeline.

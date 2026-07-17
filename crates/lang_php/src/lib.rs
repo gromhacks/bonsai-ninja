@@ -8,8 +8,9 @@ use bonsai_lang_api::{
         parse_with, span_of,
     },
     AdapterContext, AdapterError, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, DeclIndex,
-    DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasVocabulary, Visibility,
+    DeclKind, FieldWrite, FlowEvent, FragmentParseContext, GrammarHandler, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasVocabulary,
+    Visibility,
 };
 
 const PHP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -74,6 +75,14 @@ impl LanguageAdapter for PhpAdapter {
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
+    }
+    fn fragment_parse_context(&self) -> FragmentParseContext {
+        // The PHP grammar starts in HTML host mode and enters PHP only after
+        // this grammar token. Central renderers must not know that syntax.
+        FragmentParseContext {
+            prefix: "<?php\n",
+            suffix: "",
+        }
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
