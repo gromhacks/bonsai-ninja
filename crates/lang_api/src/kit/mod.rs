@@ -1455,12 +1455,17 @@ fn assignment_target_node<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'
         | "init_declarator"
         | "declarator"
         | "property_identifier"
-        | "variable_declaration" => target
+        | "variable_declaration"
+        | "function_declarator"
+        | "pointer_declarator"
+        | "parenthesized_declarator"
+        | "block_pointer_declarator" => target
             .child_by_field_name("name")
             .or_else(|| {
                 first_named_child_of_kind(&target, "variable_declarator")
                     .and_then(|decl| decl.child_by_field_name("name"))
             })
+            .or_else(|| first_identifier_descendant(target))
             .or_else(|| first_non_keyword_named_child(&target, src))
             .unwrap_or(target),
         _ => target,
@@ -1982,7 +1987,17 @@ fn walk_into(
     {
         let body_node = node
             .child_by_field_name("body")
-            .or_else(|| node.child_by_field_name("consequence"));
+            .or_else(|| node.child_by_field_name("consequence"))
+            .or_else(|| {
+                let mut cursor = node.walk();
+                let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+                children.into_iter().rev().find(|child| {
+                    matches!(
+                        child.kind(),
+                        "block" | "compound_statement" | "statement" | "expression_statement"
+                    )
+                })
+            });
         let mut body = Vec::new();
         if let Some(n) = body_node {
             walk_into(n, file, src, handler, class_names, &mut body, false);
@@ -2187,9 +2202,11 @@ fn walk_into(
         // rather over-walk than miss calls on the RHS, so as a fallback
         // we pick the LAST named child that isn't the target node.
         let rhs = assignment_value_node(node, target_node);
-        let callable_source = rhs.and_then(|rhs_node| callable_reference_name(&rhs_node, src));
-        let assignment_value_kind = callable_source
-            .is_some()
+        let rhs_is_callable_literal = rhs.is_some_and(|rhs_node| handler.is_lambda(rhs_node.kind()));
+        let callable_source = rhs
+            .filter(|_| !rhs_is_callable_literal)
+            .and_then(|rhs_node| callable_reference_name(&rhs_node, src));
+        let assignment_value_kind = (callable_source.is_some() || rhs_is_callable_literal)
             .then_some(crate::AssignValueKind::CallableReference);
         let source_name = callable_source.clone().or_else(|| {
             rhs.and_then(|rhs_node| {
@@ -2207,7 +2224,7 @@ fn walk_into(
         //   `y = item.get("k")` → source_call = Some("item.get"),
         //   source_call_args = ["x"]. If transform's summary says
         //   param 0 flows to the return, y inherits x's taint.
-        let (source_call, source_call_args) = if callable_source.is_some() {
+        let (source_call, source_call_args) = if callable_source.is_some() || rhs_is_callable_literal {
             (None, Vec::new())
         } else {
             rhs.and_then(|n| extract_direct_call_info(&n, src))
@@ -2237,7 +2254,7 @@ fn walk_into(
             .as_ref()
             .is_some_and(|n| is_large_literal_initializer_node(n.kind(), n))
             || has_direct_large_literal_initializer_child(&node);
-        if callable_source.is_none() {
+        if callable_source.is_none() && !rhs_is_callable_literal {
             if let Some(n) = rhs.filter(|n| !is_large_literal_initializer_node(n.kind(), n)) {
                 source_names.extend(extract_rhs_expr_operands(&n, src));
             }
@@ -2344,19 +2361,24 @@ fn walk_into(
                     });
                 }
             }
-            if qualified_target.is_none() {
-                for extra_target in extra_lhs_binding_targets(&node, src, &target) {
-                    out.push(FlowEvent::Assign {
-                        span: span_of(file, &node),
-                        target: extra_target,
-                        source_name: source_name.clone(),
-                        source_call: source_call.clone(),
-                        source_call_args: source_call_args.clone(),
-                        source_names: source_names.clone(),
-                        declares_new_binding: false,
-                        value_kind: assignment_value_kind,
-                    });
-                }
+            // Parallel/destructured bindings are grammar-proven independently
+            // of qualified-place recovery. Lua's `local ok, value = pcall(...)`
+            // exposes a `variable_list`; its head is also a valid simple
+            // qualified target, but that must not suppress the remaining
+            // result slots. Member/subscript places cannot enter this loop
+            // because `extra_lhs_binding_targets` accepts only aggregate CST
+            // pattern kinds.
+            for extra_target in extra_lhs_binding_targets(&node, src, &target) {
+                out.push(FlowEvent::Assign {
+                    span: span_of(file, &node),
+                    target: extra_target,
+                    source_name: source_name.clone(),
+                    source_call: source_call.clone(),
+                    source_call_args: source_call_args.clone(),
+                    source_names: source_names.clone(),
+                    declares_new_binding: false,
+                    value_kind: assignment_value_kind,
+                });
             }
             // Subscript-assign `obj[key] = value` is semantically
             // `obj.__setitem__(key, value)`. Emit a synthetic Call so
@@ -3389,14 +3411,14 @@ fn last_non_comment_named_child<'a>(node: &Node<'a>) -> Option<Node<'a>> {
         .last()
 }
 
-fn binding_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+fn binding_name_node<'a>(node: &Node<'a>, src: &[u8]) -> Option<Node<'a>> {
     let parent = node.parent()?;
     // Lua wraps the single RHS of `local f = function(...) ... end` in an
     // `expression_list` before the surrounding `assignment_statement`.
     // Treat a one-expression list as transparent so the callable can still
     // recover the local binding instead of disappearing from Pass 2.
     if matches!(parent.kind(), "expression_list" | "expressions") && parent.named_child_count() == 1 {
-        return binding_name_node(&parent);
+        return binding_name_node(&parent, src);
     }
     let value_is_node = parent
         .child_by_field_name("value")
@@ -3418,15 +3440,25 @@ fn binding_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
     } else {
         None
     };
+    let is_last_named_child =
+        last_non_comment_named_child(&parent).is_some_and(|value| value.id() == node.id());
     match parent.kind() {
-        "variable_declarator" | "initialized_variable_definition" | "property_declaration"
-            if value_is_node =>
-        {
+        "variable_declarator" | "initialized_variable_definition" if value_is_node || is_last_named_child => {
             parent
                 .child_by_field_name("name")
                 .or_else(|| parent.child_by_field_name("pattern"))
         }
-        "assignment_expression" | "assignment" | "assignment_statement"
+        "val_definition" | "var_definition" if value_is_node => parent
+            .child_by_field_name("name")
+            .or_else(|| parent.child_by_field_name("pattern")),
+        "property_declaration" if value_is_node || is_last_named_child => parent
+            .child_by_field_name("name")
+            .or_else(|| parent.child_by_field_name("pattern"))
+            .or_else(|| {
+                first_named_child_of_kind(&parent, "variable_declaration")
+                    .and_then(first_identifier_descendant)
+            }),
+        "assignment_expression" | "assignment" | "assignment_statement" | "binary_operator"
             if value_is_node || structural_assignment_target.is_some() =>
         {
             parent
@@ -3449,6 +3481,359 @@ fn binding_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
 
 fn span_contains(outer: Span, inner: Span) -> bool {
     outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
+}
+
+fn push_unique_name(out: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
+        out.push(value);
+    }
+}
+
+#[derive(Debug)]
+struct LocalClosureCapturePlan {
+    lambda_index: usize,
+    caller_index: usize,
+    binding_name: String,
+    captures: Vec<String>,
+}
+
+/// Finalize lexical closure conversion after adapter-specific HIR lowering.
+///
+/// Some grammars need adapter passes to normalize their local-call syntax
+/// (`binding.()` in Elixir, coderef calls in Perl). Running this compiler pass
+/// after those adapters guarantees every canonical consumer sees the same
+/// hidden capture parameters and arguments.
+pub fn apply_local_closure_captures(index: &mut crate::DeclIndex) {
+    lower_local_closure_captures(&mut index.defs);
+}
+
+/// Perform lexical closure conversion on locally-bound lambdas.
+///
+/// Tree-sitter supplies the nested callable span, its explicit parameters,
+/// and every value-bearing read in its body. The enclosing declaration
+/// supplies the bindings visible at the lambda's definition. Their
+/// intersection is the capture set. Captures become trailing hidden
+/// parameters on the lowered lambda and trailing hidden arguments on calls
+/// to that local callable, exactly like a compiler closure-conversion pass.
+fn lower_local_closure_captures(defs: &mut [crate::Decl]) {
+    let mut plans = Vec::new();
+    for lambda_index in 0..defs.len() {
+        let lambda = &defs[lambda_index];
+        let lambda_width = lambda.span.end.saturating_sub(lambda.span.start);
+        let caller_index = defs
+            .iter()
+            .enumerate()
+            .filter(|(index, candidate)| {
+                let owner_span = candidate.body_span.unwrap_or(candidate.span);
+                *index != lambda_index
+                    && matches!(
+                        candidate.kind,
+                        crate::DeclKind::Function | crate::DeclKind::Method | crate::DeclKind::Constructor
+                    )
+                    && span_contains(owner_span, lambda.span)
+                    && owner_span.end.saturating_sub(owner_span.start) > lambda_width
+            })
+            .min_by_key(|(_, candidate)| {
+                let owner_span = candidate.body_span.unwrap_or(candidate.span);
+                owner_span.end.saturating_sub(owner_span.start)
+            })
+            .map(|(index, _)| index);
+        let Some(caller_index) = caller_index else {
+            continue;
+        };
+
+        let caller = &defs[caller_index];
+        // A nested declaration is a locally-bound closure only when the
+        // enclosing callable has an AST-classified callable assignment whose
+        // RHS span contains it. This excludes ordinary nested declarations
+        // and obtains the invocation binding from syntax rather than from a
+        // generated lambda name.
+        let Some(binding_name) = local_callable_binding_for_span(&caller.flow_events, lambda.span) else {
+            continue;
+        };
+        let mut visible = caller.params.clone();
+        for implicit in &caller.implicit_receiver_names {
+            push_unique_name(&mut visible, implicit.clone());
+        }
+        collect_assignment_targets_before(&caller.flow_events, lambda.span.start, &mut visible);
+
+        let mut reads = Vec::new();
+        collect_flow_read_names(&lambda.flow_events, &mut reads);
+        let mut captures: Vec<String> = Vec::new();
+        for read in reads {
+            if lambda
+                .params
+                .iter()
+                .any(|param| same_identifier_name(param, &read))
+            {
+                continue;
+            }
+            let Some(visible_name) = visible
+                .iter()
+                .find(|candidate| same_identifier_name(candidate, &read))
+            else {
+                continue;
+            };
+            if !captures
+                .iter()
+                .any(|capture| same_identifier_name(capture, visible_name))
+            {
+                captures.push(visible_name.clone());
+            }
+        }
+        plans.push(LocalClosureCapturePlan {
+            lambda_index,
+            caller_index,
+            binding_name,
+            captures,
+        });
+    }
+
+    for plan in plans {
+        // Expression-bodied closures are invoked through their local binding;
+        // make that AST-proven binding their declaration identity as well.
+        defs[plan.lambda_index].name.clone_from(&plan.binding_name);
+        if plan.captures.is_empty() {
+            continue;
+        }
+        for capture in &plan.captures {
+            if !defs[plan.lambda_index]
+                .params
+                .iter()
+                .any(|param| same_identifier_name(param, capture))
+            {
+                defs[plan.lambda_index].params.push(capture.clone());
+            }
+        }
+        inject_local_closure_capture_args(
+            &mut defs[plan.caller_index].flow_events,
+            &plan.binding_name,
+            &plan.captures,
+        );
+    }
+}
+
+fn local_callable_binding_for_span(events: &[FlowEvent], callable_span: Span) -> Option<String> {
+    fn visit(events: &[FlowEvent], callable_span: Span, best: &mut Option<(u64, String)>) {
+        for event in events {
+            match event {
+                FlowEvent::Assign {
+                    span,
+                    target,
+                    value_kind: Some(crate::AssignValueKind::CallableReference),
+                    ..
+                } if span_contains(*span, callable_span) => {
+                    let width = span.end.saturating_sub(span.start);
+                    if best.as_ref().is_none_or(|(best_width, _)| width < *best_width) {
+                        *best = Some((width, target.clone()));
+                    }
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    visit(then_events, callable_span, best);
+                    visit(else_events, callable_span, best);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => visit(body, callable_span, best),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    visit(body, callable_span, best);
+                    visit(catch_events, callable_span, best);
+                    visit(finally_events, callable_span, best);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut best = None;
+    visit(events, callable_span, &mut best);
+    best.map(|(_, binding)| binding)
+}
+
+fn collect_assignment_targets_before(events: &[FlowEvent], before: u64, out: &mut Vec<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { span, target, .. } | FlowEvent::AggregateAssign { span, target, .. }
+                if span.start <= before =>
+            {
+                push_unique_name(out, target.clone());
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_assignment_targets_before(then_events, before, out);
+                collect_assignment_targets_before(else_events, before, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_assignment_targets_before(body, before, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_assignment_targets_before(body, before, out);
+                collect_assignment_targets_before(catch_events, before, out);
+                collect_assignment_targets_before(finally_events, before, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_expression_flow_names(flow: &crate::ExpressionFlow, out: &mut Vec<String>) {
+    if let Some(place) = &flow.place {
+        push_unique_name(out, place.clone());
+    }
+    for source in &flow.source_names {
+        push_unique_name(out, source.clone());
+    }
+    for field in &flow.aggregate_fields {
+        collect_expression_flow_names(&field.value, out);
+    }
+    for item in &flow.tuple_items {
+        collect_expression_flow_names(item, out);
+    }
+    for spread in &flow.spreads {
+        collect_expression_flow_names(spread, out);
+    }
+}
+
+fn collect_flow_read_names(events: &[FlowEvent], out: &mut Vec<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { receiver, args, .. } => {
+                if let Some(receiver) = receiver {
+                    push_unique_name(out, receiver.clone());
+                }
+                for arg in args {
+                    if let Some(place) = &arg.place {
+                        push_unique_name(out, place.clone());
+                    }
+                    for source in &arg.source_names {
+                        push_unique_name(out, source.clone());
+                    }
+                }
+            }
+            FlowEvent::Assign {
+                source_name,
+                source_names,
+                ..
+            } => {
+                if let Some(source) = source_name {
+                    push_unique_name(out, source.clone());
+                }
+                for source in source_names {
+                    push_unique_name(out, source.clone());
+                }
+            }
+            FlowEvent::AggregateAssign { value_flow, .. }
+            | FlowEvent::Return { value_flow, .. }
+            | FlowEvent::Yield { value_flow, .. } => collect_expression_flow_names(value_flow, out),
+            FlowEvent::Throw { value_name, .. } | FlowEvent::Await { value_name, .. } => {
+                if let Some(value) = value_name {
+                    push_unique_name(out, value.clone());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_flow_read_names(then_events, out);
+                collect_flow_read_names(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_flow_read_names(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_flow_read_names(body, out);
+                collect_flow_read_names(catch_events, out);
+                collect_flow_read_names(finally_events, out);
+            }
+            FlowEvent::Break { .. } | FlowEvent::Continue { .. } | FlowEvent::Lifecycle { .. } => {}
+        }
+    }
+}
+
+fn inject_local_closure_capture_args(events: &mut [FlowEvent], binding: &str, captures: &[String]) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                call_kind,
+                args,
+                ..
+            } if call_invokes_local_binding(name, receiver.as_deref(), binding) => {
+                for capture in captures {
+                    args.push(crate::CallArg {
+                        span: *span,
+                        passing_mode: crate::ArgumentPassingMode::Value,
+                        name: None,
+                        value_text: capture.clone(),
+                        place: Some(capture.clone()),
+                        source_names: vec![capture.clone()],
+                    });
+                }
+                *call_kind = crate::CallKind::Indirect;
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                inject_local_closure_capture_args(then_events, binding, captures);
+                inject_local_closure_capture_args(else_events, binding, captures);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                inject_local_closure_capture_args(body, binding, captures);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                inject_local_closure_capture_args(body, binding, captures);
+                inject_local_closure_capture_args(catch_events, binding, captures);
+                inject_local_closure_capture_args(finally_events, binding, captures);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn call_invokes_local_binding(name: &str, receiver: Option<&str>, binding: &str) -> bool {
+    if receiver.is_some_and(|receiver| same_identifier_name(receiver, binding)) {
+        return true;
+    }
+    let call = name.trim().trim_end_matches(['.', '(', ')']);
+    if same_identifier_name(call, binding) {
+        return true;
+    }
+    [".", "->", "::"].into_iter().any(|separator| {
+        call.strip_prefix(binding)
+            .is_some_and(|rest| rest.starts_with(separator))
+    })
 }
 
 fn tail_expression_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
@@ -4179,6 +4564,10 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
         if is_large_literal_initializer_node(n.kind(), &n) {
             continue;
         }
+        if n.kind() == "vararg_expression" {
+            out.push(SYNTHETIC_VARARGS_PARAM.to_string());
+            continue;
+        }
         if let Some(projection) = argumentless_dot_projection(&n, src) {
             out.push(projection);
             continue;
@@ -4316,7 +4705,10 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
         }
     }
     let value_bearing_text = strip_value_free_operator_operands(node_text(node, src));
-    out.retain(|operand| operand_occurs_in_value_bearing_text(&value_bearing_text, operand));
+    out.retain(|operand| {
+        operand == SYNTHETIC_VARARGS_PARAM
+            || operand_occurs_in_value_bearing_text(&value_bearing_text, operand)
+    });
     out.sort();
     out.dedup();
     out
@@ -4745,6 +5137,7 @@ fn destructured_assignment_pattern(node: Node<'_>) -> Option<Node<'_>> {
         "multi_variable_declaration",
         "object_pattern",
         "pattern_list",
+        "struct_pattern",
         "tuple",
         "tuple_pattern",
         "variable_list",
@@ -4807,8 +5200,10 @@ fn assignment_lhs_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
         .or_else(|| node.child_by_field_name("lhs"))
         .or_else(|| node.child_by_field_name("target"))
         .or_else(|| node.child_by_field_name("pattern"))
-        .or_else(|| node.child_by_field_name("name"))
-        .or_else(|| node.child_by_field_name("declarator"))
+        // Prefer an aggregate binding container over a repeated singular
+        // `name` field. Lua's `variable_list` gives each child the `name`
+        // field, so asking for `name` first silently collapses `ok, value`
+        // to only `ok`.
         .or_else(|| first_named_child_of_kind(node, "variable_list"))
         .or_else(|| first_named_child_of_kind(node, "variables"))
         .or_else(|| first_named_child_of_kind(node, "multi_variable_declaration"))
@@ -4819,6 +5214,8 @@ fn assignment_lhs_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
         .or_else(|| first_named_child_of_kind(node, "left_assignment_list"))
         .or_else(|| first_named_child_of_kind(node, "expression_list"))
         .or_else(|| first_named_child_of_kind(node, "tuple"))
+        .or_else(|| node.child_by_field_name("name"))
+        .or_else(|| node.child_by_field_name("declarator"))
 }
 
 /// Return the parser-declared base and index expressions of a subscript
@@ -5199,7 +5596,7 @@ pub fn decl_index_with_handler(
             .as_ref()
             .map(|def| def.name)
             .or_else(|| node.child_by_field_name("name"))
-            .or_else(|| binding_name_node(&node))
+            .or_else(|| binding_name_node(&node, src))
             // H8: out-of-line `RetType Class::method(...)` — take the
             // qualified declarator's `name` field so the decl is keyed
             // under `method`, not the scope token `Class`.
@@ -5436,7 +5833,7 @@ pub fn decl_index_with_handler(
             continue;
         }
         let span = span_of(file, &lambda);
-        let binding_name = binding_name_node(&lambda);
+        let binding_name = binding_name_node(&lambda, src);
         let name = binding_name.map_or_else(
             || {
                 format!(
@@ -5533,7 +5930,6 @@ pub fn decl_index_with_handler(
             is_variadic: false,
         });
     }
-
     // Pass 3: class declarations (recorded as Class decls so the tracer can
     // route Constructor calls through them).
     let mut class_infos: Vec<(String, bonsai_common::SymbolId, bonsai_common::Span)> = Vec::new();

@@ -76,6 +76,7 @@ impl GlobalIndex {
     /// workspace-unique global ids; `by_file` stores the *remapped* index so
     /// lookups by file return global ids.
     pub fn insert(&mut self, mut index: DeclIndex) {
+        bonsai_lang_api::apply_local_closure_captures(&mut index);
         bonsai_lang_api::apply_call_receiver_types(&mut index);
         bonsai_lang_api::apply_assign_value_kind(&mut index);
         bonsai_lang_api::apply_assign_call_result_types(&mut index);

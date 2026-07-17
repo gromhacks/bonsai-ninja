@@ -26,17 +26,12 @@ pub(crate) fn extract_direct_call_info(node: &Node<'_>, src: &[u8]) -> Option<(O
         // operative call: transparent single-call wrappers (member /
         // await / paren chains), a grouping list wrapping exactly one
         // expression (Go / Python `x := f()` → `expression_list` of one
-        // call), or a lambda / closure literal whose body forwards into
-        // a callee (`f = |x| sink(x)` — the legacy closure model binds
-        // the lambda's call so invoking `f(arg)` reaches the sink). A
+        // call). A
         // compound RHS (`a + f()`) or a multi-value list (`f(), g()`)
         // must NOT collapse to its first call — it falls through to
         // `source_names`.
         let single_expr_grouping = grouping_list_kind(node.kind()) && node.named_child_count() == 1;
-        if !direct_call_wrapper_kind(node.kind())
-            && !single_expr_grouping
-            && !lambda_closure_kind(node.kind())
-        {
+        if !direct_call_wrapper_kind(node.kind()) && !single_expr_grouping {
             return None;
         }
         return first_call_descendant(*node).and_then(|call| extract_direct_call_info(&call, src));
@@ -109,29 +104,6 @@ fn grouping_list_kind(kind: &str) -> bool {
     matches!(kind, "expression_list" | "expressions" | "expression_series")
 }
 
-/// Lambda / closure literal node kinds across the supported grammars.
-/// When such a literal is the RHS of an assignment, the legacy closure
-/// model forwards the lambda's operative call so a later invocation of
-/// the bound variable reaches it.
-fn lambda_closure_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "lambda"
-            | "lambda_expression"
-            | "lambda_literal"
-            | "anonymous_function"
-            | "anonymous_function_creation_expression"
-            | "function_expression"
-            | "function_definition"
-            | "arrow_function"
-            | "closure"
-            | "closure_expression"
-            | "fun_expr"
-            | "block_literal"
-            | "block_literal_expression"
-    )
-}
-
 fn direct_call_wrapper_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -193,6 +165,7 @@ pub(super) fn parameter_list_is_variadic(fn_node: &Node<'_>) -> bool {
     const VARIADIC_PARAM_KINDS: &[&str] = &[
         "variadic_parameter", // go `...T`, php `...$x`, c `...`
         "variadic_declaration",
+        "vararg_expression",  // lua `...`
         "spread_parameter",   // java `T... args`
         "rest_parameter",     // typescript `...args`
         "rest_pattern",       // javascript `...args`

@@ -254,10 +254,27 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
     let parameters_container = fn_node
         .child_by_field_name("parameters")
         .or_else(|| fn_node.child_by_field_name("args")) // Erlang: args: expr_args
+        // JS permits an unparenthesized arrow parameter (`x => body`) and
+        // exposes it through a singular `parameter` field.
+        .or_else(|| {
+            matches!(fn_node.kind(), "arrow_function" | "lambda_expression")
+                .then(|| fn_node.child_by_field_name("parameter"))
+                .flatten()
+        })
         .or_else(|| first_named_child_of_kind(fn_node, "parameters"))
         .or_else(|| first_named_child_of_kind(fn_node, "formal_parameters"))
         .or_else(|| first_named_child_of_kind(fn_node, "parameter_list"))
         .or_else(|| first_named_child_of_kind(fn_node, "function_value_parameters"))
+        .or_else(|| first_named_child_of_kind(fn_node, "lambda_parameters"))
+        .or_else(|| first_named_child_of_kind(fn_node, "lambda_function_type_parameters"))
+        // Swift nests the parameter container under the lambda's parsed
+        // function-type node. Follow that grammar edge explicitly instead
+        // of scanning or splitting the closure text.
+        .or_else(|| {
+            first_named_child_of_kind(fn_node, "lambda_function_type").and_then(|function_type| {
+                first_named_child_of_kind(&function_type, "lambda_function_type_parameters")
+            })
+        })
         .or_else(|| first_named_child_of_kind(fn_node, "expr_args")) // Erlang flat
         // Dart: `formal_parameter_list` wraps `formal_parameter` children.
         .or_else(|| first_named_child_of_kind(fn_node, "formal_parameter_list"))
@@ -286,6 +303,16 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
             } else {
                 None
             }
+        })
+        // Elixir anonymous functions place their parameters in the left
+        // `arguments` child of the first parsed `stab_clause`.
+        .or_else(|| {
+            (fn_node.kind() == "anonymous_function")
+                .then(|| {
+                    first_named_child_of_kind(fn_node, "stab_clause")
+                        .and_then(|clause| clause.child_by_field_name("left"))
+                })
+                .flatten()
         });
     if let Some(parameters_container) = parameters_container {
         // C# implicit single-parameter lambda `x => body`: the
@@ -306,6 +333,24 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
                     continue;
                 }
                 push_param_name(param, src, &mut param_names);
+            }
+        }
+        // C/C++ represent a bare variadic collector as the anonymous `...`
+        // terminal of `parameter_list`. Read that direct grammar token;
+        // never scan or split the surrounding source declaration.
+        let mut cursor = parameters_container.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if !child.is_named() && node_text(&child, src).trim() == "..." {
+                    if !param_names.iter().any(|name| name == SYNTHETIC_VARARGS_PARAM) {
+                        param_names.push(SYNTHETIC_VARARGS_PARAM.to_string());
+                    }
+                    break;
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
             }
         }
     }
@@ -503,7 +548,7 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
 fn is_unnamed_variadic_parameter(kind: &str) -> bool {
     matches!(
         kind,
-        "variadic_parameter" | "variadic_declaration" | "variadic_placeholder"
+        "variadic_parameter" | "variadic_declaration" | "variadic_placeholder" | "vararg_expression"
     )
 }
 
@@ -687,5 +732,37 @@ mod tests {
         let params = params_for("c", "function_definition", "void log(const char *fmt, ...) {}");
 
         assert_eq!(params, ["fmt", SYNTHETIC_VARARGS_PARAM]);
+    }
+
+    #[test]
+    fn cpp_and_lua_variadics_come_from_parameter_nodes() {
+        assert_eq!(
+            params_for("cpp", "function_definition", "void log(const char *fmt, ...) {}"),
+            ["fmt", SYNTHETIC_VARARGS_PARAM]
+        );
+        assert_eq!(
+            params_for("lua", "function_declaration", "function log(...) end"),
+            [SYNTHETIC_VARARGS_PARAM]
+        );
+    }
+
+    #[test]
+    fn lambda_parameters_follow_each_grammar_container() {
+        for (pack, kind, source) in [
+            ("javascript", "arrow_function", "const f = value => sink(value);"),
+            (
+                "kotlin",
+                "lambda_literal",
+                "val f = { value: String -> sink(value) }",
+            ),
+            (
+                "swift",
+                "lambda_literal",
+                "let f = { (value: String) in sink(value) }",
+            ),
+            ("elixir", "anonymous_function", "f = fn value -> sink(value) end"),
+        ] {
+            assert_eq!(params_for(pack, kind, source), ["value"], "{pack}");
+        }
     }
 }

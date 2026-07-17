@@ -448,6 +448,11 @@ pub(super) fn binding_targets_from_pattern_node(pattern: &Node<'_>, src: &[u8]) 
                 | "variable_name"
                 | "var"
                 | "varname"
+                // Rust struct-pattern shorthand is a binding position
+                // (`let Boxed { value } = input`). The grammar gives it a
+                // dedicated node so it cannot be confused with the struct
+                // type or with an explicit field key.
+                | "shorthand_field_identifier"
                 | "shorthand_property_identifier_pattern"
         ) {
             push_binding_target(&mut targets, node_text(&current, src));
@@ -651,7 +656,7 @@ fn extract_rust_style_match_bindings(file: FileId, node: &Node<'_>, src: &[u8]) 
         for arm in body.named_children(&mut cursor) {
             if !matches!(
                 arm.kind(),
-                "match_arm" | "match_block_arm" | "match_expression_arm"
+                "match_arm" | "match_block_arm" | "match_expression_arm" | "case_clause"
             ) {
                 continue;
             }
@@ -747,23 +752,46 @@ pub(super) fn extract_foreach_binding_assigns(file: FileId, node: &Node<'_>, src
     if let Some((binding, iterable)) = foreach_binding_nodes(node) {
         let targets = binding_targets_from_pattern_node(&binding, src);
         if !targets.is_empty() {
-            let (source_name, source_names) = binding_source_facts(iterable, src);
+            let (source_name, source_names, source_call, source_call_args) =
+                foreach_binding_source_facts(iterable, file, src);
+            let value_kind = Some(if source_call.is_some() {
+                crate::AssignValueKind::CallResult
+            } else {
+                crate::AssignValueKind::Compound
+            });
             return targets
                 .into_iter()
                 .map(|target| FlowEvent::Assign {
                     span: span_of(file, node),
                     target,
                     source_name: source_name.clone(),
-                    source_call: None,
-                    source_call_args: Vec::new(),
+                    source_call: source_call.clone(),
+                    source_call_args: source_call_args.clone(),
                     source_names: source_names.clone(),
                     declares_new_binding: false,
-                    value_kind: Some(crate::AssignValueKind::Compound),
+                    value_kind,
                 })
                 .collect();
         }
     }
     Vec::new()
+}
+
+fn foreach_binding_source_facts(
+    iterable: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) -> (Option<String>, Vec<String>, Option<String>, Vec<String>) {
+    // Dart represents `gen(args)` as sibling `identifier` + `selector`
+    // nodes under `for_loop_parts`. Preserve that parsed call-result edge so
+    // a yielded value reaches the loop binding through the callee summary.
+    if iterable.kind() == "for_loop_parts" {
+        if let Some((source_call, source_call_args)) = extract_dart_selector_call_info(iterable, file, src) {
+            return (None, Vec::new(), source_call, source_call_args);
+        }
+    }
+    let (source_name, source_names) = binding_source_facts(iterable, src);
+    (source_name, source_names, None, Vec::new())
 }
 
 fn foreach_binding_nodes<'tree>(node: &Node<'tree>) -> Option<(Node<'tree>, Node<'tree>)> {
@@ -802,7 +830,7 @@ fn foreach_binding_nodes<'tree>(node: &Node<'tree>) -> Option<(Node<'tree>, Node
     for child in &named_children {
         if matches!(
             child.kind(),
-            "range_clause" | "for_generic_clause" | "enumerators" | "enumerator"
+            "range_clause" | "for_generic_clause" | "for_loop_parts" | "enumerators" | "enumerator"
         ) {
             if let Some(pair) = foreach_binding_nodes(child) {
                 return Some(pair);
@@ -818,6 +846,22 @@ fn foreach_binding_nodes<'tree>(node: &Node<'tree>) -> Option<(Node<'tree>, Node
                 return None;
             };
             Some((*binding, *iterable))
+        }
+        // Dart puts the binding in `name` and the iterable in `value`.
+        // A call-shaped iterable is split into `identifier` + `selector`
+        // siblings, so return the wrapper itself and let the structured Dart
+        // call extractor recover the exact call-result dependency.
+        "for_loop_parts" => {
+            let binding = node.child_by_field_name("name")?;
+            let has_call_selector = named_children.iter().any(|child| {
+                child.kind() == "selector" && first_named_child_of_kind(child, "argument_part").is_some()
+            });
+            let iterable = if has_call_selector {
+                *node
+            } else {
+                node.child_by_field_name("value")?
+            };
+            Some((binding, iterable))
         }
         // PHP has no header fields. The first non-body child is the
         // iterable and the second is either one variable or a key/value
@@ -846,9 +890,22 @@ fn foreach_binding_nodes<'tree>(node: &Node<'tree>) -> Option<(Node<'tree>, Node
             .into_iter()
             .all(|field| node.child_by_field_name(field).is_none()) =>
         {
-            let body_id = node.child_by_field_name("body").map(|body| body.id());
+            let body_id = node
+                .child_by_field_name("body")
+                .or_else(|| {
+                    named_children.iter().rev().copied().find(|child| {
+                        matches!(
+                            child.kind(),
+                            "block" | "compound_statement" | "statement" | "expression_statement"
+                        )
+                    })
+                })
+                .map(|body| body.id());
+            let type_id = node.child_by_field_name("type").map(|ty| ty.id());
             let mut header = named_children.into_iter().filter(|child| {
-                Some(child.id()) != body_id && !matches!(child.kind(), "annotation" | "label" | "type")
+                Some(child.id()) != body_id
+                    && Some(child.id()) != type_id
+                    && !matches!(child.kind(), "annotation" | "label" | "type")
             });
             Some((header.next()?, header.next()?))
         }
