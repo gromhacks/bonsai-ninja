@@ -124,7 +124,6 @@ fn assert_warm_cold_parity_with_config(src: &str, entry: &str, seeds: &[&str], c
         "prewarming changed value-flow edges"
     );
     assert_eq!(cold_graph.precision, warm_graph.precision);
-    assert_eq!(cold_graph.saturated, warm_graph.saturated);
 }
 
 #[test]

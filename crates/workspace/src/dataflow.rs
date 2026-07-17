@@ -22,7 +22,7 @@ use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::DeclKind;
 use bonsai_taint::{
     taint_facts_and_graph_for_entry, taint_facts_and_graph_for_entry_with_caches, EntryTaintGraph,
-    InterTaintCaches, KindedTokens, TokenSet,
+    InterTaintCaches, KindedTokens,
 };
 use parking_lot::RwLock;
 use rayon::prelude::*;
@@ -35,6 +35,7 @@ use std::{
 /// Monotonic bump. Increment every time the on-disk format changes
 /// (shape of `KindedTokens`, serialisation layout, propagation
 /// semantics) so old sidecars are rejected on open.
+// v32 (2026-07-16): remove the retired sanitizer-profile fields.
 // v30 (2026-07-09): call arguments carry AST-derived passing modes and
 // destructuring assignments carry an explicit aggregate-binding kind.
 // v29 (2026-07-01): graph materialization no longer seeds callee/module
@@ -44,7 +45,7 @@ use std::{
 // method-receiver-base source exemption + container-input span
 // containment, service.rs return-position source-seeding fallback) and
 // adapter member synthesis alter propagated taint facts.
-pub const DATAFLOW_CACHE_VERSION: u32 = 31;
+pub const DATAFLOW_CACHE_VERSION: u32 = 32;
 
 type DataFlowMemoryEntry = (FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>, AHashSet<FileId>);
 
@@ -89,10 +90,6 @@ pub struct SnapshotEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SerializableSnapshot {
     pub version: u32,
-    /// Compatibility fingerprint for older sidecars that carried a
-    /// sanitizer profile. Current propagation is sanitizer-neutral.
-    #[serde(default)]
-    pub sanitizer_fingerprint: u128,
     /// Matcher policy fingerprint. Security rule matching is applied
     /// after graph load, but the cached graph is consumed together
     /// with matcher classifications; stale matcher policy must force
@@ -104,11 +101,6 @@ pub struct SerializableSnapshot {
     /// source file set.
     #[serde(default)]
     pub dependency_metadata_fingerprint: u64,
-    /// Compatibility field for older sidecars. Current snapshots
-    /// always persist an empty sanitizer set because sanitizers are
-    /// report evidence, not graph inputs.
-    #[serde(default)]
-    pub sanitizer_tokens: Vec<String>,
     /// Interned file path + content-hash table. Entries and dependency
     /// lists store compact indexes into this table instead of repeating
     /// absolute path strings thousands of times.
@@ -185,11 +177,6 @@ struct Inner {
     /// `facts_for` still works before prewarm, it just pays the
     /// interprocedural cost per first access.
     prewarmed: bool,
-    /// Compatibility fingerprint for the canonical graph profile.
-    sanitizer_fingerprint: u128,
-    /// Compatibility token set. Kept empty because sanitizer names do
-    /// not alter cached facts or graphs.
-    sanitizer_tokens: Arc<TokenSet>,
     /// Matcher policy fingerprint used for the current cache profile.
     matcher_policy_fingerprint: u128,
 }
@@ -245,10 +232,8 @@ impl DataFlowCache {
     fn compute_facts_and_graph(&self, func: FuncId, db: &AnalyzerDb) -> (KindedTokens, EntryTaintGraph) {
         let seeded = self.seeded_inter_taint.read().clone();
         match seeded {
-            Some(caches) => {
-                taint_facts_and_graph_for_entry_with_caches(func, db, &TokenSet::default(), &caches)
-            }
-            None => taint_facts_and_graph_for_entry(func, db, &TokenSet::default()),
+            Some(caches) => taint_facts_and_graph_for_entry_with_caches(func, db, &caches),
+            None => taint_facts_and_graph_for_entry(func, db),
         }
     }
 
@@ -256,18 +241,6 @@ impl DataFlowCache {
     /// demand if not cached. Returns `Arc<KindedTokens>` so multiple
     /// concurrent readers share one allocation.
     pub fn facts_for(&self, func: FuncId, db: &AnalyzerDb) -> Arc<KindedTokens> {
-        self.facts_for_with_sanitizers(func, db, &TokenSet::default())
-    }
-
-    /// Compatibility entry point for older callers. Sanitizers are
-    /// classification evidence and do not alter propagation, so this
-    /// ignores the supplied set and uses the canonical graph cache.
-    pub fn facts_for_with_sanitizers(
-        &self,
-        func: FuncId,
-        db: &AnalyzerDb,
-        _sanitizers: &TokenSet,
-    ) -> Arc<KindedTokens> {
         let cached = self.inner.read().facts.get(&func).cloned();
         if let Some(hit) = cached {
             return hit;
@@ -280,9 +253,6 @@ impl DataFlowCache {
         let computed = Arc::new(facts);
         let graph = Arc::new(graph);
         let mut inner = self.inner.write();
-        if inner.sanitizer_fingerprint == 0 {
-            inner.sanitizer_fingerprint = EMPTY_SANITIZER_FINGERPRINT;
-        }
         if inner.matcher_policy_fingerprint == 0 {
             inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
         }
@@ -305,9 +275,6 @@ impl DataFlowCache {
         let facts = Arc::new(entry.facts);
         let graph = Arc::new(entry.graph);
         let mut inner = self.inner.write();
-        if inner.sanitizer_fingerprint == 0 {
-            inner.sanitizer_fingerprint = EMPTY_SANITIZER_FINGERPRINT;
-        }
         if inner.matcher_policy_fingerprint == 0 {
             inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
         }
@@ -328,7 +295,25 @@ impl DataFlowCache {
     }
 
     pub fn graph_for(&self, func: FuncId, db: &AnalyzerDb) -> Arc<EntryTaintGraph> {
-        self.graph_for_with_sanitizers(func, db, &TokenSet::default())
+        let cached = self.inner.read().graphs.get(&func).cloned();
+        if let Some(hit) = cached {
+            return hit;
+        }
+        if let Some((_facts, graph)) = self.try_hydrate_from_disk(func) {
+            return graph;
+        }
+        let (facts, graph) = self.compute_facts_and_graph(func, db);
+        let dependencies = self.dependency_files_via_cache(func, db);
+        let facts = Arc::new(facts);
+        let graph = Arc::new(graph);
+        let mut inner = self.inner.write();
+        if inner.matcher_policy_fingerprint == 0 {
+            inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
+        }
+        inner.facts.insert(func, facts);
+        inner.graphs.insert(func, graph.clone());
+        inner.dependencies.insert(func, dependencies);
+        graph
     }
 
     /// Return whether this cache can satisfy `func` from an already
@@ -344,39 +329,6 @@ impl DataFlowCache {
             .is_some_and(|reader| reader.get(u64::from(func.raw())).ok().flatten().is_some())
     }
 
-    /// Compatibility entry point for older callers. Sanitizers are
-    /// classification evidence and do not alter propagation, so this
-    /// ignores the supplied set and uses the canonical graph cache.
-    pub fn graph_for_with_sanitizers(
-        &self,
-        func: FuncId,
-        db: &AnalyzerDb,
-        _sanitizers: &TokenSet,
-    ) -> Arc<EntryTaintGraph> {
-        let cached = self.inner.read().graphs.get(&func).cloned();
-        if let Some(hit) = cached {
-            return hit;
-        }
-        if let Some((_facts, graph)) = self.try_hydrate_from_disk(func) {
-            return graph;
-        }
-        let (facts, graph) = self.compute_facts_and_graph(func, db);
-        let dependencies = self.dependency_files_via_cache(func, db);
-        let facts = Arc::new(facts);
-        let graph = Arc::new(graph);
-        let mut inner = self.inner.write();
-        if inner.sanitizer_fingerprint == 0 {
-            inner.sanitizer_fingerprint = EMPTY_SANITIZER_FINGERPRINT;
-        }
-        if inner.matcher_policy_fingerprint == 0 {
-            inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
-        }
-        inner.facts.insert(func, facts);
-        inner.graphs.insert(func, graph.clone());
-        inner.dependencies.insert(func, dependencies);
-        graph
-    }
-
     /// Run the interprocedural pass for every function in the workspace
     /// in parallel and populate the cache. Safe to call more than once
     /// — second and later invocations skip already-cached entries.
@@ -384,20 +336,10 @@ impl DataFlowCache {
         self.prewarm_all_with_progress(db, |_| {});
     }
 
-    /// Compatibility entry point. Sanitizers do not alter propagation.
-    pub fn prewarm_all_with_sanitizers(&self, db: &AnalyzerDb, _sanitizers: &TokenSet) {
-        self.prewarm_all_with_sanitizers_progress(db, &TokenSet::default(), |_| {});
-    }
-
     /// How many functions the next `prewarm_all` call would actually
     /// compute (total callable decls minus already-cached entries).
     /// Callers use this to size a progress bar up front.
     pub fn pending_count(&self, db: &AnalyzerDb) -> usize {
-        self.pending_count_with_sanitizers(db, &TokenSet::default())
-    }
-
-    /// Compatibility entry point. Sanitizers do not alter propagation.
-    pub fn pending_count_with_sanitizers(&self, db: &AnalyzerDb, _sanitizers: &TokenSet) -> usize {
         let global = db.global_index();
         let inner = self.inner.read();
         let already: AHashSet<FuncId> = inner.facts.keys().copied().collect();
@@ -428,18 +370,6 @@ impl DataFlowCache {
     /// this call — already-cached entries do NOT emit progress.
     pub fn prewarm_all_with_progress<F>(&self, db: &AnalyzerDb, on_each_done: F)
     where
-        F: Fn(FuncId) + Sync + Send,
-    {
-        self.prewarm_all_with_sanitizers_progress(db, &TokenSet::default(), on_each_done);
-    }
-
-    /// Compatibility entry point. Sanitizers do not alter propagation.
-    pub fn prewarm_all_with_sanitizers_progress<F>(
-        &self,
-        db: &AnalyzerDb,
-        _sanitizers: &TokenSet,
-        on_each_done: F,
-    ) where
         F: Fn(FuncId) + Sync + Send,
     {
         let global = db.global_index();
@@ -479,8 +409,6 @@ impl DataFlowCache {
                 .dependencies
                 .insert(f, dependency_files(f, &call_graph, &global));
         }
-        inner.sanitizer_fingerprint = EMPTY_SANITIZER_FINGERPRINT;
-        inner.sanitizer_tokens = Arc::new(TokenSet::default());
         inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
         // Record file content hashes so persisted reloads can detect
         // diffs across CLI processes. VFS versions reset in a fresh
@@ -636,8 +564,6 @@ impl DataFlowCache {
                 inner.file_hashes.insert(file, content_hash(snap.text.as_bytes()));
             }
         }
-        inner.sanitizer_fingerprint = EMPTY_SANITIZER_FINGERPRINT;
-        inner.sanitizer_tokens = Arc::new(TokenSet::default());
         inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
         inner.prewarmed = true;
         drop(inner);
@@ -815,10 +741,8 @@ impl DataFlowCache {
         });
         SerializableSnapshot {
             version: DATAFLOW_CACHE_VERSION,
-            sanitizer_fingerprint: EMPTY_SANITIZER_FINGERPRINT,
             matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
             dependency_metadata_fingerprint: 0,
-            sanitizer_tokens: Vec::new(),
             files: snapshot_files,
             entries,
         }
@@ -943,8 +867,6 @@ impl DataFlowCache {
         inner.dependencies = new_dependencies;
         inner.file_hashes = kept_files;
         inner.prewarmed = false;
-        inner.sanitizer_fingerprint = EMPTY_SANITIZER_FINGERPRINT;
-        inner.sanitizer_tokens = Arc::new(TokenSet::default());
         inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
         surviving
     }
@@ -959,7 +881,6 @@ impl DataFlowCache {
         inner.dependencies.clear();
         inner.file_hashes.clear();
         inner.prewarmed = false;
-        inner.sanitizer_fingerprint = 0;
         inner.matcher_policy_fingerprint = 0;
         drop(inner);
         *self.disk.write() = None;
@@ -1089,13 +1010,6 @@ impl DataFlowCache {
         .map_err(map_factstore_io)?;
         Ok(reader.len())
     }
-
-    /// Compatibility accessor. Sanitizers are reporting evidence and
-    /// do not define a cache profile, so this is always empty.
-    #[must_use]
-    pub fn active_sanitizers(&self) -> Arc<TokenSet> {
-        Arc::new(TokenSet::default())
-    }
 }
 
 fn snapshot_version_prefix(bytes: &[u8]) -> Option<u32> {
@@ -1108,12 +1022,6 @@ fn snapshot_version_prefix(bytes: &[u8]) -> Option<u32> {
 fn content_hash(bytes: &[u8]) -> u64 {
     bonsai_hash::fnv1a_bytes64(bytes)
 }
-
-/// Compatibility fingerprint for the canonical graph profile. Older
-/// sidecars carried a sanitizer profile here; current propagation is
-/// sanitizer-neutral, so every persisted graph uses this sentinel.
-const EMPTY_SANITIZER_FINGERPRINT: u128 = 0xE3E3_E3E3_E3E3_E3E3_E3E3_E3E3_E3E3_E3E3_u128;
-const _: () = assert!(EMPTY_SANITIZER_FINGERPRINT != 0);
 
 fn current_file_hashes(db: &AnalyzerDb) -> AHashMap<FileId, u64> {
     db.vfs()

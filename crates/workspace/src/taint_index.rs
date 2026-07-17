@@ -10,10 +10,9 @@
 //!
 //! Invalidation: any file edit through `Workspace::ingest_dir` clears
 //! the whole index — entries reference call edges that any source
-//! change can invalidate. The rulepack-coupling concern (different
-//! rulepacks may demand different `source_bearing_functions`) is
-//! handled by exposing a `clear_for_config` hook the security analysis
-//! can call when its `InterTaintConfig` changes.
+//! change can invalidate. Rulepack-declared transfer semantics are part of
+//! the entry key, and `clear_for_config` invalidates the index when that
+//! semantic configuration changes.
 
 use crate::cache_fingerprint::{
     dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,

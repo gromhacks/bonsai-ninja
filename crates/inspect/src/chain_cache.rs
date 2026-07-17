@@ -233,11 +233,7 @@ impl<'a> ChainCache<'a> {
     /// runs the interprocedural pass cold every call.
     pub fn taint_facts_for_entry(&self, entry: FuncId) -> Arc<bonsai_taint::KindedTokens> {
         if self.disabled {
-            return Arc::new(bonsai_taint::taint_facts_for_entry(
-                entry,
-                self.ws.db(),
-                &bonsai_taint::TokenSet::default(),
-            ));
+            return Arc::new(bonsai_taint::taint_facts_for_entry(entry, self.ws.db()));
         }
         if let Some(hit) = self.taint_facts_r.lock().get(&entry) {
             return hit.clone();

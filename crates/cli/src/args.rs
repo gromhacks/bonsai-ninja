@@ -595,9 +595,6 @@ pub(crate) enum Cmd {
         /// Seed identifiers for structured dump-taint `T:` propagation ids. Repeatable.
         #[arg(long = "taint-seed")]
         taint_seeds: Vec<String>,
-        /// Sanitizer identifiers for structured dump-taint `T:` propagation ids. Repeatable.
-        #[arg(long = "taint-sanitizer")]
-        taint_sanitizers: Vec<String>,
         /// Sink filter for structured dump-taint `T:` propagation ids.
         #[arg(long = "taint-sink")]
         taint_sink: Option<String>,
@@ -1103,9 +1100,6 @@ pub(crate) enum Cmd {
                       # Seed multiple names; pick up cross-module flows\n  \
                       $ bonsai-ninja dump-taint ./src --source update_user --seed token --seed action\n  \
                       \n  \
-                      # Pass sanitizer names for compatibility; propagation is unchanged\n  \
-                      $ bonsai-ninja dump-taint ./src --source update_user --seed action --sanitizer shlex_quote\n  \
-                      \n  \
                       # Filter to propagations landing in a specific sink\n  \
                       $ bonsai-ninja dump-taint ./src --source update_user --seed action --sink run_admin_command\n  \
                       \n  \
@@ -1129,10 +1123,6 @@ pub(crate) enum Cmd {
         /// can still be inspected.
         #[arg(long = "seed")]
         seeds: Vec<String>,
-        /// Compatibility sanitizer callee names (repeatable). They
-        /// are accepted but do not change taint propagation.
-        #[arg(long = "sanitizer")]
-        sanitizers: Vec<String>,
         /// Filter emitted propagations to those whose callee name
         /// contains this substring. Doesn't change the analysis —
         /// taint still runs globally; only the render is narrowed.

@@ -312,14 +312,13 @@ fn assign_chain_continue_false_path() {
 }
 
 // ---------------------------------------------------------------------------
-// intraprocedural — sanitizer compatibility
+// intraprocedural compiler dataflow
 // ---------------------------------------------------------------------------
 
-fn intra_run(events: &[FlowEvent], sources: &[&str], sanitizers: &[&str]) -> IntraTaintResult {
+fn intra_run(events: &[FlowEvent], sources: &[&str]) -> IntraTaintResult {
     let cfg = bonsai_cfg::build_cfg_from_flow("test_fn", events);
     let config = TaintConfig {
         sources: seed(sources),
-        sanitizers: seed(sanitizers),
     };
     intraprocedural_taint(&cfg, &config)
 }
@@ -332,7 +331,7 @@ fn exit_contains(result: &IntraTaintResult, cfg: &bonsai_cfg::Cfg, name: &str) -
 fn intra_assign_positive_taints_target() {
     let events = vec![assign("x", Some("src"))];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &[]);
+    let result = intra_run(&events, &["src"]);
     assert!(exit_contains(&result, &cfg, "x"));
 }
 
@@ -340,7 +339,7 @@ fn intra_assign_positive_taints_target() {
 fn intra_assign_descendant_source_seed_taints_qualified_rhs() {
     let events = vec![assign_sources("x", &["args.query"])];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["args.*"], &[]);
+    let result = intra_run(&events, &["args.*"]);
     assert!(
         exit_contains(&result, &cfg, "x"),
         "explicit descendant source seed should taint qualified RHS reads"
@@ -354,7 +353,7 @@ fn intra_assign_compound_target_taints_descendant_read() {
         assign_sources("cmd", &["env.cmd"]),
     ];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["raw"], &[]);
+    let result = intra_run(&events, &["raw"]);
     assert!(
         exit_contains(&result, &cfg, "cmd"),
         "aggregate/container assignments should seed explicit descendant taint for later field reads"
@@ -368,7 +367,7 @@ fn intra_assign_receiver_method_projection_preserves_value_taint() {
         assign_sources("arg", &["query.c_str()"]),
     ];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["token"], &[]);
+    let result = intra_run(&events, &["token"]);
     assert!(
         exit_contains(&result, &cfg, "arg"),
         "value-preserving receiver method projections should remain tainted"
@@ -379,7 +378,7 @@ fn intra_assign_receiver_method_projection_preserves_value_taint() {
 fn intra_assign_bare_object_still_does_not_taint_field_read() {
     let events = vec![assign_sources("n", &["client.capacity"])];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["client"], &[]);
+    let result = intra_run(&events, &["client"]);
     assert!(
         !exit_contains(&result, &cfg, "n"),
         "bare carrier taint must not promote to arbitrary field reads"
@@ -393,7 +392,7 @@ fn intra_assign_clean_source_clears_taint() {
     // killed before any later sink(x).
     let events = vec![assign("x", Some("src")), assign("x", Some("clean"))];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &[]);
+    let result = intra_run(&events, &["src"]);
     assert!(
         !exit_contains(&result, &cfg, "x"),
         "clean reassignment must overwrite and clear target taint"
@@ -401,25 +400,22 @@ fn intra_assign_clean_source_clears_taint() {
 }
 
 #[test]
-fn intra_call_compat_sanitizer_does_not_clean() {
-    let events = vec![assign("x", Some("src")), call("validate", &["x"])];
+fn intra_generic_call_does_not_clean() {
+    let events = vec![assign("x", Some("src")), call("observe", &["x"])];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &["validate"]);
+    let result = intra_run(&events, &["src"]);
     assert!(
         exit_contains(&result, &cfg, "x"),
-        "sanitizers are reporting evidence and must not alter propagation",
+        "a generic call must not alter propagation",
     );
 }
 
 #[test]
-fn intra_call_false_path_non_sanitizer_leaves_taint() {
+fn intra_second_generic_call_leaves_taint() {
     let events = vec![assign("x", Some("src")), call("logger", &["x"])];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &["validate"]);
-    assert!(
-        exit_contains(&result, &cfg, "x"),
-        "non-sanitizer call must leave taint",
-    );
+    let result = intra_run(&events, &["src"]);
+    assert!(exit_contains(&result, &cfg, "x"), "generic call must leave taint",);
 }
 
 #[test]
@@ -429,21 +425,21 @@ fn intra_branch_positive_one_arm_taints() {
         branch(vec![assign("y", Some("x"))], vec![]),
     ];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &[]);
+    let result = intra_run(&events, &["src"]);
     assert!(exit_contains(&result, &cfg, "y"));
 }
 
 #[test]
-fn intra_branch_compat_sanitizers_do_not_clean() {
+fn intra_branch_calls_do_not_clean() {
     let events = vec![
         assign("x", Some("src")),
         branch(vec![call("validate", &["x"])], vec![call("validate", &["x"])]),
     ];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &["validate"]);
+    let result = intra_run(&events, &["src"]);
     assert!(
         exit_contains(&result, &cfg, "x"),
-        "sanitizers in both branch arms must not clear taint",
+        "calls in both branch arms must not clear taint",
     );
 }
 
@@ -451,21 +447,21 @@ fn intra_branch_compat_sanitizers_do_not_clean() {
 fn intra_loop_positive_converges_with_taint() {
     let events = vec![loop_body(vec![assign("x", Some("src"))])];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &[]);
+    let result = intra_run(&events, &["src"]);
     assert!(exit_contains(&result, &cfg, "x"));
 }
 
 #[test]
-fn intra_loop_compat_sanitizer_inside_body_preserves_taint() {
+fn intra_loop_call_inside_body_preserves_taint() {
     let events = vec![loop_body(vec![
         assign("x", Some("src")),
         call("validate", &["x"]),
     ])];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &["validate"]);
+    let result = intra_run(&events, &["src"]);
     assert!(
         exit_contains(&result, &cfg, "x"),
-        "sanitizer calls inside loops must not clear taint",
+        "calls inside loops must not clear taint",
     );
 }
 
@@ -477,14 +473,14 @@ fn intra_try_positive_any_region_taints() {
         vec![assign("c", Some("src"))],
     )];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &[]);
+    let result = intra_run(&events, &["src"]);
     assert!(exit_contains(&result, &cfg, "a"));
     assert!(exit_contains(&result, &cfg, "b"));
     assert!(exit_contains(&result, &cfg, "c"));
 }
 
 #[test]
-fn intra_try_compat_sanitizers_do_not_clean_regions() {
+fn intra_try_calls_do_not_clean_regions() {
     let events = vec![
         assign("x", Some("src")),
         try_event(
@@ -494,10 +490,10 @@ fn intra_try_compat_sanitizers_do_not_clean_regions() {
         ),
     ];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &["validate"]);
+    let result = intra_run(&events, &["src"]);
     assert!(
         exit_contains(&result, &cfg, "x"),
-        "sanitizer evidence across try regions must not clear taint",
+        "calls across try regions must not clear taint",
     );
 }
 
@@ -505,7 +501,7 @@ fn intra_try_compat_sanitizers_do_not_clean_regions() {
 fn intra_return_false_path_doesnt_taint() {
     let events = vec![flow_return()];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &[]);
+    let result = intra_run(&events, &["src"]);
     assert!(!exit_contains(&result, &cfg, "anything"));
 }
 
@@ -513,7 +509,7 @@ fn intra_return_false_path_doesnt_taint() {
 fn intra_throw_false_path_doesnt_taint() {
     let events = vec![throw()];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &[]);
+    let result = intra_run(&events, &["src"]);
     assert!(!exit_contains(&result, &cfg, "anything"));
 }
 
@@ -526,7 +522,7 @@ fn intra_break_false_path() {
         assign("y", Some("src")),
     ])];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &[]);
+    let result = intra_run(&events, &["src"]);
     assert!(exit_contains(&result, &cfg, "x"));
     // y assigned after break lives in an unreachable block and
     // shouldn't flow to the exit.
@@ -537,7 +533,7 @@ fn intra_break_false_path() {
 fn intra_defer_positive_body_taints() {
     let events = vec![defer(vec![assign("x", Some("src"))])];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &[]);
+    let result = intra_run(&events, &["src"]);
     assert!(exit_contains(&result, &cfg, "x"));
 }
 
@@ -545,7 +541,7 @@ fn intra_defer_positive_body_taints() {
 fn intra_using_positive_body_taints() {
     let events = vec![using(vec![assign("x", Some("src"))])];
     let cfg = bonsai_cfg::build_cfg_from_flow("f", &events);
-    let result = intra_run(&events, &["src"], &[]);
+    let result = intra_run(&events, &["src"]);
     assert!(exit_contains(&result, &cfg, "x"));
 }
 

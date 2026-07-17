@@ -1,10 +1,9 @@
-//! Legacy ↔ value-flow parity smoke tests.
+//! Seeded taint ↔ value-flow projection parity smoke tests.
 //!
 //! Phase 5 soundness gate. For each fixture, runs the seeded engine
 //! AND the seed-free value-flow pass, and asserts the SAME callee
-//! params get reached. This is the "no regression" proof for
-//! cutting over `inspect`/`security source-analysis` to the value-
-//! flow cache.
+//! params get reached. This guards the value-flow projection consumed by
+//! `inspect` and source analysis against semantic drift.
 //!
 //! When a per-fixture diff appears, this test fires before any
 //! consumer change ships — preventing a silent semantic drift in the
@@ -18,7 +17,7 @@ use bonsai_taint::{interprocedural_taint, value_flow_for_function, InterTaintCon
 use common::{build_db, cfg, func_id_or_none, seed};
 use std::sync::Arc;
 
-/// For a Python entry function, run legacy + value-flow paths and
+/// For a Python entry function, run seeded-taint + value-flow paths and
 /// assert they reach the same set of callee param names from the
 /// entry's seed.
 fn assert_parity(src: &str, entry: &str, seeds: &[&str]) {
@@ -26,9 +25,9 @@ fn assert_parity(src: &str, entry: &str, seeds: &[&str]) {
     let db = build_db(adapter, &[("a.py", src)]);
     let entry_func = func_id_or_none(&db, entry).unwrap_or_else(|| panic!("entry `{entry}` indexes"));
 
-    // Legacy path: seeded engine produces propagation records.
-    let legacy = interprocedural_taint(entry_func, &seed(seeds), &cfg(), &db);
-    let legacy_callee_params: AHashSet<String> = legacy
+    // Seeded path: the canonical engine produces propagation records.
+    let seeded = interprocedural_taint(entry_func, &seed(seeds), &cfg(), &db);
+    let seeded_callee_params: AHashSet<String> = seeded
         .call_records
         .iter()
         .flat_map(|prop| prop.tainted_args.iter().map(|t| t.param_name.clone()))
@@ -36,7 +35,7 @@ fn assert_parity(src: &str, entry: &str, seeds: &[&str]) {
 
     // Value-flow path: seed-free graph from value_flow_for_function.
     // Forward-closure from any seed-named param node should land on
-    // every callee param the legacy run found.
+    // every callee param the seeded run found.
     let graph = value_flow_for_function(entry_func, &db, &InterTaintConfig::default());
     let entry_seed_nodes: Vec<_> = graph
         .nodes
@@ -57,17 +56,17 @@ fn assert_parity(src: &str, entry: &str, seeds: &[&str]) {
         }
     }
 
-    // Legacy is the floor — value-flow must reach at least every
-    // callee param legacy found.
-    let missing: Vec<&String> = legacy_callee_params
+    // Seeded propagation is the floor — value-flow must reach at least every
+    // callee param it found.
+    let missing: Vec<&String> = seeded_callee_params
         .iter()
         .filter(|p| !value_flow_reached.contains(*p))
         .collect();
     assert!(
         missing.is_empty(),
-        "value-flow must reach every callee param the seeded legacy run found.\n\
+        "value-flow must reach every callee param the seeded run found.\n\
          Missing: {missing:?}\n\
-         Legacy: {legacy_callee_params:?}\n\
+         Seeded: {seeded_callee_params:?}\n\
          Value-flow: {value_flow_reached:?}"
     );
 }

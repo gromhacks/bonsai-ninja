@@ -1705,7 +1705,7 @@ fn rust_mega_flow_preserves_nested_field_projection_through_newtype_factory() {
     let idg = ensure_idg_service(ws.db());
     let seeds = TokenSet::from_iter(["raw".to_string()]);
     let seed_nodes = compose_idg_seed_nodes(
-        IdgSeedRequest::legacy_tokens(source, &seeds),
+        IdgSeedRequest::token_api(source, &seeds),
         global.as_ref(),
         idg.as_ref(),
     );
@@ -1763,7 +1763,7 @@ fn kotlin_mega_flow_preserves_implicit_getter_receiver_state() {
     let handle = ws.lookup_function("handle").expect("Kotlin mega-flow entry");
     let seeds = TokenSet::from_iter(["raw".to_string()]);
     let seed_nodes = compose_idg_seed_nodes(
-        IdgSeedRequest::legacy_tokens(handle, &seeds),
+        IdgSeedRequest::token_api(handle, &seeds),
         global.as_ref(),
         idg.as_ref(),
     );

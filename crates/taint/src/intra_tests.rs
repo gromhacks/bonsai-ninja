@@ -75,10 +75,9 @@ fn seed(names: &[&str]) -> TokenSet {
     names.iter().map(|n| (*n).to_string()).collect()
 }
 
-fn config(sources: &[&str], sanitizers: &[&str]) -> TaintConfig {
+fn config(sources: &[&str]) -> TaintConfig {
     TaintConfig {
         sources: seed(sources),
-        sanitizers: seed(sanitizers),
     }
 }
 
@@ -92,8 +91,7 @@ fn run(events: Vec<FlowEvent>, cfg: &TaintConfig) -> (IntraTaintResult, Cfg) {
 fn simple_source_to_sink_taints_target() {
     // x = recv(); sink(x) — at the exit block x is tainted.
     let events = vec![assign("x", Some("recv"))];
-    let (result, cfg) = run(events, &config(&["recv"], &[]));
-    assert!(!result.saturated);
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(result.diagnostics.is_empty());
     assert!(result.is_tainted_at_exit(cfg.exit, "x"));
 }
@@ -140,7 +138,7 @@ fn entry_predecessor_edge_emits_diagnostic() {
             },
         ],
     };
-    let result = intraprocedural_taint(&cfg, &config(&["recv"], &[]));
+    let result = intraprocedural_taint(&cfg, &config(&["recv"]));
 
     assert_eq!(result.diagnostics.len(), 1);
     let diagnostic = &result.diagnostics[0];
@@ -152,7 +150,7 @@ fn entry_predecessor_edge_emits_diagnostic() {
 #[test]
 fn tainted_carrier_field_read_taints_target() {
     let events = vec![assign("cmd", Some("env->cmd"))];
-    let (result, cfg) = run(events, &config(&["env.*"], &[]));
+    let (result, cfg) = run(events, &config(&["env.*"]));
     assert!(
         result.is_tainted_at_exit(cfg.exit, "cmd"),
         "field reads from an explicitly tainted descendant object must be tainted"
@@ -162,14 +160,14 @@ fn tainted_carrier_field_read_taints_target() {
 #[test]
 fn tainted_carrier_subscript_read_taints_target() {
     let events = vec![assign("cmd", Some("env['cmd']"))];
-    let (result, cfg) = run(events, &config(&["env.*"], &[]));
+    let (result, cfg) = run(events, &config(&["env.*"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "cmd"));
 }
 
 #[test]
 fn source_unavailable_call_does_not_invent_destination_taint() {
     let events = vec![call("strncpy", &["env.cmd", "raw", "sizeof(env.cmd) - 1"])];
-    let (result, cfg) = run(events, &config(&["raw"], &[]));
+    let (result, cfg) = run(events, &config(&["raw"]));
     assert!(
         !result.is_tainted_at_exit(cfg.exit, "env.cmd"),
         "opaque external calls must not create hidden arg-to-arg propagation"
@@ -180,20 +178,20 @@ fn source_unavailable_call_does_not_invent_destination_taint() {
 #[test]
 fn pointer_declarator_target_aliases_to_identifier() {
     let events = vec![assign("*raw", Some("argv"))];
-    let (result, cfg) = run(events, &config(&["argv"], &[]));
+    let (result, cfg) = run(events, &config(&["argv"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "raw"));
 }
 
 #[test]
 fn seed_itself_is_tainted_at_entry() {
-    let (result, cfg) = run(vec![], &config(&["recv"], &[]));
+    let (result, cfg) = run(vec![], &config(&["recv"]));
     assert!(result.is_tainted_at_entry(cfg.entry, "recv"));
 }
 
 #[test]
 fn receiver_seed_does_not_taint_unrelated_assignment() {
     let events = vec![assign("tag", Some("constant_name"))];
-    let (result, cfg) = run(events, &config(&["recv"], &[]));
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(
         !result.is_tainted_at_exit(cfg.exit, "tag"),
         "receiver taint must not contaminate arbitrary clean assignments"
@@ -203,7 +201,7 @@ fn receiver_seed_does_not_taint_unrelated_assignment() {
 #[test]
 fn receiver_seed_does_not_taint_zero_arg_static_helper_return() {
     let events = vec![assign_call("runner", "Repository._new_runner", &[])];
-    let (result, cfg) = run(events, &config(&["recv"], &[]));
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(
         !result.is_tainted_at_exit(cfg.exit, "runner"),
         "zero-arg class/static helper returns are not tainted object data"
@@ -213,7 +211,7 @@ fn receiver_seed_does_not_taint_zero_arg_static_helper_return() {
 #[test]
 fn receiver_seed_taints_explicit_receiver_field_read() {
     let events = vec![assign("cmd", Some("recv.data['cmd']"))];
-    let (result, cfg) = run(events, &config(&["recv.*"], &[]));
+    let (result, cfg) = run(events, &config(&["recv.*"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "cmd"));
 }
 
@@ -223,7 +221,7 @@ fn reassignment_from_clean_source_clears_taint() {
     // clean RHS must clear x; otherwise a later sink(x) reports a
     // stale value that no longer exists at runtime.
     let events = vec![assign("x", Some("recv")), assign("x", Some("unrelated"))];
-    let (result, cfg) = run(events, &config(&["recv"], &[]));
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(
         !result.is_tainted_at_exit(cfg.exit, "x"),
         "clean reassignment must overwrite and clear target taint"
@@ -236,49 +234,43 @@ fn reassignment_from_none_rhs_clears_taint() {
     // tainted RHS operand, the assignment is an overwrite and x
     // becomes clean.
     let events = vec![assign("x", Some("recv")), assign("x", None)];
-    let (result, cfg) = run(events, &config(&["recv"], &[]));
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(!result.is_tainted_at_exit(cfg.exit, "x"));
 }
 
 #[test]
-fn configured_sanitizer_call_return_still_propagates_taint() {
-    // y = shlex_quote(x) where x is tainted. The configured
-    // sanitizer name is metadata only; propagation still reaches y.
-    let events = vec![assign("x", Some("recv")), assign_call("y", "shlex_quote", &["x"])];
-    let (result, cfg) = run(events, &config(&["recv"], &["shlex_quote"]));
+fn generic_call_return_propagates_taint() {
+    let events = vec![assign("x", Some("recv")), assign_call("y", "transform", &["x"])];
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "x"));
     assert!(result.is_tainted_at_exit(cfg.exit, "y"));
 }
 
 #[test]
-fn configured_sanitizer_call_does_not_clear_arg_taint() {
-    // validate(x) where validate is listed as a sanitizer. The
-    // end user decides what that means; taint still propagates.
-    let events = vec![assign("x", Some("recv")), call("validate", &["x"])];
-    let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
+fn generic_call_does_not_clear_argument_taint() {
+    let events = vec![assign("x", Some("recv")), call("observe", &["x"])];
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "x"));
 }
 
 #[test]
-fn configured_sanitizer_after_sink_does_not_change_propagation() {
+fn calls_after_sink_do_not_change_propagation() {
     let events = vec![
         assign("x", Some("recv")),
         call("sink", &["x"]),
-        call("validate", &["x"]),
+        call("observe", &["x"]),
     ];
-    let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "x"));
 }
 
 #[test]
-fn configured_sanitizer_in_one_branch_arm_preserves_taint_at_join() {
-    // x = recv(); if c: validate(x); else: (nothing). Sanitizer
-    // calls are evidence only, so the join preserves x's taint.
+fn call_in_one_branch_arm_preserves_taint_at_join() {
     let events = vec![
         assign("x", Some("recv")),
         branch(vec![call("validate", &["x"])], vec![]),
     ];
-    let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(
         result.is_tainted_at_exit(cfg.exit, "x"),
         "union of then/else must preserve taint"
@@ -286,14 +278,12 @@ fn configured_sanitizer_in_one_branch_arm_preserves_taint_at_join() {
 }
 
 #[test]
-fn configured_sanitizer_in_both_branch_arms_preserves_taint_at_join() {
-    // x = recv(); if c: validate(x); else: validate(x). Sanitizer
-    // calls are evidence only, so both arms preserve x's taint.
+fn calls_in_both_branch_arms_preserve_taint_at_join() {
     let events = vec![
         assign("x", Some("recv")),
         branch(vec![call("validate", &["x"])], vec![call("validate", &["x"])]),
     ];
-    let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "x"));
 }
 
@@ -301,25 +291,22 @@ fn configured_sanitizer_in_both_branch_arms_preserves_taint_at_join() {
 fn loop_body_taint_propagates_after_fixed_point() {
     // for i in items: x = recv() — x tainted after the loop.
     let events = vec![loop_body(vec![assign("x", Some("recv"))])];
-    let (result, cfg) = run(events, &config(&["recv"], &[]));
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "x"));
 }
 
 #[test]
-fn configured_sanitizer_inside_loop_preserves_taint() {
-    // for i: x = recv(); validate(x). The call does not kill
-    // taint, so the fixed point keeps x tainted after the loop.
+fn call_inside_loop_preserves_taint() {
     let events = vec![loop_body(vec![
         assign("x", Some("recv")),
         call("validate", &["x"]),
     ])];
-    let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "x"));
 }
 
 #[test]
-fn uncapped_worklist_runs_to_fixed_point() {
-    // The default completeness-preserving mode must drain the worklist.
+fn cfg_dataflow_runs_to_fixed_point() {
     let mut events = Vec::new();
     for i in 0..50 {
         let target = format!("v{i}");
@@ -330,8 +317,11 @@ fn uncapped_worklist_runs_to_fixed_point() {
         };
         events.push(assign(&target, Some(&source)));
     }
-    let (result, _) = run(events, &config(&["recv"], &[]));
-    assert!(!result.saturated, "50 sequential assigns must converge");
+    let (result, cfg) = run(events, &config(&["recv"]));
+    assert!(
+        result.is_tainted_at_exit(cfg.exit, "v49"),
+        "fixed-point dataflow must reach the end of the assignment chain"
+    );
 }
 
 #[test]
@@ -341,20 +331,19 @@ fn multiple_independent_sources_propagate_separately() {
         assign("b", Some("src2")),
         assign("c", Some("unrelated")),
     ];
-    let (result, cfg) = run(events, &config(&["src1", "src2"], &[]));
+    let (result, cfg) = run(events, &config(&["src1", "src2"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "a"));
     assert!(result.is_tainted_at_exit(cfg.exit, "b"));
     assert!(!result.is_tainted_at_exit(cfg.exit, "c"));
 }
 
 #[test]
-fn configured_sanitizer_inside_loop_then_reassigned_in_body_keeps_taint() {
-    // for i: validate(x); x = recv() — at loop exit, x is tainted.
+fn call_inside_loop_then_reassignment_keeps_taint() {
     let events = vec![loop_body(vec![
         call("validate", &["x"]),
         assign("x", Some("recv")),
     ])];
-    let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
+    let (result, cfg) = run(events, &config(&["recv"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "x"));
 }
 
@@ -415,7 +404,7 @@ fn qualified_seed_tail_does_not_taint_unrelated_bare_identifier() {
         assign_call("y", "sanitize", &["x"]),
         assign_call("z", "sanitize", &["obj.x"]),
     ];
-    let (result, cfg) = run(events, &config(&["args"], &[]));
+    let (result, cfg) = run(events, &config(&["args"]));
     assert!(
         result.is_tainted_at_exit(cfg.exit, "obj.x"),
         "the qualified seed itself must be tainted"

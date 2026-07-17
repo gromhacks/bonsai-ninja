@@ -12,7 +12,7 @@ fn aggregate_flow_precision_keeps_worst_semantic_precision() {
 }
 
 #[test]
-fn dump_taint_legacy_seed_policy_preserves_clean_overwrite() {
+fn dump_taint_token_seed_policy_preserves_clean_overwrite() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("app.py"),
@@ -40,7 +40,7 @@ fn dump_taint_legacy_seed_policy_preserves_clean_overwrite() {
 }
 
 #[test]
-fn dump_taint_legacy_seed_policy_supports_source_call_names() {
+fn dump_taint_token_seed_policy_supports_source_call_names() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("app.py"),

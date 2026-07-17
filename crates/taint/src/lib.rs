@@ -5,7 +5,7 @@
 //! `interprocedural_taint`, and `call_site_receives_taint` all query that
 //! graph; there is no second interprocedural worklist. The older
 //! reachability/assignment/intraprocedural modules remain as local
-//! compatibility and code-navigation utilities, not an alternate
+//! compiler-dataflow and code-navigation utilities, not an alternate
 //! cross-function taint engine.
 
 // Submodules stay private; external callers use the re-exports below so the
@@ -24,10 +24,9 @@ pub use idg_build::ensure_idg_service;
 pub use inter::{
     call_site_receives_taint, call_site_receives_taint_with_caches, function_summary, interprocedural_taint,
     interprocedural_taint_with_caches, CallPropagation, CallResultPassthrough, CleanOutputOverwrite,
-    ConstValue, FunctionSeed, FunctionSeedBase, FunctionSummary, InterTaintCaches, InterTaintConfig,
-    InterTaintResult, OutputArgFlow, ParamSideEffect, ReceiverStatePropagation, ReturnAccessPath,
-    ReturnElementTaint, ReturnFieldTaint, SourceCallbackArgs, SourceOutputArgs, TaintedArg, TaintedArgAtCall,
-    TaintedCall, TaintedCallKind,
+    FunctionSeed, FunctionSummary, InterTaintCaches, InterTaintConfig, InterTaintResult, OutputArgFlow,
+    ParamSideEffect, ReceiverStatePropagation, ReturnAccessPath, ReturnElementTaint, ReturnFieldTaint,
+    SourceCallbackArgs, SourceOutputArgs, TaintedArg, TaintedArgAtCall, TaintedCall, TaintedCallKind,
 };
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{
@@ -48,6 +47,6 @@ pub use reachable::{
     EntryTaintGraph, FactKind, IdgSeedRequest, KindedTokens, TaintedCallEdge, TokenSet,
 };
 pub use value_flow::{
-    value_flow_for_function, value_flow_for_function_with_caches, LatticeMode, ProvenanceMarker,
-    ProvenanceSet, ValueFlowEdge, ValueFlowGraph, ValueFlowNode, ValueFlowNodeKind,
+    value_flow_for_function, value_flow_for_function_with_caches, ProvenanceMarker, ProvenanceSet,
+    ValueFlowEdge, ValueFlowGraph, ValueFlowNode, ValueFlowNodeKind,
 };

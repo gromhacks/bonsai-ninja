@@ -153,16 +153,12 @@ def entry(req):
 }
 
 // -------------------------------------------------------------------------
-// 3. SANITIZER MODEL — engine accepts sanitizer config but does not
-//    apply it during propagation (sanitizer attribution is a security-
-//    layer concern; engine over-approximates conservatively).
+// 3. SANITIZER MODEL — the propagation engine has no embedded sanitizer
+//    names. Sanitizer attribution is a rulepack/security-layer concern.
 // -------------------------------------------------------------------------
 
 #[test]
-fn concept_3_sanitizer_model_engine_does_not_drop_taint_for_sanitized_path() {
-    // Pass a "sanitizer" name in config; engine still propagates.
-    // The security layer is responsible for crediting sanitizer
-    // evidence on the chain; the engine itself is conservative.
+fn concept_3_generic_calls_do_not_implicitly_clean_taint() {
     let src = "
 def entry(req):
     cleaned = escape(req)
@@ -170,9 +166,7 @@ def entry(req):
 ";
     let db = python_db(&[("a.py", src)]);
     let entry = func_id(&db, "entry");
-    let mut config = default_config();
-    config.sanitizers = seed(&["escape"]);
-    let result = interprocedural_taint(entry, &seed(&["req"]), &config, &db);
+    let result = interprocedural_taint(entry, &seed(&["req"]), &default_config(), &db);
     // Engine is conservative — sink still receives a tainted call.
     let saw_sink = result
         .tainted_calls
@@ -260,7 +254,7 @@ def entry(req):
 
 #[test]
 fn concept_6_module_resolver_cross_file_import_propagates() {
-    // Keep this contract focused on module resolution. A bare legacy token
+    // Keep this contract focused on module resolution. A bare token seed
     // seed intentionally does not promote every field of an object; field
     // projection semantics are covered separately by concept 8 and the
     // security rule-match seed policy.

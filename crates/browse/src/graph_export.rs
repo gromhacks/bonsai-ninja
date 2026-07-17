@@ -353,7 +353,6 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
                 "analysis_incomplete_reasons",
                 strings_value(&graph_export_analysis_incomplete_reasons()),
             ),
-            ("taint_propagations_saturated_entries", number_usize(0)),
             (
                 "taint_propagations_incomplete_reason",
                 Value::String(GRAPH_EXPORT_INCOMPLETE_REASON.to_string()),

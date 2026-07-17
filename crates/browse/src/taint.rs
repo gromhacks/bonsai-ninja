@@ -22,9 +22,6 @@ pub struct TaintFilters<'a> {
     /// Override seed identifiers. Empty = derive from the source's
     /// params + assigned locals.
     pub seeds: Vec<String>,
-    /// Sanitizer identifiers (currently unused by the engine but
-    /// echoed to the report for parity with the CLI flag set).
-    pub sanitizers: Vec<String>,
     /// `--sink X` — keep only records whose callee contains `X`.
     pub sink: Option<&'a str>,
     /// `--taint T:id` — drill into one propagation by stable id.
@@ -45,7 +42,6 @@ impl<'a> Default for TaintFilters<'a> {
         Self {
             source: "",
             seeds: Vec::new(),
-            sanitizers: Vec::new(),
             sink: None,
             taint_id: None,
             receiver_state_propagations: Vec::new(),
@@ -59,12 +55,10 @@ impl<'a> Default for TaintFilters<'a> {
 pub struct TaintReport {
     pub source: String,
     pub seeds: Vec<String>,
-    pub sanitizers: Vec<String>,
     pub analysis_complete: bool,
     pub analysis_incomplete_reasons: Vec<String>,
     pub precision: String,
     pub pairs_analyzed: u32,
-    pub saturated: bool,
     pub records: Vec<TaintRecord>,
 }
 
@@ -206,7 +200,7 @@ fn split_source_spec(spec: &str) -> SourceSpec<'_> {
 }
 
 /// Run the intraprocedural + interprocedural taint passes from
-/// `filters.source` with the given seeds / sanitizers, applying the
+/// `filters.source` with the given seeds, applying the
 /// configured filters to the result.
 pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     let db = ws.db();
@@ -283,7 +277,7 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         .unwrap_or_else(|| ws.build_and_seed_idg_service());
     let global = db.global_index();
     let mut seed_nodes = bonsai_taint::compose_idg_seed_nodes(
-        bonsai_taint::IdgSeedRequest::legacy_tokens(source_func, &effective_seed),
+        bonsai_taint::IdgSeedRequest::token_api(source_func, &effective_seed),
         global.as_ref(),
         idg.as_ref(),
     );
@@ -378,7 +372,7 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     let unique_pairs: ahash::AHashSet<(bonsai_common::FuncId, bonsai_common::FuncId)> =
         cross_calls.iter().map(|ce| (ce.caller, ce.callee)).collect();
     let pairs_analyzed = std::cmp::max(1, unique_pairs.len());
-    let mut analysis_incomplete_reasons = dump_taint_incomplete_reasons(false);
+    let mut analysis_incomplete_reasons = Vec::new();
     analysis_incomplete_reasons.extend(tainted_unresolved_workspace_call_reasons(
         ws,
         global.as_ref(),
@@ -390,22 +384,12 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     TaintOutcome::Report(TaintReport {
         source: f.source.to_string(),
         seeds,
-        sanitizers: f.sanitizers.clone(),
         analysis_complete: analysis_incomplete_reasons.is_empty(),
         analysis_incomplete_reasons,
         precision: precision_display(aggregate_precision),
         pairs_analyzed: u32::try_from(pairs_analyzed).unwrap_or(u32::MAX),
-        saturated: false,
         records,
     })
-}
-
-fn dump_taint_incomplete_reasons(saturated: bool) -> Vec<String> {
-    if saturated {
-        vec!["taint propagation saturated before semantic fixed point".to_string()]
-    } else {
-        Vec::new()
-    }
 }
 
 fn dedup_taint_records(records: &mut Vec<TaintRecord>) {

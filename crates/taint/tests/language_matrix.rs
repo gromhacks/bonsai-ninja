@@ -433,11 +433,6 @@ fn interproc_propagates_mid_to_sink_for_every_language() {
         let sink = func_id(&db, row.sink);
         let seed = seed_from_row(&row);
         let result = interprocedural_taint(mid, &seed, &InterTaintConfig::default(), &db);
-        assert!(
-            !result.saturated,
-            "{}: interprocedural pass must not hit the budget cap on a 3-hop fixture",
-            row.lang,
-        );
         // The sink should appear as a callee in at least one
         // propagation record somewhere downstream of mid.
         let propagated = result.call_records.iter().any(|record| record.callee == sink);

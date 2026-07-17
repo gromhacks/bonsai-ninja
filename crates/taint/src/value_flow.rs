@@ -1,12 +1,7 @@
-//! Value-flow lattice and seed-free graph types.
+//! Seed-free value-flow graph types derived from the canonical IDG closure.
 //!
-//! This module hosts the additive provenance-marker lattice that
-//! complements (does not replace) the engine's `TokenSet` lattice. In
-//! `LatticeMode::TokenSet` (the default, today's behavior), nothing
-//! here is exercised. In `LatticeMode::Provenance`, propagation
-//! produces the same `InterTaintResult` PLUS a `ValueFlowGraph` with
-//! provenance edges so consumers can answer "where did this taint
-//! come from / where does it flow?" without re-running the engine.
+//! Provenance markers let consumers answer "where did this value come from?"
+//! without selecting a second engine mode or changing propagation semantics.
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{FuncId, Precision, Span, SymbolId};
@@ -19,23 +14,6 @@ use crate::reachable::collect_assign_targets;
 use crate::TokenSet;
 
 const SEMANTIC_FLOW_MAX_PRECISION: Precision = Precision::Narrowed;
-
-/// Which lattice the engine should track during a propagation run.
-///
-/// `TokenSet` keeps today's flat identifier-set semantics — propagation
-/// records `tainted` / `not tainted` per name. The Provenance mode is
-/// strictly additive: it produces the same `tainted_calls` /
-/// `call_records` AND, when enabled, a parallel `ValueFlowGraph` that
-/// records which provenance markers reached which nodes.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
-pub enum LatticeMode {
-    /// Today's behavior. Default.
-    #[default]
-    TokenSet,
-    /// Track provenance markers in addition to the token set. Adds
-    /// `ValueFlowGraph` to the result.
-    Provenance,
-}
 
 /// One provenance marker: identifies a value at the point it became
 /// "interesting" (a self-marked variable in the entry, a return
@@ -123,9 +101,6 @@ pub struct ValueFlowGraph {
     /// Worst precision observed across all edges in the graph.
     /// Defaults to `Exact` for an empty graph.
     pub precision: Precision,
-    /// `true` when the engine saturated before draining. Findings
-    /// produced from a saturated graph should be precision-tagged.
-    pub saturated: bool,
 }
 
 impl ValueFlowGraph {
@@ -138,7 +113,6 @@ impl ValueFlowGraph {
             forward: AHashMap::default(),
             backward: AHashMap::default(),
             precision: Precision::Exact,
-            saturated: false,
         }
     }
 
@@ -233,11 +207,9 @@ impl ValueFlowGraph {
 ///    the originating value and the `to` node carries the callee
 ///    param it lands on.
 ///
-/// This implementation reuses the existing engine in `TokenSet` mode
-/// — the `Provenance` lattice mode is the future engine-side
-/// optimization that avoids repeated TokenSet runs. The post-process
-/// approach trades CPU for simplicity: we get the same edges as a
-/// native Provenance pass would emit, just by running the engine
+/// This implementation reuses the canonical IDG-backed taint result and
+/// translates its call records into provenance edges. The post-process
+/// produces the same edges without a separate propagation mode by running
 /// once per source group and walking its records.
 ///
 /// Caller responsibility: wrap in a per-FuncId cache (see
@@ -257,7 +229,7 @@ pub fn value_flow_for_function(
 /// `InterTaintCaches` so batch consumers (e.g. a workspace analysis)
 /// can amortise summary computation across many entry functions.
 ///
-/// The compatibility API below is IDG-backed for both warm and cold
+/// The API below is IDG-backed for both warm and cold
 /// databases. Going through that single path is important: it composes
 /// assignment-target and source-call seeds with the canonical policy and
 /// applies every transfer overlay in `config`. A workspace-prewarmed IDG
@@ -302,9 +274,7 @@ pub fn value_flow_for_function_with_caches(
 /// Lift one engine result into a graph: register origin nodes for
 /// each entry param, materialise intra-function assign edges, and
 /// translate every recorded call propagation into one
-/// `ValueFlowEdge`. Precision and the saturated flag carry over from
-/// the engine result so consumers can tell when a graph was built
-/// from an under-approximated run.
+/// `ValueFlowEdge`. Precision carries over from the engine result.
 fn build_graph_from_result(
     entry_func: FuncId,
     entry_decl: &bonsai_lang_api::Decl,
@@ -312,7 +282,6 @@ fn build_graph_from_result(
 ) -> ValueFlowGraph {
     let (mut graph, mut node_index) = build_intra_entry_graph(entry_func, entry_decl);
     graph.precision = result.precision;
-    graph.saturated = result.saturated;
 
     // Walk every recorded propagation. Each `CallPropagation` says:
     // "in the caller, value X (at call_span) flowed into the callee's
@@ -655,7 +624,7 @@ fn build_intra_entry_graph(
                                 // R3: wire an edge from each tainted value
                                 // thrown in the body to the catch binding
                                 // so lineage survives `throw t; catch(e)
-                                // sink(e)` on the legacy walker path.
+                                // sink(e)` in the local CFG projection.
                                 for thrown in collect_thrown_value_names(body) {
                                     for from_node in source_nodes(&body_env, func, *span, &thrown) {
                                         graph.add_edge(ValueFlowEdge {

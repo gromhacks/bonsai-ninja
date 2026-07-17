@@ -2,15 +2,12 @@
 //! API knowledge" contract.
 //!
 //! Every fact table that controls library/framework-shaped behavior in
-//! the IDG compatibility surface lives on `InterTaintConfig` and is
+//! the IDG query surface lives on `InterTaintConfig` and is
 //! empty by default. The graph engine consumes AST/resolver facts; only
 //! explicit rule/config data may add external API transfer semantics.
 //!
-//! Why a test instead of a doc comment: a future contributor adding
-//! `pub default_callback_invocation_methods: AHashSet<String>` with a
-//! `vec!["call", "apply"]` default would silently undo months of
-//! purity work. The compiler catches the change here so it has to be
-//! conscious.
+//! The compiler catches any new non-empty transfer default here so adding
+//! embedded library behavior must be a conscious review decision.
 
 use bonsai_taint::InterTaintConfig;
 
@@ -18,14 +15,6 @@ use bonsai_taint::InterTaintConfig;
 fn default_config_carries_zero_embedded_library_knowledge() {
     let config = InterTaintConfig::default();
 
-    assert!(
-        config.sanitizers.is_empty(),
-        "default sanitizers must be empty; security layer populates them per analysis",
-    );
-    assert!(
-        config.source_bearing_functions.is_empty(),
-        "default source_bearing_functions must be empty; only the security layer populates this set",
-    );
     assert!(
         config.clean_output_overwrites.is_empty(),
         "default clean_output_overwrites must be empty; rulepack `taint_semantics.clean_output_overwrite` populates this list",
@@ -41,10 +30,6 @@ fn default_config_carries_zero_embedded_library_knowledge() {
     assert!(
         config.call_result_passthroughs.is_empty(),
         "default call_result_passthroughs must be empty; rulepack transfer semantics populate this list",
-    );
-    assert!(
-        config.callback_invocation_methods.is_empty(),
-        "default callback_invocation_methods must be empty; the compatibility-only inventory must not influence IDG resolution",
     );
     assert!(
         config.receiver_state_propagations.is_empty(),
