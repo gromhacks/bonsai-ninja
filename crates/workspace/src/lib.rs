@@ -2484,7 +2484,7 @@ impl Workspace {
     }
 
     /// Language-neutral project context derived from indexed syntax
-    /// paths plus bounded filesystem discovery of roots the ingest
+    /// paths plus complete filesystem discovery of roots the ingest
     /// layer intentionally skips (dependencies, generated output,
     /// caches, and VCS metadata). Adapters and frontends use this
     /// shared contract instead of inventing per-language workspace
@@ -2494,7 +2494,7 @@ impl Workspace {
         self.build_semantic_context(true)
     }
 
-    /// Same counts as [`Self::semantic_context`], including bounded
+    /// Same counts as [`Self::semantic_context`], including complete
     /// filesystem discovery of non-indexed roots — `index` stats and
     /// `context` must not disagree about the same workspace.
     #[must_use]

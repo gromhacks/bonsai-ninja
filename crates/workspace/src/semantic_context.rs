@@ -79,9 +79,6 @@ struct ContextRootAccumulator {
     indexed_files: usize,
 }
 
-const CONTEXT_DISCOVERY_MAX_DIRS: usize = 4096;
-const CONTEXT_DISCOVERY_MAX_DEPTH: usize = 4;
-
 pub(crate) fn build_workspace_semantic_context(
     root: Option<&Path>,
     files: &[PathBuf],
@@ -312,18 +309,17 @@ fn discover_context_roots_from_disk(
     excluded_roots: &mut BTreeMap<String, ContextRootAccumulator>,
     incomplete_reasons: &mut Vec<String>,
 ) {
-    let mut stack = vec![(root.to_path_buf(), 0usize)];
-    let mut visited = 0usize;
-    while let Some((dir, depth)) = stack.pop() {
-        if visited >= CONTEXT_DISCOVERY_MAX_DIRS {
-            incomplete_reasons.push(format!(
-                "context root discovery stopped after {CONTEXT_DISCOVERY_MAX_DIRS} directories"
-            ));
-            break;
-        }
-        visited += 1;
-        let Ok(read_dir) = fs::read_dir(&dir) else {
-            continue;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let read_dir = match fs::read_dir(&dir) {
+            Ok(read_dir) => read_dir,
+            Err(error) => {
+                incomplete_reasons.push(format!(
+                    "could not inspect context directory {}: {error}",
+                    context_path_string(&context_relative_path(Some(root), &dir))
+                ));
+                continue;
+            }
         };
         let mut children = read_dir
             .filter_map(Result::ok)
@@ -339,9 +335,7 @@ fn discover_context_roots_from_disk(
         for child in children.into_iter().rev() {
             let relative = context_relative_path(Some(root), &child);
             let Some((kind, reason, root_path)) = classify_context_path(&relative) else {
-                if depth < CONTEXT_DISCOVERY_MAX_DEPTH {
-                    stack.push((child, depth + 1));
-                }
+                stack.push(child);
                 continue;
             };
             let rendered = context_path_string(&root_path);
@@ -506,4 +500,38 @@ fn source_transformations_from_roots(
         evidence: root.reason.clone(),
     });
     generated.chain(excluded).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_discovery_has_no_directory_or_depth_ceiling() {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        for index in 0..4_100 {
+            fs::create_dir(temp.path().join(format!("unit_{index:04}"))).expect("source directory");
+        }
+        let dependency = temp
+            .path()
+            .join("unit_4099")
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("d")
+            .join("e")
+            .join("node_modules");
+        fs::create_dir_all(&dependency).expect("deep dependency directory");
+
+        let context = build_workspace_semantic_context(Some(temp.path()), &[], true);
+
+        assert!(
+            context
+                .dependency_roots
+                .iter()
+                .any(|root| root.path == "unit_4099/a/b/c/d/e/node_modules"),
+            "deep dependency roots after more than 4096 source directories must be discovered: {context:?}"
+        );
+        assert!(context.incomplete_reasons.is_empty(), "{context:?}");
+    }
 }
