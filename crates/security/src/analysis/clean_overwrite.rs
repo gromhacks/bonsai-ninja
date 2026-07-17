@@ -4,14 +4,29 @@
 //! value between its taint point and the sink — same-function and
 //! interprocedurally — so the finding is suppressed. Only the LAST write
 //! before the sink may kill the flow; conditional/partial writes keep it.
-//! Includes the small static evaluators (numeric conditions, literal-list
-//! state, ternaries) used to prove a write is clean.
+//! Includes the small static evaluators (numeric conditions and ternaries)
+//! used to prove a write is clean.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) struct CleanOverwritePolicy<'a> {
+    ws: &'a Workspace,
+    clean_output_overwrites: &'a [CleanOutputOverwrite],
+}
+
+impl<'a> CleanOverwritePolicy<'a> {
+    pub(super) fn new(ws: &'a Workspace, clean_output_overwrites: &'a [CleanOutputOverwrite]) -> Self {
+        Self {
+            ws,
+            clean_output_overwrites,
+        }
+    }
+}
+
 pub(super) fn same_function_clean_overwrite_kills_sink_arg(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     src_func: FuncId,
     sink_func: FuncId,
     source_span: Span,
@@ -34,12 +49,12 @@ pub(super) fn same_function_clean_overwrite_kills_sink_arg(
     if targets.is_empty() {
         return false;
     }
-    let global = ws.db().global_index();
+    let global = policy.ws.db().global_index();
     let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
         return false;
     };
     clean_overwrite_between(
-        ws,
+        policy,
         &decl.flow_events,
         &decl.flow_events,
         source_span,
@@ -48,7 +63,7 @@ pub(super) fn same_function_clean_overwrite_kills_sink_arg(
         true,
     ) || targets.iter().any(|target| {
         clean_assignment_from_clean_inputs_between(
-            ws,
+            policy,
             &decl.flow_events,
             &decl.flow_events,
             source_span,
@@ -59,7 +74,7 @@ pub(super) fn same_function_clean_overwrite_kills_sink_arg(
 }
 
 pub(super) fn interprocedural_clean_overwrite_kills_lineage_arg(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     src_func: FuncId,
     source_span: Span,
     trace_index: &AHashMap<u64, &TaintedCallEdge>,
@@ -70,11 +85,11 @@ pub(super) fn interprocedural_clean_overwrite_kills_lineage_arg(
     };
     records
         .iter()
-        .any(|record| propagation_record_clean_overwrite_kills_edge(ws, src_func, source_span, record))
+        .any(|record| propagation_record_clean_overwrite_kills_edge(policy, src_func, source_span, record))
 }
 
 fn propagation_record_clean_overwrite_kills_edge(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     src_func: FuncId,
     source_span: Span,
     record: &TaintedCallEdge,
@@ -82,7 +97,7 @@ fn propagation_record_clean_overwrite_kills_edge(
     if record.tainted_args.is_empty() {
         return false;
     }
-    let global = ws.db().global_index();
+    let global = policy.ws.db().global_index();
     let Some(decl) = global.decl_of(SymbolId::new(record.caller.raw())) else {
         return false;
     };
@@ -104,7 +119,7 @@ fn propagation_record_clean_overwrite_kills_edge(
         }
         targets.iter().any(|target| {
             let clean_overwrite = clean_overwrite_between(
-                ws,
+                policy,
                 &decl.flow_events,
                 &decl.flow_events,
                 edge_source_span,
@@ -113,7 +128,7 @@ fn propagation_record_clean_overwrite_kills_edge(
                 true,
             );
             let clean_assignment = clean_assignment_from_clean_inputs_between(
-                ws,
+                policy,
                 &decl.flow_events,
                 &decl.flow_events,
                 edge_source_span,
@@ -222,7 +237,7 @@ fn find_call_arg_at(
 }
 
 fn clean_overwrite_between(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     events: &[bonsai_lang_api::FlowEvent],
     func_events: &[bonsai_lang_api::FlowEvent],
     source_span: Span,
@@ -250,7 +265,7 @@ fn clean_overwrite_between(
                     && targets.iter().any(|target_key| {
                         clean_overwrite_target_key(target).as_deref() == Some(target_key)
                             && assignment_cleanly_overwrites_target(
-                                ws,
+                                policy,
                                 *span,
                                 source_name.as_deref(),
                                 source_call.as_deref(),
@@ -287,23 +302,23 @@ fn clean_overwrite_between(
                     && targets.iter().any(|target| {
                         if let Some(takes_then) = condition
                             .as_deref()
-                            .and_then(|condition| static_numeric_condition_value(ws, *span, condition))
+                            .and_then(|condition| static_numeric_condition_value(policy.ws, *span, condition))
                         {
                             if takes_then {
-                                branch_arm_clean_overwrites_target(ws, then_events, target)
+                                branch_arm_clean_overwrites_target(policy, then_events, target)
                             } else {
-                                branch_arm_clean_overwrites_target(ws, else_events, target)
+                                branch_arm_clean_overwrites_target(policy, else_events, target)
                             }
                         } else {
-                            branch_arm_clean_overwrites_target(ws, then_events, target)
-                                && branch_arm_clean_overwrites_target(ws, else_events, target)
+                            branch_arm_clean_overwrites_target(policy, then_events, target)
+                                && branch_arm_clean_overwrites_target(policy, else_events, target)
                         }
                     })
                 {
                     return true;
                 }
                 if clean_overwrite_between(
-                    ws,
+                    policy,
                     then_events,
                     func_events,
                     source_span,
@@ -311,7 +326,7 @@ fn clean_overwrite_between(
                     targets,
                     false,
                 ) || clean_overwrite_between(
-                    ws,
+                    policy,
                     else_events,
                     func_events,
                     source_span,
@@ -324,7 +339,7 @@ fn clean_overwrite_between(
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if clean_overwrite_between(
-                    ws,
+                    policy,
                     body,
                     func_events,
                     source_span,
@@ -343,7 +358,7 @@ fn clean_overwrite_between(
                 ..
             } => {
                 if clean_overwrite_between(
-                    ws,
+                    policy,
                     finally_events,
                     func_events,
                     source_span,
@@ -358,7 +373,7 @@ fn clean_overwrite_between(
                     try_before_sink && span.start > source_span.start && span.end <= sink_span.start;
                 if try_after_source
                     && targets.iter().any(|target| {
-                        try_region_clean_overwrites_target(ws, body, catch_events, finally_events, target)
+                        try_region_clean_overwrites_target(policy, body, catch_events, finally_events, target)
                     })
                 {
                     return true;
@@ -369,7 +384,7 @@ fn clean_overwrite_between(
                     for target in targets {
                         let single_target = [target.clone()];
                         let body_cleans_after_source = clean_overwrite_between(
-                            ws,
+                            policy,
                             body,
                             func_events,
                             source_span,
@@ -378,7 +393,7 @@ fn clean_overwrite_between(
                             allow_direct_assign,
                         );
                         let catch_cleans_after_source = clean_overwrite_between(
-                            ws,
+                            policy,
                             catch_events,
                             func_events,
                             source_span,
@@ -386,9 +401,9 @@ fn clean_overwrite_between(
                             &single_target,
                             allow_direct_assign,
                         );
-                        let body_always_clean = branch_arm_clean_overwrites_target(ws, body, target);
+                        let body_always_clean = branch_arm_clean_overwrites_target(policy, body, target);
                         let catch_always_clean = catch_events.is_empty()
-                            || branch_arm_clean_overwrites_target(ws, catch_events, target);
+                            || branch_arm_clean_overwrites_target(policy, catch_events, target);
                         if (body_cleans_after_source && catch_always_clean)
                             || (catch_cleans_after_source && body_always_clean)
                         {
@@ -404,7 +419,7 @@ fn clean_overwrite_between(
 }
 
 fn clean_assignment_from_clean_inputs_between(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     events: &[bonsai_lang_api::FlowEvent],
     func_events: &[bonsai_lang_api::FlowEvent],
     source_span: Span,
@@ -430,7 +445,7 @@ fn clean_assignment_from_clean_inputs_between(
                     && source_call_args.is_empty()
                     && !target_written_between(func_events, target_key, *span, sink_span)
                     && assignment_source_names_are_clean_before(
-                        ws,
+                        policy,
                         func_events,
                         source_span,
                         *span,
@@ -446,14 +461,14 @@ fn clean_assignment_from_clean_inputs_between(
                 ..
             } => {
                 if clean_assignment_from_clean_inputs_between(
-                    ws,
+                    policy,
                     then_events,
                     func_events,
                     source_span,
                     sink_span,
                     target_key,
                 ) || clean_assignment_from_clean_inputs_between(
-                    ws,
+                    policy,
                     else_events,
                     func_events,
                     source_span,
@@ -465,7 +480,7 @@ fn clean_assignment_from_clean_inputs_between(
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if clean_assignment_from_clean_inputs_between(
-                    ws,
+                    policy,
                     body,
                     func_events,
                     source_span,
@@ -482,21 +497,21 @@ fn clean_assignment_from_clean_inputs_between(
                 ..
             } => {
                 if clean_assignment_from_clean_inputs_between(
-                    ws,
+                    policy,
                     body,
                     func_events,
                     source_span,
                     sink_span,
                     target_key,
                 ) || clean_assignment_from_clean_inputs_between(
-                    ws,
+                    policy,
                     catch_events,
                     func_events,
                     source_span,
                     sink_span,
                     target_key,
                 ) || clean_assignment_from_clean_inputs_between(
-                    ws,
+                    policy,
                     finally_events,
                     func_events,
                     source_span,
@@ -513,7 +528,7 @@ fn clean_assignment_from_clean_inputs_between(
 }
 
 fn assignment_source_names_are_clean_before(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     func_events: &[bonsai_lang_api::FlowEvent],
     source_span: Span,
     assign_span: Span,
@@ -529,19 +544,25 @@ fn assignment_source_names_are_clean_before(
     !source_keys.is_empty()
         && source_keys.iter().all(|source_key| {
             clean_overwrite_between(
-                ws,
+                policy,
                 func_events,
                 func_events,
                 source_span,
                 assign_span,
                 std::slice::from_ref(source_key),
                 true,
-            ) || target_only_has_clean_writes_between(ws, func_events, source_span, assign_span, source_key)
+            ) || target_only_has_clean_writes_between(
+                policy,
+                func_events,
+                source_span,
+                assign_span,
+                source_key,
+            )
         })
 }
 
 fn target_only_has_clean_writes_between(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     events: &[bonsai_lang_api::FlowEvent],
     source_span: Span,
     limit_span: Span,
@@ -549,7 +570,7 @@ fn target_only_has_clean_writes_between(
 ) -> bool {
     let mut cleanliness = TargetWriteCleanliness::default();
     collect_target_write_cleanliness(
-        ws,
+        policy,
         events,
         source_span,
         limit_span,
@@ -568,7 +589,7 @@ struct TargetWriteCleanliness {
 }
 
 fn collect_target_write_cleanliness(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     events: &[bonsai_lang_api::FlowEvent],
     source_span: Span,
     limit_span: Span,
@@ -595,7 +616,7 @@ fn collect_target_write_cleanliness(
                     && clean_overwrite_target_key(target).as_deref() == Some(target_key)
                 {
                     if assignment_cleanly_overwrites_target(
-                        ws,
+                        policy,
                         *span,
                         source_name.as_deref(),
                         source_call.as_deref(),
@@ -621,10 +642,10 @@ fn collect_target_write_cleanliness(
             } => {
                 if let Some(takes_then) = condition
                     .as_deref()
-                    .and_then(|condition| static_numeric_condition_value(ws, *span, condition))
+                    .and_then(|condition| static_numeric_condition_value(policy.ws, *span, condition))
                 {
                     collect_target_write_cleanliness(
-                        ws,
+                        policy,
                         if takes_then { then_events } else { else_events },
                         source_span,
                         limit_span,
@@ -634,7 +655,7 @@ fn collect_target_write_cleanliness(
                     );
                 } else {
                     collect_target_write_cleanliness(
-                        ws,
+                        policy,
                         then_events,
                         source_span,
                         limit_span,
@@ -643,7 +664,7 @@ fn collect_target_write_cleanliness(
                         out,
                     );
                     collect_target_write_cleanliness(
-                        ws,
+                        policy,
                         else_events,
                         source_span,
                         limit_span,
@@ -655,7 +676,7 @@ fn collect_target_write_cleanliness(
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_target_write_cleanliness(
-                    ws,
+                    policy,
                     body,
                     source_span,
                     limit_span,
@@ -671,7 +692,7 @@ fn collect_target_write_cleanliness(
                 ..
             } => {
                 collect_target_write_cleanliness(
-                    ws,
+                    policy,
                     body,
                     source_span,
                     limit_span,
@@ -680,7 +701,7 @@ fn collect_target_write_cleanliness(
                     out,
                 );
                 collect_target_write_cleanliness(
-                    ws,
+                    policy,
                     catch_events,
                     source_span,
                     limit_span,
@@ -689,7 +710,7 @@ fn collect_target_write_cleanliness(
                     out,
                 );
                 collect_target_write_cleanliness(
-                    ws,
+                    policy,
                     finally_events,
                     source_span,
                     limit_span,
@@ -751,7 +772,7 @@ fn target_written_between(
 }
 
 fn assignment_cleanly_overwrites_target(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     span: Span,
     source_name: Option<&str>,
     source_call: Option<&str>,
@@ -765,12 +786,15 @@ fn assignment_cleanly_overwrites_target(
             .as_ref()
             .is_some_and(|kind| matches!(kind, AssignValueKind::Literal))
             || clean_constant_assignment(source_name, source_names)
-            || assignment_rhs_is_clean_conditional(ws, span)))
-        || literal_list_get_assignment_is_clean(ws, span)
-        || local_call_returns_clean_value(ws, span, source_call)
+            || assignment_rhs_is_clean_conditional(policy.ws, span)))
+        || local_call_returns_clean_value(policy, span, source_call)
 }
 
-fn local_call_returns_clean_value(ws: &Workspace, call_span: Span, source_call: Option<&str>) -> bool {
+fn local_call_returns_clean_value(
+    policy: CleanOverwritePolicy<'_>,
+    call_span: Span,
+    source_call: Option<&str>,
+) -> bool {
     let Some(source_call) = source_call else {
         return false;
     };
@@ -778,7 +802,7 @@ fn local_call_returns_clean_value(ws: &Workspace, call_span: Span, source_call: 
     if callee_tail.is_empty() {
         return false;
     }
-    let global = ws.db().global_index();
+    let global = policy.ws.db().global_index();
     let candidates: Vec<_> = global
         .decls_in(call_span.file)
         .iter()
@@ -790,15 +814,15 @@ fn local_call_returns_clean_value(ws: &Workspace, call_span: Span, source_call: 
     if candidates.len() != 1 {
         return false;
     }
-    function_returns_clean_value(ws, candidates[0])
+    function_returns_clean_value(policy, candidates[0])
 }
 
-fn function_returns_clean_value(ws: &Workspace, decl: &bonsai_lang_api::Decl) -> bool {
+fn function_returns_clean_value(policy: CleanOverwritePolicy<'_>, decl: &bonsai_lang_api::Decl) -> bool {
     let mut returns = Vec::new();
     collect_return_values(&decl.flow_events, &mut returns);
     !returns.is_empty()
         && returns.iter().all(|(span, value_text, value_name)| {
-            return_value_is_clean(ws, decl, *span, *value_text, *value_name)
+            return_value_is_clean(policy, decl, *span, *value_text, *value_name)
         })
 }
 
@@ -842,7 +866,7 @@ fn collect_return_values<'a>(
 }
 
 fn return_value_is_clean(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     decl: &bonsai_lang_api::Decl,
     return_span: Span,
     value_text: Option<&str>,
@@ -859,18 +883,18 @@ fn return_value_is_clean(
     };
     let entry_span = Span::empty(return_span.file, decl.span.start);
     clean_overwrite_between(
-        ws,
+        policy,
         &decl.flow_events,
         &decl.flow_events,
         entry_span,
         return_span,
         std::slice::from_ref(&target),
         true,
-    ) || target_only_has_clean_writes_between(ws, &decl.flow_events, entry_span, return_span, &target)
+    ) || target_only_has_clean_writes_between(policy, &decl.flow_events, entry_span, return_span, &target)
 }
 
 fn branch_arm_clean_overwrites_target(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     events: &[bonsai_lang_api::FlowEvent],
     target: &str,
 ) -> bool {
@@ -888,7 +912,7 @@ fn branch_arm_clean_overwrites_target(
         } => {
             clean_overwrite_target_key(assigned).as_deref() == Some(target)
                 && assignment_cleanly_overwrites_target(
-                    ws,
+                    policy,
                     *span,
                     source_name.as_deref(),
                     source_call.as_deref(),
@@ -906,65 +930,93 @@ fn branch_arm_clean_overwrites_target(
         } => {
             if let Some(takes_then) = condition
                 .as_deref()
-                .and_then(|condition| static_numeric_condition_value(ws, *span, condition))
+                .and_then(|condition| static_numeric_condition_value(policy.ws, *span, condition))
             {
                 if takes_then {
-                    branch_arm_clean_overwrites_target(ws, then_events, target)
+                    branch_arm_clean_overwrites_target(policy, then_events, target)
                 } else {
-                    branch_arm_clean_overwrites_target(ws, else_events, target)
+                    branch_arm_clean_overwrites_target(policy, else_events, target)
                 }
             } else {
                 !else_events.is_empty()
-                    && branch_arm_clean_overwrites_target(ws, then_events, target)
-                    && branch_arm_clean_overwrites_target(ws, else_events, target)
+                    && branch_arm_clean_overwrites_target(policy, then_events, target)
+                    && branch_arm_clean_overwrites_target(policy, else_events, target)
             }
         }
-        FlowEvent::Call { name, args, .. } => clean_output_call_overwrites_target(name, args, target),
+        FlowEvent::Call { name, args, .. } => {
+            clean_output_call_overwrites_target(policy.clean_output_overwrites, name, args, target)
+        }
         FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            branch_arm_clean_overwrites_target(ws, body, target)
+            branch_arm_clean_overwrites_target(policy, body, target)
         }
         FlowEvent::Try {
             body,
             catch_events,
             finally_events,
             ..
-        } => try_region_clean_overwrites_target(ws, body, catch_events, finally_events, target),
+        } => try_region_clean_overwrites_target(policy, body, catch_events, finally_events, target),
         _ => false,
     })
 }
 
 pub(super) fn try_region_clean_overwrites_target(
-    ws: &Workspace,
+    policy: CleanOverwritePolicy<'_>,
     body: &[bonsai_lang_api::FlowEvent],
     catch_events: &[bonsai_lang_api::FlowEvent],
     finally_events: &[bonsai_lang_api::FlowEvent],
     target: &str,
 ) -> bool {
-    branch_arm_clean_overwrites_target(ws, finally_events, target)
-        || (branch_arm_clean_overwrites_target(ws, body, target)
-            && (catch_events.is_empty() || branch_arm_clean_overwrites_target(ws, catch_events, target)))
+    branch_arm_clean_overwrites_target(policy, finally_events, target)
+        || (branch_arm_clean_overwrites_target(policy, body, target)
+            && (catch_events.is_empty() || branch_arm_clean_overwrites_target(policy, catch_events, target)))
 }
 
 pub(super) fn clean_output_call_overwrites_target(
+    clean_output_overwrites: &[CleanOutputOverwrite],
     name: &str,
     args: &[bonsai_lang_api::CallArg],
     target: &str,
 ) -> bool {
-    if !matches!(
-        clean_overwrite_callee_tail(name).as_str(),
-        "snprintf" | "snprintf_s" | "sprintf_s" | "strcpy_s" | "strncpy_s"
-    ) {
-        return false;
+    clean_output_overwrites.iter().any(|shape| {
+        if !configured_clean_output_name_matches(&shape.callee, name) {
+            return false;
+        }
+        let Some(output) = args.get(shape.output_arg_index) else {
+            return false;
+        };
+        if clean_overwrite_target_key(&output.value_text).as_deref() != Some(target) {
+            return false;
+        }
+        let Some(value_args) = args.get(shape.value_start_arg_index..) else {
+            return false;
+        };
+        !value_args.is_empty()
+            && value_args
+                .iter()
+                .all(|arg| clean_output_overwrite_arg_is_clean(arg, target))
+    })
+}
+
+fn configured_clean_output_name_matches(configured: &str, observed: &str) -> bool {
+    if let Some(regex) = configured.trim().strip_prefix("regex:") {
+        return regex::Regex::new(regex)
+            .ok()
+            .is_some_and(|matcher| matcher.is_match(observed.trim()));
     }
-    let Some(first) = args.first() else {
-        return false;
-    };
-    if clean_overwrite_target_key(&first.value_text).as_deref() != Some(target) {
-        return false;
-    }
-    args.iter()
-        .skip(1)
-        .all(|arg| clean_output_overwrite_arg_is_clean(&arg.value_text, target))
+    let configured = configured
+        .trim()
+        .replace("::", ".")
+        .replace("->", ".")
+        .replace(':', ".");
+    let observed = observed
+        .trim()
+        .replace("::", ".")
+        .replace("->", ".")
+        .replace(':', ".");
+    !configured.is_empty()
+        && !observed.is_empty()
+        && (configured == observed
+            || observed.rsplit('.').find(|part| !part.is_empty()) == Some(configured.as_str()))
 }
 
 pub(super) fn clean_overwrite_callee_tail(name: &str) -> String {
@@ -975,16 +1027,25 @@ pub(super) fn clean_overwrite_callee_tail(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn clean_output_overwrite_arg_is_clean(value: &str, target: &str) -> bool {
-    let trimmed = value.trim();
+fn clean_output_overwrite_arg_is_clean(arg: &bonsai_lang_api::CallArg, target: &str) -> bool {
+    if arg
+        .place
+        .as_deref()
+        .and_then(clean_overwrite_target_key)
+        .as_deref()
+        == Some(target)
+        || arg.source_names.iter().any(|source| {
+            clean_overwrite_target_key(source).as_deref() == Some(target)
+                || !looks_like_clean_constant(source)
+        })
+    {
+        return false;
+    }
+    let trimmed = arg.value_text.trim();
     if trimmed.is_empty() {
         return true;
     }
     if quoted_literal(trimmed) || numeric_literal(trimmed) {
-        return true;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("sizeof(") && lower.ends_with(')') {
         return true;
     }
     clean_overwrite_target_key(trimmed).as_deref() != Some(target) && looks_like_clean_constant(trimmed)
@@ -1040,301 +1101,6 @@ fn assignment_rhs_syntax_text(ws: &Workspace, span: Span) -> Option<String> {
     let snapshot = ws.vfs().snapshot(span.file).ok()?;
     bonsai_lang_api::assignment_value_rendering(&file_index.assignment_values, span, snapshot.text.as_ref())
         .map(|rhs| rhs.trim_end_matches(';').trim().to_string())
-}
-
-fn literal_list_get_assignment_is_clean(ws: &Workspace, span: Span) -> bool {
-    let global = ws.db().global_index();
-    let Some(decl) = global
-        .decls_in(span.file)
-        .iter()
-        .filter(|decl| span_contains(decl.body_span.unwrap_or(decl.span), span))
-        .min_by_key(|decl| decl.span.len())
-    else {
-        return false;
-    };
-    let Some(FlowEvent::Call {
-        name,
-        receiver: Some(receiver),
-        args,
-        ..
-    }) = find_call_event_at(&decl.flow_events, span)
-    else {
-        return false;
-    };
-    if clean_overwrite_callee_tail(name) != "get" || args.len() != 1 {
-        return false;
-    }
-    let Some(list_name) = clean_overwrite_target_key(receiver) else {
-        return false;
-    };
-    let Some(index) = static_list_index(&args[0]) else {
-        return false;
-    };
-    let Some(values) = literal_list_state_before_span(&decl.flow_events, args[0].span, &list_name) else {
-        return false;
-    };
-    values
-        .get(index)
-        .is_some_and(|value| value_part_contains_only_clean_literals(value))
-}
-
-fn static_list_index(arg: &bonsai_lang_api::CallArg) -> Option<usize> {
-    (arg.place.is_none() && arg.source_names.is_empty())
-        .then(|| arg.value_text.trim().parse::<usize>().ok())
-        .flatten()
-}
-
-fn literal_list_state_before_span(
-    events: &[FlowEvent],
-    target_span: Span,
-    list_name: &str,
-) -> Option<Vec<String>> {
-    let mut state = None;
-    if !list_state_until_target(events, events, target_span, list_name, &mut state) {
-        return None;
-    }
-    state
-}
-
-fn list_state_until_target(
-    root_events: &[FlowEvent],
-    events: &[FlowEvent],
-    target_span: Span,
-    list_name: &str,
-    state: &mut Option<Vec<String>>,
-) -> bool {
-    for event in events {
-        if event.span() == target_span {
-            return true;
-        }
-        match event {
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } if events_have_exact_span(then_events, target_span)
-                || events_have_exact_span(else_events, target_span) =>
-            {
-                let target_events = if events_have_exact_span(then_events, target_span) {
-                    then_events
-                } else {
-                    else_events
-                };
-                return list_state_until_target(root_events, target_events, target_span, list_name, state);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. }
-                if events_have_exact_span(body, target_span) =>
-            {
-                return list_state_until_target(root_events, body, target_span, list_name, state);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                for nested in [
-                    body.as_slice(),
-                    catch_events.as_slice(),
-                    finally_events.as_slice(),
-                ] {
-                    if events_have_exact_span(nested, target_span) {
-                        return list_state_until_target(root_events, nested, target_span, list_name, state);
-                    }
-                }
-            }
-            _ => {}
-        }
-        if event.span().start >= target_span.start {
-            continue;
-        }
-        apply_list_event(root_events, event, list_name, state);
-    }
-    false
-}
-
-fn events_have_exact_span(events: &[FlowEvent], target_span: Span) -> bool {
-    events.iter().any(|event| {
-        event.span() == target_span
-            || match event {
-                FlowEvent::Branch {
-                    then_events,
-                    else_events,
-                    ..
-                } => {
-                    events_have_exact_span(then_events, target_span)
-                        || events_have_exact_span(else_events, target_span)
-                }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => events_have_exact_span(body, target_span),
-                FlowEvent::Try {
-                    body,
-                    catch_events,
-                    finally_events,
-                    ..
-                } => {
-                    events_have_exact_span(body, target_span)
-                        || events_have_exact_span(catch_events, target_span)
-                        || events_have_exact_span(finally_events, target_span)
-                }
-                _ => false,
-            }
-    })
-}
-
-fn apply_list_events(
-    root_events: &[FlowEvent],
-    events: &[FlowEvent],
-    list_name: &str,
-    state: &mut Option<Vec<String>>,
-) {
-    for event in events {
-        apply_list_event(root_events, event, list_name, state);
-    }
-}
-
-fn apply_list_event(
-    root_events: &[FlowEvent],
-    event: &FlowEvent,
-    list_name: &str,
-    state: &mut Option<Vec<String>>,
-) {
-    match event {
-        FlowEvent::Assign {
-            span,
-            target,
-            source_call,
-            ..
-        } if clean_overwrite_target_key(target).as_deref() == Some(list_name) => {
-            *state = source_call
-                .as_ref()
-                .filter(|_| empty_constructor_call_in_span(root_events, *span))
-                .map(|_| Vec::new());
-        }
-        FlowEvent::AggregateAssign { target, .. }
-            if clean_overwrite_target_key(target).as_deref() == Some(list_name) =>
-        {
-            *state = None;
-        }
-        FlowEvent::Call {
-            name, receiver, args, ..
-        } => {
-            let receiver_matches = receiver
-                .as_deref()
-                .and_then(clean_overwrite_target_key)
-                .as_deref()
-                == Some(list_name);
-            if receiver_matches {
-                match clean_overwrite_callee_tail(name).as_str() {
-                    "add"
-                        if args.len() == 1
-                            && args[0].place.is_none()
-                            && args[0].source_names.is_empty()
-                            && value_part_contains_only_clean_literals(&args[0].value_text) =>
-                    {
-                        if let Some(values) = state {
-                            values.push(args[0].value_text.clone());
-                        }
-                    }
-                    "remove" if args.len() == 1 => {
-                        let Some(index) = static_list_index(&args[0]) else {
-                            *state = None;
-                            return;
-                        };
-                        let Some(values) = state else {
-                            return;
-                        };
-                        if index >= values.len() {
-                            *state = None;
-                        } else {
-                            values.remove(index);
-                        }
-                    }
-                    _ => *state = None,
-                }
-            } else if args.iter().any(|arg| {
-                arg.place
-                    .as_deref()
-                    .and_then(clean_overwrite_target_key)
-                    .as_deref()
-                    == Some(list_name)
-            }) {
-                // A reference passed to an unknown call may be mutated.
-                *state = None;
-            }
-        }
-        FlowEvent::Branch {
-            then_events,
-            else_events,
-            ..
-        } => {
-            let mut then_state = state.clone();
-            apply_list_events(root_events, then_events, list_name, &mut then_state);
-            let mut else_state = state.clone();
-            apply_list_events(root_events, else_events, list_name, &mut else_state);
-            *state = (then_state == else_state).then_some(then_state).flatten();
-        }
-        FlowEvent::Loop { body, .. } => {
-            let before = state.clone();
-            let mut after_one_iteration = before.clone();
-            apply_list_events(root_events, body, list_name, &mut after_one_iteration);
-            if after_one_iteration != before {
-                *state = None;
-            }
-        }
-        FlowEvent::Try {
-            body,
-            catch_events,
-            finally_events,
-            ..
-        } => {
-            let mut body_state = state.clone();
-            apply_list_events(root_events, body, list_name, &mut body_state);
-            let mut catch_state = state.clone();
-            apply_list_events(root_events, catch_events, list_name, &mut catch_state);
-            *state = (body_state == catch_state).then_some(body_state).flatten();
-            apply_list_events(root_events, finally_events, list_name, state);
-        }
-        FlowEvent::Using { body, .. } => apply_list_events(root_events, body, list_name, state),
-        FlowEvent::Defer { .. } => {
-            // Deferred bodies execute after the lexical target.
-        }
-        _ => {}
-    }
-}
-
-fn empty_constructor_call_in_span(events: &[FlowEvent], assignment_span: Span) -> bool {
-    events.iter().any(|event| match event {
-        FlowEvent::Call {
-            span,
-            call_kind: bonsai_lang_api::CallKind::Constructor,
-            args,
-            ..
-        } => span_contains(assignment_span, *span) && args.is_empty(),
-        FlowEvent::Branch {
-            then_events,
-            else_events,
-            ..
-        } => {
-            empty_constructor_call_in_span(then_events, assignment_span)
-                || empty_constructor_call_in_span(else_events, assignment_span)
-        }
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            empty_constructor_call_in_span(body, assignment_span)
-        }
-        FlowEvent::Try {
-            body,
-            catch_events,
-            finally_events,
-            ..
-        } => {
-            empty_constructor_call_in_span(body, assignment_span)
-                || empty_constructor_call_in_span(catch_events, assignment_span)
-                || empty_constructor_call_in_span(finally_events, assignment_span)
-        }
-        _ => false,
-    })
 }
 
 fn split_ternary_parts(rhs: &str) -> Option<(&str, &str, &str)> {
@@ -2053,7 +1819,7 @@ pub(super) fn clean_overwrite_target_keys(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod numeric_constant_tests {
     use super::*;
-    use bonsai_lang_api::{ArgumentPassingMode, AssignmentValueFact, CallArg, CallKind, LoopKind};
+    use bonsai_lang_api::{AssignmentValueFact, LoopKind};
 
     fn span(file: FileId, start: usize, end: usize) -> Span {
         Span::new(file, start as u64, end as u64)
@@ -2079,143 +1845,6 @@ mod numeric_constant_tests {
             value_span,
             call_sites: Vec::new(),
         }
-    }
-
-    fn call_arg(arg_span: Span, value: &str, place: Option<&str>, sources: &[&str]) -> CallArg {
-        CallArg {
-            span: arg_span,
-            passing_mode: ArgumentPassingMode::Value,
-            name: None,
-            value_text: value.to_string(),
-            place: place.map(str::to_string),
-            source_names: sources.iter().map(|source| (*source).to_string()).collect(),
-        }
-    }
-
-    fn call(
-        call_span: Span,
-        name: &str,
-        receiver: Option<&str>,
-        call_kind: CallKind,
-        args: Vec<CallArg>,
-    ) -> FlowEvent {
-        FlowEvent::Call {
-            span: call_span,
-            name: name.to_string(),
-            receiver: receiver.map(str::to_string),
-            receiver_types: Vec::new(),
-            call_kind,
-            args,
-        }
-    }
-
-    #[test]
-    fn literal_list_state_uses_ordered_call_facts() {
-        let file = FileId::new(0);
-        let assignment_span = span(file, 0, 20);
-        let target_span = span(file, 70, 80);
-        let events = vec![
-            FlowEvent::Assign {
-                span: assignment_span,
-                target: "values".to_string(),
-                source_name: None,
-                source_call: Some("ArrayList".to_string()),
-                source_call_args: Vec::new(),
-                source_names: Vec::new(),
-                declares_new_binding: true,
-                value_kind: Some(AssignValueKind::CallResult),
-            },
-            call(
-                span(file, 8, 18),
-                "ArrayList",
-                None,
-                CallKind::Constructor,
-                Vec::new(),
-            ),
-            call(
-                span(file, 25, 35),
-                "values.add",
-                Some("values"),
-                CallKind::Method,
-                vec![call_arg(span(file, 31, 34), "\"first\"", None, &[])],
-            ),
-            call(
-                span(file, 40, 50),
-                "values.add",
-                Some("values"),
-                CallKind::Method,
-                vec![call_arg(span(file, 46, 49), "\"second\"", None, &[])],
-            ),
-            call(
-                span(file, 55, 65),
-                "values.remove",
-                Some("values"),
-                CallKind::Method,
-                vec![call_arg(span(file, 62, 63), "0", None, &[])],
-            ),
-            call(
-                target_span,
-                "values.get",
-                Some("values"),
-                CallKind::Method,
-                vec![call_arg(span(file, 77, 78), "0", None, &[])],
-            ),
-        ];
-
-        assert_eq!(
-            literal_list_state_before_span(&events, target_span, "values"),
-            Some(vec!["\"second\"".to_string()])
-        );
-    }
-
-    #[test]
-    fn conditional_list_mutation_invalidates_exact_state() {
-        let file = FileId::new(0);
-        let assignment_span = span(file, 0, 20);
-        let target_span = span(file, 70, 80);
-        let events = vec![
-            FlowEvent::Assign {
-                span: assignment_span,
-                target: "values".to_string(),
-                source_name: None,
-                source_call: Some("ArrayList".to_string()),
-                source_call_args: Vec::new(),
-                source_names: Vec::new(),
-                declares_new_binding: true,
-                value_kind: Some(AssignValueKind::CallResult),
-            },
-            call(
-                span(file, 8, 18),
-                "ArrayList",
-                None,
-                CallKind::Constructor,
-                Vec::new(),
-            ),
-            FlowEvent::Branch {
-                span: span(file, 25, 60),
-                condition: Some("flag".to_string()),
-                then_events: vec![call(
-                    span(file, 30, 40),
-                    "values.add",
-                    Some("values"),
-                    CallKind::Method,
-                    vec![call_arg(span(file, 36, 39), "\"only\"", None, &[])],
-                )],
-                else_events: Vec::new(),
-            },
-            call(
-                target_span,
-                "values.get",
-                Some("values"),
-                CallKind::Method,
-                vec![call_arg(span(file, 77, 78), "0", None, &[])],
-            ),
-        ];
-
-        assert_eq!(
-            literal_list_state_before_span(&events, target_span, "values"),
-            None
-        );
     }
 
     #[test]

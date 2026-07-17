@@ -279,14 +279,7 @@ fn entry_taint_graph_to_inter_result(
         .map(|(func, seed)| {
             let mut seed: Vec<String> = seed.into_iter().collect();
             seed.sort();
-            (
-                FunctionSeed {
-                    func,
-                    seed,
-                    ..FunctionSeed::default()
-                },
-                IntraTaintResult::default(),
-            )
+            (FunctionSeed { func, seed }, IntraTaintResult::default())
         })
         .collect();
     let call_records = graph
