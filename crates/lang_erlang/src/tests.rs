@@ -53,6 +53,9 @@ fn fun_ref_assignment_emits_clean_callable_alias() {
         target_span: Some(bonsai_common::Span::new(FileId::new(0), 0, 2)),
         value_span: bonsai_common::Span::new(FileId::new(0), value_start, span.end),
         call_sites: Vec::new(),
+        value_flow: Default::default(),
+        direct_call_name: None,
+        direct_call_receiver: None,
     }];
     let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&facts);
 
@@ -239,6 +242,9 @@ fn list_comprehension_assignment_exposes_generator_sources() {
         )),
         value_span: bonsai_common::Span::new(FileId::new(0), value_start, span.end),
         call_sites: Vec::new(),
+        value_flow: Default::default(),
+        direct_call_name: None,
+        direct_call_receiver: None,
     }];
     let assignment_values = AssignmentValueIndex::new(&facts);
 

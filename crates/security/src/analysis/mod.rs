@@ -9677,6 +9677,7 @@ mod source_seed_tests {
             refs: Vec::new(),
             assignment_values: Vec::new(),
             call_receivers: Vec::new(),
+            runtime_type_narrowings: Vec::new(),
             aggregate_layouts: Vec::new(),
             strings: Vec::new(),
             comments: Vec::new(),

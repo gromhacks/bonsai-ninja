@@ -1271,6 +1271,9 @@ fn compound_assignment_binds_ast_indexed_rhs_call_result() {
         target_span: Some(span(50, 53)),
         value_span: span(55, 88),
         call_sites: vec![call_expression_span],
+        value_flow: ExpressionFlow::default(),
+        direct_call_name: None,
+        direct_call_receiver: None,
     }];
     let out =
         transfer_function_for_with_options_and_assignment_values(&decl, &TransferOptions::default(), &facts);

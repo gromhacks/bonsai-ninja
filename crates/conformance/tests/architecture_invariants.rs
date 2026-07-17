@@ -3127,3 +3127,56 @@ fn syntax_index_parallelism_is_not_project_size_capped() {
         "global-index IR retention must not change at a project-size threshold"
     );
 }
+
+/// Security match semantics must consume the compiler IR emitted by language
+/// adapters. Rendered expression text remains useful for diagnostics and
+/// rule-owned literal/regex constraints, but it must never be reparsed to
+/// rediscover calls, value reads, or runtime type guards.
+#[test]
+fn security_matcher_uses_compiler_expression_facts() {
+    let root = repo_root();
+    let matcher = read(&root.join("crates/security/src/matcher/mod.rs"));
+    let language_types = read(&root.join("crates/lang_api/src/types.rs"));
+    let language_kit = read(&root.join("crates/lang_api/src/kit/mod.rs"));
+    let runtime_type_lowering = read(&root.join("crates/lang_api/src/kit/runtime_types.rs"));
+
+    for retired_parser in [
+        "fn final_call_callee",
+        "fn receiver_call_with_args",
+        "fn split_balanced_args",
+        "fn split_read_token",
+        "fn parse_type_test",
+    ] {
+        assert!(
+            !matcher.contains(retired_parser),
+            "security matcher must not restore rendered-expression parser `{retired_parser}`"
+        );
+    }
+
+    let reads = function_body(&matcher, "collect_flow_read_sites");
+    assert!(
+        reads.contains("value_flow")
+            && reads.contains("call_receiver_fact_for_span")
+            && !reads.contains("value_text"),
+        "flow-read identity must come from ExpressionFlow and call-receiver facts"
+    );
+    let factories = function_body(&matcher, "synth_factory_type_aliases");
+    assert!(
+        factories.contains("assignment_value_fact_for_span")
+            && factories.contains("direct_call_name")
+            && !factories.contains("rendering"),
+        "factory typing must use the AST-selected assignment call fact"
+    );
+    let runtime_types = function_body(&matcher, "collect_runtime_type_narrowings");
+    assert!(
+        runtime_types.contains("fact.branch_span") && runtime_types.contains("fact.guarded_span"),
+        "runtime type constraints must consume compiler guard facts"
+    );
+    assert!(
+        language_types.contains("pub struct RuntimeTypeNarrowingFact")
+            && language_types.contains("pub direct_call_name: Option<String>")
+            && language_kit.contains("pub use runtime_types::extract_runtime_type_narrowing_facts")
+            && runtime_type_lowering.contains("fn extract_runtime_type_narrowing_facts"),
+        "language IR must retain direct-call and runtime-guard relationships"
+    );
+}

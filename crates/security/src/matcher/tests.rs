@@ -21,13 +21,13 @@ fn rule_from_yaml(yaml: &str, kind: crate::rule::RuleKind) -> Rule {
 
 #[test]
 fn flow_read_attribute_match_requires_actual_qualified_token() {
-    let split_callback_tokens = split_read_token("function (req) { res.send(err.path); }");
+    let split_callback_tokens = vec!["req".to_string(), "err.path".to_string()];
     assert!(
         !tokens_contain_attribute(&split_callback_tokens, "req.path"),
         "separate `req` and `err.path` tokens must not synthesize `req.path`"
     );
 
-    let query_tokens = split_read_token("if (req.query.wsdl === \"\") { return req.query; }");
+    let query_tokens = vec!["req.query.wsdl".to_string(), "req.query".to_string()];
     assert!(
         tokens_contain_attribute(&query_tokens, "req.query"),
         "real qualified request reads should still match their source rule"
@@ -46,6 +46,9 @@ fn canonical_flow_read_uses_ast_rhs_span_instead_of_assignment_punctuation() {
         target_span: Some(Span::new(file, 0, "req.query".len() as u64)),
         value_span,
         call_sites: Vec::new(),
+        value_flow: Default::default(),
+        direct_call_name: None,
+        direct_call_receiver: None,
     }];
     let values = AssignmentValueIndex::new(&facts);
 
@@ -659,6 +662,8 @@ fn return_flow_reads_strip_call_callee_but_keep_argument_reads() {
             value_name: None,
             value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(vec!["input".to_string()]),
         }],
+        &[],
+        &[],
         &mut reads,
     );
     assert_eq!(reads.len(), 1);
@@ -675,6 +680,8 @@ fn return_flow_reads_strip_call_callee_but_keep_argument_reads() {
                 "name".to_string(),
             ]),
         }],
+        &[],
+        &[],
         &mut reads,
     );
     assert_eq!(reads.len(), 1);
@@ -1006,17 +1013,33 @@ fn branch_condition_ast_values_have_no_hidden_cap() {
     assert_eq!(values.last().map(String::as_str), Some("allowed[8191]"));
 }
 
-// audit re-apply: R5 RED-before/GREEN-after: before the Yield arm, collect_cal
-
 #[test]
-fn collect_calls_lowers_yielded_call_expression_to_a_call_fact() {
-    // R5: `yield exec(cmd)` / C# `yield return Sink(x)` must surface as
-    // a CallFact so sink attribution can see the yielded call.
-    let events = vec![FlowEvent::Yield {
-        span: span(),
-        value_text: Some("exec(cmd)".to_string()),
-        value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(vec!["cmd".to_string()]),
-    }];
+fn collect_calls_uses_ast_call_event_for_yielded_expression() {
+    // `yield exec(cmd)` / C# `yield return Sink(x)` lowers both the value
+    // event and its parsed call. The matcher must consume that real call
+    // rather than re-parsing `Yield::value_text`.
+    let events = vec![
+        FlowEvent::Call {
+            span: span(),
+            name: "exec".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(),
+                name: None,
+                value_text: "cmd".to_string(),
+                place: Some("cmd".to_string()),
+                source_names: vec!["cmd".to_string()],
+            }],
+        },
+        FlowEvent::Yield {
+            span: span(),
+            value_text: Some("exec(cmd)".to_string()),
+            value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(vec!["cmd".to_string()]),
+        },
+    ];
     let calls = collect_calls(&events);
     assert_eq!(
         calls.len(),
@@ -1024,7 +1047,7 @@ fn collect_calls_lowers_yielded_call_expression_to_a_call_fact() {
         "a sink in the yielded value must become a CallFact"
     );
     assert_eq!(calls[0].callee, "exec");
-    assert_eq!(calls[0].origin, CallFactOrigin::NestedReceiverCall);
+    assert_eq!(calls[0].origin, CallFactOrigin::RealCall);
     assert_eq!(
         calls[0]
             .args
