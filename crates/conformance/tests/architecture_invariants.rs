@@ -3096,10 +3096,12 @@ fn syntax_index_parallelism_is_not_project_size_capped() {
     let root = repo_root();
     let workspace = read(&root.join("crates/workspace/src/lib.rs"));
     let database = read(&root.join("crates/db/src/lib.rs"));
+    let security_matcher = read(&root.join("crates/security/src/matcher/mod.rs"));
 
     for (source, function) in [
         (&workspace, "workspace_parse_worker_count"),
         (&database, "global_index_worker_count"),
+        (&security_matcher, "matcher_worker_count"),
     ] {
         let body = function_body(source, function);
         assert!(
