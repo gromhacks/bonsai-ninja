@@ -7323,8 +7323,7 @@ fn source_can_precede_sink(
     if src.line < snk.line || (src.line == snk.line && src.column <= snk.column) {
         return true;
     }
-    (src.line == snk.line && same_statement_between(ws, snk.span, src.span))
-        || source_is_sink_call_argument(ws, sink_func, src.span, snk.span)
+    source_is_sink_call_argument(ws, sink_func, src.span, snk.span)
         || spans_share_enclosing_loop(ws, sink_func, src.span, snk.span)
 }
 
@@ -7437,31 +7436,6 @@ fn push_identifier_token(tokens: &mut Vec<String>, current: &mut String) {
     } else {
         current.clear();
     }
-}
-
-fn same_statement_between(ws: &Workspace, earlier: Span, later: Span) -> bool {
-    if earlier.file != later.file {
-        return false;
-    }
-    if later.start <= earlier.end {
-        return true;
-    }
-    let Ok(snapshot) = ws.vfs().snapshot(earlier.file) else {
-        return false;
-    };
-    let source = snapshot.text.as_ref();
-    let start = earlier.end as usize;
-    let end = later.start as usize;
-    if start >= end || end > source.len() {
-        return false;
-    }
-    // `start`/`end` are raw byte offsets; a multi-byte UTF-8 char straddling
-    // either bound makes direct slicing panic. Fall back to "not the same
-    // statement" if the range isn't on char boundaries.
-    let Some(between) = source.get(start..end) else {
-        return false;
-    };
-    !between.chars().any(|ch| matches!(ch, ';' | '\n' | '\r'))
 }
 
 fn source_is_sink_call_argument(
@@ -7636,27 +7610,86 @@ fn sanitizer_char_allowlist_guards_tainted_call(
 /// is concatenated OUTSIDE the sanitizer call), while a genuine
 /// `["ping ", uri_string:quote(Input)]` still does.
 fn sanitizer_is_nested_in_tainted_sink_arg(
+    ws: &Workspace,
+    sink_func: FuncId,
     src: &RuleMatch,
     san: &RuleMatch,
+    snk: &RuleMatch,
     sink_tainted_args: &[TaintedArgInfo],
 ) -> bool {
-    let text = san.match_text.trim();
-    if text.is_empty() {
+    if san.span.file != snk.span.file || sink_tainted_args.is_empty() {
         return false;
     }
-    let carrier_wrapped = source_expr_base_identifier(&src.match_text).is_some_and(|carrier| {
-        sink_tainted_args
-            .iter()
-            .any(|arg| sanitizer_call_wraps_carrier(&arg.value_text, text, carrier))
-    });
-    carrier_wrapped
-        || sink_tainted_args
-            .iter()
-            .any(|arg| sanitizer_call_wraps_only_dynamic_part(&arg.value_text, text))
+    let global = ws.db().global_index();
+    let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
+        return false;
+    };
+    let Some(FlowEvent::Call {
+        span: sink_call_span,
+        args: sink_args,
+        ..
+    }) = find_call_event_at(&decl.flow_events, snk.span)
+    else {
+        return false;
+    };
+    let Some(FlowEvent::Call {
+        span: sanitizer_call_span,
+        name: sanitizer_call_name,
+        receiver: sanitizer_receiver,
+        args: sanitizer_args,
+        ..
+    }) = find_call_event_at(&decl.flow_events, san.span)
+    else {
+        return false;
+    };
+    if sanitizer_call_span == sink_call_span
+        || clean_overwrite_callee_tail(sanitizer_call_name) != clean_overwrite_callee_tail(&san.match_text)
+    {
+        return false;
+    }
+
+    let mut sanitizer_values = call_arg_value_keys(sanitizer_args);
+    sanitizer_values.extend(sanitizer_receiver.as_deref().and_then(clean_overwrite_target_key));
+    sanitizer_values.extend(
+        sanitizer_receiver
+            .as_deref()
+            .and_then(source_expr_base_identifier)
+            .and_then(clean_overwrite_target_key),
+    );
+    if sanitizer_values.is_empty() {
+        return false;
+    }
+    let source_carrier = source_expr_base_identifier(&src.match_text).and_then(clean_overwrite_target_key);
+    sink_tainted_args.iter().any(|tainted| {
+        let Some(sink_arg) = sink_args.get(tainted.index) else {
+            return false;
+        };
+        if !span_contains(sink_arg.span, *sanitizer_call_span) {
+            return false;
+        }
+        let sink_values = call_arg_value_keys(std::slice::from_ref(sink_arg));
+        let wraps_original_carrier = source_carrier
+            .as_ref()
+            .is_some_and(|carrier| sanitizer_values.contains(carrier));
+        wraps_original_carrier || (!sink_values.is_empty() && sink_values.is_subset(&sanitizer_values))
+    })
+}
+
+fn call_arg_value_keys(args: &[bonsai_lang_api::CallArg]) -> AHashSet<String> {
+    args.iter()
+        .flat_map(|arg| {
+            arg.source_names
+                .iter()
+                .map(String::as_str)
+                .chain(arg.place.as_deref())
+        })
+        .filter_map(clean_overwrite_target_key)
+        .collect()
 }
 
 fn xxe_factory_hardening_sanitizes_sink(
     ws: &Workspace,
+    sink_func: FuncId,
     sanitizer_rule: Option<&Rule>,
     sink_rule: &Rule,
     san: &RuleMatch,
@@ -7678,7 +7711,14 @@ fn xxe_factory_hardening_sanitizes_sink(
     if factory_receiver == sink_receiver {
         return true;
     }
-    builder_created_from_factory_before_sink(ws, san.span, snk.span, sink_receiver, factory_receiver)
+    builder_created_from_factory_before_sink(
+        ws,
+        sink_func,
+        san.span,
+        snk.span,
+        sink_receiver,
+        factory_receiver,
+    )
 }
 
 fn receiver_text_from_match(text: &str) -> Option<&str> {
@@ -7689,6 +7729,7 @@ fn receiver_text_from_match(text: &str) -> Option<&str> {
 
 fn builder_created_from_factory_before_sink(
     ws: &Workspace,
+    sink_func: FuncId,
     san_span: Span,
     sink_span: Span,
     builder_receiver: &str,
@@ -7697,149 +7738,185 @@ fn builder_created_from_factory_before_sink(
     if san_span.file != sink_span.file || san_span.end > sink_span.start {
         return false;
     }
-    let Ok(snapshot) = ws.vfs().snapshot(sink_span.file) else {
+    let global = ws.db().global_index();
+    let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
         return false;
     };
-    let source = snapshot.text.as_ref();
-    let start = san_span.end as usize;
-    let end = sink_span.start as usize;
-    if start > end || end > source.len() {
-        return false;
-    }
-    let compact = source[start..end]
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect::<String>();
-    let pattern = format!("{builder_receiver}={factory_receiver}.newDocumentBuilder(");
-    compact.contains(&pattern)
+    builder_available_at_sink(
+        &decl.flow_events,
+        &decl.flow_events,
+        san_span,
+        sink_span,
+        builder_receiver,
+        factory_receiver,
+        false,
+    )
+    .unwrap_or(false)
 }
 
-/// True when `value_text` invokes `callee` as a CALL (anchored on the
-/// `callee(` form, and `callee` not preceded by an identifier char so a
-/// longer identifier such as `myEscapeHtml` never matches) and that
-/// call's balanced argument list mentions `carrier` as a whole token.
-fn sanitizer_call_wraps_carrier(value_text: &str, callee: &str, carrier: &str) -> bool {
-    sanitizer_call_invocations(value_text, callee)
-        .into_iter()
-        .any(|(_, _, args)| text_mentions_token(args, carrier))
-}
-
-/// Conservative fallback for renamed flows: when the tainted sink arg is a
-/// literal wrapper around a sanitizer call, the original source token may no
-/// longer appear in the sink text (`input = source(); sink(escape(input))`).
-/// Credit only when the sanitizer call wraps an identifier-bearing expression
-/// and no value identifiers remain outside that sanitizer invocation.
-fn sanitizer_call_wraps_only_dynamic_part(value_text: &str, callee: &str) -> bool {
-    sanitizer_call_invocations(value_text, callee)
-        .into_iter()
-        .any(|(start, end, args)| {
-            sanitizer_args_contain_value_identifier(args)
-                && text_outside_range_has_no_value_identifiers(value_text, start, end)
-        })
-}
-
-fn sanitizer_call_invocations<'a>(value_text: &'a str, callee: &str) -> Vec<(usize, usize, &'a str)> {
-    if callee.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let bytes = value_text.as_bytes();
-    let mut search_from = 0;
-    while let Some(rel) = value_text[search_from..].find(callee) {
-        let start = search_from + rel;
-        let after = start + callee.len();
-        // Advance past this occurrence regardless of acceptance.
-        search_from = start + 1;
-        // Reject the callee being the tail of a longer identifier
-        // (`myEscapeHtml`): the preceding byte must not be ident-ish.
-        if start > 0 {
-            let prev = bytes[start - 1];
-            if prev == b'_' || prev == b'$' || prev.is_ascii_alphanumeric() {
-                continue;
-            }
-        }
-        // Require the call form `callee(`, tolerating spaces.
-        let mut idx = after;
-        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
-            idx += 1;
-        }
-        if idx >= bytes.len() || bytes[idx] != b'(' {
-            continue;
-        }
-        if let Some((end, args)) = balanced_paren_extent(value_text, idx) {
-            out.push((start, end, args));
-        }
-    }
-    out
-}
-
-fn balanced_paren_extent(text: &str, open_idx: usize) -> Option<(usize, &str)> {
-    let bytes = text.as_bytes();
-    if open_idx >= bytes.len() || bytes[open_idx] != b'(' {
-        return None;
-    }
-    let mut depth = 0usize;
-    let mut idx = open_idx;
-    while idx < bytes.len() {
-        match bytes[idx] {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some((idx + 1, &text[open_idx + 1..idx]));
+fn builder_available_at_sink(
+    events: &[FlowEvent],
+    all_events: &[FlowEvent],
+    sanitizer_span: Span,
+    sink_span: Span,
+    builder_receiver: &str,
+    factory_receiver: &str,
+    mut available: bool,
+) -> Option<bool> {
+    for event in events {
+        match event {
+            FlowEvent::Assign { span, target, .. } => {
+                if sanitizer_span.end <= span.start
+                    && span.end <= sink_span.start
+                    && clean_overwrite_target_key(target) == clean_overwrite_target_key(builder_receiver)
+                    && assignment_uses_factory_builder(all_events, *span, factory_receiver)
+                {
+                    available = true;
                 }
+            }
+            FlowEvent::Call { span, .. } if spans_overlap(*span, sink_span) => return Some(available),
+            FlowEvent::Branch {
+                span,
+                then_events,
+                else_events,
+                ..
+            } if span_contains(*span, sink_span) => {
+                return builder_available_at_sink(
+                    then_events,
+                    all_events,
+                    sanitizer_span,
+                    sink_span,
+                    builder_receiver,
+                    factory_receiver,
+                    available,
+                )
+                .or_else(|| {
+                    builder_available_at_sink(
+                        else_events,
+                        all_events,
+                        sanitizer_span,
+                        sink_span,
+                        builder_receiver,
+                        factory_receiver,
+                        available,
+                    )
+                });
+            }
+            FlowEvent::Loop { span, body, .. }
+            | FlowEvent::Defer { span, body }
+            | FlowEvent::Using { span, body, .. }
+                if span_contains(*span, sink_span) =>
+            {
+                return builder_available_at_sink(
+                    body,
+                    all_events,
+                    sanitizer_span,
+                    sink_span,
+                    builder_receiver,
+                    factory_receiver,
+                    available,
+                );
+            }
+            FlowEvent::Try {
+                span,
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } if span_contains(*span, sink_span) => {
+                return builder_available_at_sink(
+                    body,
+                    all_events,
+                    sanitizer_span,
+                    sink_span,
+                    builder_receiver,
+                    factory_receiver,
+                    available,
+                )
+                .or_else(|| {
+                    builder_available_at_sink(
+                        catch_events,
+                        all_events,
+                        sanitizer_span,
+                        sink_span,
+                        builder_receiver,
+                        factory_receiver,
+                        available,
+                    )
+                })
+                .or_else(|| {
+                    builder_available_at_sink(
+                        finally_events,
+                        all_events,
+                        sanitizer_span,
+                        sink_span,
+                        builder_receiver,
+                        factory_receiver,
+                        available,
+                    )
+                });
             }
             _ => {}
         }
-        idx += 1;
     }
     None
 }
 
-fn sanitizer_args_contain_value_identifier(args: &str) -> bool {
-    identifier_tokens_outside_strings(args)
-        .iter()
-        .any(|token| !non_value_expression_token(token))
+fn assignment_uses_factory_builder(
+    events: &[FlowEvent],
+    assignment_span: Span,
+    factory_receiver: &str,
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span, name, receiver, ..
+            } => {
+                if (span_contains(assignment_span, *span) || spans_overlap(assignment_span, *span))
+                    && clean_overwrite_callee_tail(name) == "newdocumentbuilder"
+                    && receiver.as_deref().and_then(clean_overwrite_target_key)
+                        == clean_overwrite_target_key(factory_receiver)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if assignment_uses_factory_builder(then_events, assignment_span, factory_receiver)
+                    || assignment_uses_factory_builder(else_events, assignment_span, factory_receiver)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if assignment_uses_factory_builder(body, assignment_span, factory_receiver) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if assignment_uses_factory_builder(body, assignment_span, factory_receiver)
+                    || assignment_uses_factory_builder(catch_events, assignment_span, factory_receiver)
+                    || assignment_uses_factory_builder(finally_events, assignment_span, factory_receiver)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
-fn text_outside_range_has_no_value_identifiers(text: &str, start: usize, end: usize) -> bool {
-    let before = text.get(..start).unwrap_or_default();
-    let after = text.get(end..).unwrap_or_default();
-    let mut outside = String::with_capacity(before.len() + after.len() + 1);
-    outside.push_str(before);
-    outside.push(' ');
-    outside.push_str(after);
-    identifier_tokens_outside_strings(&outside)
-        .iter()
-        .all(|token| non_value_expression_token(token))
-}
-
-fn non_value_expression_token(token: &str) -> bool {
-    matches!(
-        token,
-        "await"
-            | "false"
-            | "nil"
-            | "None"
-            | "null"
-            | "return"
-            | "self"
-            | "this"
-            | "true"
-            | "undefined"
-            | "new"
-            | "String"
-            | "Integer"
-            | "Long"
-            | "Boolean"
-            | "Byte"
-            | "Bytes"
-            | "Object"
-    )
-}
-
-/// True when `token` appears in `text` as a whole identifier (not as a
-/// substring of a longer identifier). Empty token never matches.
+/// True when `token` appears in one adapter-selected expression as a whole
+/// identifier. This is used only by the small guard-condition evaluator.
 fn text_mentions_token(text: &str, token: &str) -> bool {
     if token.is_empty() {
         return false;
@@ -7851,12 +7928,12 @@ fn text_mentions_token(text: &str, token: &str) -> bool {
         let end = start + token.len();
         search_from = start + 1;
         let before_ok = start == 0 || {
-            let b = bytes[start - 1];
-            !(b == b'_' || b == b'$' || b.is_ascii_alphanumeric())
+            let byte = bytes[start - 1];
+            !(byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric())
         };
         let after_ok = end >= bytes.len() || {
-            let b = bytes[end];
-            !(b == b'_' || b == b'$' || b.is_ascii_alphanumeric())
+            let byte = bytes[end];
+            !(byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric())
         };
         if before_ok && after_ok {
             return true;
@@ -7885,7 +7962,7 @@ fn sanitizer_can_attach(
     sanitizer_func: FuncId,
     snk: &RuleMatch,
     sink_func: FuncId,
-    sink_tainted_args: &[TaintedArgInfo],
+    nested_in_tainted_sink_arg: bool,
     dataflow_connected: bool,
     post_sink_path_construction_containment: bool,
 ) -> bool {
@@ -7894,7 +7971,7 @@ fn sanitizer_can_attach(
     }
     if sanitizer_func == sink_func
         && !match_precedes_or_same(san, snk)
-        && !sanitizer_is_nested_in_tainted_sink_arg(src, san, sink_tainted_args)
+        && !nested_in_tainted_sink_arg
         && !post_sink_path_construction_containment
     {
         return false;

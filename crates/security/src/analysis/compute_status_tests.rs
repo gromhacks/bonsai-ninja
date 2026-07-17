@@ -855,37 +855,210 @@ fn rule_match_with_text_and_span(match_text: &str, start: u32, end: u32) -> Rule
     }
 }
 
+struct NestedCallFixture {
+    ws: Workspace,
+    func: FuncId,
+    src: RuleMatch,
+    san: RuleMatch,
+    snk: RuleMatch,
+    sink_tainted_args: Vec<TaintedArgInfo>,
+}
+
+fn nested_call_fixture(
+    sink_argument: &str,
+    source_match: &str,
+    sanitizer_match: &str,
+    sanitizer_event_tail: Option<&str>,
+) -> NestedCallFixture {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    let source = format!("function handler(Input, input, other) {{ sink({sink_argument}); }}");
+    ws.vfs()
+        .write("fixture.js".to_string(), std::sync::Arc::<str>::from(source));
+    let file = ws.vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("declaration index");
+    let decl = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "handler")
+        .expect("handler declaration");
+    let FlowEvent::Call {
+        span: sink_span,
+        args: sink_args,
+        ..
+    } = call_event_by_tail(&decl.flow_events, "sink").expect("sink call event")
+    else {
+        unreachable!("call lookup returns a call event")
+    };
+    let sink_arg = sink_args.first().expect("sink argument");
+    let sanitizer_span = sanitizer_event_tail
+        .and_then(|tail| call_event_by_tail(&decl.flow_events, tail))
+        .and_then(|event| match event {
+            FlowEvent::Call { span, .. } => Some(*span),
+            _ => None,
+        })
+        .unwrap_or(sink_arg.span);
+    let func = FuncId::new(decl.symbol.raw());
+    let src = RuleMatch {
+        span: decl.name_span,
+        match_text: source_match.to_string(),
+        ..rule_match_with_text_and_span(source_match, 0, 0)
+    };
+    let san = RuleMatch {
+        span: sanitizer_span,
+        match_text: sanitizer_match.to_string(),
+        ..rule_match_with_text_and_span(sanitizer_match, 0, 0)
+    };
+    let snk = RuleMatch {
+        span: *sink_span,
+        match_text: "sink".to_string(),
+        ..rule_match_with_text_and_span("sink", 0, 0)
+    };
+    let sink_tainted_args = vec![TaintedArgInfo {
+        index: 0,
+        value_text: sink_arg.value_text.clone(),
+    }];
+    drop(index);
+    NestedCallFixture {
+        ws,
+        func,
+        src,
+        san,
+        snk,
+        sink_tainted_args,
+    }
+}
+
+fn call_event_by_tail<'a>(events: &'a [FlowEvent], tail: &str) -> Option<&'a FlowEvent> {
+    for event in events {
+        if let FlowEvent::Call { name, .. } = event {
+            if clean_overwrite_callee_tail(name) == clean_overwrite_callee_tail(tail) {
+                return Some(event);
+            }
+        }
+        let nested = match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => call_event_by_tail(then_events, tail).or_else(|| call_event_by_tail(else_events, tail)),
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                call_event_by_tail(body, tail)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => call_event_by_tail(body, tail)
+                .or_else(|| call_event_by_tail(catch_events, tail))
+                .or_else(|| call_event_by_tail(finally_events, tail)),
+            _ => None,
+        };
+        if nested.is_some() {
+            return nested;
+        }
+    }
+    None
+}
+
+fn java_builder_fixture(body: &str) -> (Workspace, FuncId, Span, Span) {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    let source = format!(
+        "class App {{ void handle(DocumentBuilderFactory factory, DocumentBuilder builder, String input, boolean flag) throws Exception {{ {body} }} }}"
+    );
+    ws.vfs()
+        .write("Fixture.java".to_string(), std::sync::Arc::<str>::from(source));
+    let file = ws.vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("declaration index");
+    let decl = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration");
+    let sanitizer_span = match call_event_by_tail(&decl.flow_events, "setFeature") {
+        Some(FlowEvent::Call { span, .. }) => *span,
+        _ => panic!("setFeature call event"),
+    };
+    let sink_span = match call_event_by_tail(&decl.flow_events, "parse") {
+        Some(FlowEvent::Call { span, .. }) => *span,
+        _ => panic!("parse call event"),
+    };
+    let func = FuncId::new(decl.symbol.raw());
+    drop(index);
+    (ws, func, sanitizer_span, sink_span)
+}
+
+#[test]
+fn xxe_builder_creation_uses_structured_assignment_and_call_facts() {
+    let (ws, func, sanitizer_span, sink_span) = java_builder_fixture(
+        r#"factory.setFeature("disallow-doctype-decl", true);
+           builder = factory.newDocumentBuilder();
+           builder.parse(input);"#,
+    );
+    assert!(builder_created_from_factory_before_sink(
+        &ws,
+        func,
+        sanitizer_span,
+        sink_span,
+        "builder",
+        "factory",
+    ));
+}
+
+#[test]
+fn conditional_xxe_builder_creation_does_not_dominate_later_sink() {
+    let (ws, func, sanitizer_span, sink_span) = java_builder_fixture(
+        r#"factory.setFeature("disallow-doctype-decl", true);
+           if (flag) { builder = factory.newDocumentBuilder(); }
+           builder.parse(input);"#,
+    );
+    assert!(!builder_created_from_factory_before_sink(
+        &ws,
+        func,
+        sanitizer_span,
+        sink_span,
+        "builder",
+        "factory",
+    ));
+}
+
 #[test]
 fn nested_sanitizer_inside_tainted_sink_arg_is_dataflow_connected() {
-    let src = rule_match_with_text_and_span("Input", 0, 5);
-    let san = rule_match_with_text_and_span("uri_string:quote", 120, 136);
-    let sink_tainted_args = [TaintedArgInfo {
-        index: 0,
-        value_text: "[\"ping \", uri_string:quote(Input)]".to_string(),
-    }];
+    let fixture = nested_call_fixture(
+        "[\"ping \", uri_string.quote(Input)]",
+        "Input",
+        "uri_string.quote",
+        Some("quote"),
+    );
 
     // GREEN after fix: the tainted carrier `Input` is wrapped INSIDE the
     // anchored `uri_string:quote(...)` call, so credit stands.
     assert!(sanitizer_is_nested_in_tainted_sink_arg(
-        &src,
-        &san,
-        &sink_tainted_args
+        &fixture.ws,
+        fixture.func,
+        &fixture.src,
+        &fixture.san,
+        &fixture.snk,
+        &fixture.sink_tainted_args,
     ));
 }
 
 #[test]
 fn nested_sanitizer_with_renamed_dynamic_value_is_dataflow_connected() {
-    let src = rule_match_with_text_and_span("request.getHeaderNames", 0, 22);
-    let san = rule_match_with_text_and_span("org.owasp.esapi.ESAPI.encoder().encodeForHTML", 120, 166);
-    let sink_tainted_args = [TaintedArgInfo {
-        index: 0,
-        value_text: "\"Sensitive value '\" + org.owasp.esapi.ESAPI.encoder().encodeForHTML(new String(input)) + \"' hashed and stored<br/>\"".to_string(),
-    }];
+    let fixture = nested_call_fixture(
+        "\"Sensitive value '\" + org.owasp.esapi.ESAPI.encoder().encodeForHTML(new String(input)) + \"' hashed and stored<br/>\"",
+        "request.getHeaderNames",
+        "org.owasp.esapi.ESAPI.encoder().encodeForHTML",
+        Some("encodeForHTML"),
+    );
 
     assert!(sanitizer_is_nested_in_tainted_sink_arg(
-        &src,
-        &san,
-        &sink_tainted_args
+        &fixture.ws,
+        fixture.func,
+        &fixture.src,
+        &fixture.san,
+        &fixture.snk,
+        &fixture.sink_tainted_args,
     ));
 }
 
@@ -912,22 +1085,9 @@ fn nested_sanitizer_inside_sink_arg_can_attach_after_sink_callee_token() {
         span: Span::new(bonsai_common::FileId::new(1), 120, 136),
         ..rule_match_with_text_and_span("uri_string:quote", 120, 136)
     };
-    let sink_tainted_args = [TaintedArgInfo {
-        index: 0,
-        value_text: "[\"ping \", uri_string:quote(Input)]".to_string(),
-    }];
-
     let func = FuncId::new(1);
     assert!(sanitizer_can_attach(
-        &src,
-        func,
-        &san,
-        func,
-        &snk,
-        func,
-        &sink_tainted_args,
-        true,
-        false
+        &src, func, &san, func, &snk, func, true, true, false
     ));
 }
 
@@ -951,15 +1111,7 @@ fn dataflow_connected_sanitizer_after_sink_does_not_attach_by_default() {
     let func = FuncId::new(1);
 
     assert!(!sanitizer_can_attach(
-        &src,
-        func,
-        &san,
-        func,
-        &snk,
-        func,
-        &[],
-        true,
-        false
+        &src, func, &san, func, &snk, func, false, true, false
     ));
 }
 
@@ -983,15 +1135,7 @@ fn path_construction_containment_can_attach_after_join_sink() {
     let func = FuncId::new(1);
 
     assert!(sanitizer_can_attach(
-        &src,
-        func,
-        &san,
-        func,
-        &snk,
-        func,
-        &[],
-        true,
-        true
+        &src, func, &san, func, &snk, func, false, true, true
     ));
 }
 
@@ -1456,17 +1600,20 @@ fn sanitizer_on_static_literal_concatenated_with_taint_does_not_credit() {
     // wraps a STATIC literal and the tainted `Input` is concatenated
     // OUTSIDE the call. RED before fix (unanchored `contains("escapeHtml")`
     // credited it, mislabeling a real flow `Sanitized`); GREEN after.
-    let src = rule_match_with_text_and_span("Input", 0, 5);
-    let san = rule_match_with_text_and_span("escapeHtml", 120, 130);
-    let sink_tainted_args = [TaintedArgInfo {
-        index: 0,
-        value_text: "escapeHtml(\"static\") + Input".to_string(),
-    }];
+    let fixture = nested_call_fixture(
+        "escapeHtml(\"static\") + Input",
+        "Input",
+        "escapeHtml",
+        Some("escapeHtml"),
+    );
 
     assert!(!sanitizer_is_nested_in_tainted_sink_arg(
-        &src,
-        &san,
-        &sink_tainted_args
+        &fixture.ws,
+        fixture.func,
+        &fixture.src,
+        &fixture.san,
+        &fixture.snk,
+        &fixture.sink_tainted_args,
     ));
 }
 
@@ -1474,17 +1621,20 @@ fn sanitizer_on_static_literal_concatenated_with_taint_does_not_credit() {
 fn sanitizer_on_other_dynamic_value_concatenated_with_taint_does_not_credit() {
     // The sanitizer wraps `other`, while the tainted carrier `Input`
     // remains outside the sanitizer call.
-    let src = rule_match_with_text_and_span("Input", 0, 5);
-    let san = rule_match_with_text_and_span("escapeHtml", 120, 130);
-    let sink_tainted_args = [TaintedArgInfo {
-        index: 0,
-        value_text: "escapeHtml(other) + Input".to_string(),
-    }];
+    let fixture = nested_call_fixture(
+        "escapeHtml(other) + Input",
+        "Input",
+        "escapeHtml",
+        Some("escapeHtml"),
+    );
 
     assert!(!sanitizer_is_nested_in_tainted_sink_arg(
-        &src,
-        &san,
-        &sink_tainted_args
+        &fixture.ws,
+        fixture.func,
+        &fixture.src,
+        &fixture.san,
+        &fixture.snk,
+        &fixture.sink_tainted_args,
     ));
 }
 
@@ -1493,17 +1643,15 @@ fn sanitizer_callee_as_substring_of_longer_identifier_does_not_credit() {
     // M4 regression: the callee appears only as the tail of a longer
     // identifier (`myEscapeHtml`), never as an actual call of `escapeHtml`.
     // RED before fix (substring `contains`); GREEN after (anchored call form).
-    let src = rule_match_with_text_and_span("Input", 0, 5);
-    let san = rule_match_with_text_and_span("escapeHtml", 120, 130);
-    let sink_tainted_args = [TaintedArgInfo {
-        index: 0,
-        value_text: "myEscapeHtml(Input)".to_string(),
-    }];
+    let fixture = nested_call_fixture("myEscapeHtml(Input)", "Input", "escapeHtml", Some("myEscapeHtml"));
 
     assert!(!sanitizer_is_nested_in_tainted_sink_arg(
-        &src,
-        &san,
-        &sink_tainted_args
+        &fixture.ws,
+        fixture.func,
+        &fixture.src,
+        &fixture.san,
+        &fixture.snk,
+        &fixture.sink_tainted_args,
     ));
 }
 
@@ -1512,16 +1660,14 @@ fn sanitizer_callee_as_field_name_without_call_does_not_credit() {
     // M4 regression: the callee text appears as a field/identifier with
     // no `(` call form (`config.escapeHtml = Input`). RED before fix
     // (bare substring); GREEN after (call-form anchor required).
-    let src = rule_match_with_text_and_span("Input", 0, 5);
-    let san = rule_match_with_text_and_span("escapeHtml", 120, 130);
-    let sink_tainted_args = [TaintedArgInfo {
-        index: 0,
-        value_text: "config.escapeHtml = Input".to_string(),
-    }];
+    let fixture = nested_call_fixture("config.escapeHtml = Input", "Input", "escapeHtml", None);
 
     assert!(!sanitizer_is_nested_in_tainted_sink_arg(
-        &src,
-        &san,
-        &sink_tainted_args
+        &fixture.ws,
+        fixture.func,
+        &fixture.src,
+        &fixture.san,
+        &fixture.snk,
+        &fixture.sink_tainted_args,
     ));
 }
