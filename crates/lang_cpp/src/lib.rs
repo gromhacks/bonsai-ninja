@@ -985,51 +985,56 @@ fn canonical_cpp_base_name(raw: &str) -> Option<String> {
 
 /// Translate `#include` directives and `using` declarations into
 /// `ImportSpec`s. The two flavours produce indistinguishable
-/// downstream lookups; namespace `using` ending in `::*` is recorded
-/// as a wildcard import.
+/// downstream lookups; `using namespace` is recorded as a wildcard import.
 fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     let mut imports = c_family_preproc_imports(tree, src, file);
     // C-style preproc_include + C++ `using namespace X;` / `using X::Y;`.
     for using_node in collect_kinds(tree, &["using_declaration"]) {
-        // Tree-sitter-cpp doesn't break the path into fields, so we
-        // recover it textually. Two distinct shapes share this node
-        // kind:
+        // The path is the declaration's single named child. The anonymous
+        // `namespace` token distinguishes the wildcard form, so semantic
+        // classification never depends on re-tokenizing statement text.
         //
         //   * `using namespace X::Y;` — wildcard import; brings every
         //     name in `X::Y` into scope, no single local binding.
         //   * `using X::Y::Z;`        — single-symbol import; binds
         //     `Z` locally to `X::Y::Z`.
-        //
-        // The leading `using namespace` keyword is the discriminator;
-        // detect it BEFORE trimming so the wildcard form isn't
-        // misclassified as a single-symbol import that would alias
-        // `Y` (the second-to-last segment) by accident.
-        let raw = node_text(&using_node, src);
-        let raw_trimmed = raw.trim_start();
-        let is_wildcard_namespace = raw_trimmed.starts_with("using namespace ");
-        let module_path = raw_trimmed
-            .trim_start_matches("using ")
-            .trim_start_matches("namespace ")
-            .trim_end_matches(';')
-            .trim()
-            .trim_end_matches("::*")
-            .to_string();
-        if module_path.is_empty() {
+        let is_wildcard_namespace = (0..using_node.child_count())
+            .filter_map(|index| u32::try_from(index).ok())
+            .any(|index| {
+                using_node
+                    .child(index)
+                    .is_some_and(|child| child.kind() == "namespace")
+            });
+        let mut path_cursor = using_node.walk();
+        let Some(path_node) = using_node
+            .named_children(&mut path_cursor)
+            .find(|child| matches!(child.kind(), "identifier" | "qualified_identifier"))
+        else {
+            continue;
+        };
+        let mut path_segments = cpp_import_path_segments(path_node, src);
+        if path_segments.is_empty() {
             continue;
         }
-        // Tail-segment binding only applies to the single-symbol form.
-        let alias = (!is_wildcard_namespace)
-            .then(|| module_path.rsplit("::").next().unwrap_or(""))
-            .filter(|tail| !tail.is_empty())
-            .map(str::to_string);
-        imports.push(ImportSpec {
-            span: span_of(file, &using_node),
-            module: module_path,
-            alias,
-            is_wildcard: is_wildcard_namespace,
-            original_name: None,
-            scope: ImportScope::Module,
-        });
+        if is_wildcard_namespace {
+            imports.push(ImportSpec {
+                span: span_of(file, &using_node),
+                module: path_segments.join("::"),
+                alias: None,
+                is_wildcard: true,
+                original_name: None,
+                scope: ImportScope::Module,
+            });
+        } else if let Some(original_name) = path_segments.pop() {
+            imports.push(ImportSpec {
+                span: span_of(file, &using_node),
+                module: path_segments.join("::"),
+                alias: None,
+                is_wildcard: false,
+                original_name: Some(original_name),
+                scope: ImportScope::Module,
+            });
+        }
     }
     // C++ `namespace h = util;` — explicit namespace alias. The
     // `name` field is the local alias (`h`); the `aliased` /
@@ -1052,22 +1057,16 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             .child_by_field_name("aliased")
             .or_else(|| alias_node.child_by_field_name("value"))
             .or_else(|| {
+                let alias_name_node = alias_name_node?;
                 let mut cursor = alias_node.walk();
-                let mut seen_first = false;
-                let mut found = None;
-                for child in alias_node.named_children(&mut cursor) {
-                    if matches!(
-                        child.kind(),
-                        "identifier" | "qualified_identifier" | "namespace_identifier"
-                    ) {
-                        if seen_first {
-                            found = Some(child);
-                            break;
-                        }
-                        seen_first = true;
-                    }
-                }
-                found
+                let target = alias_node.named_children(&mut cursor).find(|child| {
+                    *child != alias_name_node
+                        && matches!(
+                            child.kind(),
+                            "namespace_identifier" | "nested_namespace_specifier"
+                        )
+                });
+                target
             });
         let (Some(alias_name_node), Some(module_name_node)) = (alias_name_node, module_name_node) else {
             continue;
@@ -1087,6 +1086,33 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+fn cpp_import_path_segments(path: Node<'_>, src: &[u8]) -> Vec<String> {
+    if path.kind() == "qualified_identifier" {
+        let mut segments = path
+            .child_by_field_name("scope")
+            .map(|scope| cpp_import_path_segments(scope, src))
+            .unwrap_or_default();
+        if let Some(name) = path.child_by_field_name("name") {
+            segments.extend(cpp_import_path_segments(name, src));
+        }
+        return segments;
+    }
+    if path.kind() == "nested_namespace_specifier" {
+        let mut segments = Vec::new();
+        let mut cursor = path.walk();
+        for child in path.named_children(&mut cursor) {
+            segments.extend(cpp_import_path_segments(child, src));
+        }
+        return segments;
+    }
+    let segment = node_text(&path, src).trim();
+    if segment.is_empty() {
+        Vec::new()
+    } else {
+        vec![segment.to_string()]
+    }
 }
 
 /// Repair `catch_param` on C++ `Try` events. The kit's generic
@@ -1196,4 +1222,40 @@ fn first_identifier_descendant_cpp<'a>(node: Node<'a>) -> Option<Node<'a>> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    fn parse_import_specs(src: &str) -> Vec<ImportSpec> {
+        let language = language_from_pack(PACK_NAME).expect("cpp grammar");
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set cpp grammar");
+        let tree = parser.parse(src.as_bytes(), None).expect("parse cpp source");
+        parse_imports(&tree, src.as_bytes(), FileId::new(0))
+    }
+
+    #[test]
+    fn using_declarations_are_lowered_from_cst_nodes() {
+        let imports = parse_import_specs(
+            "using /* trivia */ namespace alpha::beta;\n\
+             using alpha::beta::Thing;\n\
+             namespace short_name = alpha::beta;\n",
+        );
+
+        assert!(imports
+            .iter()
+            .any(|spec| spec.module == "alpha::beta" && spec.is_wildcard));
+        assert!(imports.iter().any(|spec| {
+            spec.module == "alpha::beta"
+                && spec.alias.is_none()
+                && spec.original_name.as_deref() == Some("Thing")
+        }));
+        assert!(imports.iter().any(|spec| {
+            spec.module == "alpha::beta"
+                && spec.alias.as_deref() == Some("short_name")
+                && spec.original_name.is_none()
+        }));
+    }
 }

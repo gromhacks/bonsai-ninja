@@ -1844,306 +1844,181 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     for node in collect_kinds(tree, &["use_declaration"]) {
-        let text = node_text(&node, src)
-            .trim_start_matches("use ")
-            .trim_end_matches(';')
-            .trim()
-            .to_string();
-        // Base entry — full use-tree text as the module string so the
-        // name is searchable verbatim. Skipped for brace-list imports
-        // (`use X::{A, B};`) because the per-member entries emitted
-        // below already carry the prefix as module — a redundant row
-        // with the literal `{A, B}` string is noise.
-        let has_brace_list = text.contains('{');
-        if !has_brace_list {
-            out.push(ImportSpec {
-                span: span_of(file, &node),
-                module: text.clone(),
-                alias: None,
-                is_wildcard: text.ends_with('*'),
-                original_name: None,
-                scope: ImportScope::Module,
-            });
-            // Self-binding namespace alias for workspace-internal
-            // module imports (`use crate::executor;`, `use self::x;`,
-            // `use super::y;`). Without this, calls like
-            // `executor::execute(c)` cannot be resolved to the
-            // workspace `executor` module — `mod_item` declarations
-            // already bind their own name, but plain `use` imports
-            // don't, leaving cross-module call edges unresolved.
-            //
-            // Limited to lowercase leaves (Rust's module convention)
-            // so type imports (`use crate::Envelope;`) don't get a
-            // bogus namespace alias that would let
-            // `Envelope::method` rewrite to a spurious workspace
-            // function via the resolver's bare-name fallback.
-            if !text.contains(" as ") && !text.ends_with('*') {
-                if let Some(leaf) = workspace_use_leaf(text.as_str()) {
-                    out.push(ImportSpec {
-                        span: span_of(file, &node),
-                        module: leaf.to_string(),
-                        alias: Some(leaf.to_string()),
-                        is_wildcard: false,
-                        original_name: None,
-                        scope: ImportScope::Module,
-                    });
-                }
-            }
-        }
-        // Additional entries for `as`-renamed bindings. Handles:
-        //   `use X::Y as Z;`               (single rename)
-        //   `use X::{A, B as C, D};`       (rename inside a use-list)
-        //   `use X::{A::{B, C}, D};`       (nested brace-list)
-        // Brace-depth-aware split is required — `inside.split(',')`
-        // would naively split inside a nested group.
-        let body = text.trim_end_matches(';').trim();
-        if body.contains('{') {
-            let span = span_of(file, &node);
-            collect_use_tree_imports(body, file, span, &mut out);
-        } else if let Some((path, alias)) = body.rsplit_once(" as ") {
-            let alias_trim = alias.trim().to_string();
-            // Split the path into prefix::last_segment.
-            let (prefix, last) = path.rsplit_once("::").unwrap_or(("", path));
-            let last_trim = last.trim().to_string();
-            if !alias_trim.is_empty() && !last_trim.is_empty() {
-                out.push(ImportSpec {
-                    span: span_of(file, &node),
-                    module: prefix.to_string(),
-                    alias: Some(alias_trim),
-                    is_wildcard: false,
-                    original_name: Some(last_trim),
-                    scope: ImportScope::Module,
-                });
-            }
-        }
+        let Some(argument) = node.child_by_field_name("argument") else {
+            continue;
+        };
+        append_rust_use_argument(argument, &[], span_of(file, &node), src, true, &mut out);
     }
     out
 }
 
-/// Walk a Rust use-tree text form (`X::{A, B::{C, D as E}, F}`) and
-/// emit one `ImportSpec` per leaf binding. Brace-depth-aware so the
-/// split correctly handles nested groups; recurses into each
-/// brace-suffixed prefix. `//` and `/* */` comments are stripped
-/// up front so a `use foo::{ /* X, */ A }` selector list isn't
-/// fooled by commas / braces inside the comment.
-fn collect_use_tree_imports(body: &str, file: FileId, span: bonsai_common::Span, out: &mut Vec<ImportSpec>) {
-    let cleaned = strip_use_tree_comments(body);
-    let body = cleaned.trim();
-    if body.is_empty() {
-        return;
-    }
-    let Some(brace_open) = body.find('{') else {
-        // Leaf without braces — already handled by the caller's
-        // top-level emission. No nested decomposition needed.
-        return;
-    };
-    let prefix = body[..brace_open].trim_end_matches("::").trim();
-    // Find the matching `}` by depth-tracking.
-    let inside_start = brace_open + 1;
-    let bytes = body.as_bytes();
-    let mut depth: i32 = 1;
-    let mut close: Option<usize> = None;
-    for (i, &b) in bytes.iter().enumerate().skip(inside_start) {
-        match b {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(i);
-                    break;
-                }
+fn append_rust_use_argument(
+    argument: Node<'_>,
+    prefix: &[String],
+    span: bonsai_common::Span,
+    src: &[u8],
+    top_level: bool,
+    out: &mut Vec<ImportSpec>,
+) {
+    match argument.kind() {
+        "scoped_use_list" => {
+            let mut nested_prefix = prefix.to_vec();
+            if let Some(path) = argument.child_by_field_name("path") {
+                nested_prefix.extend(rust_path_segments(path, src));
             }
-            _ => {}
+            if let Some(list) = argument.child_by_field_name("list") {
+                append_rust_use_argument(list, &nested_prefix, span, src, false, out);
+            }
         }
-    }
-    let Some(close) = close else { return };
-    let inside = &body[inside_start..close];
-    for part in split_top_level_commas(inside) {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
+        "use_list" => {
+            let mut cursor = argument.walk();
+            for child in argument.named_children(&mut cursor) {
+                append_rust_use_argument(child, prefix, span, src, false, out);
+            }
         }
-        if part.contains('{') {
-            // Nested brace group: prepend our prefix and recurse so
-            // `X::{A::{B, C}}` emits `X::A` :: B and `X::A` :: C.
-            let nested = if prefix.is_empty() {
-                part.to_string()
-            } else {
-                format!("{prefix}::{part}")
+        "use_as_clause" => {
+            let (Some(path), Some(alias_node)) = (
+                argument.child_by_field_name("path"),
+                argument.child_by_field_name("alias"),
+            ) else {
+                return;
             };
-            collect_use_tree_imports(&nested, file, span, out);
-            continue;
-        }
-        // Braced glob: `use foo::{*}` brings every item in `foo`
-        // into scope just like `use foo::*;`. Without setting
-        // `is_wildcard` here the resolver would treat `*` as an
-        // ordinary symbol name.
-        if part == "*" {
-            out.push(ImportSpec {
-                span,
-                module: prefix.to_string(),
-                alias: None,
-                is_wildcard: true,
-                original_name: None,
-                scope: ImportScope::Module,
-            });
-            continue;
-        }
-        // Self-binding: `use foo::{self, bar}` re-exports `foo`
-        // itself under its own name. Emit it as a module-level
-        // alias so `alias_map_from_imports` registers `foo →
-        // foo` rather than mapping a meaningless `self` symbol.
-        // Tokenise on whitespace so `self  as  Foo` (multi-space,
-        // valid Rust) parses identically to `self as Foo`.
-        let tokens: Vec<&str> = part.split_whitespace().collect();
-        if tokens.first().copied() == Some("self") {
-            let alias_name = match tokens.as_slice() {
-                ["self"] => prefix.rsplit("::").next().map(str::to_string),
-                ["self", "as", name] => Some((*name).to_string()),
-                _ => None,
+            let mut segments = prefix.to_vec();
+            segments.extend(rust_path_segments(path, src));
+            let Some(original) = segments.pop() else {
+                return;
+            };
+            let alias = node_text(&alias_node, src).trim();
+            if alias.is_empty() {
+                return;
             }
-            .filter(|s| !s.is_empty());
-            if let Some(local) = alias_name {
+            if original == "self" {
                 out.push(ImportSpec {
                     span,
-                    module: prefix.to_string(),
-                    alias: Some(local),
+                    module: segments.join("::"),
+                    alias: Some(alias.to_string()),
                     is_wildcard: false,
                     original_name: None,
                     scope: ImportScope::Module,
                 });
-            }
-            continue;
-        }
-        if let Some((orig, alias)) = part.rsplit_once(" as ") {
-            let orig_trim = orig.trim();
-            let alias_trim = alias.trim();
-            if !orig_trim.is_empty() && !alias_trim.is_empty() {
+            } else {
                 out.push(ImportSpec {
                     span,
-                    module: prefix.to_string(),
-                    alias: Some(alias_trim.to_string()),
+                    module: segments.join("::"),
+                    alias: Some(alias.to_string()),
                     is_wildcard: false,
-                    original_name: Some(orig_trim.to_string()),
+                    original_name: Some(original),
                     scope: ImportScope::Module,
                 });
             }
-        } else {
+        }
+        "use_wildcard" => {
+            let mut module = prefix.to_vec();
+            if let Some(path) = argument.named_child(0) {
+                module.extend(rust_path_segments(path, src));
+            }
+            if !module.is_empty() {
+                out.push(ImportSpec {
+                    span,
+                    module: module.join("::"),
+                    alias: None,
+                    is_wildcard: true,
+                    original_name: None,
+                    scope: ImportScope::Module,
+                });
+            }
+        }
+        "self" if !top_level => {
+            let Some(local) = prefix.last() else {
+                return;
+            };
             out.push(ImportSpec {
                 span,
-                module: prefix.to_string(),
+                module: prefix.join("::"),
+                alias: Some(local.clone()),
+                is_wildcard: false,
+                original_name: None,
+                scope: ImportScope::Module,
+            });
+        }
+        _ => {
+            let mut segments = prefix.to_vec();
+            segments.extend(rust_path_segments(argument, src));
+            if segments.is_empty() {
+                return;
+            }
+            if top_level {
+                let module = segments.join("::");
+                out.push(ImportSpec {
+                    span,
+                    module,
+                    alias: None,
+                    is_wildcard: false,
+                    original_name: None,
+                    scope: ImportScope::Module,
+                });
+                if rust_path_is_workspace_relative(&segments) {
+                    let local = segments.last().cloned().unwrap_or_default();
+                    if !local.is_empty() {
+                        out.push(ImportSpec {
+                            span,
+                            module: local.clone(),
+                            alias: Some(local),
+                            is_wildcard: false,
+                            original_name: None,
+                            scope: ImportScope::Module,
+                        });
+                    }
+                }
+                return;
+            }
+
+            let Some(original) = segments.pop() else {
+                return;
+            };
+            out.push(ImportSpec {
+                span,
+                module: segments.join("::"),
                 alias: None,
                 is_wildcard: false,
-                original_name: Some(part.to_string()),
+                original_name: Some(original),
                 scope: ImportScope::Module,
             });
         }
     }
 }
 
-/// Strip `//` line comments and `/* ... */` block comments from a
-/// use-tree text form. Walks `char` boundaries so non-ASCII module
-/// names (Rust permits Unicode XID identifiers) survive intact.
-fn strip_use_tree_comments(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.char_indices().peekable();
-    while let Some((_, ch)) = chars.next() {
-        if ch == '/' {
-            match chars.peek().map(|&(_, c)| c) {
-                Some('/') => {
-                    // Line comment — consume to next newline (or EOF).
-                    chars.next();
-                    while let Some(&(_, c)) = chars.peek() {
-                        if c == '\n' {
-                            break;
-                        }
-                        chars.next();
-                    }
-                    continue;
-                }
-                Some('*') => {
-                    chars.next(); // consume the '*'
-                    let mut prev = '\0';
-                    for (_, c) in chars.by_ref() {
-                        if prev == '*' && c == '/' {
-                            break;
-                        }
-                        prev = c;
-                    }
-                    // Replace the comment span with a single space
-                    // so identifiers don't accidentally fuse. If the
-                    // block comment was unterminated (tree-sitter
-                    // would normally reject this), we still emit the
-                    // space and exit naturally.
-                    out.push(' ');
-                    continue;
-                }
-                _ => {}
+fn rust_path_segments(path: Node<'_>, src: &[u8]) -> Vec<String> {
+    if path.kind() == "scoped_identifier" {
+        let mut segments = path
+            .child_by_field_name("path")
+            .map(|node| rust_path_segments(node, src))
+            .unwrap_or_default();
+        if let Some(name) = path.child_by_field_name("name") {
+            let name = node_text(&name, src).trim();
+            if !name.is_empty() {
+                segments.push(name.to_string());
             }
         }
-        // Avoid Unicode-corrupting `bytes[i] as char` — push the
-        // full char as-is.
-        out.push(ch);
+        return segments;
     }
-    out
-}
-
-/// Last `::`-separated segment of a `use` path, when the path is
-/// rooted at a workspace prefix (`crate::`, `super::`, `self::`).
-/// Returns `Some(leaf)` so `use crate::executor;` binds `executor`
-/// as a workspace-namespace alias the resolver can follow.
-///
-/// Type imports (`use crate::Envelope;`) get the same alias —
-/// the resolver's bare-name fallback is filtered by the alias
-/// target's module path, so a `Envelope::method` call on a name
-/// that doesn't actually live in workspace module `Envelope`
-/// produces no candidates instead of stitching together an
-/// unrelated workspace function. External imports
-/// (`use std::process::Command;`) skip this path because their
-/// path doesn't start with a workspace prefix; the alias would
-/// have nothing to point at and `module_target_matches_decl_module_path`
-/// would reject every workspace candidate anyway.
-fn workspace_use_leaf(text: &str) -> Option<&str> {
-    let body = text.trim_end_matches(';').trim();
-    if body.is_empty() || body.contains('{') || body.contains(" as ") {
-        return None;
-    }
-    let stripped = body
-        .strip_prefix("crate::")
-        .or_else(|| body.strip_prefix("self::"))
-        .or_else(|| {
-            let mut rest = body;
-            let mut stripped_any = false;
-            while let Some(next) = rest.strip_prefix("super::") {
-                rest = next;
-                stripped_any = true;
-            }
-            stripped_any.then_some(rest)
-        })?;
-    let leaf = stripped.rsplit("::").next()?.trim();
-    (!leaf.is_empty()).then_some(leaf)
-}
-
-/// Split a brace-list body on top-level (depth-0) commas only.
-fn split_top_level_commas(input: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut depth: i32 = 0;
-    let mut start = 0;
-    for (i, ch) in input.char_indices() {
-        match ch {
-            '{' | '<' | '(' | '[' => depth += 1,
-            '}' | '>' | ')' | ']' => depth -= 1,
-            ',' if depth == 0 => {
-                out.push(&input[start..i]);
-                start = i + 1;
-            }
-            _ => {}
+    if matches!(
+        path.kind(),
+        "identifier" | "metavariable" | "crate" | "self" | "super"
+    ) {
+        let segment = node_text(&path, src).trim();
+        if !segment.is_empty() {
+            return vec![segment.to_string()];
         }
     }
-    if start <= input.len() {
-        out.push(&input[start..]);
-    }
-    out
+    Vec::new()
+}
+
+fn rust_path_is_workspace_relative(segments: &[String]) -> bool {
+    matches!(
+        segments.first().map(String::as_str),
+        Some("crate" | "self" | "super")
+    )
 }
 
 fn rust_module_segments(path: &std::path::Path) -> Vec<String> {

@@ -1177,7 +1177,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             original_name: None,
             scope: ImportScope::Module,
         });
-        if csharp_using_is_static(&using_node, src) {
+        if csharp_using_is_static(&using_node) {
             imports.push(ImportSpec {
                 span: span_of(file, &using_node),
                 module,
@@ -1191,13 +1191,17 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     imports
 }
 
-fn csharp_using_is_static(using_node: &tree_sitter::Node<'_>, src: &[u8]) -> bool {
-    node_text(using_node, src)
-        .split_whitespace()
-        .take(3)
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|window| window == ["using", "static"])
+fn csharp_using_is_static(using_node: &tree_sitter::Node<'_>) -> bool {
+    // `static` is an anonymous grammar token on `using_directive`. Inspect
+    // that CST child directly; re-tokenizing the whole statement would make
+    // comments and whitespace part of semantic classification.
+    (0..using_node.child_count())
+        .filter_map(|index| u32::try_from(index).ok())
+        .any(|index| {
+            using_node
+                .child(index)
+                .is_some_and(|child| child.kind() == "static")
+        })
 }
 
 /// Walk every C# class-like declaration and pull `(name, type)`
