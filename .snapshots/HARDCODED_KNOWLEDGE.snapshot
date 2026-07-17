@@ -1,0 +1,14 @@
+# Normalized hardcoded-knowledge audit baseline (no source line numbers).
+sha256	65dc164855d7b740641486f511c578527ecc0e17636ee151ce44294b1c2a35c0
+total	233
+browse	32
+callgraph	24
+common	19
+diagnostics	1
+idg	11
+index	1
+resolve	20
+retrieval	15
+security	85
+taint	10
+workspace	15
