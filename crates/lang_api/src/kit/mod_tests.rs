@@ -1076,16 +1076,21 @@ fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
         declares_new_binding: false,
         value_kind: Some(AssignValueKind::Compound),
     };
-    let call = |name: &str, span: Span| FlowEvent::Call {
+    let call = |name: &str, span: Span, call_kind: CallKind| FlowEvent::Call {
         span,
         name: name.to_string(),
         receiver: None,
         receiver_types: Vec::new(),
-        call_kind: CallKind::Function,
+        call_kind,
         args: Vec::new(),
     };
 
     let mut idx = DeclIndex::default();
+    for (symbol, name) in [(10, "Connection"), (11, "Util"), (12, "widget")] {
+        let mut class = m9_func_decl(symbol, name, None, Vec::new());
+        class.kind = DeclKind::Class;
+        idx.defs.push(class);
+    }
     idx.defs.push(m9_func_decl(
         0,
         "handler",
@@ -1096,20 +1101,25 @@ fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
             // Perl/Ruby-style class constructor methods should type the
             // receiver as the owner, not as the method call tail.
             assign("obj", Some("Util->new"), sp(31, 39)),
+            // Declaration resolution, not casing, proves this lower-case
+            // symbol is a constructed type.
+            assign("lower", Some("widget"), sp(141, 150)),
+            // Uppercase spelling alone is not constructor evidence.
+            assign("unknown", Some("Mystery"), sp(151, 160)),
             // JS/TS shape: `const client = new ApolloClient({})` is an
             // Assign with no source_call plus a sibling constructor Call
             // whose span lies inside the assignment's RHS.
             assign("client", None, sp(40, 80)),
-            call("ApolloClient", sp(56, 78)),
+            call("ApolloClient", sp(56, 78), CallKind::Constructor),
             // Negative: an Assign with no source_call followed by an
             // UNRELATED constructor call outside its span must not type it.
             assign("misc", None, sp(90, 100)),
-            call("Helper", sp(120, 140)),
+            call("Helper", sp(120, 140), CallKind::Constructor),
         ],
     ));
 
     apply_constructor_result_type_aliases(&mut idx);
-    let decl = &idx.defs[0];
+    let decl = idx.defs.iter().find(|decl| decl.name == "handler").unwrap();
     let typed = |name: &str| {
         decl.type_aliases
             .iter()
@@ -1118,6 +1128,8 @@ fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
     };
     assert_eq!(typed("conn"), Some("Connection"), "{:?}", decl.type_aliases);
     assert_eq!(typed("obj"), Some("Util"), "{:?}", decl.type_aliases);
+    assert_eq!(typed("lower"), Some("widget"), "{:?}", decl.type_aliases);
+    assert_eq!(typed("unknown"), None, "{:?}", decl.type_aliases);
     assert_eq!(
         typed("client"),
         Some("ApolloClient"),

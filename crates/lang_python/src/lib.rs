@@ -292,23 +292,6 @@ impl LanguageAdapter for PythonAdapter {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, PYTHON_LIFECYCLE_TRANSITIONS);
         }
-        // Local constructor-result type inference:
-        // `conn = ldap3.Connection(server)` types `conn` as `Connection`
-        // so subsequent `conn.search(...)` calls carry a resolved receiver
-        // type and `receiver_type_in` / `[Type, method]` rules match
-        // semantically — the proper alternative to loosening the package
-        // gate for dynamically-typed receivers. Param annotations
-        // (collected above) take precedence over an inferred constructor
-        // type for the same name.
-        for decl in &mut idx.defs {
-            let mut ctor_aliases = Vec::new();
-            bonsai_lang_api::collect_constructor_result_type_aliases(&decl.flow_events, &mut ctor_aliases);
-            for binding in ctor_aliases {
-                if !decl.type_aliases.iter().any(|alias| alias.name == binding.name) {
-                    decl.type_aliases.push(binding);
-                }
-            }
-        }
         // Precompute `self.<field> → Type` bindings from each class's
         // constructor `receiver_field_writes` so receiver-typed
         // dispatch through stable instance state is an O(1) lookup

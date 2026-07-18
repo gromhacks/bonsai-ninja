@@ -2992,6 +2992,27 @@ fn db_applies_receiver_type_enrichment_centrally() {
             && body.contains("apply_call_receiver_types"),
         "AnalyzerDb::build_decl_index_uncached must centrally enrich FlowEvent::Call::receiver_types after adapter extraction"
     );
+
+    let kit = read(&root.join("crates/lang_api/src/kit/mod.rs"));
+    for function in [
+        "extend_alias_map_with_flow_events",
+        "proven_constructor_type_name",
+        "resolved_declared_constructor_type",
+        "collect_constructor_result_type_aliases_with_declared_types",
+    ] {
+        let body = function_body(&kit, function);
+        assert!(
+            !body.contains("is_ascii_uppercase") && !body.contains("is_ascii_lowercase"),
+            "{function} must derive type facts from adapter call kinds and resolved declarations, not identifier casing"
+        );
+    }
+
+    let python = read(&root.join("crates/lang_python/src/lib.rs"));
+    assert!(
+        !python.contains("constructor_type_from_call_name")
+            && !python.contains("collect_constructor_result_type_aliases(&decl.flow_events"),
+        "Python must use the central AST/declaration-driven constructor typing pass instead of an adapter-local name heuristic"
+    );
 }
 
 /// Receiver syntax belongs to each tree-sitter adapter. An empty capability
