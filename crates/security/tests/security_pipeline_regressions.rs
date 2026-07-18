@@ -1050,6 +1050,12 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
         }),
         "taint-analysis should report taint cache hit/miss state through SDK progress notes: {notes:#?}"
     );
+    assert!(
+        !notes
+            .iter()
+            .any(|(label, detail)| *label == "taint-cache" && detail == "finish write-through failed"),
+        "a cache writer that was never started must not be reported as a finish failure: {notes:#?}"
+    );
     assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
     assert!(
         report.findings[0].finding.source.file.contains("Real.java"),
@@ -1157,6 +1163,12 @@ fn source_analysis_progress_emits_scope_and_cache_notes_to_sdk() {
                     || detail.contains("skipped"))
         }),
         "source-analysis should report taint cache hit/miss state through SDK progress notes: {notes:#?}"
+    );
+    assert!(
+        !notes
+            .iter()
+            .any(|(label, detail)| *label == "taint-cache" && detail == "finish write-through failed"),
+        "a cache writer that was never started must not be reported as a finish failure: {notes:#?}"
     );
     assert!(
         ws.db().idg_service().is_none(),
