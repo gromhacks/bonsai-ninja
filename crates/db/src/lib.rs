@@ -207,10 +207,7 @@ impl AnalyzerDb {
         service: Arc<IdgQueryService>,
     ) -> Arc<IdgQueryService> {
         let slot = self.idg_service_slot(fingerprint);
-        let _ = slot.set(service);
-        slot.get()
-            .expect("configured IDG slot is initialized after set")
-            .clone()
+        slot.get_or_init(|| service).clone()
     }
 
     fn idg_service_slot(&self, fingerprint: u64) -> Arc<OnceLock<Arc<IdgQueryService>>> {

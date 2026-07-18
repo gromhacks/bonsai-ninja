@@ -3440,14 +3440,14 @@ fn resolve_callable_symbol_with_alias_index(
         }
     }
     let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
-    let owned_index: Option<WorkspaceAliasIndex> = if alias_index.is_none() {
-        Some(WorkspaceAliasIndex::build(global))
-    } else {
-        None
+    let owned_index;
+    let alias_index = match alias_index {
+        Some(index) => index,
+        None => {
+            owned_index = WorkspaceAliasIndex::build(global);
+            &owned_index
+        }
     };
-    let alias_index: &WorkspaceAliasIndex = alias_index
-        .or(owned_index.as_ref())
-        .expect("alias_index built above when not supplied");
     for variant in variants {
         let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
         if trimmed.is_empty() {

@@ -1571,9 +1571,25 @@ struct SourceLineageCompilationContext<'a> {
 }
 
 struct SourceLineageScope {
-    idg: Option<Arc<bonsai_idg::IdgQueryService>>,
-    resolution: Option<ResolutionCoverage>,
+    graph: SourceLineageGraph,
     cache_persist_started: bool,
+}
+
+enum SourceLineageGraph {
+    Empty,
+    Compiled {
+        idg: Arc<bonsai_idg::IdgQueryService>,
+        resolution: ResolutionCoverage,
+    },
+}
+
+impl SourceLineageScope {
+    fn resolution(&self) -> Option<&ResolutionCoverage> {
+        match &self.graph {
+            SourceLineageGraph::Empty => None,
+            SourceLineageGraph::Compiled { resolution, .. } => Some(resolution),
+        }
+    }
 }
 
 fn compile_source_lineage_scope<F>(
@@ -1599,8 +1615,7 @@ where
             detail: cache_report.detail(),
         });
         return SourceLineageScope {
-            idg: None,
-            resolution: None,
+            graph: SourceLineageGraph::Empty,
             cache_persist_started: cache_report.persist_started,
         };
     }
@@ -1682,15 +1697,14 @@ where
     on_progress(AnalysisProgress::PhaseTicked);
     on_progress(AnalysisProgress::PhaseFinished);
     SourceLineageScope {
-        idg: Some(idg),
-        resolution: Some(resolution),
+        graph: SourceLineageGraph::Compiled { idg, resolution },
         cache_persist_started: cache_report.persist_started,
     }
 }
 
 struct SourceLineageEnumerationContext<'a> {
     ws: &'a Workspace,
-    idg: Option<&'a bonsai_idg::IdgQueryService>,
+    idg: &'a bonsai_idg::IdgQueryService,
     graph_config: &'a InterTaintConfig,
     caches: &'a InterTaintCaches,
     lineage_limits: SourceLineageLimits,
@@ -1700,9 +1714,6 @@ fn build_source_group_candidates(
     context: &SourceLineageEnumerationContext<'_>,
     group: &SourceGraphGroup,
 ) -> Vec<SourceAnalysisCandidate> {
-    let idg = context
-        .idg
-        .expect("source graph groups require their explicitly scoped IDG");
     let graph = context
         .ws
         .taint_index()
@@ -1718,7 +1729,7 @@ fn build_source_group_candidates(
                         &first.output_arg_names,
                     ),
                     context.ws.db(),
-                    idg,
+                    context.idg,
                 )
                 .with_transfers(bonsai_taint::IdgTaintTransfers {
                     call_result_passthroughs: &context.graph_config.call_result_passthroughs,
@@ -2098,18 +2109,32 @@ where
         &mut source_groups,
         &mut on_progress,
     );
-    let mut candidates = enumerate_source_candidates(
-        &SourceLineageEnumerationContext {
-            ws,
-            idg: source_scope.idg.as_deref(),
-            graph_config: &source_graph_config,
-            caches: source_graph_caches,
-            lineage_limits: options.lineage_limits,
-        },
-        &source_groups,
-        source_hits.len(),
-        &mut on_progress,
-    );
+    let mut candidates = match &source_scope.graph {
+        SourceLineageGraph::Empty => {
+            debug_assert!(source_groups.is_empty());
+            on_progress(AnalysisProgress::PhaseStarted {
+                label: "enumerating source paths",
+                total: source_hits.len() as u64,
+            });
+            for _ in 0..source_hits.len() {
+                on_progress(AnalysisProgress::PhaseTicked);
+            }
+            on_progress(AnalysisProgress::PhaseFinished);
+            Vec::new()
+        }
+        SourceLineageGraph::Compiled { idg, .. } => enumerate_source_candidates(
+            &SourceLineageEnumerationContext {
+                ws,
+                idg,
+                graph_config: &source_graph_config,
+                caches: source_graph_caches,
+                lineage_limits: options.lineage_limits,
+            },
+            &source_groups,
+            source_hits.len(),
+            &mut on_progress,
+        ),
+    };
 
     if !options.exclude_files.is_empty() || options.exclude_tests {
         candidates.retain(|candidate| {
@@ -2120,7 +2145,7 @@ where
     let lineage_summary = SourceLineageSummary::from_candidates(&candidates);
     let runtime_disabled_rules = crate::matcher::drain_runtime_disabled_rules();
     let mut analysis_incomplete_reasons: BTreeSet<String> =
-        workspace_analysis_incomplete_reasons(ws, &scan_files, source_scope.resolution.as_ref())
+        workspace_analysis_incomplete_reasons(ws, &scan_files, source_scope.resolution())
             .into_iter()
             .collect();
     if unattributed_source_matches > 0 {

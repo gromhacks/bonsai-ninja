@@ -4157,7 +4157,9 @@ fn is_bare_identifier(s: &str) -> bool {
         return false;
     }
     let mut chars = s.chars();
-    let first = chars.next().expect("non-empty checked above");
+    let Some(first) = chars.next() else {
+        return false;
+    };
     if !(first.is_alphabetic() || first == '_') {
         return false;
     }
