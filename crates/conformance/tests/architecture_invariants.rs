@@ -3007,6 +3007,21 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
     );
 }
 
+#[test]
+fn workspace_context_does_not_run_an_unneeded_compiler_pass() {
+    let root = repo_root();
+    let diagnostics = read(&root.join("crates/cli/src/commands/diagnostics.rs"));
+    let body = function_body(&diagnostics, "cmd_context");
+    assert!(
+        body.contains("open_workspace_syntax_only(root)?") && body.contains("workspace.semantic_context()"),
+        "context must derive filesystem metadata without parsing every source file"
+    );
+    assert!(
+        !body.contains("open_project_parse_only") && !body.contains("global_index"),
+        "context must not trigger declaration lowering or global semantic indexing"
+    );
+}
+
 /// Receiver type enrichment must run after each adapter has finished
 /// language-specific type_alias / base-class extraction. The DB cache
 /// helper is the single shared indexing chokepoint used by cached

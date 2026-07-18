@@ -14,7 +14,7 @@ use crate::progress;
 
 use super::{
     not_found_with_suggestions, open_project_dataflow_prewarm, open_project_index_only,
-    open_project_parse_only, open_project_semantic_prewarm,
+    open_project_parse_only, open_project_semantic_prewarm, open_workspace_syntax_only,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -77,9 +77,12 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
 }
 
 pub(crate) fn cmd_context(root: &std::path::Path) -> Result<()> {
-    let (project, _footer) = open_project_parse_only(root)?;
+    // Workspace context is a filesystem/path fact. It does not inspect
+    // declarations, so parsing every Tree-sitter input here would be an
+    // accidental whole-program compiler pass for a metadata-only command.
+    let (workspace, _footer) = open_workspace_syntax_only(root)?;
     let stage = progress::ScopedSpinner::new("collecting workspace context");
-    let context = project.semantic_context();
+    let context = workspace.semantic_context();
     stage.finish();
     cli_println!("{}", serde_json::to_string_pretty(&context)?);
     flush_stdout()?;
