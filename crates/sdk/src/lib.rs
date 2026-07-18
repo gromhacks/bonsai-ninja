@@ -22,6 +22,7 @@ use bonsai_common::{
 use bonsai_lang_api::{Decl, LanguageRegistry};
 use bonsai_workspace::{FileRefreshKind, SourceFileStamp, WorkspaceOpenOptions};
 use fs2::FileExt as _;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -31,7 +32,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -952,10 +953,7 @@ impl Project {
     /// discarded. A later successful refresh clears the diagnostic.
     #[must_use]
     pub fn last_refresh_error(&self) -> Option<String> {
-        self.last_refresh_error
-            .lock()
-            .expect("refresh error lock")
-            .clone()
+        self.last_refresh_error.lock().clone()
     }
 
     /// Refresh this long-lived project from the current on-disk source
@@ -966,7 +964,7 @@ impl Project {
     /// dataflow sidecar is warmed and written back for the next process.
     pub fn refresh_from_disk(&self) -> Result<WorkspaceRefreshReport> {
         let result = self.refresh_from_disk_impl();
-        let mut last_error = self.last_refresh_error.lock().expect("refresh error lock");
+        let mut last_error = self.last_refresh_error.lock();
         match &result {
             Ok(_) => *last_error = None,
             Err(error) => *last_error = Some(format!("{error:#}")),
@@ -978,11 +976,11 @@ impl Project {
         // A Project is Clone and its facades may be queried concurrently.
         // Serialise refresh transactions without holding the fingerprint-map
         // lock across file IO, parsing, cache invalidation, or sidecar writes.
-        let _refresh = self.refresh_gate.lock().expect("refresh gate lock");
-        let previous_stamps = self.file_stamps.lock().expect("file stamp lock").clone();
-        let previous_fingerprints = self.fingerprints.lock().expect("fingerprint lock").clone();
+        let _refresh = self.refresh_gate.lock();
+        let previous_stamps = self.file_stamps.lock().clone();
+        let previous_fingerprints = self.fingerprints.lock().clone();
         let candidates = {
-            let mut oracle_slot = self.change_oracle.lock().expect("change oracle lock");
+            let mut oracle_slot = self.change_oracle.lock();
             match oracle_slot.as_mut() {
                 Some(oracle) => match oracle.candidates() {
                     Ok(candidates) => Some(candidates),
@@ -1134,8 +1132,8 @@ impl Project {
         // Publish every successfully applied edit before returning a later
         // refresh/sidecar error. A bad file will be retried because its stamp
         // is deliberately absent, while good siblings are not reread.
-        *self.file_stamps.lock().expect("file stamp lock") = next_stamps;
-        *self.fingerprints.lock().expect("fingerprint lock") = next_fingerprints;
+        *self.file_stamps.lock() = next_stamps;
+        *self.fingerprints.lock() = next_fingerprints;
         if let Some(error) = first_error {
             return Err(error);
         }
@@ -1164,7 +1162,7 @@ impl Project {
             let current_stamp = disk_file_stamp(&sidecar)
                 .with_context(|| format!("checking IDG sidecar {}", sidecar.display()))?;
             let changed = {
-                let mut observed = self.idg_sidecar_stamp.lock().expect("IDG sidecar stamp lock");
+                let mut observed = self.idg_sidecar_stamp.lock();
                 if *observed == current_stamp {
                     false
                 } else {
@@ -1182,13 +1180,13 @@ impl Project {
     }
 
     fn retain_refresh_retry(&self, path: &Path) {
-        if let Some(oracle) = self.change_oracle.lock().expect("change oracle lock").as_mut() {
+        if let Some(oracle) = self.change_oracle.lock().as_mut() {
             oracle.retain_retry(path);
         }
     }
 
     fn clear_refresh_retry(&self, path: &Path) {
-        if let Some(oracle) = self.change_oracle.lock().expect("change oracle lock").as_mut() {
+        if let Some(oracle) = self.change_oracle.lock().as_mut() {
             oracle.clear_retry(path);
         }
     }
@@ -1256,7 +1254,7 @@ impl Project {
     }
 
     fn current_source_fingerprint(&self) -> ExportCacheContentFingerprint {
-        let fingerprints = self.fingerprints.lock().expect("fingerprint lock");
+        let fingerprints = self.fingerprints.lock();
         source_fingerprint_from_pairs(
             &self.root,
             fingerprints.iter().map(|(path, hash)| (path.as_path(), *hash)),
