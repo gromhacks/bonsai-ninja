@@ -219,6 +219,7 @@ pub(super) fn make_finding(
                     )
                     || sanitizer_guard_feeds_sink_arg(
                         context.ws,
+                        pack,
                         hop_func,
                         sanitizer_rule,
                         sanitizer_match,
@@ -296,7 +297,7 @@ pub(super) fn make_finding(
             sanitizers_seen.push(allowlist);
         }
     }
-    if let Some(path_guard) = python_realpath_containment_guard_sanitizer(
+    if let Some(path_guard) = path_containment_guard_sanitizer(
         context.ws,
         context.sink_func,
         snk,

@@ -206,6 +206,9 @@ indexing, and dereference-like use. The conversion lives in
 `bonsai_lang_api::operations_from_flow_events`, so browse, SDK, security,
 and future abstract-interpretation consumers all share the same
 syntax-derived operation vocabulary instead of re-parsing source text.
+Exact branch-condition boundaries and negation polarity live beside those
+events as `BranchConditionFact` compiler IR and are included in native export;
+semantic guard proofs consume that fact rather than branch rendering.
 
 `dump-resolution` audits the same layer without adding a second resolver:
 it compares adapter-emitted `FlowEvent::Call` sites with the canonical

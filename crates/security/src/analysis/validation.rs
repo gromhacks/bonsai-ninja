@@ -769,6 +769,7 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         );
     }
     if (semantics.guard_profile.is_some()
+        || semantics.path_containment_guard.is_some()
         || semantics.context_flow.is_some()
         || semantics.post_sink_policy.is_some())
         && rule.kind != RuleKind::Sink
@@ -778,8 +779,62 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "error",
             "invalid-analysis-semantics",
             Some(rule),
-            "guard_profile, context_flow, and post_sink_policy are only valid on sink rules",
+            "guard_profile, path_containment_guard, context_flow, and post_sink_policy are only valid on sink rules",
         );
+    }
+    let path_profile = semantics.guard_profile == Some(GuardProfile::PythonPathContainment);
+    if path_profile != semantics.path_containment_guard.is_some() {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "python-path-containment guard_profile and path_containment_guard must be declared together",
+        );
+    }
+    if let Some(path_guard) = semantics.path_containment_guard.as_ref() {
+        let callable_target = |target: &RuleTarget| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.trim().is_empty())
+        };
+        if !callable_target(&path_guard.canonicalizer)
+            || !callable_target(&path_guard.containment_check)
+            || path_guard.boundary_places.is_empty()
+            || path_guard
+                .boundary_places
+                .iter()
+                .any(|place| place.trim().is_empty())
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "path_containment_guard requires callable canonicalizer/containment_check targets and non-empty boundary_places",
+            );
+        }
+        for (role, target) in [
+            ("canonicalizer", &path_guard.canonicalizer),
+            ("containment_check", &path_guard.containment_check),
+        ] {
+            if let Some(pattern) = target.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-analysis-semantics",
+                        Some(rule),
+                        &format!("path_containment_guard.{role}.regex is invalid: {error}"),
+                    );
+                }
+            }
+        }
     }
     if let Some(context) = semantics.context_flow.as_ref() {
         if context.channel.trim().is_empty()

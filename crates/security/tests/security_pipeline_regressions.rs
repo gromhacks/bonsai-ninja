@@ -13,8 +13,9 @@ use bonsai_security::loader::LanguagePack;
 use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
 use bonsai_security::{
     run_taint_analysis, run_taint_analysis_with_phase_progress, AnalysisSemantics, ConstraintKind,
-    FindingStatus, FlowClass, GuardProfile, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind, RuleTarget,
-    Rulepack, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions, TrustClass,
+    FindingStatus, FlowClass, GuardProfile, MatchKind, MatchSpec, PathContainmentGuardSemantics, Rule,
+    RuleConstraint, RuleKind, RuleTarget, Rulepack, SourceAnalysisOptions, SourceLineageLimits,
+    TaintAnalysisOptions, TrustClass,
 };
 use bonsai_taint::{compose_idg_seed_nodes, ensure_idg_service, IdgSeedRequest, TokenSet};
 use bonsai_workspace::Workspace;
@@ -2620,6 +2621,22 @@ fn python_realpath_containment_branch_sanitizes_join_sink() {
     let mut pack = rulepack("python", "source", "os.path.join");
     let python_pack = pack.packs.get_mut("python").expect("python pack");
     python_pack.sinks[0].tag = Some("path-traversal".to_string());
+    python_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        guard_profile: Some(GuardProfile::PythonPathContainment),
+        path_containment_guard: Some(PathContainmentGuardSemantics {
+            canonicalizer: RuleTarget {
+                attribute: Some(vec!["os".to_string(), "path".to_string(), "realpath".to_string()]),
+                ..RuleTarget::default()
+            },
+            containment_check: RuleTarget {
+                name: Some("startswith".to_string()),
+                ..RuleTarget::default()
+            },
+            sink_base_arg_index: 0,
+            boundary_places: vec!["os.sep".to_string()],
+        }),
+        ..AnalysisSemantics::default()
+    });
     python_pack.sinks[0].constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
         arg_tainted: ArgTaintedSpec {
             index: Some(1),
@@ -2674,9 +2691,58 @@ def handle():
         finding
             .sanitizers_seen
             .iter()
-            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.python_realpath_containment_guard"),
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.path_containment_guard"),
         "expected realpath containment guard evidence, got {:#?}",
         finding.sanitizers_seen
+    );
+
+    let mut mismatched_pack = pack.clone();
+    mismatched_pack
+        .packs
+        .get_mut("python")
+        .and_then(|pack| pack.sinks.first_mut())
+        .and_then(|rule| rule.analysis_semantics.as_mut())
+        .and_then(|semantics| semantics.path_containment_guard.as_mut())
+        .expect("configured path containment semantics")
+        .boundary_places = vec!["path.separator".to_string()];
+    let mismatched_report =
+        run_taint_analysis(&ws, &mismatched_pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        mismatched_report.findings.iter().any(|finding| {
+            finding.finding.sink.rule_id == "python.test.sink"
+                && finding.finding.status == FindingStatus::Unsanitized
+        }),
+        "the proof must be driven by rulepack boundary operands: {:#?}",
+        mismatched_report.findings
+    );
+
+    let double_negated_ws = workspace(&[(
+        "/app/app.py",
+        r#"
+import os
+
+def source():
+    return "user"
+
+def handle():
+    base = "/srv/uploads"
+    name = source()
+    candidate = os.path.realpath(os.path.join(base, name))
+    if not not candidate.startswith(base + os.sep):
+        raise PermissionError("inverted guard")
+    return candidate
+"#,
+    )]);
+    let double_negated_report =
+        run_taint_analysis(&double_negated_ws, &pack, TaintAnalysisOptions::default())
+            .expect("taint analysis");
+    assert!(
+        double_negated_report.findings.iter().any(|finding| {
+            finding.finding.sink.rule_id == "python.test.sink"
+                && finding.finding.status == FindingStatus::Unsanitized
+        }),
+        "an even number of AST negations must not prove a rejection guard: {:#?}",
+        double_negated_report.findings
     );
 }
 

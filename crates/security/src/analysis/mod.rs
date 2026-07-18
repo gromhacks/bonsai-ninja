@@ -18,18 +18,22 @@ use crate::matcher::{
     match_rules_against_facts_for_taint_support_with_progress_on_files,
     match_rules_against_facts_for_taint_with_progress_on_files,
     match_rules_against_facts_with_progress_on_files, rule_match_passes_constraints_with_taint_view,
-    InterTaintView, RuleMatch, RuntimeDisabledRule,
+    rule_target_matches_call, InterTaintView, RuleMatch, RuntimeDisabledRule,
 };
 use crate::rule::{
-    ConstraintKind, ContextFlowRole, FlowClass, GuardProfile, MatchKind, MatchOrigin, PostSinkPolicy, Rule,
-    RuleKind, RuleTarget, Severity, SourceCallbackArgSemantics,
+    ConstraintKind, ContextFlowRole, FlowClass, GuardProfile, MatchKind, MatchOrigin,
+    PathContainmentGuardSemantics, PostSinkPolicy, Rule, RuleKind, RuleTarget, Severity,
+    SourceCallbackArgSemantics,
 };
 use crate::sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};
 use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
 use bonsai_common::{FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_index::GlobalIndex;
-use bonsai_lang_api::{AssignValueKind, DeclKind, FlowEvent, LanguageRegistry};
+use bonsai_lang_api::{
+    branch_condition_fact_for_span, AssignValueKind, BranchConditionFact, BranchConditionPolarity, DeclKind,
+    FlowEvent, LanguageRegistry,
+};
 use bonsai_taint::{
     apply_configured_transfer_fixpoint, compose_idg_seed_nodes, CallResultPassthrough, CleanOutputOverwrite,
     EntryTaintGraph, IdgSeedRequest, InterTaintCaches, InterTaintConfig, OutputArgFlow,
@@ -74,8 +78,8 @@ use guard_sanitizers::{
     go_xml_decoder_hardening_sanitizer, guarded_char_append_allowlist_sanitizer,
     java_local_html_escape_helper_return_sanitizer, java_url_ssrf_guard_sanitizer,
     js_ts_local_html_escape_helper_sanitizer, local_ldap_escape_helper_sanitizer,
-    nosql_eq_filter_wrapper_sanitizer, python_compiled_regex_guard_sanitizer,
-    python_lxml_parser_keyword_sanitizer, python_realpath_containment_guard_sanitizer,
+    nosql_eq_filter_wrapper_sanitizer, path_containment_guard_sanitizer,
+    python_compiled_regex_guard_sanitizer, python_lxml_parser_keyword_sanitizer,
     python_url_ssrf_guard_sanitizer, source_sink_pair_is_low_signal,
 };
 use prototype_guard::prototype_pollution_sink_is_guarded;
@@ -7752,6 +7756,7 @@ fn assignment_sources_include_any(
 
 fn sanitizer_guard_feeds_sink_arg(
     ws: &Workspace,
+    pack: &Rulepack,
     sanitizer_func: FuncId,
     sanitizer_rule: Option<&Rule>,
     san: &RuleMatch,
@@ -7788,6 +7793,7 @@ fn sanitizer_guard_feeds_sink_arg(
     if target_keys.iter().any(|target| guarded_set.contains(target)) {
         return true;
     }
+    let receiver_mutation_targets = pack.receiver_mutation_targets(&snk.language);
     guarded_variable_feeds_sink_target_in_events(
         &decl.flow_events,
         san.span,
@@ -7800,6 +7806,7 @@ fn sanitizer_guard_feeds_sink_arg(
         snk.span,
         &guarded_set,
         &target_keys,
+        receiver_mutation_targets,
     )
 }
 
@@ -7975,6 +7982,7 @@ fn guarded_variable_flows_into_receiver_before_sink(
     sink_span: Span,
     guarded: &AHashSet<String>,
     receiver_targets: &AHashSet<String>,
+    receiver_mutation_targets: &[RuleTarget],
 ) -> bool {
     for event in events {
         match event {
@@ -7982,6 +7990,7 @@ fn guarded_variable_flows_into_receiver_before_sink(
                 span,
                 name,
                 receiver,
+                receiver_types,
                 args,
                 ..
             } if span.file == sink_span.file
@@ -7991,7 +8000,11 @@ fn guarded_variable_flows_into_receiver_before_sink(
                 let Some(receiver) = receiver.as_deref().and_then(clean_overwrite_target_key) else {
                     continue;
                 };
-                if !receiver_targets.contains(&receiver) || !name.ends_with("setLocation") {
+                if !receiver_targets.contains(&receiver)
+                    || !receiver_mutation_targets
+                        .iter()
+                        .any(|target| rule_target_matches_call(name, receiver_types, target))
+                {
                     continue;
                 }
                 if args.iter().any(|arg| {
@@ -8013,12 +8026,14 @@ fn guarded_variable_flows_into_receiver_before_sink(
                     sink_span,
                     guarded,
                     receiver_targets,
+                    receiver_mutation_targets,
                 ) || guarded_variable_flows_into_receiver_before_sink(
                     else_events,
                     guard_span,
                     sink_span,
                     guarded,
                     receiver_targets,
+                    receiver_mutation_targets,
                 ) {
                     return true;
                 }
@@ -8030,6 +8045,7 @@ fn guarded_variable_flows_into_receiver_before_sink(
                     sink_span,
                     guarded,
                     receiver_targets,
+                    receiver_mutation_targets,
                 ) {
                     return true;
                 }
@@ -8046,18 +8062,21 @@ fn guarded_variable_flows_into_receiver_before_sink(
                     sink_span,
                     guarded,
                     receiver_targets,
+                    receiver_mutation_targets,
                 ) || guarded_variable_flows_into_receiver_before_sink(
                     catch_events,
                     guard_span,
                     sink_span,
                     guarded,
                     receiver_targets,
+                    receiver_mutation_targets,
                 ) || guarded_variable_flows_into_receiver_before_sink(
                     finally_events,
                     guard_span,
                     sink_span,
                     guarded,
                     receiver_targets,
+                    receiver_mutation_targets,
                 ) {
                     return true;
                 }
@@ -9356,6 +9375,7 @@ mod source_seed_tests {
             assignment_values: Vec::new(),
             call_receivers: Vec::new(),
             runtime_type_narrowings: Vec::new(),
+            branch_conditions: Vec::new(),
             aggregate_layouts: Vec::new(),
             strings: Vec::new(),
             comments: Vec::new(),

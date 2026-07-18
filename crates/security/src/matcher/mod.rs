@@ -5805,6 +5805,46 @@ fn callee_matches_with_receiver_types(
     attribute.is_some_and(|attr| receiver_type_attribute_matches(callee, receiver_types, attr))
 }
 
+/// Match an adapter-emitted call against a rulepack-owned callable target.
+/// This is shared by the ordinary rule matcher and structured guard proofs so
+/// analysis helpers never grow their own API-name comparisons.
+pub(crate) fn rule_target_matches_call(callee: &str, receiver_types: &[String], target: &RuleTarget) -> bool {
+    if target.annotation.is_some()
+        || !target.in_class.is_empty()
+        || !target.in_method.is_empty()
+        || !target.in_method_prefix.is_empty()
+        || !target.param_index_in.is_empty()
+        || !target.base_param_index_in.is_empty()
+        || !target.decl_kind_in.is_empty()
+        || !target.visibility_in.is_empty()
+    {
+        // This helper has call facts but no declaration context. Contextual
+        // constraints must fail closed instead of being silently ignored.
+        return false;
+    }
+    let base_name_allowed = match_base_name(callee).map_or(target.base_name_in.is_empty(), |base| {
+        (target.base_name_in.is_empty() || target.base_name_in.iter().any(|wanted| wanted == base))
+            && !target.base_name_not_in.iter().any(|blocked| blocked == base)
+    });
+    if !base_name_allowed
+        || (!target.receiver_type_in.is_empty()
+            && !receiver_type_matches_any(receiver_types, &target.receiver_type_in))
+    {
+        return false;
+    }
+    let regex = target
+        .regex
+        .as_deref()
+        .and_then(|pattern| Regex::new(pattern).ok());
+    callee_matches_with_receiver_types(
+        callee,
+        receiver_types,
+        target.name.as_deref(),
+        target.attribute.as_ref(),
+        regex.as_ref(),
+    )
+}
+
 fn receiver_type_attribute_matches(callee: &str, receiver_types: &[String], attr: &[String]) -> bool {
     if receiver_types.is_empty() || attr.len() < 2 {
         return false;

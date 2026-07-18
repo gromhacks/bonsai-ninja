@@ -18,22 +18,24 @@ pub use kit::{
     apply_local_closure_captures, apply_module_path_semantic_identity, c_family_preproc_imports,
     collect_assign_targets, collect_constructor_result_type_aliases, collect_modifier_visibility,
     collect_param_type_aliases, decl_index_with_handler, extend_alias_map_with_flow_events,
-    extract_assignment_value_facts, extract_call_receiver_facts, extract_imports_via,
-    extract_runtime_type_narrowing_facts, inject_lifecycle_events, normalize_call_result_assignment_sources,
-    populate_decl_return_types, rewrite_implicit_member_reads, with_fn_kinds, AliasTarget, GrammarHandler,
-    ImplicitMemberReadCall, LifecycleTransition, ModifierVocabulary, SyntaxSpecialForm, TypeAliasVocabulary,
-    GENERIC_HANDLER, WILDCARD_IMPORT_ALIAS_PREFIX,
+    extract_assignment_value_facts, extract_branch_condition_facts, extract_call_receiver_facts,
+    extract_imports_via, extract_runtime_type_narrowing_facts, inject_lifecycle_events,
+    normalize_call_result_assignment_sources, populate_decl_return_types, rewrite_implicit_member_reads,
+    with_fn_kinds, AliasTarget, GrammarHandler, ImplicitMemberReadCall, LifecycleTransition,
+    ModifierVocabulary, SyntaxSpecialForm, TypeAliasVocabulary, GENERIC_HANDLER,
+    WILDCARD_IMPORT_ALIAS_PREFIX,
 };
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};
 pub use types::{
-    assignment_value_fact_for_span, assignment_value_rendering, call_receiver_fact_for_span,
-    operations_from_flow_events, AggregateLayout, ArgumentPassingMode, AssignValueKind, AssignmentValueFact,
-    AssignmentValueIndex, CallArg, CallKind, CallReceiverFact, Comment, CommentKind, Decl, DeclIndex,
-    DeclKind, ExpressionField, ExpressionFlow, ExpressionProjection, FieldWrite, FlowEvent, ImportIndex,
-    ImportScope, ImportSpec, LanguageId, LoopKind, ModulePath, Operation, OperationKind, OperationOperand,
-    OperationOperandRole, Ref, RefKind, RuntimeTypeNarrowingFact, StringCategory, StringLiteral,
-    TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
+    assignment_value_fact_for_span, assignment_value_rendering, branch_condition_fact_for_span,
+    call_receiver_fact_for_span, operations_from_flow_events, AggregateLayout, ArgumentPassingMode,
+    AssignValueKind, AssignmentValueFact, AssignmentValueIndex, BranchConditionFact, BranchConditionPolarity,
+    CallArg, CallKind, CallReceiverFact, Comment, CommentKind, Decl, DeclIndex, DeclKind, ExpressionField,
+    ExpressionFlow, ExpressionProjection, FieldWrite, FlowEvent, ImportIndex, ImportScope, ImportSpec,
+    LanguageId, LoopKind, ModulePath, Operation, OperationKind, OperationOperand, OperationOperandRole, Ref,
+    RefKind, RuntimeTypeNarrowingFact, StringCategory, StringLiteral, TypeAliasBinding, UnsupportedConstruct,
+    Visibility, WorkspaceRoot,
 };
 
 use bonsai_common::FileId;

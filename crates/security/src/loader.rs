@@ -51,11 +51,11 @@ impl LanguagePack {
 ///
 /// **Mutation invariant**: any code that pushes to / removes from
 /// `packs` (or any nested `LanguagePack` rule vector) MUST clear
-/// the lazy `by_id` cache via `self.by_id = OnceLock::new()`. The
+/// the lazy `by_id` and compiled receiver-mutation caches. The
 /// `pub` field is preserved for ergonomic read access; mutation
 /// goes through `merge_overriding` (or any future helper) which
 /// resets the cache. External callers performing in-place mutation
-/// without clearing the cache will get stale lookup results.
+/// without clearing the caches will get stale semantic results.
 #[derive(Debug)]
 pub struct Rulepack {
     pub packs: AHashMap<String, LanguagePack>,
@@ -76,6 +76,10 @@ pub struct Rulepack {
     /// keys. Built lazily because broad conformance runs invoke taint
     /// analysis many times against the same immutable pack.
     pub(crate) taint_graph_rule_content_fingerprint: std::sync::OnceLock<u64>,
+    /// Per-language receiver-mutating call targets compiled from
+    /// `taint_receiver_from_args`. Guard proofs query this hot path per
+    /// finding, so rules are indexed once instead of rescanned repeatedly.
+    receiver_mutation_targets: std::sync::OnceLock<AHashMap<String, Vec<crate::rule::RuleTarget>>>,
 }
 
 impl Default for Rulepack {
@@ -85,6 +89,7 @@ impl Default for Rulepack {
             root: PathBuf::new(),
             by_id: std::sync::OnceLock::new(),
             taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
+            receiver_mutation_targets: std::sync::OnceLock::new(),
         }
     }
 }
@@ -109,6 +114,7 @@ impl Clone for Rulepack {
             root: self.root.clone(),
             by_id: std::sync::OnceLock::new(),
             taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
+            receiver_mutation_targets: std::sync::OnceLock::new(),
         }
     }
 }
@@ -122,6 +128,37 @@ impl Rulepack {
             all.extend(pack.all_rules());
         }
         all
+    }
+
+    /// Rulepack-owned call targets whose arguments mutate their receiver.
+    /// Built lazily and retained as an immutable semantic index for the life
+    /// of this pack.
+    pub(crate) fn receiver_mutation_targets(&self, language: &str) -> &[crate::rule::RuleTarget] {
+        self.receiver_mutation_targets
+            .get_or_init(|| {
+                self.packs
+                    .iter()
+                    .map(|(language, pack)| {
+                        let targets = pack
+                            .sinks
+                            .iter()
+                            .chain(&pack.typing)
+                            .filter(|rule| {
+                                rule.enabled
+                                    && rule
+                                        .taint_semantics
+                                        .as_ref()
+                                        .is_some_and(|semantics| semantics.taint_receiver_from_args)
+                            })
+                            .filter_map(|rule| rule.match_spec.callee.clone())
+                            .collect();
+                        (language.clone(), targets)
+                    })
+                    .collect()
+            })
+            .get(language)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// O(1) rule-id lookup. The first call builds a flat
@@ -205,6 +242,7 @@ impl Rulepack {
         // Reset the lazy `id → locator` cache so a future
         // `find_rule_by_id` rebuilds against the merged set.
         self.by_id = std::sync::OnceLock::new();
+        self.receiver_mutation_targets = std::sync::OnceLock::new();
         overridden
     }
 }
@@ -245,6 +283,7 @@ pub fn load_workspace_local_rules(workspace: &Path) -> Result<Option<Rulepack>, 
         root: local_root.clone(),
         by_id: std::sync::OnceLock::new(),
         taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
+        receiver_mutation_targets: std::sync::OnceLock::new(),
     };
     let entries = read_dir(&local_root)?;
     for entry in entries {
@@ -386,6 +425,7 @@ pub fn load_rulepack(root: &Path) -> Result<Rulepack, LoadError> {
         root: root.to_path_buf(),
         by_id: std::sync::OnceLock::new(),
         taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
+        receiver_mutation_targets: std::sync::OnceLock::new(),
     };
     let langs_dir = root.join("langs");
     if langs_dir.exists() {

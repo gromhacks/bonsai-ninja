@@ -44,6 +44,7 @@ fn len_and_empty_track_live_decls_after_removal() {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
     });
 
     assert_eq!(index.len(), 2);
@@ -70,6 +71,7 @@ fn insert_dedupes_identical_adapter_declarations() {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
     });
 
     assert_eq!(index.len(), 1);
@@ -118,6 +120,7 @@ fn insert_merges_duplicate_declaration_facts() {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
     });
 
     let decl = index
@@ -152,6 +155,7 @@ fn reinserting_file_replaces_name_lookup_entries() {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
     });
     index.insert(DeclIndex {
         file,
@@ -163,6 +167,7 @@ fn reinserting_file_replaces_name_lookup_entries() {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
     });
 
     assert_eq!(index.len(), 1);

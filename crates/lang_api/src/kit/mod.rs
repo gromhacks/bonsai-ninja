@@ -51,6 +51,7 @@
 //! `COMMON_CALL_KINDS`) and `pub` re-exports stay at the top level.
 
 mod bindings;
+mod branch_conditions;
 mod branch_repair;
 mod call_results;
 mod comments;
@@ -78,6 +79,7 @@ use bindings::{
     extract_elixir_case_stab_clause_bindings, extract_foreach_binding_assigns, extract_match_binding_assigns,
     extract_rust_let_condition_bindings, pattern_binding_assign,
 };
+pub use branch_conditions::extract_branch_condition_facts;
 pub use call_results::normalize_call_result_assignment_sources;
 pub use comments::extract_comments;
 pub use decorators::extract_decorators;
@@ -5003,6 +5005,7 @@ pub fn decl_index_with_handler(
     let assignment_values = extract_assignment_value_facts(&tree, file, handler, src);
     let call_receivers = extract_call_receiver_facts(&tree, file, handler, src);
     let runtime_type_narrowings = extract_runtime_type_narrowing_facts(&tree, file, handler, src);
+    let branch_conditions = extract_branch_condition_facts(&tree, file, handler, src);
     crate::DeclIndex {
         file,
         defs,
@@ -5010,6 +5013,7 @@ pub fn decl_index_with_handler(
         assignment_values,
         call_receivers,
         runtime_type_narrowings,
+        branch_conditions,
         aggregate_layouts: Vec::new(),
         strings,
         comments,

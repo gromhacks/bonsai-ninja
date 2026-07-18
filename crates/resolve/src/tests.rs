@@ -67,6 +67,7 @@ fn insert_one(global: &mut GlobalIndex, file: FileId, decl: Decl) {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
     });
 }
 
@@ -319,6 +320,7 @@ fn static_member_resolution_accepts_enum_receivers_in_same_module() {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
     });
 
     let mut sibling_enum = decl(sibling_file, DeclKind::Enum, "Executor", &["copy_1"], 10);
@@ -338,6 +340,7 @@ fn static_member_resolution_accepts_enum_receivers_in_same_module() {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
     });
 
     let caller_module = ModulePath::from_segments(["copy_0"]);
@@ -679,6 +682,7 @@ fn class_resolution_rewrites_alias_map() {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
     });
 
     let caller_module = ModulePath::from_segments(["pkg"]);
@@ -719,6 +723,7 @@ fn type_alias_member_call_does_not_fall_back_to_bare_method() {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
     });
 
     let caller_module = ModulePath::from_segments(["app"]);
