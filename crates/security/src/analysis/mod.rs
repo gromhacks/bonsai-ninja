@@ -1332,6 +1332,470 @@ where
     })
 }
 
+struct SourceGraphJob {
+    source_match: FindingMatch,
+    start: FuncId,
+    seeds: TokenSet,
+    anchor: Option<Span>,
+    output_arg_names: Vec<String>,
+    graph_key: Vec<String>,
+}
+
+struct SourceGraphGroup {
+    first_index: usize,
+    start: FuncId,
+    graph_key: Vec<String>,
+    lineage_funcs: Option<AHashSet<FuncId>>,
+    jobs: Vec<SourceGraphJob>,
+}
+
+struct SourceHitForFunction<'a> {
+    index: usize,
+    hit: &'a RuleMatch,
+    source_match: FindingMatch,
+}
+
+fn schedule_source_graph_groups(
+    ws: &Workspace,
+    pack: &Rulepack,
+    global: &GlobalIndex,
+    source_hits: &[RuleMatch],
+) -> (Vec<SourceGraphGroup>, usize) {
+    let mut hits_by_func: AHashMap<FuncId, Vec<SourceHitForFunction<'_>>> = AHashMap::new();
+    for (index, hit) in source_hits.iter().enumerate() {
+        let Some(source_match) = source_finding_match(hit, pack) else {
+            continue;
+        };
+        let Some(start) = func_id_for_match(ws, hit) else {
+            continue;
+        };
+        hits_by_func.entry(start).or_default().push(SourceHitForFunction {
+            index,
+            hit,
+            source_match,
+        });
+    }
+
+    let mut hits_by_func: Vec<_> = hits_by_func.into_iter().collect();
+    hits_by_func.sort_by_key(|(_, hits)| hits.first().map(|hit| hit.index).unwrap_or(usize::MAX));
+    let source_function_count = hits_by_func.len();
+
+    let mut source_jobs = Vec::new();
+    for (start, hits) in hits_by_func {
+        let Some(decl) = global.decl_of(SymbolId::new(start.raw())) else {
+            continue;
+        };
+        for hit in hits {
+            let seeds = source_seed_set(pack, hit.hit, decl);
+            let output_arg_names = output_arg_names_for_match(pack, hit.hit, decl);
+            let anchor = source_anchor_for_rule_match(pack, hit.hit);
+            let graph_key = sorted_seed_key_with_anchor(&seeds, anchor, &output_arg_names);
+            source_jobs.push((
+                hit.index,
+                SourceGraphJob {
+                    source_match: hit.source_match,
+                    start,
+                    seeds,
+                    anchor,
+                    output_arg_names,
+                    graph_key,
+                },
+            ));
+        }
+    }
+    source_jobs.sort_by_key(|(index, _)| *index);
+
+    let mut source_groups: Vec<SourceGraphGroup> = Vec::new();
+    let mut group_by_key: AHashMap<(FuncId, Vec<String>), usize> = AHashMap::new();
+    for (index, job) in source_jobs {
+        let group_key = (job.start, job.graph_key.clone());
+        if let Some(&group_index) = group_by_key.get(&group_key) {
+            source_groups[group_index].jobs.push(job);
+        } else {
+            let group_index = source_groups.len();
+            group_by_key.insert(group_key, group_index);
+            source_groups.push(SourceGraphGroup {
+                first_index: index,
+                start: job.start,
+                graph_key: job.graph_key.clone(),
+                lineage_funcs: None,
+                jobs: vec![job],
+            });
+        }
+    }
+    source_groups.sort_by_key(|group| group.first_index);
+    (source_groups, source_function_count)
+}
+
+struct SourceLineageCompilationContext<'a> {
+    ws: &'a Workspace,
+    pack: &'a Rulepack,
+    global: &'a GlobalIndex,
+    transfer_languages: &'a AHashSet<String>,
+    graph_config: &'a InterTaintConfig,
+    transfer_options: &'a bonsai_idg::TransferOptions,
+    caches: &'a InterTaintCaches,
+}
+
+struct SourceLineageScope {
+    idg: Option<Arc<bonsai_idg::IdgQueryService>>,
+    resolution: Option<ResolutionCoverage>,
+}
+
+fn compile_source_lineage_scope<F>(
+    context: &SourceLineageCompilationContext<'_>,
+    source_groups: &mut [SourceGraphGroup],
+    on_progress: &mut F,
+) -> SourceLineageScope
+where
+    F: FnMut(AnalysisProgress),
+{
+    if source_groups.is_empty() {
+        let fingerprint = taint_cache::scoped_config_fingerprint(
+            context.pack,
+            "source-analysis",
+            context.graph_config.max_edge_precision,
+            &[],
+            &[],
+            context.transfer_options.semantic_fingerprint(),
+        );
+        let cache_report = taint_cache::prepare_workspace_cache(context.ws, "source-analysis", fingerprint);
+        on_progress(AnalysisProgress::Note {
+            label: "taint-cache",
+            detail: cache_report.detail(),
+        });
+        return SourceLineageScope {
+            idg: None,
+            resolution: None,
+        };
+    }
+
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "building source lineage scope",
+        total: source_groups.len() as u64 + 2,
+    });
+    let mut source_starts: Vec<FuncId> = source_groups.iter().map(|group| group.start).collect();
+    source_starts.sort_by_key(|func| func.raw());
+    source_starts.dedup();
+    let reachable_call_graph = context.ws.source_reachable_resolved_call_graph(
+        &source_starts,
+        &[],
+        context.graph_config.max_edge_precision,
+    );
+    let source_call_graph = reachable_call_graph.graph;
+    let resolution = ResolutionCoverage::from_graph(source_call_graph.as_ref(), reachable_call_graph.funcs);
+    context
+        .caches
+        .seed_resolved_call_graph(source_call_graph.as_ref());
+    on_progress(AnalysisProgress::PhaseTicked);
+
+    let mut scoped_func_set: AHashSet<FuncId> = AHashSet::default();
+    let mut lineage_scope_by_start: AHashMap<FuncId, AHashSet<FuncId>> = AHashMap::default();
+    for group in source_groups {
+        let source_lineage_funcs = lineage_scope_by_start
+            .entry(group.start)
+            .or_insert_with(|| {
+                source_analysis_lineage_func_scope(
+                    group.start,
+                    context.global,
+                    source_call_graph.as_ref(),
+                    context.graph_config.max_edge_precision,
+                )
+            })
+            .clone();
+        append_taint_target_key(
+            &mut group.graph_key,
+            "source_lineage",
+            Some(&source_lineage_funcs),
+        );
+        scoped_func_set.extend(source_lineage_funcs.iter().copied());
+        group.lineage_funcs = Some(source_lineage_funcs);
+        on_progress(AnalysisProgress::PhaseTicked);
+    }
+
+    let mut scoped_funcs: Vec<FuncId> = scoped_func_set.into_iter().collect();
+    scoped_funcs.sort_by_key(|func| func.raw());
+    scoped_funcs.dedup();
+    let mut scoped_files: Vec<FileId> = scoped_funcs
+        .iter()
+        .filter_map(|func| context.global.declaring_file(SymbolId::new(func.raw())))
+        .collect();
+    scoped_files.sort_by_key(|file| file.raw());
+    scoped_files.dedup();
+    let fingerprint = taint_cache::scoped_config_fingerprint(
+        context.pack,
+        "source-analysis",
+        context.graph_config.max_edge_precision,
+        &scoped_files,
+        &scoped_funcs,
+        context.transfer_options.semantic_fingerprint(),
+    );
+    let cache_report = taint_cache::prepare_workspace_cache(context.ws, "source-analysis", fingerprint);
+    on_progress(AnalysisProgress::Note {
+        label: "taint-cache",
+        detail: cache_report.detail(),
+    });
+    ensure_workspace_files_indexed(context.ws, &scoped_files);
+    let idg = seed_idg_service_for_rulepack_for_files(
+        context.ws,
+        context.pack,
+        context.transfer_languages,
+        &scoped_files,
+        &scoped_funcs,
+        source_call_graph.as_ref(),
+    );
+    on_progress(AnalysisProgress::PhaseTicked);
+    on_progress(AnalysisProgress::PhaseFinished);
+    SourceLineageScope {
+        idg: Some(idg),
+        resolution: Some(resolution),
+    }
+}
+
+struct SourceLineageEnumerationContext<'a> {
+    ws: &'a Workspace,
+    idg: Option<&'a bonsai_idg::IdgQueryService>,
+    graph_config: &'a InterTaintConfig,
+    caches: &'a InterTaintCaches,
+    lineage_limits: SourceLineageLimits,
+}
+
+fn build_source_group_candidates(
+    context: &SourceLineageEnumerationContext<'_>,
+    group: &SourceGraphGroup,
+) -> Vec<SourceAnalysisCandidate> {
+    let idg = context
+        .idg
+        .expect("source graph groups require their explicitly scoped IDG");
+    let graph = context
+        .ws
+        .taint_index()
+        .get(group.start, &group.graph_key)
+        .unwrap_or_else(|| {
+            let first = &group.jobs[0];
+            let graph = Arc::new(bonsai_taint::entry_taint_call_records_from_idg_query(
+                bonsai_taint::IdgTaintQuery::semantic(
+                    bonsai_taint::IdgTaintSource::rule_match(
+                        group.start,
+                        &first.seeds,
+                        first.anchor,
+                        &first.output_arg_names,
+                    ),
+                    context.ws.db(),
+                    idg,
+                )
+                .with_transfers(bonsai_taint::IdgTaintTransfers {
+                    call_result_passthroughs: &context.graph_config.call_result_passthroughs,
+                    call_results_materialized: true,
+                    ..bonsai_taint::IdgTaintTransfers::none()
+                })
+                .with_targets(bonsai_taint::IdgTaintTargets {
+                    nodes: None,
+                    funcs: group.lineage_funcs.as_ref(),
+                    lineage_funcs: group.lineage_funcs.as_ref(),
+                })
+                .with_max_precision(context.graph_config.max_edge_precision)
+                .with_caches(context.caches),
+            ));
+            context
+                .ws
+                .taint_index()
+                .insert_if_absent(group.start, group.graph_key.clone(), graph)
+        });
+
+    let mut candidates = Vec::new();
+    for job in &group.jobs {
+        let mut seen_chains: AHashSet<Vec<String>> = AHashSet::new();
+        let (lineages, lineage_stats) = collect_tainted_source_lineages(
+            &graph.call_records,
+            job.start,
+            context.lineage_limits.max_hops,
+            context.lineage_limits.max_paths,
+        );
+        let mut emitted_lineage_rows = 0usize;
+        for emission in &lineages {
+            let terminal = emission
+                .records
+                .last()
+                .map(|record| record.callee)
+                .unwrap_or(job.start);
+            let Some(path) = chain_funcs_for_lineage(&emission.records, job.start, terminal) else {
+                continue;
+            };
+            let Some(chain_names) = chain_names_for_path(context.ws, &path) else {
+                continue;
+            };
+            if !seen_chains.insert(chain_names.clone()) {
+                continue;
+            }
+            let taint_path = taint_path_for_lineage(context.ws, &emission.records, None);
+            let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
+            let precision = chain_precision_for_records(&emission.records);
+            if !precision.is_semantic() {
+                continue;
+            }
+            candidates.push(SourceAnalysisCandidate {
+                source: job.source_match.clone(),
+                path,
+                flow_id,
+                chain_names,
+                taint_path,
+                precision,
+                lineage: SourceLineageStatus::from_lineage(emission, lineage_stats, emitted_lineage_rows),
+            });
+            emitted_lineage_rows = emitted_lineage_rows.saturating_add(1);
+        }
+        if lineages.is_empty() {
+            let path = vec![job.start];
+            let Some(chain_names) = chain_names_for_path(context.ws, &path) else {
+                continue;
+            };
+            let taint_path = Vec::new();
+            let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
+            candidates.push(SourceAnalysisCandidate {
+                source: job.source_match.clone(),
+                path,
+                flow_id,
+                chain_names,
+                taint_path,
+                precision: Precision::Exact,
+                lineage: SourceLineageStatus::complete(),
+            });
+        }
+    }
+    candidates
+}
+
+fn canonicalize_source_candidates(
+    parallel_candidates: Vec<SourceAnalysisCandidate>,
+) -> Vec<SourceAnalysisCandidate> {
+    // Key on the rendered identity `(source-site, displayed-chain)`, not
+    // `flow_id`: path detail that is not displayed must not create duplicate
+    // report rows. The first call-graph-ordered candidate remains canonical.
+    let mut seen: AHashMap<(String, String, u32, u32, String), usize> = AHashMap::new();
+    let mut candidates: Vec<SourceAnalysisCandidate> = Vec::with_capacity(parallel_candidates.len());
+    for candidate in parallel_candidates {
+        let dedupe_key = (
+            candidate.source.rule_id.clone(),
+            candidate.source.file.clone(),
+            candidate.source.line,
+            candidate.source.column,
+            displayed_chain_key(&candidate.chain_names),
+        );
+        if let Some(&index) = seen.get(&dedupe_key) {
+            merge_source_lineage_status(&mut candidates[index].lineage, candidate.lineage);
+            candidates[index].precision = candidates[index].precision.meet(candidate.precision);
+        } else {
+            let index = candidates.len();
+            seen.insert(dedupe_key, index);
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+fn enumerate_source_candidates<F>(
+    context: &SourceLineageEnumerationContext<'_>,
+    source_groups: &[SourceGraphGroup],
+    total_source_path_ticks: usize,
+    on_progress: &mut F,
+) -> Vec<SourceAnalysisCandidate>
+where
+    F: FnMut(AnalysisProgress),
+{
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "enumerating source paths",
+        total: total_source_path_ticks as u64,
+    });
+    use rayon::prelude::*;
+    let worker_count = source_analysis_worker_count();
+    let mut grouped_candidates: Vec<(usize, Vec<SourceAnalysisCandidate>)> =
+        if worker_count > 1 && source_groups.len() > 1 {
+            match rayon::ThreadPoolBuilder::new().num_threads(worker_count).build() {
+                Ok(pool) => {
+                    let (tx, rx) = mpsc::channel();
+                    let mut groups = None;
+                    std::thread::scope(|scope| {
+                        let worker = scope.spawn(|| {
+                            pool.install(|| {
+                                source_groups
+                                    .par_iter()
+                                    .enumerate()
+                                    .map(|(index, group)| {
+                                        let candidates = build_source_group_candidates(context, group);
+                                        let _ = tx.send(group.jobs.len());
+                                        (index, candidates)
+                                    })
+                                    .collect()
+                            })
+                        });
+                        let mut completed = 0usize;
+                        while completed < total_source_path_ticks {
+                            match rx.recv_timeout(Duration::from_millis(250)) {
+                                Ok(ticks) => {
+                                    for _ in 0..ticks {
+                                        completed = completed.saturating_add(1);
+                                        on_progress(AnalysisProgress::PhaseTicked);
+                                    }
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    if worker.is_finished() {
+                                        break;
+                                    }
+                                }
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                        groups = Some(match worker.join() {
+                            Ok(result) => result,
+                            Err(payload) => std::panic::resume_unwind(payload),
+                        });
+                        while completed < total_source_path_ticks {
+                            on_progress(AnalysisProgress::PhaseTicked);
+                            completed += 1;
+                        }
+                    });
+                    groups.unwrap_or_default()
+                }
+                Err(_) => source_groups
+                    .iter()
+                    .enumerate()
+                    .map(|(index, group)| {
+                        let candidates = build_source_group_candidates(context, group);
+                        for _ in 0..group.jobs.len() {
+                            on_progress(AnalysisProgress::PhaseTicked);
+                        }
+                        (index, candidates)
+                    })
+                    .collect(),
+            }
+        } else {
+            source_groups
+                .iter()
+                .enumerate()
+                .map(|(index, group)| {
+                    let candidates = build_source_group_candidates(context, group);
+                    for _ in 0..group.jobs.len() {
+                        on_progress(AnalysisProgress::PhaseTicked);
+                    }
+                    (index, candidates)
+                })
+                .collect()
+        };
+    grouped_candidates.sort_by_key(|(index, _)| *index);
+    let parallel_candidates = grouped_candidates
+        .into_iter()
+        .flat_map(|(_, candidates)| candidates)
+        .collect();
+    let candidates = canonicalize_source_candidates(parallel_candidates);
+    let emitted_ticks: usize = source_groups.iter().map(|group| group.jobs.len()).sum();
+    for _ in emitted_ticks..total_source_path_ticks {
+        on_progress(AnalysisProgress::PhaseTicked);
+    }
+    on_progress(AnalysisProgress::PhaseFinished);
+    candidates
+}
+
 /// Phase-aware variant of [`run_source_analysis_with_progress`].
 pub fn run_source_analysis_with_phase_progress<F>(
     ws: &Workspace,
@@ -1464,7 +1928,6 @@ where
     // default-on so repeated CLI runs can stay warm; set
     // `BONSAI_TAINT_GRAPH_PERSIST=0` to disable the performance
     // artifact without changing analysis results.
-    let workspace_taint_index = ws.taint_index();
     let source_graph_caches = ws.inter_taint_caches();
     let mut source_idg_transfer_options = idg_transfer_options_from_rulepack_shapes(
         &source_graph_config.clean_output_overwrites,
@@ -1475,88 +1938,8 @@ where
     );
     source_idg_transfer_options.call_result_passthroughs =
         idg_call_result_passthrough_specs(&source_graph_config.call_result_passthroughs);
-    struct SourceGraphJob {
-        source_match: FindingMatch,
-        start: FuncId,
-        seeds: TokenSet,
-        anchor: Option<Span>,
-        output_arg_names: Vec<String>,
-        graph_key: Vec<String>,
-    }
-    struct SourceGraphGroup {
-        first_index: usize,
-        start: FuncId,
-        graph_key: Vec<String>,
-        lineage_funcs: Option<AHashSet<FuncId>>,
-        jobs: Vec<SourceGraphJob>,
-    }
-    struct SourceHitForFunction<'a> {
-        index: usize,
-        hit: &'a RuleMatch,
-        source_match: FindingMatch,
-    }
-    let mut hits_by_func: AHashMap<FuncId, Vec<SourceHitForFunction<'_>>> = AHashMap::new();
-    for (idx, hit) in source_hits.iter().enumerate() {
-        let Some(source_match) = source_finding_match(hit, pack) else {
-            continue;
-        };
-        let Some(start) = func_id_for_match(ws, hit) else {
-            continue;
-        };
-        hits_by_func.entry(start).or_default().push(SourceHitForFunction {
-            index: idx,
-            hit,
-            source_match,
-        });
-    }
-    let mut hits_by_func_sorted: Vec<(FuncId, Vec<SourceHitForFunction<'_>>)> =
-        hits_by_func.into_iter().collect();
-    hits_by_func_sorted.sort_by_key(|(_, hits)| hits.first().map(|hit| hit.index).unwrap_or(usize::MAX));
-    let source_function_count = hits_by_func_sorted.len();
-
-    let mut source_jobs: Vec<(usize, SourceGraphJob)> = Vec::new();
-    for (start, hits) in hits_by_func_sorted {
-        let Some(decl) = global.decl_of(SymbolId::new(start.raw())) else {
-            continue;
-        };
-        for hit in hits {
-            let seeds = source_seed_set(pack, hit.hit, decl);
-            let output_arg_names = output_arg_names_for_match(pack, hit.hit, decl);
-            let anchor = source_anchor_for_rule_match(pack, hit.hit);
-            let graph_key = sorted_seed_key_with_anchor(&seeds, anchor, &output_arg_names);
-            source_jobs.push((
-                hit.index,
-                SourceGraphJob {
-                    source_match: hit.source_match,
-                    start,
-                    seeds,
-                    anchor,
-                    output_arg_names,
-                    graph_key,
-                },
-            ));
-        }
-    }
-    source_jobs.sort_by_key(|(idx, _)| *idx);
-    let mut source_groups: Vec<SourceGraphGroup> = Vec::new();
-    let mut group_by_key: AHashMap<(FuncId, Vec<String>), usize> = AHashMap::new();
-    for (idx, job) in source_jobs {
-        let group_key = (job.start, job.graph_key.clone());
-        if let Some(&group_idx) = group_by_key.get(&group_key) {
-            source_groups[group_idx].jobs.push(job);
-        } else {
-            let group_idx = source_groups.len();
-            group_by_key.insert(group_key, group_idx);
-            source_groups.push(SourceGraphGroup {
-                first_index: idx,
-                start: job.start,
-                graph_key: job.graph_key.clone(),
-                lineage_funcs: None,
-                jobs: vec![job],
-            });
-        }
-    }
-    source_groups.sort_by_key(|group| group.first_index);
+    let (mut source_groups, source_function_count) =
+        schedule_source_graph_groups(ws, pack, global.as_ref(), &source_hits);
     on_progress(AnalysisProgress::Note {
         label: "scope",
         detail: format!(
@@ -1566,324 +1949,31 @@ where
             source_function_count
         ),
     });
-    let mut source_resolution = None;
-    let source_idg = if !source_groups.is_empty() {
-        on_progress(AnalysisProgress::PhaseStarted {
-            label: "building source lineage scope",
-            total: source_groups.len() as u64 + 2,
-        });
-        let mut source_starts: Vec<FuncId> = source_groups.iter().map(|group| group.start).collect();
-        source_starts.sort_by_key(|func| func.raw());
-        source_starts.dedup();
-        let reachable_call_graph = ws.source_reachable_resolved_call_graph(
-            &source_starts,
-            &[],
-            source_graph_config.max_edge_precision,
-        );
-        let source_call_graph = reachable_call_graph.graph;
-        source_resolution = Some(ResolutionCoverage::from_graph(
-            source_call_graph.as_ref(),
-            reachable_call_graph.funcs,
-        ));
-        source_graph_caches.seed_resolved_call_graph(source_call_graph.as_ref());
-        on_progress(AnalysisProgress::PhaseTicked);
-        let mut scoped_func_set: AHashSet<FuncId> = AHashSet::default();
-        let mut lineage_scope_by_start: AHashMap<FuncId, AHashSet<FuncId>> = AHashMap::default();
-        for group in &mut source_groups {
-            let source_lineage_funcs = lineage_scope_by_start
-                .entry(group.start)
-                .or_insert_with(|| {
-                    source_analysis_lineage_func_scope(
-                        group.start,
-                        global.as_ref(),
-                        source_call_graph.as_ref(),
-                        source_graph_config.max_edge_precision,
-                    )
-                })
-                .clone();
-            append_taint_target_key(
-                &mut group.graph_key,
-                "source_lineage",
-                Some(&source_lineage_funcs),
-            );
-            scoped_func_set.extend(source_lineage_funcs.iter().copied());
-            group.lineage_funcs = Some(source_lineage_funcs);
-            on_progress(AnalysisProgress::PhaseTicked);
-        }
-        let mut scoped_funcs: Vec<FuncId> = scoped_func_set.into_iter().collect();
-        scoped_funcs.sort_by_key(|func| func.raw());
-        scoped_funcs.dedup();
-        let mut scoped_files: Vec<FileId> = scoped_funcs
-            .iter()
-            .filter_map(|func| global.declaring_file(SymbolId::new(func.raw())))
-            .collect();
-        scoped_files.sort_by_key(|file| file.raw());
-        scoped_files.dedup();
-        let source_graph_fingerprint = taint_cache::scoped_config_fingerprint(
-            pack,
-            "source-analysis",
-            source_graph_config.max_edge_precision,
-            &scoped_files,
-            &scoped_funcs,
-            source_idg_transfer_options.semantic_fingerprint(),
-        );
-        let cache_report =
-            taint_cache::prepare_workspace_cache(ws, "source-analysis", source_graph_fingerprint);
-        on_progress(AnalysisProgress::Note {
-            label: "taint-cache",
-            detail: cache_report.detail(),
-        });
-        ensure_workspace_files_indexed(ws, &scoped_files);
-        let source_idg = seed_idg_service_for_rulepack_for_files(
+    let source_scope = compile_source_lineage_scope(
+        &SourceLineageCompilationContext {
             ws,
             pack,
-            &transfer_languages,
-            &scoped_files,
-            &scoped_funcs,
-            source_call_graph.as_ref(),
-        );
-        on_progress(AnalysisProgress::PhaseTicked);
-        on_progress(AnalysisProgress::PhaseFinished);
-        Some(source_idg)
-    } else {
-        let source_graph_fingerprint = taint_cache::scoped_config_fingerprint(
-            pack,
-            "source-analysis",
-            source_graph_config.max_edge_precision,
-            &[],
-            &[],
-            source_idg_transfer_options.semantic_fingerprint(),
-        );
-        let cache_report =
-            taint_cache::prepare_workspace_cache(ws, "source-analysis", source_graph_fingerprint);
-        on_progress(AnalysisProgress::Note {
-            label: "taint-cache",
-            detail: cache_report.detail(),
-        });
-        None
-    };
-    let total_source_path_ticks = source_hits.len();
-    on_progress(AnalysisProgress::PhaseStarted {
-        label: "enumerating source paths",
-        total: total_source_path_ticks as u64,
-    });
-    let build_group_candidates = |group: &SourceGraphGroup| -> Vec<SourceAnalysisCandidate> {
-        let idg = source_idg
-            .as_deref()
-            .expect("source graph groups require their explicitly scoped IDG");
-        let graph = workspace_taint_index
-            .get(group.start, &group.graph_key)
-            .unwrap_or_else(|| {
-                let first = &group.jobs[0];
-                let graph = Arc::new(bonsai_taint::entry_taint_call_records_from_idg_query(
-                    bonsai_taint::IdgTaintQuery::semantic(
-                        bonsai_taint::IdgTaintSource::rule_match(
-                            group.start,
-                            &first.seeds,
-                            first.anchor,
-                            &first.output_arg_names,
-                        ),
-                        ws.db(),
-                        idg,
-                    )
-                    .with_transfers(bonsai_taint::IdgTaintTransfers {
-                        call_result_passthroughs: &source_graph_config.call_result_passthroughs,
-                        call_results_materialized: true,
-                        ..bonsai_taint::IdgTaintTransfers::none()
-                    })
-                    .with_targets(bonsai_taint::IdgTaintTargets {
-                        nodes: None,
-                        funcs: group.lineage_funcs.as_ref(),
-                        lineage_funcs: group.lineage_funcs.as_ref(),
-                    })
-                    .with_max_precision(source_graph_config.max_edge_precision)
-                    .with_caches(source_graph_caches),
-                ));
-                workspace_taint_index.insert_if_absent(group.start, group.graph_key.clone(), graph)
-            });
-        let mut local: Vec<SourceAnalysisCandidate> = Vec::new();
-        for job in &group.jobs {
-            let mut seen_chains: AHashSet<Vec<String>> = AHashSet::new();
-            let (lineages, lineage_stats) = collect_tainted_source_lineages(
-                &graph.call_records,
-                job.start,
-                options.lineage_limits.max_hops,
-                options.lineage_limits.max_paths,
-            );
-            let mut emitted_lineage_rows = 0usize;
-            for emission in &lineages {
-                let terminal = emission
-                    .records
-                    .last()
-                    .map(|record| record.callee)
-                    .unwrap_or(job.start);
-                let Some(path) = chain_funcs_for_lineage(&emission.records, job.start, terminal) else {
-                    continue;
-                };
-                let Some(chain_names) = chain_names_for_path(ws, &path) else {
-                    continue;
-                };
-                if !seen_chains.insert(chain_names.clone()) {
-                    continue;
-                }
-                let taint_path = taint_path_for_lineage(ws, &emission.records, None);
-                let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
-                let precision = chain_precision_for_records(&emission.records);
-                if !precision.is_semantic() {
-                    continue;
-                }
-                local.push(SourceAnalysisCandidate {
-                    source: job.source_match.clone(),
-                    path,
-                    flow_id,
-                    chain_names,
-                    taint_path,
-                    precision,
-                    lineage: SourceLineageStatus::from_lineage(emission, lineage_stats, emitted_lineage_rows),
-                });
-                emitted_lineage_rows = emitted_lineage_rows.saturating_add(1);
-            }
-            if lineages.is_empty() {
-                let path = vec![job.start];
-                let Some(chain_names) = chain_names_for_path(ws, &path) else {
-                    continue;
-                };
-                let taint_path = Vec::new();
-                let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
-                local.push(SourceAnalysisCandidate {
-                    source: job.source_match.clone(),
-                    path,
-                    flow_id,
-                    chain_names,
-                    taint_path,
-                    precision: Precision::Exact,
-                    lineage: SourceLineageStatus::complete(),
-                });
-                continue;
-            }
-        }
-        local
-    };
-    use rayon::prelude::*;
-    let worker_count = source_analysis_worker_count();
-    let mut grouped_candidates: Vec<(usize, Vec<SourceAnalysisCandidate>)> =
-        if worker_count > 1 && source_groups.len() > 1 {
-            match rayon::ThreadPoolBuilder::new().num_threads(worker_count).build() {
-                Ok(pool) => {
-                    let (tx, rx) = mpsc::channel();
-                    let mut groups = None;
-                    std::thread::scope(|scope| {
-                        let worker = scope.spawn(|| {
-                            pool.install(|| {
-                                source_groups
-                                    .par_iter()
-                                    .enumerate()
-                                    .map(|(idx, group)| {
-                                        let candidates = build_group_candidates(group);
-                                        let _ = tx.send(group.jobs.len());
-                                        (idx, candidates)
-                                    })
-                                    .collect()
-                            })
-                        });
-                        let mut completed = 0usize;
-                        while completed < total_source_path_ticks {
-                            match rx.recv_timeout(Duration::from_millis(250)) {
-                                Ok(ticks) => {
-                                    for _ in 0..ticks {
-                                        completed = completed.saturating_add(1);
-                                        on_progress(AnalysisProgress::PhaseTicked);
-                                    }
-                                }
-                                Err(mpsc::RecvTimeoutError::Timeout) => {
-                                    if worker.is_finished() {
-                                        break;
-                                    }
-                                }
-                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                            }
-                        }
-                        // A panicking worker must surface, not silently yield zero
-                        // findings: `unwrap_or_default()` would turn a crashed scan
-                        // into a clean "nothing found" result. Re-raise the payload
-                        // on the scope thread so the failure is visible.
-                        groups = Some(match worker.join() {
-                            Ok(result) => result,
-                            Err(payload) => std::panic::resume_unwind(payload),
-                        });
-                        while completed < total_source_path_ticks {
-                            on_progress(AnalysisProgress::PhaseTicked);
-                            completed += 1;
-                        }
-                    });
-                    groups.unwrap_or_default()
-                }
-                Err(_) => source_groups
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, group)| {
-                        let candidates = build_group_candidates(group);
-                        for _ in 0..group.jobs.len() {
-                            on_progress(AnalysisProgress::PhaseTicked);
-                        }
-                        (idx, candidates)
-                    })
-                    .collect(),
-            }
-        } else {
-            source_groups
-                .iter()
-                .enumerate()
-                .map(|(idx, group)| {
-                    let candidates = build_group_candidates(group);
-                    for _ in 0..group.jobs.len() {
-                        on_progress(AnalysisProgress::PhaseTicked);
-                    }
-                    (idx, candidates)
-                })
-                .collect()
-        };
-    grouped_candidates.sort_by_key(|(idx, _)| *idx);
-    // Per-group output Vecs are merged at the end; the second
-    // `seen` pass below is a canonicalisation step.
-    let parallel_candidates: Vec<SourceAnalysisCandidate> = grouped_candidates
-        .into_iter()
-        .flat_map(|(_, candidates)| candidates)
-        .collect();
-
-    // Single-threaded canonicalisation: stable first-occurrence dedupe
-    // across the par-collected candidates.
-    //
-    // Key on the rendered identity `(source-site, displayed-chain)`, not
-    // `flow_id` — the flow id carries taint-path detail that never reaches
-    // the panel, so two lineages that render the same chain would be
-    // reported twice. Ambiguous virtual dispatch can emit the same function
-    // set in different internal orders; keeping the first (call-graph
-    // ordered) drops the spurious reversed ordering.
-    let mut seen: AHashMap<(String, String, u32, u32, String), usize> = AHashMap::new();
-    let mut candidates: Vec<SourceAnalysisCandidate> = Vec::with_capacity(parallel_candidates.len());
-    for candidate in parallel_candidates {
-        let dedupe_key = (
-            candidate.source.rule_id.clone(),
-            candidate.source.file.clone(),
-            candidate.source.line,
-            candidate.source.column,
-            displayed_chain_key(&candidate.chain_names),
-        );
-        if let Some(&idx) = seen.get(&dedupe_key) {
-            merge_source_lineage_status(&mut candidates[idx].lineage, candidate.lineage);
-            candidates[idx].precision = candidates[idx].precision.meet(candidate.precision);
-        } else {
-            let idx = candidates.len();
-            seen.insert(dedupe_key, idx);
-            candidates.push(candidate);
-        }
-    }
-    let emitted_source_path_ticks: usize = source_groups.iter().map(|group| group.jobs.len()).sum();
-    for _ in emitted_source_path_ticks..total_source_path_ticks {
-        on_progress(AnalysisProgress::PhaseTicked);
-    }
-    on_progress(AnalysisProgress::PhaseFinished);
+            global: global.as_ref(),
+            transfer_languages: &transfer_languages,
+            graph_config: &source_graph_config,
+            transfer_options: &source_idg_transfer_options,
+            caches: source_graph_caches,
+        },
+        &mut source_groups,
+        &mut on_progress,
+    );
+    let mut candidates = enumerate_source_candidates(
+        &SourceLineageEnumerationContext {
+            ws,
+            idg: source_scope.idg.as_deref(),
+            graph_config: &source_graph_config,
+            caches: source_graph_caches,
+            lineage_limits: options.lineage_limits,
+        },
+        &source_groups,
+        source_hits.len(),
+        &mut on_progress,
+    );
 
     if !options.exclude_files.is_empty() || options.exclude_tests {
         candidates.retain(|candidate| {
@@ -1894,7 +1984,7 @@ where
     let lineage_summary = SourceLineageSummary::from_candidates(&candidates);
     let runtime_disabled_rules = crate::matcher::drain_runtime_disabled_rules();
     let mut analysis_incomplete_reasons: BTreeSet<String> =
-        workspace_analysis_incomplete_reasons(ws, &scan_files, source_resolution.as_ref())
+        workspace_analysis_incomplete_reasons(ws, &scan_files, source_scope.resolution.as_ref())
             .into_iter()
             .collect();
     if unattributed_source_matches > 0 {
