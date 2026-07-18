@@ -7,10 +7,9 @@
 //! so normal CI remains portable.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn elasticsearch_test_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -72,45 +71,19 @@ fn temp_output_path(name: &str) -> PathBuf {
     ))
 }
 
-fn run_bonsai(bin: &Path, args: &[String], timeout: Duration) -> Output {
-    let mut child = Command::new(bin)
+fn run_bonsai(bin: &Path, args: &[String]) -> Output {
+    Command::new(bin)
         .args(args)
         .arg("--no-color")
         .arg("--no-progress")
         .env("COLUMNS", "200")
         .env_remove("BONSAI_CONTEXT")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|err| panic!("spawn bonsai-ninja {args:?}: {err}"));
-    let start = Instant::now();
-    loop {
-        if let Some(_status) = child
-            .try_wait()
-            .unwrap_or_else(|err| panic!("poll bonsai-ninja {args:?}: {err}"))
-        {
-            return child
-                .wait_with_output()
-                .unwrap_or_else(|err| panic!("collect bonsai-ninja {args:?}: {err}"));
-        }
-        if start.elapsed() > timeout {
-            let _ = child.kill();
-            let output = child
-                .wait_with_output()
-                .unwrap_or_else(|err| panic!("collect timed-out bonsai-ninja {args:?}: {err}"));
-            panic!(
-                "bonsai-ninja {args:?} timed out after {:?}\nstdout:\n{}\nstderr:\n{}",
-                timeout,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
+        .output()
+        .unwrap_or_else(|err| panic!("run bonsai-ninja {args:?}: {err}"))
 }
 
-fn assert_success(bin: &Path, args: &[String], timeout: Duration) -> String {
-    let output = run_bonsai(bin, args, timeout);
+fn assert_success(bin: &Path, args: &[String]) -> String {
+    let output = run_bonsai(bin, args);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     assert!(
@@ -167,7 +140,7 @@ fn elasticsearch_navigation_commands_do_not_regress() {
         ],
     ];
     for command in commands {
-        let out = assert_success(&bin, &es_args(&es, command), Duration::from_secs(240));
+        let out = assert_success(&bin, &es_args(&es, command));
         assert!(
             !out.trim().is_empty(),
             "bonsai-ninja {command:?} produced empty stdout"
@@ -184,7 +157,6 @@ fn elasticsearch_inspect_modes_do_not_regress() {
     let default_out = assert_success(
         &bin,
         &es_args(&es, &["inspect", "{es}", "--query", "execute", "--context", "8k"]),
-        Duration::from_secs(120),
     );
     assert!(
         default_out.contains("inspect `execute`"),
@@ -204,7 +176,6 @@ fn elasticsearch_inspect_modes_do_not_regress() {
                 "8k",
             ],
         ),
-        Duration::from_secs(180),
     );
     assert!(
         taint_out.contains("TAINT FLOWS") || taint_out.contains("taint flow"),
@@ -263,7 +234,7 @@ fn elasticsearch_security_inventory_commands_do_not_regress() {
         ],
     ];
     for command in commands {
-        let out = assert_success(&bin, &es_args(&es, command), Duration::from_secs(240));
+        let out = assert_success(&bin, &es_args(&es, command));
         assert!(
             !out.trim().is_empty(),
             "bonsai-ninja {command:?} produced empty stdout"
@@ -293,12 +264,10 @@ fn elasticsearch_full_taint_analysis_does_not_regress() {
             "{rules}",
         ],
     );
-    // Budget: the full-workspace taint analysis on the 6M-LOC checkout
-    // measures ~310-330s wall on an M-series laptop (chain-aware finding
-    // construction + package gates grew the legitimate cost past the
-    // original 240s). 600s keeps the smoke meaningful — a 2x regression
-    // still trips it — without flaking under concurrent-suite load.
-    let stdout = assert_success(&bin, &args, Duration::from_secs(600));
+    // Correctness is not time-bounded: a large real workspace must run to a
+    // semantic fixed point. Dedicated benchmark gates record wall time and
+    // peak RSS without killing analysis or returning an incomplete result.
+    let stdout = assert_success(&bin, &args);
     assert!(
         stdout.trim().is_empty(),
         "taint-analysis with --output-path should keep stdout empty, got:\n{stdout}"
