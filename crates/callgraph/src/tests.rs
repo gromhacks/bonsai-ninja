@@ -2538,6 +2538,29 @@ fn receiver_projected_callable_binding_resolves_receiver_form_invocation() {
 }
 
 #[test]
+fn workspace_alias_index_materializes_module_suffixes() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let mut module_decl = decl(file, 0, "persist", Vec::new());
+    module_decl.module_path = ModulePath::from_segments(["crate", "services", "storage"]);
+    insert_file(&mut global, file, vec![module_decl]);
+
+    let index = WorkspaceAliasIndex::build(&global);
+    for alias in [
+        "crate::services::storage",
+        "services::storage",
+        "services.storage",
+        "storage",
+    ] {
+        assert!(
+            index.contains(alias),
+            "syntax-derived module suffix `{alias}` should be indexed"
+        );
+    }
+    assert!(!index.contains("unrelated"));
+}
+
+#[test]
 fn receiver_projected_callable_binding_resolves_assignment_rhs_invocation() {
     let caller_file = FileId::new(1);
     let mut global = GlobalIndex::new();
