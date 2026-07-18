@@ -12,6 +12,7 @@
 // implementation can evolve without exposing module layout.
 pub(crate) mod assignment;
 pub mod idg_build;
+mod idg_query;
 pub(crate) mod inter;
 pub(crate) mod intra;
 pub(crate) mod reachable;
@@ -21,6 +22,9 @@ pub mod value_flow;
 
 pub use assignment::{assign_chain_taints, target_is_tainted};
 pub use idg_build::{compiler_idg_service, ensure_idg_service};
+pub use idg_query::{
+    IdgReturnQuery, IdgTaintQuery, IdgTaintSeed, IdgTaintSource, IdgTaintTargets, IdgTaintTransfers,
+};
 pub use inter::{
     call_site_receives_taint, call_site_receives_taint_with_caches, function_summary, interprocedural_taint,
     interprocedural_taint_with_caches, CallPropagation, CallResultPassthrough, CleanOutputOverwrite,
@@ -31,18 +35,11 @@ pub use inter::{
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{
     apply_configured_transfer_fixpoint, compose_idg_seed_nodes, default_entry_graph_seed,
-    default_entry_taint_seed, entry_taint_call_records_from_idg,
-    entry_taint_call_records_from_idg_with_max_precision,
-    entry_taint_call_records_from_idg_with_target_filters_and_max_precision,
-    entry_taint_call_records_from_idg_with_target_filters_and_max_precision_and_caches,
-    entry_taint_graph_from_idg, entry_taint_graph_from_idg_with_max_precision,
-    entry_taint_graph_from_idg_with_target_filters_and_max_precision,
-    entry_taint_graph_from_idg_with_target_funcs_and_max_precision,
-    entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision,
-    entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision_and_caches,
+    default_entry_taint_seed, entry_taint_call_records_from_idg, entry_taint_call_records_from_idg_query,
+    entry_taint_graph_from_idg, entry_taint_graph_from_idg_query,
     inspect_entry_taint_graph_from_idg_with_target_funcs, merge_into, name_reachable_through_chain_kinded,
     name_reachable_through_file_kinded, name_reachable_through_func_kinded,
-    source_seed_reaches_return_from_idg, source_seed_reaches_return_from_idg_with_max_precision,
+    source_seed_reaches_return_from_idg, source_seed_reaches_return_from_idg_query,
     taint_facts_and_graph_for_entry, taint_facts_and_graph_for_entry_with_caches, taint_facts_for_entry,
     EntryTaintGraph, FactKind, IdgSeedRequest, KindedTokens, TaintedCallEdge, TokenSet,
 };

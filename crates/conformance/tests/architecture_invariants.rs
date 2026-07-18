@@ -2137,27 +2137,52 @@ fn method_dispatch_does_not_use_span_containment_as_parent_fallback() {
 
 /// Public IDG-backed taint wrappers are evidence-producing APIs, so
 /// they must default to the semantic precision ceiling. Diagnostic
-/// callers can still opt into unscoped reachability through the
-/// explicit `*_with_max_precision(..., None, ...)` functions.
+/// callers can still opt into unscoped reachability through a typed
+/// query request with `with_max_precision(None)`.
 #[test]
 fn public_idg_taint_wrappers_are_semantic_by_default() {
     let root = repo_root();
     let taint_reachable = read(&root.join("crates/taint/src/reachable.rs"));
-    for function in [
-        "source_seed_reaches_return_from_idg",
-        "entry_taint_call_records_from_idg",
-        "entry_taint_graph_from_idg",
+    let taint_query = read(&root.join("crates/taint/src/idg_query.rs"));
+    for (function, constructor) in [
+        ("source_seed_reaches_return_from_idg", "IdgReturnQuery::semantic"),
+        ("entry_taint_call_records_from_idg", "IdgTaintQuery::semantic"),
+        ("entry_taint_graph_from_idg", "IdgTaintQuery::semantic"),
     ] {
         let body = function_body(&taint_reachable, function);
         assert!(
-            body.contains("Some(Precision::Narrowed)"),
-            "{function} must cap default IDG reachability at Precision::Narrowed"
+            body.contains(constructor),
+            "{function} must construct the semantic typed IDG query"
         );
         assert!(
             !body.contains("\n        None,\n"),
             "{function} must not delegate to unscoped diagnostic reachability by default"
         );
     }
+    assert!(
+        function_body(&taint_query, "semantic").contains("max_precision: Some(Precision::Narrowed)"),
+        "typed IDG taint queries must default to the semantic precision ceiling"
+    );
+    for legacy_ladder in [
+        "source_seed_reaches_return_from_idg_with_max_precision",
+        "entry_taint_call_records_from_idg_with_max_precision",
+        "entry_taint_call_records_from_idg_with_target_filters_and_max_precision",
+        "entry_taint_graph_from_idg_with_max_precision",
+        "entry_taint_graph_from_idg_with_target_funcs_and_max_precision",
+        "entry_taint_graph_from_idg_with_target_filters_and_max_precision",
+        "entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision",
+    ] {
+        assert!(
+            !taint_reachable.contains(legacy_ladder),
+            "IDG taint query options must stay in typed requests, not regrow the positional `{legacy_ladder}` ladder"
+        );
+    }
+    assert!(
+        taint_reachable.contains("pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>)",)
+            && taint_reachable
+                .contains("pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>)",),
+        "advanced IDG taint surfaces must accept one typed query request"
+    );
 }
 
 /// IDG query-service defaults are evidence-producing APIs. They must
@@ -2260,16 +2285,14 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
         source_body.contains("if !precision.is_semantic()"),
         "security source-analysis must drop diagnostic precision classes before emitting candidates"
     );
-    let source_path_graph_body = function_body(&security_analysis, "exact_source_path_graph");
+    let source_path_graph_body = source_body;
     assert!(
-        source_path_graph_body.contains(
-            "entry_taint_call_records_from_idg_with_target_filters_and_max_precision_and_caches",
-        )
-            && source_path_graph_body.contains("&config.call_result_passthroughs")
-            && source_path_graph_body.contains("target_funcs")
+        source_path_graph_body.contains("entry_taint_call_records_from_idg_query")
+            && source_path_graph_body.contains("call_result_passthroughs")
+            && source_path_graph_body.contains("IdgTaintTargets")
             && source_path_graph_body.contains("lineage_funcs")
-            && source_path_graph_body.contains("Some(caches)"),
-        "security source-analysis must use the cached filtered IDG call-record API; configured transfers are materialized into the shared IDG before attribution"
+            && source_path_graph_body.contains("with_caches"),
+        "security source-analysis must use the cached typed IDG call-record query; configured transfers are materialized into the shared IDG before attribution"
     );
     let source_lineage_scope_body = function_body(&security_analysis, "source_analysis_lineage_func_scope");
     assert!(
@@ -2284,10 +2307,7 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     );
 
     let taint_reachable = read(&root.join("crates/taint/src/reachable.rs"));
-    let call_records_body = function_body(
-        &taint_reachable,
-        "entry_taint_call_records_from_idg_with_target_filters_and_max_precision_and_caches",
-    );
+    let call_records_body = function_body(&taint_reachable, "entry_taint_call_records_from_idg_query");
     assert!(
         call_records_body.contains("apply_configured_transfer_fixpoint")
             && call_records_body.contains("closure_evidence_with_targets")

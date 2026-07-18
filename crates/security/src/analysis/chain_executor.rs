@@ -144,18 +144,33 @@ impl SourceGroupExecutor<'_> {
                     hit
                 } else {
                     graph_builds = graph_builds.saturating_add(1);
-                    let graph = Arc::new(exact_source_seed_graph(
-                        src_func_id,
-                        seeds,
-                        config,
-                        ws.db(),
-                        taint_caches,
-                        idg,
-                        anchor,
-                        &output_arg_names,
-                        group_target_nodes,
-                        group_sink_func_targets,
-                        group_lineage_func_targets,
+                    // The shared IDG already contains Tree-sitter-lowered
+                    // callback bindings and the rulepack transfer summaries
+                    // materialized once per call site. This query only selects
+                    // the source seed, semantic target corridor, and caches.
+                    let graph = Arc::new(bonsai_taint::entry_taint_graph_from_idg_query(
+                        bonsai_taint::IdgTaintQuery::semantic(
+                            bonsai_taint::IdgTaintSource::rule_match(
+                                src_func_id,
+                                seeds,
+                                anchor,
+                                &output_arg_names,
+                            ),
+                            ws.db(),
+                            idg,
+                        )
+                        .with_transfers(bonsai_taint::IdgTaintTransfers {
+                            call_result_passthroughs: &config.call_result_passthroughs,
+                            call_results_materialized: true,
+                            ..bonsai_taint::IdgTaintTransfers::none()
+                        })
+                        .with_targets(bonsai_taint::IdgTaintTargets {
+                            nodes: group_target_nodes,
+                            funcs: group_sink_func_targets,
+                            lineage_funcs: group_lineage_func_targets,
+                        })
+                        .with_max_precision(config.max_edge_precision)
+                        .with_caches(taint_caches),
                     ));
                     let graph = if use_partitioned_scoped_idg {
                         graph
