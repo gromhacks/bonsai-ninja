@@ -1106,6 +1106,23 @@ fn finish_taint_analysis_report(
     }
 }
 
+fn finish_taint_cache_write_through<F>(ws: &Workspace, persist_started: bool, on_progress: &mut F)
+where
+    F: FnMut(AnalysisProgress),
+{
+    if !persist_started {
+        return;
+    }
+    let detail = taint_cache::finish_workspace_cache(ws).map_or_else(
+        || "finish write-through failed".to_string(),
+        |written| format!("finish write-through entries={written}"),
+    );
+    on_progress(AnalysisProgress::Note {
+        label: "taint-cache",
+        detail,
+    });
+}
+
 /// Top-level taint analysis entry point. Combines source / sink /
 /// sanitizer matching with interprocedural taint propagation and
 /// returns the assembled findings. No progress reporting — see the
@@ -1556,6 +1573,7 @@ struct SourceLineageCompilationContext<'a> {
 struct SourceLineageScope {
     idg: Option<Arc<bonsai_idg::IdgQueryService>>,
     resolution: Option<ResolutionCoverage>,
+    cache_persist_started: bool,
 }
 
 fn compile_source_lineage_scope<F>(
@@ -1583,6 +1601,7 @@ where
         return SourceLineageScope {
             idg: None,
             resolution: None,
+            cache_persist_started: cache_report.persist_started,
         };
     }
 
@@ -1665,6 +1684,7 @@ where
     SourceLineageScope {
         idg: Some(idg),
         resolution: Some(resolution),
+        cache_persist_started: cache_report.persist_started,
     }
 }
 
@@ -2131,17 +2151,7 @@ where
         ));
     }
     let analysis_incomplete_reasons: Vec<String> = analysis_incomplete_reasons.into_iter().collect();
-    if let Some(written) = taint_cache::finish_workspace_cache(ws) {
-        on_progress(AnalysisProgress::Note {
-            label: "taint-cache",
-            detail: format!("finish write-through entries={written}"),
-        });
-    } else {
-        on_progress(AnalysisProgress::Note {
-            label: "taint-cache",
-            detail: "finish write-through failed".to_string(),
-        });
-    }
+    finish_taint_cache_write_through(ws, source_scope.cache_persist_started, &mut on_progress);
     Ok(SourceAnalysisReport {
         candidates,
         source_rule_count: sources.len(),
@@ -5928,9 +5938,7 @@ where
         // No source/sink work will run, but `prepare_workspace_cache`
         // may have opened the sidecar write-through — close it so the
         // temp file never dangles.
-        if cache_report.persist_started {
-            let _ = taint_cache::finish_workspace_cache(ws);
-        }
+        finish_taint_cache_write_through(ws, cache_report.persist_started, on_progress);
         return ChainBuildResult::default();
     }
     let mut out = Vec::new();
@@ -6347,17 +6355,7 @@ where
     };
     out.extend(findings);
     on_progress(AnalysisProgress::PhaseFinished);
-    if let Some(written) = taint_cache::finish_workspace_cache(ws) {
-        on_progress(AnalysisProgress::Note {
-            label: "taint-cache",
-            detail: format!("finish write-through entries={written}"),
-        });
-    } else {
-        on_progress(AnalysisProgress::Note {
-            label: "taint-cache",
-            detail: "finish write-through failed".to_string(),
-        });
-    }
+    finish_taint_cache_write_through(ws, cache_report.persist_started, on_progress);
     ChainBuildResult {
         findings: out,
         resolution,
