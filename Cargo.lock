@@ -706,6 +706,7 @@ dependencies = [
  "bonsai_trace",
  "bonsai_workspace",
  "fs2",
+ "parking_lot",
  "regex",
  "serde",
  "serde_json",
