@@ -712,25 +712,29 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
         };
         for site in &data.call_sites {
             stitch_call_site(
-                caller,
-                *caller_seg,
-                caller_remap,
-                site,
-                &data.params,
-                data.is_constructor,
-                data.receiver_param_index,
-                &data.implicit_receiver_bases,
-                &data.receiver_names,
-                resolver,
-                &callee_endpoints,
-                &mut ws,
-                &mut field_arg_sites,
-                &mut return_field_sites,
-                &mut scalar_return_sites,
-                &mut constructor_return_sites,
-                &mut receiver_mutation_sites,
-                &mut passthrough_field_copy_sites,
-                if collect_stats { Some(&mut stats) } else { None },
+                CallStitchRequest {
+                    caller,
+                    caller_seg: *caller_seg,
+                    caller_remap,
+                    site,
+                    caller_params: &data.params,
+                    caller_is_constructor: data.is_constructor,
+                    caller_receiver_param_index: data.receiver_param_index,
+                    caller_implicit_receiver_bases: &data.implicit_receiver_bases,
+                    caller_receiver_names: &data.receiver_names,
+                    resolver,
+                    callee_endpoints: &callee_endpoints,
+                },
+                CallStitchOutputs {
+                    ws: &mut ws,
+                    field_arg_sites: &mut field_arg_sites,
+                    return_field_sites: &mut return_field_sites,
+                    scalar_return_sites: &mut scalar_return_sites,
+                    constructor_return_sites: &mut constructor_return_sites,
+                    receiver_mutation_sites: &mut receiver_mutation_sites,
+                    passthrough_field_copy_sites: &mut passthrough_field_copy_sites,
+                    stats: if collect_stats { Some(&mut stats) } else { None },
+                },
             );
         }
     }
@@ -1219,28 +1223,55 @@ fn remap_place_strids(place: &Place, strid_remap: &[bonsai_factstore::StrId]) ->
 /// edges for one call site. Inserts intra-segment edges directly
 /// into the caller's segment; routes cross-segment edges through
 /// the workspace's cross-file index.
-#[allow(clippy::too_many_arguments)] // Hot-path stitch state is passed explicitly to avoid heap context objects.
-fn stitch_call_site(
+struct CallStitchRequest<'a> {
     caller: FuncId,
     caller_seg: SegmentId,
-    caller_remap: &NodeRemap,
-    site: &CallSiteRef,
-    caller_params: &[String],
+    caller_remap: &'a NodeRemap,
+    site: &'a CallSiteRef,
+    caller_params: &'a [String],
     caller_is_constructor: bool,
     caller_receiver_param_index: Option<usize>,
-    caller_implicit_receiver_bases: &[String],
-    caller_receiver_names: &[String],
-    resolver: &dyn CalleeResolver,
-    callee_endpoints: &AHashMap<FuncId, CalleeEndpoints>,
-    ws: &mut IdgWorkspace,
-    field_arg_sites: &mut FieldArgSiteQueue,
-    return_field_sites: &mut ReturnFieldSiteQueue,
-    scalar_return_sites: &mut ScalarReturnSiteQueue,
-    constructor_return_sites: &mut ConstructorReturnSiteQueue,
-    receiver_mutation_sites: &mut Vec<Arc<ReceiverMutationStitch>>,
-    passthrough_field_copy_sites: &mut Vec<FieldCopySite>,
-    mut stats: Option<&mut StitchStats>,
-) {
+    caller_implicit_receiver_bases: &'a [String],
+    caller_receiver_names: &'a [String],
+    resolver: &'a dyn CalleeResolver,
+    callee_endpoints: &'a AHashMap<FuncId, CalleeEndpoints>,
+}
+
+struct CallStitchOutputs<'a> {
+    ws: &'a mut IdgWorkspace,
+    field_arg_sites: &'a mut FieldArgSiteQueue,
+    return_field_sites: &'a mut ReturnFieldSiteQueue,
+    scalar_return_sites: &'a mut ScalarReturnSiteQueue,
+    constructor_return_sites: &'a mut ConstructorReturnSiteQueue,
+    receiver_mutation_sites: &'a mut Vec<Arc<ReceiverMutationStitch>>,
+    passthrough_field_copy_sites: &'a mut Vec<FieldCopySite>,
+    stats: Option<&'a mut StitchStats>,
+}
+
+fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'_>) {
+    let CallStitchRequest {
+        caller,
+        caller_seg,
+        caller_remap,
+        site,
+        caller_params,
+        caller_is_constructor,
+        caller_receiver_param_index,
+        caller_implicit_receiver_bases,
+        caller_receiver_names,
+        resolver,
+        callee_endpoints,
+    } = request;
+    let CallStitchOutputs {
+        ws,
+        field_arg_sites,
+        return_field_sites,
+        scalar_return_sites,
+        constructor_return_sites,
+        receiver_mutation_sites,
+        passthrough_field_copy_sites,
+        mut stats,
+    } = outputs;
     let caller_receiver = CallerReceiverContext {
         params: caller_params,
         receiver_param_index: caller_receiver_param_index,
@@ -1402,478 +1433,37 @@ fn stitch_call_site(
     // Wire only candidates that resolved to a known segment. External
     // calls require explicit summaries/models; unresolved assignment
     // calls do not get a generic passthrough edge.
-    for cand in &candidates {
-        let Some(endpoints) = callee_endpoints.get(&cand.func) else {
-            // Callee not in any segment we know about — likely an
-            // unresolved external call. Skip.
+    for candidate in &candidates {
+        let Some(endpoints) = callee_endpoints.get(&candidate.func) else {
             continue;
         };
-        if let Some(stats) = &mut stats {
-            stats.wired_candidates = stats.wired_candidates.saturating_add(1);
-        }
-        let is_ancestor_dispatch = resolver.is_ancestor_dispatch(caller, cand.func);
-        // For method receivers, emit the synthetic receiver slot to
-        // the callee's adapter-declared receiver parameter. This is
-        // separate from positional args so explicit arguments keep
-        // their source-language order.
-        if matches!(site.call_kind, CallKind::Method) {
-            let receiver_call_arg = site
-                .receiver_arg_node
-                .map(|node| caller_remap.get(node))
-                .filter(|node| !node.is_sentinel());
-            if let (Some(receiver_arg_node), Some(receiver_idx)) =
-                (site.receiver_arg_node, endpoints.receiver_param_index)
-            {
-                if let Some(&callee_param_node) = endpoints.params.get(receiver_idx) {
-                    if !callee_param_node.is_sentinel() {
-                        let caller_call_arg = caller_remap.get(receiver_arg_node);
-                        if !caller_call_arg.is_sentinel() {
-                            let edge = IdgEdge::inter_call_arg(
-                                caller_call_arg,
-                                callee_param_node,
-                                site.site.0,
-                                cand.precision,
-                                cand.edge_kind,
-                            );
-                            place_inter_edge(caller_seg, endpoints.segment, edge, ws);
-                            if let Some(stats) = &mut stats {
-                                stats.inter_edges = stats.inter_edges.saturating_add(1);
-                            }
-                        }
-                    }
-                }
-                if let (Some(receiver), Some(param_name)) = (
-                    site.receiver
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|receiver| !receiver.is_empty()),
-                    endpoints.param_names.get(receiver_idx).map(String::as_str),
-                ) {
-                    let actual_receiver = receiver_field_forwarding_base(
-                        site,
-                        receiver,
-                        &caller_receiver,
-                        is_ancestor_dispatch,
-                        false,
-                    );
-                    push_receiver_field_arg_site(
-                        field_arg_sites,
-                        caller,
-                        caller_seg,
-                        cand.func,
-                        endpoints.segment,
-                        &actual_receiver,
-                        param_name,
-                        site.site.0,
-                        cand.precision,
-                        cand.edge_kind,
-                        receiver_call_arg,
-                        None,
-                    );
-                    push_nested_receiver_field_arg_sites(
-                        field_arg_sites,
-                        caller,
-                        caller_seg,
-                        cand.func,
-                        endpoints.segment,
-                        &actual_receiver,
-                        param_name,
-                        endpoints,
-                        site.site.0,
-                        cand.precision,
-                        cand.edge_kind,
-                        receiver_call_arg,
-                    );
-                    if let Some(receiver_type) = resolver.receiver_type_for(cand.func) {
-                        push_receiver_field_arg_site(
-                            field_arg_sites,
-                            caller,
-                            caller_seg,
-                            cand.func,
-                            endpoints.segment,
-                            &actual_receiver,
-                            param_name,
-                            site.site.0,
-                            cand.precision,
-                            cand.edge_kind,
-                            receiver_call_arg,
-                            Some(receiver_type.as_str()),
-                        );
-                    }
-                }
-            }
-            if endpoints.receiver_param_index.is_none() && !endpoints.receiver_consumer_nodes.is_empty() {
-                if let Some(receiver_arg_node) = site.receiver_arg_node {
-                    let caller_call_arg = caller_remap.get(receiver_arg_node);
-                    if !caller_call_arg.is_sentinel() {
-                        for &callee_receiver_consumer in &endpoints.receiver_consumer_nodes {
-                            if callee_receiver_consumer.is_sentinel() {
-                                continue;
-                            }
-                            let edge = IdgEdge::inter_call_arg(
-                                caller_call_arg,
-                                callee_receiver_consumer,
-                                site.site.0,
-                                cand.precision,
-                                cand.edge_kind,
-                            );
-                            place_inter_edge(caller_seg, endpoints.segment, edge, ws);
-                            if let Some(stats) = &mut stats {
-                                stats.inter_edges = stats.inter_edges.saturating_add(1);
-                            }
-                        }
-                    }
-                }
-            }
-            if endpoints.receiver_param_index.is_none()
-                && (!endpoints.implicit_receiver_bases.is_empty()
-                    || !endpoints.receiver_field_bases.is_empty()
-                    || !endpoints.return_field_projections.is_empty())
-            {
-                if let Some(receiver) = site
-                    .receiver
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|receiver| !receiver.is_empty())
-                {
-                    let actual_receiver = receiver_field_forwarding_base(
-                        site,
-                        receiver,
-                        &caller_receiver,
-                        is_ancestor_dispatch,
-                        true,
-                    );
-                    let projection_bases = return_projection_bases(endpoints);
-                    for param_name in endpoints
-                        .implicit_receiver_bases
-                        .iter()
-                        .chain(endpoints.receiver_field_bases.iter())
-                        .chain(projection_bases.iter())
-                    {
-                        push_receiver_field_arg_site(
-                            field_arg_sites,
-                            caller,
-                            caller_seg,
-                            cand.func,
-                            endpoints.segment,
-                            &actual_receiver,
-                            param_name,
-                            site.site.0,
-                            cand.precision,
-                            cand.edge_kind,
-                            receiver_call_arg,
-                            None,
-                        );
-                    }
-                }
-            }
-        }
-        if site.receiver.is_none()
-            && endpoints.receiver_param_index.is_none()
-            && (!endpoints.implicit_receiver_bases.is_empty()
-                || !endpoints.receiver_field_bases.is_empty()
-                || !endpoints.return_field_projections.is_empty())
-        {
-            push_bare_implicit_member_field_arg_sites(
-                field_arg_sites,
+        stitch_resolved_candidate(
+            ResolvedCandidateStitch {
                 caller,
                 caller_seg,
-                cand.func,
-                endpoints.segment,
-                endpoints,
+                caller_remap,
+                site,
+                caller_params,
+                caller_is_constructor,
+                caller_receiver_param_index,
                 caller_implicit_receiver_bases,
                 caller_receiver_names,
-                site.site.0,
-                cand.precision,
-                cand.edge_kind,
-            );
-        }
-        // For each explicit arg index, emit
-        // `caller.CallArg(site, i) → callee.Param(j)`. When the
-        // callee has a declared receiver parameter, `j` skips that
-        // formal slot instead of treating the receiver as arg zero.
-        // Named / labelled arguments bind by adapter-supplied formal
-        // name first, then fall back to positional order.
-        for i in 0..site.args_count as usize {
-            let callee_param_idx = site
-                .call_arg_names
-                .get(i)
-                .and_then(|name| {
-                    name.as_deref().and_then(|name| {
-                        named_arg_param_index(name, &endpoints.param_names, endpoints.receiver_param_index)
-                    })
-                })
-                .unwrap_or_else(|| explicit_arg_param_index(i, endpoints.receiver_param_index));
-            let Some(&callee_param_node) = endpoints.params.get(callee_param_idx) else {
-                continue;
-            };
-            if callee_param_node.is_sentinel() {
-                continue;
-            }
-            let caller_call_arg =
-                caller_remap.get(site.call_arg_nodes.get(i).copied().unwrap_or(NodeId::SENTINEL));
-            if caller_call_arg.is_sentinel() {
-                continue;
-            }
-            let edge = IdgEdge::inter_call_arg(
-                caller_call_arg,
-                callee_param_node,
-                site.site.0,
-                cand.precision,
-                cand.edge_kind,
-            );
-            place_inter_edge(caller_seg, endpoints.segment, edge, ws);
-            if let (Some(actual_arg), Some(param_name)) = (
-                site.call_arg_places.get(i).map(String::as_str),
-                endpoints.param_names.get(callee_param_idx).map(String::as_str),
-            ) {
-                if !actual_arg.trim().is_empty() && !param_name.trim().is_empty() {
-                    field_arg_sites.push(FieldArgStitch {
-                        caller,
-                        caller_seg,
-                        callee: cand.func,
-                        callee_seg: endpoints.segment,
-                        actual_arg_node: Some(caller_call_arg),
-                        actual_arg: actual_arg.trim().to_string(),
-                        param_name: param_name.trim().to_string(),
-                        call_span: site.site.0,
-                        precision: cand.precision,
-                        call_kind: cand.edge_kind,
-                        allow_out_of_order_source: false,
-                    });
-                }
-            }
-            if let Some(target_base) = site.call_arg_writeback_targets.get(i).and_then(Option::as_deref) {
-                let added = stitch_out_parameter_write_back(
-                    caller,
-                    caller_seg,
-                    cand.func,
-                    endpoints.segment,
-                    endpoints
-                        .param_write_nodes
-                        .get(callee_param_idx)
-                        .map(Vec::as_slice)
-                        .unwrap_or_default(),
-                    target_base,
-                    site.site.0,
-                    cand.precision,
-                    cand.edge_kind,
-                    ws,
-                );
-                if let Some(stats) = &mut stats {
-                    stats.inter_edges = stats.inter_edges.saturating_add(added);
-                }
-            }
-            if let Some(stats) = &mut stats {
-                stats.inter_edges = stats.inter_edges.saturating_add(1);
-            }
-        }
-        if resolver.is_local_callable_binding(caller, cand.func) {
-            let added = stitch_lexical_capture_reads(
-                caller,
-                caller_seg,
-                endpoints.segment,
-                &endpoints.capture_read_nodes,
-                site.site.0,
-                cand.precision,
-                cand.edge_kind,
-                ws,
-            );
-            if let Some(stats) = &mut stats {
-                stats.inter_edges = stats.inter_edges.saturating_add(added);
-            }
-        }
-        // Emit `callee.Return → caller.CallRet(site)`.
-        let caller_call_ret = caller_remap.get(site.call_ret_node);
-        if let Some(callee_return) = endpoints.return_node {
-            if !caller_call_ret.is_sentinel() {
-                let edge = IdgEdge::inter_return(
-                    callee_return,
-                    caller_call_ret,
-                    site.site.0,
-                    cand.precision,
-                    cand.edge_kind,
-                );
-                place_inter_edge(endpoints.segment, caller_seg, edge, ws);
-                if let Some(stats) = &mut stats {
-                    stats.inter_edges = stats.inter_edges.saturating_add(1);
-                }
-            }
-        }
-        if !caller_call_ret.is_sentinel() {
-            let assignment_targets = call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret);
-            if !assignment_targets.is_empty() {
-                // Preserve field/descendant identity through wrappers such
-                // as `return param`. This is intentionally separate from
-                // scalar return flow: a bare tainted object remains scalar,
-                // while an explicit `param.*` seed or exact field write can
-                // flow to the corresponding field on the assigned result.
-                for &param_idx in &endpoints.return_passthrough_param_indices {
-                    let explicit_arg_idx = match endpoints.receiver_param_index {
-                        Some(receiver_idx) if param_idx == receiver_idx => None,
-                        Some(receiver_idx) if param_idx > receiver_idx => Some(param_idx - 1),
-                        _ => Some(param_idx),
-                    };
-                    let Some(actual_arg) = explicit_arg_idx
-                        .and_then(|idx| site.call_arg_places.get(idx))
-                        .map(String::as_str)
-                        .map(str::trim)
-                        .filter(|arg| !arg.is_empty())
-                    else {
-                        continue;
-                    };
-                    for (target_base, write_span, result_field) in &assignment_targets {
-                        if result_field.is_some() {
-                            continue;
-                        }
-                        passthrough_field_copy_sites.push(FieldCopySite {
-                            seg_id: caller_seg,
-                            func: caller,
-                            source_base: actual_arg.to_string(),
-                            target_base: target_base.clone(),
-                            write_span: *write_span,
-                            via_span: site.site.0,
-                            precision: cand.precision,
-                            call_kind: cand.edge_kind,
-                        });
-                    }
-                }
-                for source_base in [
-                    crate::transfer::RETURN_FIELD_BASE,
-                    crate::transfer::YIELD_FIELD_BASE,
-                ] {
-                    for (target_base, write_span, result_field) in &assignment_targets {
-                        if result_field.is_some() {
-                            continue;
-                        }
-                        return_field_sites.push(ReturnFieldStitch {
-                            caller,
-                            caller_seg,
-                            callee: cand.func,
-                            callee_seg: endpoints.segment,
-                            source_base: source_base.to_string(),
-                            target_base: target_base.clone(),
-                            call_span: site.site.0,
-                            write_span: *write_span,
-                            precision: cand.precision,
-                            call_kind: cand.edge_kind,
-                        });
-                    }
-                }
-                for (target_base, write_span, result_field) in &assignment_targets {
-                    if let Some(result_field) = result_field {
-                        scalar_return_sites.push(ScalarReturnStitch {
-                            caller,
-                            caller_seg,
-                            callee: cand.func,
-                            callee_seg: endpoints.segment,
-                            source_base: crate::transfer::RETURN_FIELD_BASE.to_string(),
-                            source_field: result_field.clone(),
-                            target_base: target_base.clone(),
-                            call_span: site.site.0,
-                            write_span: *write_span,
-                            precision: cand.precision,
-                            call_kind: cand.edge_kind,
-                        });
-                        continue;
-                    }
-                    for projection in &endpoints.return_field_projections {
-                        scalar_return_sites.push(ScalarReturnStitch {
-                            caller,
-                            caller_seg,
-                            callee: cand.func,
-                            callee_seg: endpoints.segment,
-                            source_base: projection.base.clone(),
-                            source_field: projection.field.clone(),
-                            target_base: target_base.clone(),
-                            call_span: site.site.0,
-                            write_span: *write_span,
-                            precision: cand.precision,
-                            call_kind: cand.edge_kind,
-                        });
-                    }
-                }
-            }
-        }
-        if matches!(site.call_kind, CallKind::Method | CallKind::Constructor)
-            && resolver.is_constructor_func(cand.func)
-        {
-            let explicit_receiver = site
-                .receiver
-                .as_deref()
-                .map(str::trim)
-                .filter(|receiver| !receiver.is_empty());
-            let target_base = explicit_receiver
-                .map(|receiver| {
-                    constructor_receiver_target_base(
-                        receiver,
-                        caller_params,
-                        caller_is_constructor,
-                        caller_receiver_param_index,
-                        caller_implicit_receiver_bases,
-                        caller_receiver_names,
-                        is_ancestor_dispatch,
-                    )
-                })
-                .or_else(|| {
-                    // A synthesized primary constructor represents a class-
-                    // header delegation call with no expression receiver.
-                    // Resolved ancestor identity proves that the call mutates
-                    // the current object; use the adapter's canonical receiver
-                    // token rather than a language spelling in the IDG.
-                    (matches!(site.call_kind, CallKind::Constructor)
-                        && caller_is_constructor
-                        && is_ancestor_dispatch)
-                        .then(|| caller_receiver_names.first().cloned())
-                        .flatten()
-                })
-                .unwrap_or_default();
-            if !target_base.is_empty() {
-                for callee_receiver_param_name in constructor_receiver_bases(endpoints) {
-                    receiver_mutation_sites.push(Arc::new(ReceiverMutationStitch {
-                        caller,
-                        caller_seg,
-                        callee: cand.func,
-                        callee_seg: endpoints.segment,
-                        target_base: target_base.clone(),
-                        callee_receiver_param_name,
-                        call_span: site.site.0,
-                        precision: cand.precision,
-                        call_kind: cand.edge_kind,
-                    }));
-                }
-            }
-        }
-        if resolver.is_constructor_func(cand.func) {
-            let caller_call_ret = caller_remap.get(site.call_ret_node);
-            if !caller_call_ret.is_sentinel() {
-                let receiver_bases = constructor_receiver_bases(endpoints);
-                let assignment_targets = call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret);
-                if !receiver_bases.is_empty() {
-                    for (target_base, write_span, result_field) in assignment_targets {
-                        if result_field.is_some() {
-                            continue;
-                        }
-                        for receiver_param_name in &receiver_bases {
-                            let target_base =
-                                projected_receiver_target_base(&target_base, receiver_param_name);
-                            constructor_return_sites.push(ConstructorReturnStitch {
-                                caller,
-                                caller_seg,
-                                callee: cand.func,
-                                callee_seg: endpoints.segment,
-                                target_base,
-                                receiver_param_name: receiver_param_name.clone(),
-                                call_span: site.site.0,
-                                write_span,
-                                precision: cand.precision,
-                                call_kind: cand.edge_kind,
-                            });
-                        }
-                    }
-                }
-            }
-        }
+                caller_receiver: &caller_receiver,
+                resolver,
+                candidate,
+                endpoints,
+            },
+            ResolvedCandidateOutputs {
+                ws: &mut *ws,
+                field_arg_sites: &mut *field_arg_sites,
+                return_field_sites: &mut *return_field_sites,
+                scalar_return_sites: &mut *scalar_return_sites,
+                constructor_return_sites: &mut *constructor_return_sites,
+                receiver_mutation_sites: &mut *receiver_mutation_sites,
+                passthrough_field_copy_sites: &mut *passthrough_field_copy_sites,
+                stats: stats.as_deref_mut(),
+            },
+        );
     }
     let source_callback_edges = stitch_source_callback_args(
         caller,
@@ -1894,6 +1484,526 @@ fn stitch_call_site(
     // generic `CallArg -> CallRet` edge would invent dataflow.
     // Drop unused: candidates iterator is consumed.
     drop(candidates);
+}
+
+struct ResolvedCandidateStitch<'a> {
+    caller: FuncId,
+    caller_seg: SegmentId,
+    caller_remap: &'a NodeRemap,
+    site: &'a CallSiteRef,
+    caller_params: &'a [String],
+    caller_is_constructor: bool,
+    caller_receiver_param_index: Option<usize>,
+    caller_implicit_receiver_bases: &'a [String],
+    caller_receiver_names: &'a [String],
+    caller_receiver: &'a CallerReceiverContext<'a>,
+    resolver: &'a dyn CalleeResolver,
+    candidate: &'a ResolvedCallee,
+    endpoints: &'a CalleeEndpoints,
+}
+
+struct ResolvedCandidateOutputs<'a> {
+    ws: &'a mut IdgWorkspace,
+    field_arg_sites: &'a mut FieldArgSiteQueue,
+    return_field_sites: &'a mut ReturnFieldSiteQueue,
+    scalar_return_sites: &'a mut ScalarReturnSiteQueue,
+    constructor_return_sites: &'a mut ConstructorReturnSiteQueue,
+    receiver_mutation_sites: &'a mut Vec<Arc<ReceiverMutationStitch>>,
+    passthrough_field_copy_sites: &'a mut Vec<FieldCopySite>,
+    stats: Option<&'a mut StitchStats>,
+}
+
+fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: ResolvedCandidateOutputs<'_>) {
+    let ResolvedCandidateStitch {
+        caller,
+        caller_seg,
+        caller_remap,
+        site,
+        caller_params,
+        caller_is_constructor,
+        caller_receiver_param_index,
+        caller_implicit_receiver_bases,
+        caller_receiver_names,
+        caller_receiver,
+        resolver,
+        candidate: cand,
+        endpoints,
+    } = request;
+    let ResolvedCandidateOutputs {
+        ws,
+        field_arg_sites,
+        return_field_sites,
+        scalar_return_sites,
+        constructor_return_sites,
+        receiver_mutation_sites,
+        passthrough_field_copy_sites,
+        mut stats,
+    } = outputs;
+    if let Some(stats) = &mut stats {
+        stats.wired_candidates = stats.wired_candidates.saturating_add(1);
+    }
+    let is_ancestor_dispatch = resolver.is_ancestor_dispatch(caller, cand.func);
+    // For method receivers, emit the synthetic receiver slot to
+    // the callee's adapter-declared receiver parameter. This is
+    // separate from positional args so explicit arguments keep
+    // their source-language order.
+    if matches!(site.call_kind, CallKind::Method) {
+        let receiver_call_arg = site
+            .receiver_arg_node
+            .map(|node| caller_remap.get(node))
+            .filter(|node| !node.is_sentinel());
+        if let (Some(receiver_arg_node), Some(receiver_idx)) =
+            (site.receiver_arg_node, endpoints.receiver_param_index)
+        {
+            if let Some(&callee_param_node) = endpoints.params.get(receiver_idx) {
+                if !callee_param_node.is_sentinel() {
+                    let caller_call_arg = caller_remap.get(receiver_arg_node);
+                    if !caller_call_arg.is_sentinel() {
+                        let edge = IdgEdge::inter_call_arg(
+                            caller_call_arg,
+                            callee_param_node,
+                            site.site.0,
+                            cand.precision,
+                            cand.edge_kind,
+                        );
+                        place_inter_edge(caller_seg, endpoints.segment, edge, ws);
+                        if let Some(stats) = &mut stats {
+                            stats.inter_edges = stats.inter_edges.saturating_add(1);
+                        }
+                    }
+                }
+            }
+            if let (Some(receiver), Some(param_name)) = (
+                site.receiver
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|receiver| !receiver.is_empty()),
+                endpoints.param_names.get(receiver_idx).map(String::as_str),
+            ) {
+                let actual_receiver = receiver_field_forwarding_base(
+                    site,
+                    receiver,
+                    caller_receiver,
+                    is_ancestor_dispatch,
+                    false,
+                );
+                push_receiver_field_arg_site(
+                    field_arg_sites,
+                    caller,
+                    caller_seg,
+                    cand.func,
+                    endpoints.segment,
+                    &actual_receiver,
+                    param_name,
+                    site.site.0,
+                    cand.precision,
+                    cand.edge_kind,
+                    receiver_call_arg,
+                    None,
+                );
+                push_nested_receiver_field_arg_sites(
+                    field_arg_sites,
+                    caller,
+                    caller_seg,
+                    cand.func,
+                    endpoints.segment,
+                    &actual_receiver,
+                    param_name,
+                    endpoints,
+                    site.site.0,
+                    cand.precision,
+                    cand.edge_kind,
+                    receiver_call_arg,
+                );
+                if let Some(receiver_type) = resolver.receiver_type_for(cand.func) {
+                    push_receiver_field_arg_site(
+                        field_arg_sites,
+                        caller,
+                        caller_seg,
+                        cand.func,
+                        endpoints.segment,
+                        &actual_receiver,
+                        param_name,
+                        site.site.0,
+                        cand.precision,
+                        cand.edge_kind,
+                        receiver_call_arg,
+                        Some(receiver_type.as_str()),
+                    );
+                }
+            }
+        }
+        if endpoints.receiver_param_index.is_none() && !endpoints.receiver_consumer_nodes.is_empty() {
+            if let Some(receiver_arg_node) = site.receiver_arg_node {
+                let caller_call_arg = caller_remap.get(receiver_arg_node);
+                if !caller_call_arg.is_sentinel() {
+                    for &callee_receiver_consumer in &endpoints.receiver_consumer_nodes {
+                        if callee_receiver_consumer.is_sentinel() {
+                            continue;
+                        }
+                        let edge = IdgEdge::inter_call_arg(
+                            caller_call_arg,
+                            callee_receiver_consumer,
+                            site.site.0,
+                            cand.precision,
+                            cand.edge_kind,
+                        );
+                        place_inter_edge(caller_seg, endpoints.segment, edge, ws);
+                        if let Some(stats) = &mut stats {
+                            stats.inter_edges = stats.inter_edges.saturating_add(1);
+                        }
+                    }
+                }
+            }
+        }
+        if endpoints.receiver_param_index.is_none()
+            && (!endpoints.implicit_receiver_bases.is_empty()
+                || !endpoints.receiver_field_bases.is_empty()
+                || !endpoints.return_field_projections.is_empty())
+        {
+            if let Some(receiver) = site
+                .receiver
+                .as_deref()
+                .map(str::trim)
+                .filter(|receiver| !receiver.is_empty())
+            {
+                let actual_receiver = receiver_field_forwarding_base(
+                    site,
+                    receiver,
+                    caller_receiver,
+                    is_ancestor_dispatch,
+                    true,
+                );
+                let projection_bases = return_projection_bases(endpoints);
+                for param_name in endpoints
+                    .implicit_receiver_bases
+                    .iter()
+                    .chain(endpoints.receiver_field_bases.iter())
+                    .chain(projection_bases.iter())
+                {
+                    push_receiver_field_arg_site(
+                        field_arg_sites,
+                        caller,
+                        caller_seg,
+                        cand.func,
+                        endpoints.segment,
+                        &actual_receiver,
+                        param_name,
+                        site.site.0,
+                        cand.precision,
+                        cand.edge_kind,
+                        receiver_call_arg,
+                        None,
+                    );
+                }
+            }
+        }
+    }
+    if site.receiver.is_none()
+        && endpoints.receiver_param_index.is_none()
+        && (!endpoints.implicit_receiver_bases.is_empty()
+            || !endpoints.receiver_field_bases.is_empty()
+            || !endpoints.return_field_projections.is_empty())
+    {
+        push_bare_implicit_member_field_arg_sites(
+            field_arg_sites,
+            caller,
+            caller_seg,
+            cand.func,
+            endpoints.segment,
+            endpoints,
+            caller_implicit_receiver_bases,
+            caller_receiver_names,
+            site.site.0,
+            cand.precision,
+            cand.edge_kind,
+        );
+    }
+    // For each explicit arg index, emit
+    // `caller.CallArg(site, i) → callee.Param(j)`. When the
+    // callee has a declared receiver parameter, `j` skips that
+    // formal slot instead of treating the receiver as arg zero.
+    // Named / labelled arguments bind by adapter-supplied formal
+    // name first, then fall back to positional order.
+    for i in 0..site.args_count as usize {
+        let callee_param_idx = site
+            .call_arg_names
+            .get(i)
+            .and_then(|name| {
+                name.as_deref().and_then(|name| {
+                    named_arg_param_index(name, &endpoints.param_names, endpoints.receiver_param_index)
+                })
+            })
+            .unwrap_or_else(|| explicit_arg_param_index(i, endpoints.receiver_param_index));
+        let Some(&callee_param_node) = endpoints.params.get(callee_param_idx) else {
+            continue;
+        };
+        if callee_param_node.is_sentinel() {
+            continue;
+        }
+        let caller_call_arg =
+            caller_remap.get(site.call_arg_nodes.get(i).copied().unwrap_or(NodeId::SENTINEL));
+        if caller_call_arg.is_sentinel() {
+            continue;
+        }
+        let edge = IdgEdge::inter_call_arg(
+            caller_call_arg,
+            callee_param_node,
+            site.site.0,
+            cand.precision,
+            cand.edge_kind,
+        );
+        place_inter_edge(caller_seg, endpoints.segment, edge, ws);
+        if let (Some(actual_arg), Some(param_name)) = (
+            site.call_arg_places.get(i).map(String::as_str),
+            endpoints.param_names.get(callee_param_idx).map(String::as_str),
+        ) {
+            if !actual_arg.trim().is_empty() && !param_name.trim().is_empty() {
+                field_arg_sites.push(FieldArgStitch {
+                    caller,
+                    caller_seg,
+                    callee: cand.func,
+                    callee_seg: endpoints.segment,
+                    actual_arg_node: Some(caller_call_arg),
+                    actual_arg: actual_arg.trim().to_string(),
+                    param_name: param_name.trim().to_string(),
+                    call_span: site.site.0,
+                    precision: cand.precision,
+                    call_kind: cand.edge_kind,
+                    allow_out_of_order_source: false,
+                });
+            }
+        }
+        if let Some(target_base) = site.call_arg_writeback_targets.get(i).and_then(Option::as_deref) {
+            let added = stitch_out_parameter_write_back(
+                caller,
+                caller_seg,
+                cand.func,
+                endpoints.segment,
+                endpoints
+                    .param_write_nodes
+                    .get(callee_param_idx)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                target_base,
+                site.site.0,
+                cand.precision,
+                cand.edge_kind,
+                ws,
+            );
+            if let Some(stats) = &mut stats {
+                stats.inter_edges = stats.inter_edges.saturating_add(added);
+            }
+        }
+        if let Some(stats) = &mut stats {
+            stats.inter_edges = stats.inter_edges.saturating_add(1);
+        }
+    }
+    if resolver.is_local_callable_binding(caller, cand.func) {
+        let added = stitch_lexical_capture_reads(
+            caller,
+            caller_seg,
+            endpoints.segment,
+            &endpoints.capture_read_nodes,
+            site.site.0,
+            cand.precision,
+            cand.edge_kind,
+            ws,
+        );
+        if let Some(stats) = &mut stats {
+            stats.inter_edges = stats.inter_edges.saturating_add(added);
+        }
+    }
+    // Emit `callee.Return → caller.CallRet(site)`.
+    let caller_call_ret = caller_remap.get(site.call_ret_node);
+    if let Some(callee_return) = endpoints.return_node {
+        if !caller_call_ret.is_sentinel() {
+            let edge = IdgEdge::inter_return(
+                callee_return,
+                caller_call_ret,
+                site.site.0,
+                cand.precision,
+                cand.edge_kind,
+            );
+            place_inter_edge(endpoints.segment, caller_seg, edge, ws);
+            if let Some(stats) = &mut stats {
+                stats.inter_edges = stats.inter_edges.saturating_add(1);
+            }
+        }
+    }
+    if !caller_call_ret.is_sentinel() {
+        let assignment_targets = call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret);
+        if !assignment_targets.is_empty() {
+            // Preserve field/descendant identity through wrappers such
+            // as `return param`. This is intentionally separate from
+            // scalar return flow: a bare tainted object remains scalar,
+            // while an explicit `param.*` seed or exact field write can
+            // flow to the corresponding field on the assigned result.
+            for &param_idx in &endpoints.return_passthrough_param_indices {
+                let explicit_arg_idx = match endpoints.receiver_param_index {
+                    Some(receiver_idx) if param_idx == receiver_idx => None,
+                    Some(receiver_idx) if param_idx > receiver_idx => Some(param_idx - 1),
+                    _ => Some(param_idx),
+                };
+                let Some(actual_arg) = explicit_arg_idx
+                    .and_then(|idx| site.call_arg_places.get(idx))
+                    .map(String::as_str)
+                    .map(str::trim)
+                    .filter(|arg| !arg.is_empty())
+                else {
+                    continue;
+                };
+                for (target_base, write_span, result_field) in &assignment_targets {
+                    if result_field.is_some() {
+                        continue;
+                    }
+                    passthrough_field_copy_sites.push(FieldCopySite {
+                        seg_id: caller_seg,
+                        func: caller,
+                        source_base: actual_arg.to_string(),
+                        target_base: target_base.clone(),
+                        write_span: *write_span,
+                        via_span: site.site.0,
+                        precision: cand.precision,
+                        call_kind: cand.edge_kind,
+                    });
+                }
+            }
+            for source_base in [
+                crate::transfer::RETURN_FIELD_BASE,
+                crate::transfer::YIELD_FIELD_BASE,
+            ] {
+                for (target_base, write_span, result_field) in &assignment_targets {
+                    if result_field.is_some() {
+                        continue;
+                    }
+                    return_field_sites.push(ReturnFieldStitch {
+                        caller,
+                        caller_seg,
+                        callee: cand.func,
+                        callee_seg: endpoints.segment,
+                        source_base: source_base.to_string(),
+                        target_base: target_base.clone(),
+                        call_span: site.site.0,
+                        write_span: *write_span,
+                        precision: cand.precision,
+                        call_kind: cand.edge_kind,
+                    });
+                }
+            }
+            for (target_base, write_span, result_field) in &assignment_targets {
+                if let Some(result_field) = result_field {
+                    scalar_return_sites.push(ScalarReturnStitch {
+                        caller,
+                        caller_seg,
+                        callee: cand.func,
+                        callee_seg: endpoints.segment,
+                        source_base: crate::transfer::RETURN_FIELD_BASE.to_string(),
+                        source_field: result_field.clone(),
+                        target_base: target_base.clone(),
+                        call_span: site.site.0,
+                        write_span: *write_span,
+                        precision: cand.precision,
+                        call_kind: cand.edge_kind,
+                    });
+                    continue;
+                }
+                for projection in &endpoints.return_field_projections {
+                    scalar_return_sites.push(ScalarReturnStitch {
+                        caller,
+                        caller_seg,
+                        callee: cand.func,
+                        callee_seg: endpoints.segment,
+                        source_base: projection.base.clone(),
+                        source_field: projection.field.clone(),
+                        target_base: target_base.clone(),
+                        call_span: site.site.0,
+                        write_span: *write_span,
+                        precision: cand.precision,
+                        call_kind: cand.edge_kind,
+                    });
+                }
+            }
+        }
+    }
+    if matches!(site.call_kind, CallKind::Method | CallKind::Constructor)
+        && resolver.is_constructor_func(cand.func)
+    {
+        let explicit_receiver = site
+            .receiver
+            .as_deref()
+            .map(str::trim)
+            .filter(|receiver| !receiver.is_empty());
+        let target_base = explicit_receiver
+            .map(|receiver| {
+                constructor_receiver_target_base(
+                    receiver,
+                    caller_params,
+                    caller_is_constructor,
+                    caller_receiver_param_index,
+                    caller_implicit_receiver_bases,
+                    caller_receiver_names,
+                    is_ancestor_dispatch,
+                )
+            })
+            .or_else(|| {
+                // A synthesized primary constructor represents a class-
+                // header delegation call with no expression receiver.
+                // Resolved ancestor identity proves that the call mutates
+                // the current object; use the adapter's canonical receiver
+                // token rather than a language spelling in the IDG.
+                (matches!(site.call_kind, CallKind::Constructor)
+                    && caller_is_constructor
+                    && is_ancestor_dispatch)
+                    .then(|| caller_receiver_names.first().cloned())
+                    .flatten()
+            })
+            .unwrap_or_default();
+        if !target_base.is_empty() {
+            for callee_receiver_param_name in constructor_receiver_bases(endpoints) {
+                receiver_mutation_sites.push(Arc::new(ReceiverMutationStitch {
+                    caller,
+                    caller_seg,
+                    callee: cand.func,
+                    callee_seg: endpoints.segment,
+                    target_base: target_base.clone(),
+                    callee_receiver_param_name,
+                    call_span: site.site.0,
+                    precision: cand.precision,
+                    call_kind: cand.edge_kind,
+                }));
+            }
+        }
+    }
+    if resolver.is_constructor_func(cand.func) {
+        let caller_call_ret = caller_remap.get(site.call_ret_node);
+        if !caller_call_ret.is_sentinel() {
+            let receiver_bases = constructor_receiver_bases(endpoints);
+            let assignment_targets = call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret);
+            if !receiver_bases.is_empty() {
+                for (target_base, write_span, result_field) in assignment_targets {
+                    if result_field.is_some() {
+                        continue;
+                    }
+                    for receiver_param_name in &receiver_bases {
+                        let target_base = projected_receiver_target_base(&target_base, receiver_param_name);
+                        constructor_return_sites.push(ConstructorReturnStitch {
+                            caller,
+                            caller_seg,
+                            callee: cand.func,
+                            callee_seg: endpoints.segment,
+                            target_base,
+                            receiver_param_name: receiver_param_name.clone(),
+                            call_span: site.site.0,
+                            write_span,
+                            precision: cand.precision,
+                            call_kind: cand.edge_kind,
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn call_site_is_constructor(site: &crate::transfer::CallSiteRef) -> bool {
