@@ -5504,6 +5504,164 @@ where
     groups
 }
 
+#[derive(Clone, Copy)]
+struct PartitionedExecutionContext<'a> {
+    executor: &'a SourceGroupExecutor<'a>,
+    pool: Option<&'a rayon::ThreadPool>,
+    global: &'a GlobalIndex,
+    ws: &'a Workspace,
+    pack: &'a Rulepack,
+    transfer_languages: &'a AHashSet<String>,
+    call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+}
+
+struct PartitionedExecutionRequest<'a> {
+    context: PartitionedExecutionContext<'a>,
+    source_groups: Vec<ScheduledSourceGroup>,
+    shared_corridors: &'a SharedSourceSinkCorridors,
+    partitioned_source_indices: &'a AHashMap<FuncId, Arc<Vec<usize>>>,
+}
+
+fn execute_partitioned_source_groups<F>(
+    request: PartitionedExecutionRequest<'_>,
+    on_progress: &mut F,
+) -> Vec<FindingWithChain>
+where
+    F: FnMut(AnalysisProgress),
+{
+    let mut out = Vec::new();
+    let mut callback_batches: AHashMap<usize, (Arc<SourceSinkCorridor>, Vec<ScheduledSourceGroup>)> =
+        AHashMap::default();
+    for group in request.source_groups {
+        let key = Arc::as_ptr(&group.corridor) as usize;
+        callback_batches
+            .entry(key)
+            .or_insert_with(|| (Arc::clone(&group.corridor), Vec::new()))
+            .1
+            .push(group);
+    }
+    let shared_batch_count = request
+        .shared_corridors
+        .source_units
+        .iter()
+        .filter(|unit| {
+            unit.sources
+                .iter()
+                .any(|source| request.partitioned_source_indices.contains_key(source))
+        })
+        .count();
+    let total_batches = shared_batch_count.saturating_add(callback_batches.len());
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "semantic graph source units planned batches={}",
+        total_batches
+    );
+    let mut batch_number = 0usize;
+    for unit in &request.shared_corridors.source_units {
+        let active_sources: Vec<FuncId> = unit
+            .sources
+            .iter()
+            .copied()
+            .filter(|source| request.partitioned_source_indices.contains_key(source))
+            .collect();
+        if active_sources.is_empty() {
+            continue;
+        }
+        let corridor = Arc::clone(&unit.corridor);
+        let batch_groups: Vec<ScheduledSourceGroup> = active_sources
+            .iter()
+            .filter_map(|source| {
+                request
+                    .partitioned_source_indices
+                    .get(source)
+                    .map(|indices| ScheduledSourceGroup {
+                        src_func_id: *source,
+                        indices: Arc::clone(indices),
+                        corridor: Arc::clone(&corridor),
+                    })
+            })
+            .collect();
+        batch_number += 1;
+        out.extend(execute_partitioned_corridor_batch(
+            &request.context,
+            &corridor,
+            &batch_groups,
+            batch_number,
+            total_batches,
+            "scoped",
+            on_progress,
+        ));
+    }
+
+    let mut callback_batches: Vec<_> = callback_batches.into_values().collect();
+    callback_batches.sort_by_key(|(corridor, _)| {
+        corridor
+            .lineage_funcs
+            .iter()
+            .map(|func| func.raw())
+            .min()
+            .unwrap_or_default()
+    });
+    for (corridor, batch_groups) in callback_batches {
+        batch_number += 1;
+        out.extend(execute_partitioned_corridor_batch(
+            &request.context,
+            &corridor,
+            &batch_groups,
+            batch_number,
+            total_batches,
+            "callback",
+            on_progress,
+        ));
+    }
+    out
+}
+
+fn execute_partitioned_corridor_batch<F>(
+    context: &PartitionedExecutionContext<'_>,
+    corridor: &SourceSinkCorridor,
+    groups: &[ScheduledSourceGroup],
+    batch_number: usize,
+    total_batches: usize,
+    batch_kind: &str,
+    on_progress: &mut F,
+) -> Vec<FindingWithChain>
+where
+    F: FnMut(AnalysisProgress),
+{
+    let mut funcs: Vec<FuncId> = corridor.lineage_funcs.iter().copied().collect();
+    funcs.sort_by_key(|func| func.raw());
+    funcs.dedup();
+    let mut files: Vec<FileId> = funcs
+        .iter()
+        .filter_map(|func| context.global.declaring_file(SymbolId::new(func.raw())))
+        .collect();
+    files.sort_by_key(|file| file.raw());
+    files.dedup();
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "building {} semantic graph batch {}/{} groups={} funcs={} files={}",
+        batch_kind,
+        batch_number,
+        total_batches,
+        groups.len(),
+        funcs.len(),
+        files.len()
+    );
+    let idg = build_idg_service_for_rulepack_for_files(
+        context.ws,
+        context.pack,
+        context.transfer_languages,
+        &files,
+        &funcs,
+        context.call_graph,
+    );
+    execute_source_groups(context.executor, context.pool, groups, idg.as_ref(), on_progress)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 fn build_findings_chain_aware<F>(request: ChainAnalysisRequest<'_, F>) -> ChainBuildResult
 where
     F: FnMut(AnalysisProgress),
@@ -5942,148 +6100,27 @@ where
     } else {
         None
     };
-    let mut parallel_out = Vec::new();
-    if use_partitioned_scoped_idg {
+    let findings = if use_partitioned_scoped_idg {
         // Source groups are streamed directly from each parsed source file;
         // each file gets its exact cross-file source→all-sinks corridor and
         // is released before the next compilation unit.
-        let mut callback_batches: AHashMap<usize, (Arc<SourceSinkCorridor>, Vec<ScheduledSourceGroup>)> =
-            AHashMap::default();
-        for group in scheduled_source_groups {
-            let key = Arc::as_ptr(&group.corridor) as usize;
-            callback_batches
-                .entry(key)
-                .or_insert_with(|| (Arc::clone(&group.corridor), Vec::new()))
-                .1
-                .push(group);
-        }
-        let shared_batch_count = shared_coarse_corridors
-            .source_units
-            .iter()
-            .filter(|unit| {
-                unit.sources
-                    .iter()
-                    .any(|source| partitioned_source_indices.contains_key(source))
-            })
-            .count();
-        let total_batches = shared_batch_count.saturating_add(callback_batches.len());
-        bonsai_diagnostics::debug_log!(
-            "security-phase",
-            "semantic graph source units planned batches={}",
-            total_batches
-        );
-        let mut batch_number = 0usize;
-        for unit in &shared_coarse_corridors.source_units {
-            let active_sources: Vec<FuncId> = unit
-                .sources
-                .iter()
-                .copied()
-                .filter(|source| partitioned_source_indices.contains_key(source))
-                .collect();
-            if active_sources.is_empty() {
-                continue;
-            }
-            let corridor = Arc::clone(&unit.corridor);
-            let batch_groups: Vec<ScheduledSourceGroup> = active_sources
-                .iter()
-                .filter_map(|source| {
-                    partitioned_source_indices
-                        .get(source)
-                        .map(|indices| ScheduledSourceGroup {
-                            src_func_id: *source,
-                            indices: Arc::clone(indices),
-                            corridor: Arc::clone(&corridor),
-                        })
-                })
-                .collect();
-            batch_number += 1;
-            let mut batch_funcs: Vec<FuncId> = corridor.lineage_funcs.iter().copied().collect();
-            batch_funcs.sort_by_key(|func| func.raw());
-            batch_funcs.dedup();
-            let mut batch_files: Vec<FileId> = batch_funcs
-                .iter()
-                .filter_map(|func| global.declaring_file(SymbolId::new(func.raw())))
-                .collect();
-            batch_files.sort_by_key(|file| file.raw());
-            batch_files.dedup();
-            bonsai_diagnostics::debug_log!(
-                "security-phase",
-                "building scoped semantic graph batch {}/{} groups={} funcs={} files={}",
-                batch_number,
-                total_batches,
-                batch_groups.len(),
-                batch_funcs.len(),
-                batch_files.len()
-            );
-            let batch_idg = build_idg_service_for_rulepack_for_files(
-                ws,
-                pack,
-                &transfer_languages,
-                &batch_files,
-                &batch_funcs,
-                chain_call_graph.as_ref(),
-            );
-            parallel_out.extend(
-                execute_source_groups(
-                    &source_group_executor,
-                    rayon_pool.as_ref(),
-                    &batch_groups,
-                    batch_idg.as_ref(),
-                    on_progress,
-                )
-                .into_iter()
-                .flatten(),
-            );
-        }
-        let mut callback_batches: Vec<_> = callback_batches.into_values().collect();
-        callback_batches.sort_by_key(|(corridor, _)| {
-            corridor
-                .lineage_funcs
-                .iter()
-                .map(|func| func.raw())
-                .min()
-                .unwrap_or_default()
-        });
-        for (corridor, batch_groups) in callback_batches {
-            batch_number += 1;
-            let mut batch_funcs: Vec<FuncId> = corridor.lineage_funcs.iter().copied().collect();
-            batch_funcs.sort_by_key(|func| func.raw());
-            batch_funcs.dedup();
-            let mut batch_files: Vec<FileId> = batch_funcs
-                .iter()
-                .filter_map(|func| global.declaring_file(SymbolId::new(func.raw())))
-                .collect();
-            batch_files.sort_by_key(|file| file.raw());
-            batch_files.dedup();
-            bonsai_diagnostics::debug_log!(
-                "security-phase",
-                "building callback semantic graph batch {}/{} groups={} funcs={} files={}",
-                batch_number,
-                total_batches,
-                batch_groups.len(),
-                batch_funcs.len(),
-                batch_files.len()
-            );
-            let batch_idg = build_idg_service_for_rulepack_for_files(
-                ws,
-                pack,
-                &transfer_languages,
-                &batch_files,
-                &batch_funcs,
-                chain_call_graph.as_ref(),
-            );
-            parallel_out.extend(
-                execute_source_groups(
-                    &source_group_executor,
-                    rayon_pool.as_ref(),
-                    &batch_groups,
-                    batch_idg.as_ref(),
-                    on_progress,
-                )
-                .into_iter()
-                .flatten(),
-            );
-        }
+        execute_partitioned_source_groups(
+            PartitionedExecutionRequest {
+                context: PartitionedExecutionContext {
+                    executor: &source_group_executor,
+                    pool: rayon_pool.as_ref(),
+                    global: global.as_ref(),
+                    ws,
+                    pack,
+                    transfer_languages: &transfer_languages,
+                    call_graph: chain_call_graph.as_ref(),
+                },
+                source_groups: scheduled_source_groups,
+                shared_corridors: &shared_coarse_corridors,
+                partitioned_source_indices: &partitioned_source_indices,
+            },
+            on_progress,
+        )
     } else {
         let Some(global_idg) = idg.as_ref() else {
             return ChainBuildResult {
@@ -6091,19 +6128,18 @@ where
                 resolution,
             };
         };
-        parallel_out.extend(
-            execute_source_groups(
-                &source_group_executor,
-                rayon_pool.as_ref(),
-                &scheduled_source_groups,
-                global_idg.as_ref(),
-                on_progress,
-            )
-            .into_iter()
-            .flatten(),
-        );
-    }
-    out.extend(parallel_out);
+        execute_source_groups(
+            &source_group_executor,
+            rayon_pool.as_ref(),
+            &scheduled_source_groups,
+            global_idg.as_ref(),
+            on_progress,
+        )
+        .into_iter()
+        .flatten()
+        .collect()
+    };
+    out.extend(findings);
     on_progress(AnalysisProgress::PhaseFinished);
     if let Some(written) = taint_cache::finish_workspace_cache(ws) {
         on_progress(AnalysisProgress::Note {
