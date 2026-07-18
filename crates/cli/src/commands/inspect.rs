@@ -572,510 +572,690 @@ pub(crate) struct InspectCommandOptions<'a> {
     pub(crate) format: BrowseFormat,
 }
 
-pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions<'_>) -> Result<()> {
-    let InspectCommandOptions {
-        pattern,
-        is_regex,
-        kind_filter,
-        filters,
-        max_flows,
-        max_entry_probes,
-        max_hits,
-        render,
-        graph_flow,
-        taint_flow,
-        taint_flow_explicit,
-        paging_cfg,
-        format,
-    } = options;
-    // Taint-aware default for `--query X` combined with standalone
-    // `--from Y` or `--to Y`: synthesize the OPPOSITE endpoint from
-    // the pattern so the filter enters the dual-mode matcher
-    // (`Some(from), Some(to)`) which enforces real taint connectivity
-    // across the chain. Matches the user's mental model from
-    // `--from X --to Y` where one endpoint must land on the hit and
-    // the other must be flow-connected. Pure-regex queries skip this
-    // — a regex won't cleanly match a taint-fact name. Plain
-    // `--query X` with neither `--from` nor `--to` keeps its current
-    // behavior (filter is a no-op; every chain for every matched hit
-    // surfaces).
-    let mut filters = filters;
-    if !is_regex {
-        if let Some(p) = pattern {
-            match (filters.from, filters.to) {
-                (Some(_), None) => filters.to = Some(p),
-                (None, Some(_)) => filters.from = Some(p),
-                _ => {}
+struct TaintCandidates {
+    entries: ahash::AHashSet<bonsai_common::FuncId>,
+    limit: usize,
+    truncated: std::cell::Cell<bool>,
+}
+
+impl TaintCandidates {
+    fn new(entries: ahash::AHashSet<bonsai_common::FuncId>, limit: usize) -> Self {
+        Self {
+            entries,
+            limit,
+            truncated: std::cell::Cell::new(false),
+        }
+    }
+
+    fn insert(&mut self, entry: bonsai_common::FuncId) {
+        insert_taint_candidate_entry(&mut self.entries, self.limit, &self.truncated, entry);
+    }
+}
+
+struct DeclHitPass<'a> {
+    enabled: bool,
+    files_in_path_order: &'a [bonsai_common::FileId],
+    matcher: &'a Matcher,
+    filters: InspectFilters<'a>,
+    taint_flow: bool,
+    graph_flows_enabled: bool,
+    max_flows: usize,
+    max_entry_probes: usize,
+    downstream_max_extra: usize,
+    downstream_max_paths: usize,
+    full_source_for_large_bodies: bool,
+}
+
+struct InspectKindSelection {
+    requested: ahash::AHashSet<String>,
+    endpoint_kind: Option<bonsai_sdk::FactKindFilter>,
+    exclude_lexical_by_default: bool,
+}
+
+impl InspectKindSelection {
+    fn wants(&self, kind: &str) -> bool {
+        if self
+            .endpoint_kind
+            .is_some_and(|filter| !inspect_kind_matches_filter(kind, filter))
+        {
+            return false;
+        }
+        if self.requested.is_empty() {
+            !self.exclude_lexical_by_default || !matches!(kind, "decorator" | "ref")
+        } else {
+            self.requested.contains(kind)
+        }
+    }
+}
+
+fn collect_decl_hits(
+    ws: &Workspace,
+    chain_cache: &ChainCache<'_>,
+    edge_resolver: &mut CallEdgeResolver<'_>,
+    options: DeclHitPass<'_>,
+    taint_candidates: &mut TaintCandidates,
+) -> Vec<InspectOut> {
+    if !options.enabled {
+        return Vec::new();
+    }
+
+    let global = ws.db().global_index();
+    let mut matched_decls = Vec::new();
+    for file in options.files_in_path_order.iter().copied() {
+        for decl in global.decls_in(file) {
+            if options.matcher.is_match(&decl.name) {
+                matched_decls.push(decl.clone());
             }
         }
     }
-    let structural_flow_lookup = render
-        .flow_id_filter
-        .as_deref()
-        .is_some_and(|id| id.starts_with("F:"))
-        || render.group_id_filter.is_some();
-    let default_graph_flow = taint_flow
-        && !taint_flow_explicit
-        && render.flow_id_filter.is_none()
-        && render.group_id_filter.is_none()
-        && !workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT);
-    let graph_flows_enabled = graph_flow || structural_flow_lookup || default_graph_flow;
-    let literal_prefilter = pattern.filter(|p| {
-        !is_regex
-            && p.len() >= 3
-            && !graph_flows_enabled
-            && render.group_id_filter.is_none()
-            && workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT)
+    // Prefer callables first so the most interesting flows land on top.
+    matched_decls.sort_by_key(|decl| match decl.kind {
+        DeclKind::Function | DeclKind::Method | DeclKind::Constructor => 0,
+        DeclKind::Class | DeclKind::Struct => 1,
+        _ => 2,
     });
-    let retrieval_prefilter = retrieval_prefilter_for_inspect(
-        root,
-        pattern,
-        is_regex,
-        filters,
-        graph_flows_enabled,
-        render.group_id_filter.is_some(),
-    )?;
-    let partial_workspace = retrieval_prefilter.is_some() || literal_prefilter.is_some();
-    let (project, _footer) = if let Some(include_filters) = retrieval_prefilter {
-        open_project_index_filtered_paths(root, &include_filters, &[])?
-    } else if let Some(literal) = literal_prefilter {
-        open_project_index_matching_literal(root, literal)?
-    } else {
-        open_project(root)?
-    };
-    let prepare_stage = progress::ScopedSpinner::new("preparing inspect query");
-    let ws = project.workspace();
-    let global = ws.db().global_index();
-    let full_source_for_large_bodies =
-        paging_cfg.all || render.flow_id_filter.is_some() || render.group_id_filter.is_some();
-    // One cache per `inspect` run. `inspect --query system` in Redis
-    // resolves 50+ hits to the same handful of enclosing functions, so
-    // per-target memoization here turns an N × call-graph walk into
-    // single-shot lookups after the first hit on each function.
-    // `--no-cache` / `BONSAI_NO_CACHE` swaps this for a pass-through
-    // variant that always takes the cold path.
-    let chain_cache = build_chain_cache(ws);
-    let (downstream_max_extra, downstream_max_paths) = if paging_cfg.all {
-        (usize::MAX, usize::MAX)
-    } else {
-        (6, 12)
-    };
-    // Edge resolvability is queried heavily when `inspect` extends raw
-    // upstream chains into concrete downstream call paths. Cache the
-    // per-file alias maps and per-edge span lookups for this invocation;
-    // otherwise hub queries such as Redis's `--query system` repeatedly
-    // rescan the same parse trees while checking the same edges.
-    let mut edge_resolver = CallEdgeResolver::new(ws);
 
-    // When no query is supplied, `inspect` becomes a filter-driven
-    // enumeration. Declaration hits stay opt-in in this mode, but
-    // occurrence hits should still be seeded by the concrete endpoint
-    // when the user provides one. Otherwise `inspect --to pickle`
-    // treats every string/arg/var in any function that reaches pickle
-    // as a match point.
-    let matcher: Matcher = match pattern {
-        Some(p) => build_matcher(p, is_regex)?,
-        None => Matcher::MatchAll,
-    };
-    let filter_only_occurrence_pattern = if pattern.is_none() {
-        filters.to.or(filters.from)
-    } else {
-        None
-    };
-    let occurrence_matcher: Matcher = match filter_only_occurrence_pattern {
-        Some(p) => build_matcher(p, false)?,
-        None => matcher.clone(),
-    };
-    let filter_only_target_scan = filter_only_occurrence_pattern.is_some();
-    let filter_only_occurrence_kind = if pattern.is_none() {
-        filters.to_kind.or(filters.from_kind).map(FactKindFilter::to_sdk)
-    } else {
-        None
-    };
-    prepare_stage.finish();
-    let kinds: ahash::AHashSet<String> = kind_filter.iter().map(|s| s.to_lowercase()).collect();
-    // When a `--query` is active but `--kind` is left unset, exclude
-    // purely lexical hit kinds (`decorator`, `ref`) from the default
-    // set. Decorators and bare refs aren't part of the taint-analysis
-    // view — they're syntactic annotations that shadow the same
-    // location as a `call` / `read` / `write` fact and inflate the
-    // "other hits" count with duplicates (e.g. `request.args.get(...)`
-    // emits BOTH a `call` and a `decorator`/`ref` hit for `request`).
-    // Users who explicitly want those kinds pass `--kind decorator`
-    // / `--kind ref` and get them back. When no query is supplied
-    // we keep every kind available — the filter-driven enumeration
-    // mode deliberately surfaces everything the matchers let through.
-    let default_exclude_kinds: &[&str] = if pattern.is_some() || filter_only_target_scan {
-        &["decorator", "ref"]
-    } else {
-        &[]
-    };
-    let want = |k: &str| {
-        if filter_only_occurrence_kind.is_some_and(|kind| !inspect_kind_matches_filter(k, kind)) {
-            return false;
+    let mut hits = Vec::new();
+    let decl_bar = progress::progress_bar("inspecting decls", matched_decls.len() as u64);
+    for decl in &matched_decls {
+        decl_bar.inc(1);
+        let (path, line, col) = format_span(&decl.name_span, ws);
+        if options
+            .filters
+            .file
+            .is_some_and(|filter| !file_path_matches_filter(ws, &path, filter))
+        {
+            continue;
         }
-        if kinds.is_empty() {
-            !default_exclude_kinds.contains(&k)
-        } else {
-            kinds.contains(k)
-        }
-    };
 
-    // ----- 1. Decl hits: keep the existing chain-enumerated flow render.
-    //
-    // When the matcher is universal (no `--query`), listing every decl
-    // as a hit floods the output. Skip decl hits in that case *unless*
-    // the user explicitly asked for them via `--kind decl`. The
-    // `--from` / `--to` / `--file` / `--in-fn` filters still narrow
-    // the per-hit flow enumeration below.
-    // Enumerate decls when the user either gave us a non-universal
-    // matcher, explicitly opted in via `--kind decl`, OR asked for a
-    // specific flow / group id (`--flow F:<16-hex>` /
-    // `--group G:<16-hex>`). The id paths need every decl's chains
-    // enumerated because they target a chain by hash, not by name
-    // — without that, a query-less `inspect --flow F:<16-hex>`
-    // would find nothing.
-    let emit_decls = want("decl")
-        && (!matcher.is_universal()
-            || kinds.contains("decl")
-            || render.flow_id_filter.is_some()
-            || render.group_id_filter.is_some());
-    let mut decl_hits: Vec<InspectOut> = Vec::new();
-    // Iterate files by PATH order (not FileId). This matches the final
-    // display sort, which keeps discovery and final label assignment
-    // deterministic across cache state and hash-map iteration order.
-    let files_in_path_order: Vec<bonsai_common::FileId> = {
-        let mut v: Vec<(String, bonsai_common::FileId)> = global
-            .all_files()
-            .map(|f| {
-                let path = ws
-                    .vfs()
-                    .path(f)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                (path, f)
-            })
-            .collect();
-        v.sort();
-        v.into_iter().map(|(_, f)| f).collect()
-    };
-    let large_syntax_scan = partial_workspace || files_in_path_order.len() > INSPECT_GRAPH_FLOW_FILE_LIMIT;
-    let syntax_fast_path = !graph_flows_enabled;
-    let structural_id_only_lookup = structural_flow_lookup
-        && pattern.is_none()
-        && kind_filter.is_empty()
-        && filters.from.is_none()
-        && filters.from_kind.is_none()
-        && filters.to.is_none()
-        && filters.to_kind.is_none()
-        && filters.file.is_none()
-        && filters.in_fn.is_none();
-    // A bare `--flow F:` / `--group G:` open skips the whole-workspace
-    // occurrence scan only when that scan would be expensive: with a
-    // MatchAll matcher every var/call/arg in the workspace becomes a
-    // hit whose chains get enumerated — the exact blowup direct id
-    // lookups exist to avoid. Small workspaces keep the folded
-    // occurrence context (vars/calls sharing the flow id); dropping it
-    // everywhere lost render context the folding contract pins. The
-    // large-workspace skip is announced via `hit_truncation_reasons`,
-    // never silent.
-    // `show F:` / `show G:` drilldowns skip the occurrence scan
-    // unconditionally — they are pure structural-chain views; the id
-    // IS the query. `inspect --flow` keeps the folded occurrence
-    // context except on large workspaces (announced, never silent).
-    let occurrence_scan_skipped_for_id_lookup =
-        structural_id_only_lookup && (large_syntax_scan || render.structural_drilldown);
-    // Raw inspect taint-flow is query-bounded by default: syntax hits add
-    // their enclosing callable to this set, then we ask the taint graph
-    // only for those entries. The only workspace-wide fallback is a
-    // direct `--flow T:...` lookup without any query/filter signal,
-    // because the `T:` id is derived from taint row content rather
-    // than a persisted index key.
-    let taint_flow_id_lookup = taint_flow
-        && render
-            .flow_id_filter
-            .as_deref()
-            .is_some_and(|id| id.starts_with("T:"));
-    let direct_taint_id_lookup = taint_flow_id_lookup
-        && pattern.is_none()
-        && filters.from.is_none()
-        && filters.to.is_none()
-        && filters.file.is_none()
-        && filters.in_fn.is_none()
-        && kind_filter.is_empty();
-    let mut taint_candidate_entries: ahash::AHashSet<bonsai_common::FuncId> = if direct_taint_id_lookup {
-        all_callable_entries(ws, &files_in_path_order)
-            .into_iter()
-            .collect()
-    } else {
-        ahash::AHashSet::default()
-    };
-    let taint_candidate_entry_cap = if taint_flow && !taint_flow_id_lookup && !paging_cfg.all {
-        INSPECT_DEFAULT_TAINT_ENTRY_LIMIT.min(max_hits).max(1)
-    } else {
-        usize::MAX
-    };
-    let taint_flow_cap = if taint_flow && !taint_flow_id_lookup && !paging_cfg.all {
-        INSPECT_DEFAULT_TAINT_FLOW_LIMIT.min(max_hits).max(1)
-    } else {
-        usize::MAX
-    };
-    let taint_candidates_truncated = std::cell::Cell::new(false);
-    if emit_decls {
-        let mut matched_decls: Vec<bonsai_lang_api::Decl> = Vec::new();
-        for file in files_in_path_order.iter().copied() {
-            for d in global.decls_in(file) {
-                if matcher.is_match(&d.name) {
-                    matched_decls.push(d.clone());
-                }
-            }
+        let target_func = bonsai_common::FuncId::new(decl.symbol.raw());
+        if options.taint_flow
+            && matches!(
+                decl.kind,
+                DeclKind::Module
+                    | DeclKind::Function
+                    | DeclKind::Method
+                    | DeclKind::Constructor
+                    | DeclKind::Global
+            )
+        {
+            taint_candidates.insert(target_func);
         }
-        // Prefer callables first so the most interesting flows land on top.
-        matched_decls.sort_by_key(|d| match d.kind {
-            DeclKind::Function | DeclKind::Method | DeclKind::Constructor => 0,
-            DeclKind::Class | DeclKind::Struct => 1,
-            _ => 2,
-        });
-        let decl_bar = progress::progress_bar("inspecting decls", matched_decls.len() as u64);
-        for decl in &matched_decls {
-            decl_bar.inc(1);
-            let (path, line, col) = format_span(&decl.name_span, ws);
-            // `--file` filters out decl hits whose file path doesn't
-            // match; skip early so we don't enumerate chains for dropped
-            // decls.
-            if filters
-                .file
-                .is_some_and(|f| !file_path_matches_filter(ws, &path, f))
-            {
-                continue;
-            }
-            // Resolved-graph traversal: enumerate chains in `FuncId`
-            // space so name collisions across classes / modules can't
-            // stitch unrelated decls into the same chain.
-            let target_func = bonsai_common::FuncId::new(decl.symbol.raw());
-            if taint_flow
-                && matches!(
-                    decl.kind,
-                    DeclKind::Module
-                        | DeclKind::Function
-                        | DeclKind::Method
-                        | DeclKind::Constructor
-                        | DeclKind::Global
-                )
-            {
-                insert_taint_candidate_entry(
-                    &mut taint_candidate_entries,
-                    taint_candidate_entry_cap,
-                    &taint_candidates_truncated,
-                    target_func,
-                );
-            }
-            if !graph_flows_enabled {
-                decl_hits.push(InspectOut {
-                    symbol: decl.name.clone(),
-                    kind: format!("{:?}", decl.kind).to_lowercase(),
-                    file: path,
-                    line,
-                    column: col,
-                    params: decl.params.clone(),
-                    direct_callers: Vec::new(),
-                    callees: Vec::new(),
-                    flows: Vec::new(),
-                    groups: Vec::new(),
-                    summary: InspectSummary {
-                        total_flows: 0,
-                        max_chain_depth: 0,
-                        unique_entry_points: 0,
-                        truncated_by: None,
-                    },
-                });
-                continue;
-            }
-            let (chains_r, decl_truncation) =
-                chain_cache.chains_resolved(target_func, max_flows, max_entry_probes);
-            // Precompute the downstream user-fn closure of the decl once.
-            // Each chain is extended with this so the filter match space
-            // equals what the renderer will inline.
-            let _decl_downstream_r =
-                chain_cache.downstream_resolved(target_func, downstream_max_extra, downstream_max_paths);
-            // For decl hits the "hit text" is the decl name itself; pass
-            // it so `--to <decl>` still matches even when the chain has
-            // just one element (the decl is a root).
-            //
-            // When neither `--from` nor `--to` is set, `chain_matches_filters`
-            // is a no-op — every chain passes. Skip the whole
-            // extend + reachable-names compute in that case. This is
-            // loss-free: the filter result is guaranteed to be `true`,
-            // so we'd have kept every chain anyway.
-            // Semantic-only default: drop chains whose worst-case
-            // precision is outside `Exact` / `Narrowed`, and drop
-            // chains with any unresolvable edge. Those shapes are not
-            // semantic evidence for inspect flows.
-            let chains_r: Vec<ResolvedChain> = chains_r
-                .into_iter()
-                .filter(|c| {
-                    matches!(
-                        c.precision,
-                        bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed,
-                    ) && edge_resolver.chain_edges_resolvable(&c.funcs)
-                })
-                .collect();
-            if chains_r.is_empty() {
-                continue;
-            }
-            // Enumerate every resolvable downstream call path per raw
-            // chain — each DFS leaf becomes its own extended chain.
-            // Only paths with actual syntactic edges survive; no
-            // reachability-bag `(over-approx)` annotations make it
-            // into render.
-            let mut decl_truncation_labels = Vec::new();
-            push_chain_truncation(&mut decl_truncation_labels, decl_truncation);
-            let mut extended_chains_r: Vec<(Vec<bonsai_common::FuncId>, bonsai_common::Precision)> =
-                Vec::new();
-            for chain in &chains_r {
-                let (paths, path_truncation) = edge_resolver.enumerate_call_paths_from_with_truncation(
-                    &chain_cache,
-                    &chain.funcs,
-                    downstream_max_extra,
-                    downstream_max_paths,
-                );
-                push_call_path_truncation(&mut decl_truncation_labels, path_truncation);
-                extended_chains_r.extend(paths.into_iter().map(|path| (path, chain.precision)));
-            }
-            if filters.from.is_some() || filters.to.is_some() {
-                chain_cache
-                    .prewarm_taint_facts(extended_chains_r.iter().filter_map(|(c, _)| c.first().copied()));
-                extended_chains_r.retain(|(path, _)| {
-                    // Chain function names — the syntactically
-                    // connected hops. Taint facts — tokens the
-                    // interprocedural / structural pass actually
-                    // surfaced for the chain's entry. The filter
-                    // runs on the already-extended path so a
-                    // `--to X` query only keeps chains where the
-                    // call-path tail actually reaches X (not just
-                    // the raw caller chain).
-                    let mut chain_names: Vec<String> =
-                        path.iter().map(|&f| func_display_name(ws, f)).collect();
-                    // Extend with tail's direct callees — `--to
-                    // <external-sink>` (`system`, `exec`,
-                    // `os.system`) must land when the sink is a
-                    // callee of the chain tail rather than a user-
-                    // defined hop. Taint facts alone leak sibling
-                    // branches; direct callees of the tail are
-                    // strict to this exact call path.
-                    if let Some(&tail) = path.last() {
-                        for c in chain_cache.callees_of_resolved(tail) {
-                            let name = func_display_name(ws, c);
-                            if !name.is_empty() && !chain_names.contains(&name) {
-                                chain_names.push(name);
-                            }
-                        }
-                    }
-                    // Path-only structural facts avoid sibling-branch
-                    // leakage while still allowing kind filters to land
-                    // on args/calls/reads/writes in intermediate hops.
-                    let taint_facts_fn = || chain_cache.chain_structural_tokens(path);
-                    bonsai_sdk::chain_matches_filters_for_hit(
-                        Some(bonsai_sdk::FilterHit::new(
-                            &decl.name,
-                            bonsai_sdk::FactKindFilter::Decl,
-                        )),
-                        &chain_names,
-                        &taint_facts_fn,
-                        filters.to_sdk(),
-                    )
-                });
-                if extended_chains_r.is_empty() {
-                    continue;
-                }
-            }
-            if taint_flow {
-                for (path, _) in &extended_chains_r {
-                    if let Some(&entry) = path.first() {
-                        insert_taint_candidate_entry(
-                            &mut taint_candidate_entries,
-                            taint_candidate_entry_cap,
-                            &taint_candidates_truncated,
-                            entry,
-                        );
-                    }
-                }
-            }
-            let call_spans: Vec<Vec<Option<bonsai_common::Span>>> = extended_chains_r
-                .iter()
-                .map(|(chain, _)| edge_resolver.call_spans_for_chain(chain))
-                .collect();
-            // Parallel render across chains. Source inlining +
-            // FROM/TO-marker walks dominate inspect's wall time on
-            // hub-sink queries (TS compiler `inspect parse` spends
-            // ~120 s here). Each chain's render is pure — reads
-            // workspace VFS (`Sync`), writes no shared state — so
-            // rayon's `par_iter` gives a near-linear core speedup.
-            //
-            // Determinism: flow labels are assigned after the report
-            // has its final filtered shape. This pass renders with a
-            // placeholder, and `.collect()` on a parallel iterator
-            // preserves iteration order for the later label fill.
-            use rayon::prelude::*;
-            let flows: Vec<InspectFlowRendered> = extended_chains_r
-                .par_iter()
-                .zip(call_spans.par_iter())
-                .enumerate()
-                .filter_map(|(_i, ((extended_r, prec), spans))| {
-                    let match_idx = extended_r
-                        .iter()
-                        .position(|&f| f == target_func)
-                        .unwrap_or(extended_r.len().saturating_sub(1));
-                    let match_at = Some((
-                        match_idx,
-                        MatchOverride {
-                            span: decl.name_span,
-                            label: format!("MATCH: enter {}", decl.name),
-                            marker_subjects: vec![decl.name.clone()],
-                        },
-                    ));
-                    render_flow_with_cached_call_spans(
-                        ws,
-                        extended_r,
-                        spans,
-                        0,
-                        FLOW_LABEL_PLACEHOLDER,
-                        *prec,
-                        match_at,
-                        filters,
-                        true,
-                        full_source_for_large_bodies,
-                    )
-                })
-                .collect();
-            let direct_callers = semantic_direct_callers(ws, chain_cache.resolved_graph(), target_func);
-            let callees_out = semantic_callees(ws, chain_cache.resolved_graph(), target_func);
-            let unique_entries: ahash::AHashSet<&String> =
-                flows.iter().filter_map(|f| f.chain.first()).collect();
-            let summary = InspectSummary {
-                total_flows: flows.len() as u32,
-                max_chain_depth: flows.iter().map(|f| f.chain.len() as u32).max().unwrap_or(0),
-                unique_entry_points: unique_entries.len() as u32,
-                truncated_by: truncation_summary(&decl_truncation_labels),
-            };
-            let groups = group_flows_by_suffix(&flows);
-            decl_hits.push(InspectOut {
+        if !options.graph_flows_enabled {
+            hits.push(InspectOut {
                 symbol: decl.name.clone(),
                 kind: format!("{:?}", decl.kind).to_lowercase(),
                 file: path,
                 line,
                 column: col,
                 params: decl.params.clone(),
-                direct_callers,
-                callees: callees_out,
-                flows,
-                groups,
-                summary,
+                direct_callers: Vec::new(),
+                callees: Vec::new(),
+                flows: Vec::new(),
+                groups: Vec::new(),
+                summary: InspectSummary {
+                    total_flows: 0,
+                    max_chain_depth: 0,
+                    unique_entry_points: 0,
+                    truncated_by: None,
+                },
             });
+            continue;
         }
-        decl_bar.finish_and_clear();
-    }
 
+        let (chains, chain_truncation) =
+            chain_cache.chains_resolved(target_func, options.max_flows, options.max_entry_probes);
+        let _downstream = chain_cache.downstream_resolved(
+            target_func,
+            options.downstream_max_extra,
+            options.downstream_max_paths,
+        );
+        let chains: Vec<ResolvedChain> = chains
+            .into_iter()
+            .filter(|chain| {
+                matches!(
+                    chain.precision,
+                    bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed,
+                ) && edge_resolver.chain_edges_resolvable(&chain.funcs)
+            })
+            .collect();
+        if chains.is_empty() {
+            continue;
+        }
+
+        let mut truncation_labels = Vec::new();
+        push_chain_truncation(&mut truncation_labels, chain_truncation);
+        let mut extended_chains = Vec::new();
+        for chain in &chains {
+            let (paths, path_truncation) = edge_resolver.enumerate_call_paths_from_with_truncation(
+                chain_cache,
+                &chain.funcs,
+                options.downstream_max_extra,
+                options.downstream_max_paths,
+            );
+            push_call_path_truncation(&mut truncation_labels, path_truncation);
+            extended_chains.extend(paths.into_iter().map(|path| (path, chain.precision)));
+        }
+        if options.filters.from.is_some() || options.filters.to.is_some() {
+            chain_cache.prewarm_taint_facts(
+                extended_chains
+                    .iter()
+                    .filter_map(|(chain, _)| chain.first().copied()),
+            );
+            extended_chains.retain(|(path, _)| {
+                let mut chain_names: Vec<String> =
+                    path.iter().map(|&func| func_display_name(ws, func)).collect();
+                if let Some(&tail) = path.last() {
+                    for callee in chain_cache.callees_of_resolved(tail) {
+                        let name = func_display_name(ws, callee);
+                        if !name.is_empty() && !chain_names.contains(&name) {
+                            chain_names.push(name);
+                        }
+                    }
+                }
+                let taint_facts = || chain_cache.chain_structural_tokens(path);
+                bonsai_sdk::chain_matches_filters_for_hit(
+                    Some(bonsai_sdk::FilterHit::new(
+                        &decl.name,
+                        bonsai_sdk::FactKindFilter::Decl,
+                    )),
+                    &chain_names,
+                    &taint_facts,
+                    options.filters.to_sdk(),
+                )
+            });
+            if extended_chains.is_empty() {
+                continue;
+            }
+        }
+        if options.taint_flow {
+            for (path, _) in &extended_chains {
+                if let Some(&entry) = path.first() {
+                    taint_candidates.insert(entry);
+                }
+            }
+        }
+
+        let call_spans: Vec<Vec<Option<bonsai_common::Span>>> = extended_chains
+            .iter()
+            .map(|(chain, _)| edge_resolver.call_spans_for_chain(chain))
+            .collect();
+        use rayon::prelude::*;
+        let flows: Vec<InspectFlowRendered> = extended_chains
+            .par_iter()
+            .zip(call_spans.par_iter())
+            .filter_map(|((extended, precision), spans)| {
+                let match_idx = extended
+                    .iter()
+                    .position(|&func| func == target_func)
+                    .unwrap_or(extended.len().saturating_sub(1));
+                render_flow_with_cached_call_spans(
+                    ws,
+                    extended,
+                    spans,
+                    0,
+                    FLOW_LABEL_PLACEHOLDER,
+                    *precision,
+                    Some((
+                        match_idx,
+                        MatchOverride {
+                            span: decl.name_span,
+                            label: format!("MATCH: enter {}", decl.name),
+                            marker_subjects: vec![decl.name.clone()],
+                        },
+                    )),
+                    options.filters,
+                    true,
+                    options.full_source_for_large_bodies,
+                )
+            })
+            .collect();
+        let direct_callers = semantic_direct_callers(ws, chain_cache.resolved_graph(), target_func);
+        let callees = semantic_callees(ws, chain_cache.resolved_graph(), target_func);
+        let unique_entries: ahash::AHashSet<&String> =
+            flows.iter().filter_map(|flow| flow.chain.first()).collect();
+        let summary = InspectSummary {
+            total_flows: flows.len() as u32,
+            max_chain_depth: flows
+                .iter()
+                .map(|flow| flow.chain.len() as u32)
+                .max()
+                .unwrap_or(0),
+            unique_entry_points: unique_entries.len() as u32,
+            truncated_by: truncation_summary(&truncation_labels),
+        };
+        let groups = group_flows_by_suffix(&flows);
+        hits.push(InspectOut {
+            symbol: decl.name.clone(),
+            kind: format!("{:?}", decl.kind).to_lowercase(),
+            file: path,
+            line,
+            column: col,
+            params: decl.params.clone(),
+            direct_callers,
+            callees,
+            flows,
+            groups,
+            summary,
+        });
+    }
+    decl_bar.finish_and_clear();
+    hits
+}
+
+struct OccurrenceHitPass<'a> {
+    files_in_path_order: &'a [bonsai_common::FileId],
+    occurrence_matcher: &'a Matcher,
+    kind_selection: &'a InspectKindSelection,
+    filter_only_occurrence_kind: Option<bonsai_sdk::FactKindFilter>,
+    filters: InspectFilters<'a>,
+    max_flows: usize,
+    max_entry_probes: usize,
+    max_hits: usize,
+    downstream_max_extra: usize,
+    downstream_max_paths: usize,
+    full_source_for_large_bodies: bool,
+    graph_flows_enabled: bool,
+    syntax_fast_path: bool,
+    taint_flow: bool,
+    paging_cfg: &'a paging::PagingConfig,
+    direct_taint_id_lookup: bool,
+    occurrence_scan_skipped_for_id_lookup: bool,
+    partial_workspace: bool,
+    large_syntax_scan: bool,
+}
+
+struct OccurrenceChainResolution {
+    chains: Vec<ResolvedChain>,
+    call_targets: Vec<(bonsai_common::FuncId, bonsai_common::Precision)>,
+    from_match: Option<FilterMatch>,
+    to_match: Option<FilterMatch>,
+    truncation_labels: Vec<&'static str>,
+}
+
+struct OccurrenceChainContext<'query, 'workspace> {
+    ws: &'workspace Workspace,
+    chain_cache: &'query ChainCache<'workspace>,
+    edge_resolver: &'query mut CallEdgeResolver<'workspace>,
+    filters: InspectFilters<'query>,
+    max_flows: usize,
+    max_entry_probes: usize,
+    downstream_max_extra: usize,
+    downstream_max_paths: usize,
+}
+
+fn resolve_occurrence_chains(
+    context: &mut OccurrenceChainContext<'_, '_>,
+    kind: &str,
+    text: &str,
+    span: bonsai_common::Span,
+    containing_id: Option<bonsai_common::FuncId>,
+) -> OccurrenceChainResolution {
+    let mut resolution = OccurrenceChainResolution {
+        chains: Vec::new(),
+        call_targets: Vec::new(),
+        from_match: None,
+        to_match: None,
+        truncation_labels: Vec::new(),
+    };
+    let Some(containing_id) = containing_id else {
+        return resolution;
+    };
+
+    let containing_downstream = context.chain_cache.downstream_resolved(
+        containing_id,
+        context.downstream_max_extra,
+        context.downstream_max_paths,
+    );
+    let mut seed = Vec::new();
+    let mut seed_from_call_target = false;
+    if kind == "call" {
+        resolution.call_targets = resolve_call_hit_targets(context.chain_cache, containing_id, span);
+        for (target, direct_precision) in resolution.call_targets.iter().copied() {
+            let (raw, truncation) =
+                context
+                    .chain_cache
+                    .chains_resolved(target, context.max_flows, context.max_entry_probes);
+            push_chain_truncation(&mut resolution.truncation_labels, truncation);
+            let target_seed = if raw.is_empty() {
+                vec![ResolvedChain {
+                    funcs: vec![target],
+                    precision: bonsai_common::Precision::Exact,
+                }]
+            } else {
+                raw
+            };
+            let mut target_seed: Vec<ResolvedChain> = target_seed
+                .into_iter()
+                .filter(|chain| chain.funcs.contains(&containing_id))
+                .collect();
+            if target_seed.is_empty() && target != containing_id {
+                target_seed.push(ResolvedChain {
+                    funcs: vec![containing_id, target],
+                    precision: direct_precision,
+                });
+            }
+            seed.extend(target_seed);
+        }
+        seed = dedupe_chains_keep_best_precision(seed);
+        seed_from_call_target = !seed.is_empty();
+    }
+    if seed.is_empty() {
+        let (raw, truncation) =
+            context
+                .chain_cache
+                .chains_resolved(containing_id, context.max_flows, context.max_entry_probes);
+        push_chain_truncation(&mut resolution.truncation_labels, truncation);
+        seed = if raw.is_empty() {
+            vec![ResolvedChain {
+                funcs: vec![containing_id],
+                precision: bonsai_common::Precision::Exact,
+            }]
+        } else {
+            raw
+        };
+    }
+    let seed: Vec<ResolvedChain> = seed
+        .into_iter()
+        .filter(|chain| {
+            let precise = matches!(
+                chain.precision,
+                bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed,
+            );
+            precise && (seed_from_call_target || context.edge_resolver.chain_edges_resolvable(&chain.funcs))
+        })
+        .collect();
+
+    if (context.filters.from.is_some() || context.filters.to.is_some()) && kind != "call" {
+        let mut seen_from = None;
+        let mut seen_to = None;
+        context
+            .chain_cache
+            .prewarm_taint_facts(seed.iter().filter_map(|chain| chain.funcs.first().copied()));
+        resolution.chains = seed
+            .into_iter()
+            .filter(|chain| {
+                let mut extended = chain.funcs.clone();
+                for downstream in &containing_downstream {
+                    if !extended.contains(downstream) {
+                        extended.push(*downstream);
+                    }
+                }
+                let chain_names: Vec<String> = extended
+                    .iter()
+                    .map(|&func| func_display_name(context.ws, func))
+                    .collect();
+                let taint_facts = || context.chain_cache.chain_taint_facts(&extended);
+                if !bonsai_sdk::chain_matches_filters_for_hit(
+                    inspect_filter_hit(text, kind),
+                    &chain_names,
+                    &taint_facts,
+                    context.filters.to_sdk(),
+                ) {
+                    return false;
+                }
+
+                let reachable = context.chain_cache.reachable_resolved(&extended);
+                let func_names: Vec<String> = reachable
+                    .iter()
+                    .map(|&func| func_display_name(context.ws, func))
+                    .collect();
+                if seen_from.is_none() {
+                    if let Some(needle) = context.filters.from {
+                        seen_from = reachable
+                            .iter()
+                            .zip(func_names.iter())
+                            .find(|(_, name)| name_token_match(name, needle))
+                            .map(|(&func, name)| build_filter_match(context.ws, Some(func), name.clone()))
+                            .or_else(|| {
+                                let facts = taint_facts();
+                                let mut tokens: Vec<&String> =
+                                    facts.by_kind.values().flat_map(|tokens| tokens.iter()).collect();
+                                tokens.sort();
+                                tokens
+                                    .into_iter()
+                                    .find(|token| name_token_match(token, needle))
+                                    .map(|token| build_filter_match(context.ws, None, token.clone()))
+                            });
+                    }
+                }
+                if seen_to.is_none() {
+                    if let Some(needle) = context.filters.to {
+                        seen_to = name_token_match(text, needle)
+                            .then(|| build_filter_match(context.ws, None, needle.to_string()))
+                            .or_else(|| {
+                                let facts = taint_facts();
+                                let mut tokens: Vec<&String> =
+                                    facts.by_kind.values().flat_map(|tokens| tokens.iter()).collect();
+                                tokens.sort();
+                                tokens
+                                    .into_iter()
+                                    .find(|token| name_token_match(token, needle))
+                                    .map(|token| build_filter_match(context.ws, None, token.clone()))
+                            })
+                            .or_else(|| {
+                                reachable
+                                    .iter()
+                                    .zip(func_names.iter())
+                                    .find(|(_, name)| name_token_match(name, needle))
+                                    .map(|(&func, name)| {
+                                        build_filter_match(context.ws, Some(func), name.clone())
+                                    })
+                            });
+                    }
+                }
+                true
+            })
+            .collect();
+        resolution.from_match = seen_from;
+        resolution.to_match = seen_to;
+    } else {
+        resolution.chains = seed;
+    }
+    resolution
+}
+
+struct OccurrenceHitResult {
+    hits: Vec<HitOut>,
+    truncated_by_output_cap: bool,
+    truncated_by_attempt_cap: bool,
+    candidates_attempted: usize,
+    attempt_cap: usize,
+}
+
+struct OccurrenceScan<'a> {
+    files_in_path_order: &'a [bonsai_common::FileId],
+    matcher: &'a Matcher,
+    kind_selection: &'a InspectKindSelection,
+    endpoint_kind: Option<bonsai_sdk::FactKindFilter>,
+    syntax_fast_path: bool,
+    taint_flow: bool,
+    large_syntax_scan: bool,
+    max_hits: usize,
+    attempt_cap: usize,
+    skip: bool,
+    partial_workspace: bool,
+    hits_attempted: &'a std::cell::Cell<usize>,
+    truncated_by_output_cap: &'a std::cell::Cell<bool>,
+    truncated_by_attempt_cap: &'a std::cell::Cell<bool>,
+}
+
+fn scan_occurrence_facts(
+    ws: &Workspace,
+    chain_cache: &ChainCache<'_>,
+    options: OccurrenceScan<'_>,
+    mut hits: &mut Vec<HitOut>,
+    mut push_hit: &mut impl FnMut(
+        &str,
+        String,
+        bonsai_common::Span,
+        Option<(bonsai_common::FuncId, String)>,
+        bool,
+        &mut Vec<HitOut>,
+    ),
+) {
+    let OccurrenceScan {
+        files_in_path_order,
+        matcher: occurrence_matcher,
+        kind_selection,
+        endpoint_kind: filter_only_occurrence_kind,
+        syntax_fast_path,
+        taint_flow,
+        large_syntax_scan,
+        max_hits,
+        attempt_cap,
+        skip: occurrence_scan_skipped_for_id_lookup,
+        partial_workspace,
+        hits_attempted,
+        truncated_by_output_cap: hits_truncated_by_output_cap,
+        truncated_by_attempt_cap: hits_truncated_by_attempt_cap,
+    } = options;
+    let global = ws.db().global_index();
+    if !occurrence_scan_skipped_for_id_lookup {
+        let hit_phase = if partial_workspace {
+            "hydrating verified facts"
+        } else {
+            "scanning files"
+        };
+        let hit_bar = progress::progress_bar(hit_phase, files_in_path_order.len() as u64);
+        for file in files_in_path_order.iter().copied() {
+            if syntax_fast_path && hits_attempted.get() >= attempt_cap {
+                hits_truncated_by_attempt_cap.set(true);
+                break;
+            }
+            if syntax_fast_path && !taint_flow && hits.len() >= max_hits {
+                hits_truncated_by_output_cap.set(true);
+                break;
+            }
+            hit_bar.inc(1);
+            let Some(idx) = global.file_index(file) else {
+                continue;
+            };
+            // Preload decls in this file for enclosing-function lookup.
+            let decls_in_file: Vec<&bonsai_lang_api::Decl> = idx.defs.iter().collect();
+
+            // Calls + Assigns + Args live in flow_events.
+            for d in &decls_in_file {
+                if !matches!(
+                    d.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) {
+                    continue;
+                }
+                walk_flow_hits(
+                    &d.flow_events,
+                    bonsai_common::FuncId::new(d.symbol.raw()),
+                    &d.name,
+                    FlowHitWalkContext {
+                        workspace: Some(ws),
+                        matcher: &occurrence_matcher,
+                        endpoint_kind_filter: filter_only_occurrence_kind,
+                        kinds: &kind_selection.requested,
+                    },
+                    &mut hits,
+                    &mut push_hit,
+                );
+            }
+
+            // Strings.
+            if kind_selection.wants("string") {
+                for s in &idx.strings {
+                    if occurrence_matcher.is_match(&s.text) {
+                        let enclosing = chain_cache.enclosing_func(file, &decls_in_file, s.span);
+                        push_hit("string", s.text.clone(), s.span, enclosing, false, &mut hits);
+                    }
+                }
+            }
+
+            // Refs (covers decorators via RefKind::Decorator, plus residual
+            // module-level call refs). On large syntax-fast inspections,
+            // call facts from function bodies already came from flow_events
+            // above; avoid an O(refs × enclosing lookup) pass just to
+            // rediscover the same calls.
+            let scan_refs = kind_selection.wants("decorator")
+                || kind_selection.wants("ref")
+                || (kind_selection.wants("call") && (!syntax_fast_path || !large_syntax_scan));
+            if scan_refs {
+                for r in &idx.refs {
+                    let kind_tag = match r.kind {
+                        RefKind::Decorator => "decorator",
+                        RefKind::Call => {
+                            // Skip call-refs that correspond to a call already
+                            // surfaced by the flow-event walker above. Module-
+                            // level calls (JS `const x = require(...)` at file
+                            // top, Python top-level script statements, etc.)
+                            // have NO enclosing function — they're not in any
+                            // decl's flow_events — so we must emit them here or
+                            // they become invisible to inspect.
+                            let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
+                            if enclosing.is_some() {
+                                continue;
+                            }
+                            "call"
+                        }
+                        _ => "ref",
+                    };
+                    if !kind_selection.wants(kind_tag) {
+                        continue;
+                    }
+                    if occurrence_matcher.is_match(&r.name) {
+                        let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
+                        push_hit(kind_tag, r.name.clone(), r.span, enclosing, false, &mut hits);
+                    }
+                }
+            }
+
+            // Imports (fallback to generic scan when the adapter didn't provide any).
+            if kind_selection.wants("import") {
+                let imports_vec = ws.db().imports_for(file);
+                for imp in &imports_vec {
+                    let alias_match = imp
+                        .alias
+                        .as_deref()
+                        .is_some_and(|alias| occurrence_matcher.is_match(alias));
+                    let original_match = imp
+                        .original_name
+                        .as_deref()
+                        .is_some_and(|original| occurrence_matcher.is_match(original));
+                    if occurrence_matcher.is_match(&imp.module) || alias_match || original_match {
+                        push_hit("import", import_hit_text(imp), imp.span, None, false, &mut hits);
+                    }
+                }
+            }
+        }
+        hit_bar.finish_and_clear();
+    }
+}
+
+fn collect_occurrence_hits<'workspace>(
+    ws: &'workspace Workspace,
+    chain_cache: &ChainCache<'workspace>,
+    edge_resolver: &mut CallEdgeResolver<'workspace>,
+    options: OccurrenceHitPass<'_>,
+    taint_candidates: &mut TaintCandidates,
+) -> OccurrenceHitResult {
+    let OccurrenceHitPass {
+        files_in_path_order,
+        occurrence_matcher,
+        kind_selection,
+        filter_only_occurrence_kind,
+        filters,
+        max_flows,
+        max_entry_probes,
+        max_hits,
+        downstream_max_extra,
+        downstream_max_paths,
+        full_source_for_large_bodies,
+        graph_flows_enabled,
+        syntax_fast_path,
+        taint_flow,
+        paging_cfg,
+        direct_taint_id_lookup,
+        occurrence_scan_skipped_for_id_lookup,
+        partial_workspace,
+        large_syntax_scan,
+    } = options;
+    let taint_candidate_entry_cap = taint_candidates.limit;
     // ----- 2. Non-decl hits: calls, assignments, strings, imports, args, decorators, refs.
     let mut hits: Vec<HitOut> = Vec::new();
     // Warm the resolved graph only when this invocation is actually
@@ -1161,12 +1341,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         hits_attempted.set(hits_attempted.get() + 1);
         if taint_flow {
             if let Some(entry) = containing_id {
-                insert_taint_candidate_entry(
-                    &mut taint_candidate_entries,
-                    taint_candidate_entry_cap,
-                    &taint_candidates_truncated,
-                    entry,
-                );
+                taint_candidates.insert(entry);
             }
         }
         if output_capped {
@@ -1213,218 +1388,29 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             return;
         }
 
-        // Resolved-graph traversal: enumerate chains in `FuncId`
-        // space so name collisions across classes / modules can't
-        // stitch unrelated decls into the same chain.
-        let containing_downstream_r: Vec<bonsai_common::FuncId> = containing_id
-            .map(|f| chain_cache.downstream_resolved(f, downstream_max_extra, downstream_max_paths))
-            .unwrap_or_default();
-        // Populated by the filter pass below when `--from` / `--to`
-        // is set — the specific reachable name (or hit text) that
-        // matched each needle, along with its source location.
-        // Threaded into `HitOut` so the occurrence-hits table can
-        // summarise each flow at a glance: "this hit connects
-        // `handleRequest (gateway.swift:5:3)` → `Process
-        // (AuthService.swift:23:24)` on line 23:24".
-        let mut hit_from_match: Option<FilterMatch> = None;
-        let mut hit_to_match: Option<FilterMatch> = None;
-        let mut flow_truncation_labels: Vec<&'static str> = Vec::new();
-        let mut call_hit_targets: Vec<(bonsai_common::FuncId, bonsai_common::Precision)> = Vec::new();
-        let chains_r: Vec<ResolvedChain> = if let Some(c_id) = containing_id {
-            let mut seed = Vec::new();
-            let mut seed_from_call_target = false;
-            if kind == "call" {
-                call_hit_targets = resolve_call_hit_targets(&chain_cache, c_id, span);
-                for (target, direct_precision) in call_hit_targets.iter().copied() {
-                    let (raw, truncation) = chain_cache.chains_resolved(target, max_flows, max_entry_probes);
-                    push_chain_truncation(&mut flow_truncation_labels, truncation);
-                    let target_seed = if raw.is_empty() {
-                        vec![ResolvedChain {
-                            funcs: vec![target],
-                            precision: bonsai_common::Precision::Exact,
-                        }]
-                    } else {
-                        raw
-                    };
-                    let mut target_seed: Vec<ResolvedChain> = target_seed
-                        .into_iter()
-                        .filter(|chain| chain.funcs.contains(&c_id))
-                        .collect();
-                    if target_seed.is_empty() && target != c_id {
-                        target_seed.push(ResolvedChain {
-                            funcs: vec![c_id, target],
-                            precision: direct_precision,
-                        });
-                    }
-                    seed.extend(target_seed);
-                }
-                seed = dedupe_chains_keep_best_precision(seed);
-                seed_from_call_target = !seed.is_empty();
-            }
-            if seed.is_empty() {
-                let (raw, truncation) = chain_cache.chains_resolved(c_id, max_flows, max_entry_probes);
-                push_chain_truncation(&mut flow_truncation_labels, truncation);
-                // Ensure the containing function itself is a candidate
-                // chain even when it's an entry point (no upstream
-                // callers). Without this synthetic chain, a sink that
-                // lives in an entry function would have zero chains and
-                // get dropped by the filter below. The synthetic seed is
-                // `Exact` because there's no upstream edge to introduce
-                // uncertainty.
-                seed = if raw.is_empty() {
-                    vec![ResolvedChain {
-                        funcs: vec![c_id],
-                        precision: bonsai_common::Precision::Exact,
-                    }]
-                } else {
-                    raw
-                };
-            }
-            // Semantic-only default: drop chains whose worst-case
-            // precision is outside `Exact` / `Narrowed`, and drop
-            // chains with any unresolvable edge. See the decl-hit
-            // branch above for the rationale.
-            let seed: Vec<ResolvedChain> = seed
-                .into_iter()
-                .filter(|c| {
-                    let precise = matches!(
-                        c.precision,
-                        bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed,
-                    );
-                    precise && (seed_from_call_target || edge_resolver.chain_edges_resolvable(&c.funcs))
-                })
-                .collect();
-            // Per-chain filter: extend with the containing function's
-            // downstream (what the renderer will inline), compute the set
-            // of names that extended chain visibly touches, and require
-            // both `--from` and `--to` to appear there (or in the hit
-            // text). Scoped strictly to the rendered flow — no sibling
-            // branches leak in.
-            //
-            // When neither `--from` nor `--to` is set, the filter is a
-            // no-op. Skip the extend + reachable compute entirely: the
-            // output is identical, we just save per-hit cost on the
-            // cold path where the user didn't ask for filtering.
-            if (filters.from.is_some() || filters.to.is_some()) && kind != "call" {
-                // Track the first reachable FuncId per chain whose
-                // display name satisfies `--from` / `--to`, then
-                // resolve back to a location so the hits table can
-                // show `name (file:line:col)`. First match wins —
-                // the row is a single line; multiple matches collapse
-                // to the nearest upstream/downstream respectively.
-                let mut seen_from: Option<FilterMatch> = None;
-                let mut seen_to: Option<FilterMatch> = None;
-                // The interprocedural per-entry compute is
-                // independent across entries and CPU-bound. Pre-warm
-                // the cache in parallel so the serial filter loop
-                // that follows sees a hot cache on every reachability
-                // miss. On requests's `--from session` (~5k chains,
-                // ~100 unique entries) this cuts wall time roughly
-                // in half.
-                chain_cache.prewarm_taint_facts(seed.iter().filter_map(|c| c.funcs.first().copied()));
-                let kept: Vec<ResolvedChain> = seed
-                    .into_iter()
-                    .filter(|chain_r| {
-                        let mut extended = chain_r.funcs.clone();
-                        for d in &containing_downstream_r {
-                            if !extended.contains(d) {
-                                extended.push(*d);
-                            }
-                        }
-                        // Chain function names — syntactically
-                        // connected hops. Taint facts — tokens the
-                        // interprocedural pass actually propagated.
-                        // Lexical reachability was removed — it
-                        // matched unrelated imports in the same file.
-                        let chain_names: Vec<String> =
-                            extended.iter().map(|&f| func_display_name(ws, f)).collect();
-                        let taint_facts_fn = || chain_cache.chain_taint_facts(&extended);
-                        if !bonsai_sdk::chain_matches_filters_for_hit(
-                            inspect_filter_hit(&text, kind),
-                            &chain_names,
-                            &taint_facts_fn,
-                            filters.to_sdk(),
-                        ) {
-                            return false;
-                        }
-                        // Parallel FuncId list for resolving the
-                        // matched FROM/TO to a `(file, line)` for the
-                        // hits table — we only need FuncIds for
-                        // names that happen to be function-valued,
-                        // so walk the resolved reachable set and
-                        // find the first matching name.
-                        let reachable_r = chain_cache.reachable_resolved(&extended);
-                        let func_names: Vec<String> =
-                            reachable_r.iter().map(|&f| func_display_name(ws, f)).collect();
-                        if seen_from.is_none() {
-                            if let Some(needle) = filters.from {
-                                // Prefer a function-valued match on
-                                // the chain itself (file:line can be
-                                // resolved via FuncId). Fall back to
-                                // a taint-fact token when the needle
-                                // is a propagated value rather than a
-                                // function on the path.
-                                seen_from = reachable_r
-                                    .iter()
-                                    .zip(func_names.iter())
-                                    .find(|(_, n)| name_token_match(n, needle))
-                                    .map(|(&f, n)| build_filter_match(ws, Some(f), n.clone()))
-                                    .or_else(|| {
-                                        // Sort token candidates
-                                        // before picking the "first"
-                                        // match. AHashMap iteration
-                                        // depends on the process's
-                                        // random hash seed — sorting
-                                        // restores a stable choice.
-                                        let taint = taint_facts_fn();
-                                        let mut tokens: Vec<&String> =
-                                            taint.by_kind.values().flat_map(|t| t.iter()).collect();
-                                        tokens.sort();
-                                        tokens
-                                            .into_iter()
-                                            .find(|t| name_token_match(t, needle))
-                                            .map(|t| build_filter_match(ws, None, t.clone()))
-                                    });
-                            }
-                        }
-                        if seen_to.is_none() {
-                            if let Some(needle) = filters.to {
-                                seen_to = if name_token_match(&text, needle) {
-                                    Some(build_filter_match(ws, None, needle.to_string()))
-                                } else {
-                                    None
-                                }
-                                .or_else(|| {
-                                    let taint = taint_facts_fn();
-                                    let mut tokens: Vec<&String> =
-                                        taint.by_kind.values().flat_map(|t| t.iter()).collect();
-                                    tokens.sort();
-                                    tokens
-                                        .into_iter()
-                                        .find(|t| name_token_match(t, needle))
-                                        .map(|t| build_filter_match(ws, None, t.clone()))
-                                })
-                                .or_else(|| {
-                                    reachable_r
-                                        .iter()
-                                        .zip(func_names.iter())
-                                        .find(|(_, n)| name_token_match(n, needle))
-                                        .map(|(&f, n)| build_filter_match(ws, Some(f), n.clone()))
-                                });
-                            }
-                        }
-                        true
-                    })
-                    .collect();
-                hit_from_match = seen_from;
-                hit_to_match = seen_to;
-                kept
-            } else {
-                seed
-            }
-        } else {
-            Vec::new()
-        };
+        let resolution = resolve_occurrence_chains(
+            &mut OccurrenceChainContext {
+                ws,
+                chain_cache,
+                edge_resolver: &mut *edge_resolver,
+                filters,
+                max_flows,
+                max_entry_probes,
+                downstream_max_extra,
+                downstream_max_paths,
+            },
+            kind,
+            &text,
+            span,
+            containing_id,
+        );
+        let OccurrenceChainResolution {
+            chains: chains_r,
+            call_targets: call_hit_targets,
+            from_match: hit_from_match,
+            to_match: hit_to_match,
+            truncation_labels: mut flow_truncation_labels,
+        } = resolution;
         // If chain filters rejected every chain AND the user explicitly
         // asked for --from / --to, drop this hit entirely (they didn't
         // want to see it).
@@ -1532,12 +1518,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         if taint_flow {
             for (path, _) in &extended_chains_r {
                 if let Some(&entry) = path.first() {
-                    insert_taint_candidate_entry(
-                        &mut taint_candidate_entries,
-                        taint_candidate_entry_cap,
-                        &taint_candidates_truncated,
-                        entry,
-                    );
+                    taint_candidates.insert(entry);
                 }
             }
         }
@@ -1590,121 +1571,87 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         });
     };
 
-    if !occurrence_scan_skipped_for_id_lookup {
-        let hit_phase = if partial_workspace {
-            "hydrating verified facts"
-        } else {
-            "scanning files"
-        };
-        let hit_bar = progress::progress_bar(hit_phase, files_in_path_order.len() as u64);
-        for file in files_in_path_order.iter().copied() {
-            if syntax_fast_path && hits_attempted.get() >= attempt_cap {
-                hits_truncated_by_attempt_cap.set(true);
-                break;
-            }
-            if syntax_fast_path && !taint_flow && hits.len() >= max_hits {
-                hits_truncated_by_output_cap.set(true);
-                break;
-            }
-            hit_bar.inc(1);
-            let Some(idx) = global.file_index(file) else {
-                continue;
-            };
-            // Preload decls in this file for enclosing-function lookup.
-            let decls_in_file: Vec<&bonsai_lang_api::Decl> = idx.defs.iter().collect();
+    scan_occurrence_facts(
+        ws,
+        chain_cache,
+        OccurrenceScan {
+            files_in_path_order,
+            matcher: occurrence_matcher,
+            kind_selection,
+            endpoint_kind: filter_only_occurrence_kind,
+            syntax_fast_path,
+            taint_flow,
+            large_syntax_scan,
+            max_hits,
+            attempt_cap,
+            skip: occurrence_scan_skipped_for_id_lookup,
+            partial_workspace,
+            hits_attempted: &hits_attempted,
+            truncated_by_output_cap: &hits_truncated_by_output_cap,
+            truncated_by_attempt_cap: &hits_truncated_by_attempt_cap,
+        },
+        &mut hits,
+        &mut push_hit,
+    );
 
-            // Calls + Assigns + Args live in flow_events.
-            for d in &decls_in_file {
-                if !matches!(
-                    d.kind,
-                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                ) {
-                    continue;
-                }
-                walk_flow_hits(
-                    &d.flow_events,
-                    bonsai_common::FuncId::new(d.symbol.raw()),
-                    &d.name,
-                    FlowHitWalkContext {
-                        workspace: Some(ws),
-                        matcher: &occurrence_matcher,
-                        endpoint_kind_filter: filter_only_occurrence_kind,
-                        kinds: &kinds,
-                    },
-                    &mut hits,
-                    &mut push_hit,
-                );
-            }
-
-            // Strings.
-            if want("string") {
-                for s in &idx.strings {
-                    if occurrence_matcher.is_match(&s.text) {
-                        let enclosing = chain_cache.enclosing_func(file, &decls_in_file, s.span);
-                        push_hit("string", s.text.clone(), s.span, enclosing, false, &mut hits);
-                    }
-                }
-            }
-
-            // Refs (covers decorators via RefKind::Decorator, plus residual
-            // module-level call refs). On large syntax-fast inspections,
-            // call facts from function bodies already came from flow_events
-            // above; avoid an O(refs × enclosing lookup) pass just to
-            // rediscover the same calls.
-            let scan_refs = want("decorator")
-                || want("ref")
-                || (want("call") && (!syntax_fast_path || !large_syntax_scan));
-            if scan_refs {
-                for r in &idx.refs {
-                    let kind_tag = match r.kind {
-                        RefKind::Decorator => "decorator",
-                        RefKind::Call => {
-                            // Skip call-refs that correspond to a call already
-                            // surfaced by the flow-event walker above. Module-
-                            // level calls (JS `const x = require(...)` at file
-                            // top, Python top-level script statements, etc.)
-                            // have NO enclosing function — they're not in any
-                            // decl's flow_events — so we must emit them here or
-                            // they become invisible to inspect.
-                            let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
-                            if enclosing.is_some() {
-                                continue;
-                            }
-                            "call"
-                        }
-                        _ => "ref",
-                    };
-                    if !want(kind_tag) {
-                        continue;
-                    }
-                    if occurrence_matcher.is_match(&r.name) {
-                        let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
-                        push_hit(kind_tag, r.name.clone(), r.span, enclosing, false, &mut hits);
-                    }
-                }
-            }
-
-            // Imports (fallback to generic scan when the adapter didn't provide any).
-            if want("import") {
-                let imports_vec = ws.db().imports_for(file);
-                for imp in &imports_vec {
-                    let alias_match = imp
-                        .alias
-                        .as_deref()
-                        .is_some_and(|alias| occurrence_matcher.is_match(alias));
-                    let original_match = imp
-                        .original_name
-                        .as_deref()
-                        .is_some_and(|original| occurrence_matcher.is_match(original));
-                    if occurrence_matcher.is_match(&imp.module) || alias_match || original_match {
-                        push_hit("import", import_hit_text(imp), imp.span, None, false, &mut hits);
-                    }
-                }
-            }
-        }
-        hit_bar.finish_and_clear();
+    OccurrenceHitResult {
+        hits,
+        truncated_by_output_cap: hits_truncated_by_output_cap.get(),
+        truncated_by_attempt_cap: hits_truncated_by_attempt_cap.get(),
+        candidates_attempted: hits_attempted.get(),
+        attempt_cap,
     }
+}
 
+struct InspectFinish<'a> {
+    pattern: Option<&'a str>,
+    is_regex: bool,
+    kind_filter: &'a [String],
+    filters: InspectFilters<'a>,
+    render: InspectRenderOptions,
+    paging_cfg: paging::PagingConfig,
+    format: BrowseFormat,
+    taint_flow: bool,
+    taint_flow_explicit: bool,
+    taint_flow_id_lookup: bool,
+    syntax_fast_path: bool,
+    large_syntax_scan: bool,
+    graph_flows_enabled: bool,
+    occurrence_scan_skipped_for_id_lookup: bool,
+    taint_flow_cap: usize,
+}
+
+fn finish_inspect(
+    root: &std::path::Path,
+    ws: &Workspace,
+    options: InspectFinish<'_>,
+    mut decl_hits: Vec<InspectOut>,
+    occurrence_hits: OccurrenceHitResult,
+    taint_candidates: TaintCandidates,
+) -> Result<()> {
+    let InspectFinish {
+        pattern,
+        is_regex,
+        kind_filter,
+        filters,
+        render,
+        paging_cfg,
+        format,
+        taint_flow,
+        taint_flow_explicit,
+        taint_flow_id_lookup,
+        syntax_fast_path,
+        large_syntax_scan,
+        graph_flows_enabled,
+        occurrence_scan_skipped_for_id_lookup,
+        taint_flow_cap,
+    } = options;
+    let taint_candidate_entry_cap = taint_candidates.limit;
+    let mut hits = occurrence_hits.hits;
+    let hits_truncated_by_output_cap = std::cell::Cell::new(occurrence_hits.truncated_by_output_cap);
+    let hits_truncated_by_attempt_cap = std::cell::Cell::new(occurrence_hits.truncated_by_attempt_cap);
+    let hits_attempted = std::cell::Cell::new(occurrence_hits.candidates_attempted);
+    let attempt_cap = occurrence_hits.attempt_cap;
     // Determinism: `global.all_files()` iterates an AHashMap, so discovery
     // order varies run-to-run. Sort hits and decl_hits by a stable key
     // (file, line, column, kind, text) so two back-to-back runs produce
@@ -1745,11 +1692,13 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         ),
         hit_candidates_attempted: hits_truncated.then_some(hits_attempted.get()),
         hit_attempt_cap: hits_truncated.then_some(attempt_cap),
-        taint_candidates_truncated: taint_candidates_truncated.get(),
-        taint_candidate_entries_considered: taint_candidates_truncated
+        taint_candidates_truncated: taint_candidates.truncated.get(),
+        taint_candidate_entries_considered: taint_candidates
+            .truncated
             .get()
-            .then_some(taint_candidate_entries.len()),
-        taint_candidate_entry_cap: taint_candidates_truncated
+            .then_some(taint_candidates.entries.len()),
+        taint_candidate_entry_cap: taint_candidates
+            .truncated
             .get()
             .then_some(taint_candidate_entry_cap),
         taint_flows_truncated: false,
@@ -1797,7 +1746,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     } else if taint_flow {
         let (taint_flows, taint_flows_truncated, semantic_flow_stats) = inspect_taint_flows(
             ws,
-            &taint_candidate_entries,
+            &taint_candidates.entries,
             InspectTaintFlowOptions {
                 pattern,
                 is_regex,
@@ -2043,6 +1992,316 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         }
     }
     Ok(())
+}
+
+pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions<'_>) -> Result<()> {
+    let InspectCommandOptions {
+        pattern,
+        is_regex,
+        kind_filter,
+        filters,
+        max_flows,
+        max_entry_probes,
+        max_hits,
+        render,
+        graph_flow,
+        taint_flow,
+        taint_flow_explicit,
+        paging_cfg,
+        format,
+    } = options;
+    // Taint-aware default for `--query X` combined with standalone
+    // `--from Y` or `--to Y`: synthesize the OPPOSITE endpoint from
+    // the pattern so the filter enters the dual-mode matcher
+    // (`Some(from), Some(to)`) which enforces real taint connectivity
+    // across the chain. Matches the user's mental model from
+    // `--from X --to Y` where one endpoint must land on the hit and
+    // the other must be flow-connected. Pure-regex queries skip this
+    // — a regex won't cleanly match a taint-fact name. Plain
+    // `--query X` with neither `--from` nor `--to` keeps its current
+    // behavior (filter is a no-op; every chain for every matched hit
+    // surfaces).
+    let mut filters = filters;
+    if !is_regex {
+        if let Some(p) = pattern {
+            match (filters.from, filters.to) {
+                (Some(_), None) => filters.to = Some(p),
+                (None, Some(_)) => filters.from = Some(p),
+                _ => {}
+            }
+        }
+    }
+    let structural_flow_lookup = render
+        .flow_id_filter
+        .as_deref()
+        .is_some_and(|id| id.starts_with("F:"))
+        || render.group_id_filter.is_some();
+    let default_graph_flow = taint_flow
+        && !taint_flow_explicit
+        && render.flow_id_filter.is_none()
+        && render.group_id_filter.is_none()
+        && !workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT);
+    let graph_flows_enabled = graph_flow || structural_flow_lookup || default_graph_flow;
+    let literal_prefilter = pattern.filter(|p| {
+        !is_regex
+            && p.len() >= 3
+            && !graph_flows_enabled
+            && render.group_id_filter.is_none()
+            && workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT)
+    });
+    let retrieval_prefilter = retrieval_prefilter_for_inspect(
+        root,
+        pattern,
+        is_regex,
+        filters,
+        graph_flows_enabled,
+        render.group_id_filter.is_some(),
+    )?;
+    let partial_workspace = retrieval_prefilter.is_some() || literal_prefilter.is_some();
+    let (project, _footer) = if let Some(include_filters) = retrieval_prefilter {
+        open_project_index_filtered_paths(root, &include_filters, &[])?
+    } else if let Some(literal) = literal_prefilter {
+        open_project_index_matching_literal(root, literal)?
+    } else {
+        open_project(root)?
+    };
+    let prepare_stage = progress::ScopedSpinner::new("preparing inspect query");
+    let ws = project.workspace();
+    let global = ws.db().global_index();
+    let full_source_for_large_bodies =
+        paging_cfg.all || render.flow_id_filter.is_some() || render.group_id_filter.is_some();
+    // One cache per `inspect` run. `inspect --query system` in Redis
+    // resolves 50+ hits to the same handful of enclosing functions, so
+    // per-target memoization here turns an N × call-graph walk into
+    // single-shot lookups after the first hit on each function.
+    // `--no-cache` / `BONSAI_NO_CACHE` swaps this for a pass-through
+    // variant that always takes the cold path.
+    let chain_cache = build_chain_cache(ws);
+    let (downstream_max_extra, downstream_max_paths) = if paging_cfg.all {
+        (usize::MAX, usize::MAX)
+    } else {
+        (6, 12)
+    };
+    // Edge resolvability is queried heavily when `inspect` extends raw
+    // upstream chains into concrete downstream call paths. Cache the
+    // per-file alias maps and per-edge span lookups for this invocation;
+    // otherwise hub queries such as Redis's `--query system` repeatedly
+    // rescan the same parse trees while checking the same edges.
+    let mut edge_resolver = CallEdgeResolver::new(ws);
+
+    // When no query is supplied, `inspect` becomes a filter-driven
+    // enumeration. Declaration hits stay opt-in in this mode, but
+    // occurrence hits should still be seeded by the concrete endpoint
+    // when the user provides one. Otherwise `inspect --to pickle`
+    // treats every string/arg/var in any function that reaches pickle
+    // as a match point.
+    let matcher: Matcher = match pattern {
+        Some(p) => build_matcher(p, is_regex)?,
+        None => Matcher::MatchAll,
+    };
+    let filter_only_occurrence_pattern = if pattern.is_none() {
+        filters.to.or(filters.from)
+    } else {
+        None
+    };
+    let occurrence_matcher: Matcher = match filter_only_occurrence_pattern {
+        Some(p) => build_matcher(p, false)?,
+        None => matcher.clone(),
+    };
+    let filter_only_target_scan = filter_only_occurrence_pattern.is_some();
+    let filter_only_occurrence_kind = if pattern.is_none() {
+        filters.to_kind.or(filters.from_kind).map(FactKindFilter::to_sdk)
+    } else {
+        None
+    };
+    prepare_stage.finish();
+    let kinds: ahash::AHashSet<String> = kind_filter.iter().map(|s| s.to_lowercase()).collect();
+    // When a `--query` is active but `--kind` is left unset, exclude
+    // purely lexical hit kinds (`decorator`, `ref`) from the default
+    // set. Decorators and bare refs aren't part of the taint-analysis
+    // view — they're syntactic annotations that shadow the same
+    // location as a `call` / `read` / `write` fact and inflate the
+    // "other hits" count with duplicates (e.g. `request.args.get(...)`
+    // emits BOTH a `call` and a `decorator`/`ref` hit for `request`).
+    // Users who explicitly want those kinds pass `--kind decorator`
+    // / `--kind ref` and get them back. When no query is supplied
+    // we keep every kind available — the filter-driven enumeration
+    // mode deliberately surfaces everything the matchers let through.
+    let kind_selection = InspectKindSelection {
+        requested: kinds,
+        endpoint_kind: filter_only_occurrence_kind,
+        exclude_lexical_by_default: pattern.is_some() || filter_only_target_scan,
+    };
+
+    // ----- 1. Decl hits: keep the existing chain-enumerated flow render.
+    //
+    // When the matcher is universal (no `--query`), listing every decl
+    // as a hit floods the output. Skip decl hits in that case *unless*
+    // the user explicitly asked for them via `--kind decl`. The
+    // `--from` / `--to` / `--file` / `--in-fn` filters still narrow
+    // the per-hit flow enumeration below.
+    // Enumerate decls when the user either gave us a non-universal
+    // matcher, explicitly opted in via `--kind decl`, OR asked for a
+    // specific flow / group id (`--flow F:<16-hex>` /
+    // `--group G:<16-hex>`). The id paths need every decl's chains
+    // enumerated because they target a chain by hash, not by name
+    // — without that, a query-less `inspect --flow F:<16-hex>`
+    // would find nothing.
+    let emit_decls = kind_selection.wants("decl")
+        && (!matcher.is_universal()
+            || kind_selection.requested.contains("decl")
+            || render.flow_id_filter.is_some()
+            || render.group_id_filter.is_some());
+    // Iterate files by PATH order (not FileId). This matches the final
+    // display sort, which keeps discovery and final label assignment
+    // deterministic across cache state and hash-map iteration order.
+    let files_in_path_order: Vec<bonsai_common::FileId> = {
+        let mut v: Vec<(String, bonsai_common::FileId)> = global
+            .all_files()
+            .map(|f| {
+                let path = ws
+                    .vfs()
+                    .path(f)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (path, f)
+            })
+            .collect();
+        v.sort();
+        v.into_iter().map(|(_, f)| f).collect()
+    };
+    let large_syntax_scan = partial_workspace || files_in_path_order.len() > INSPECT_GRAPH_FLOW_FILE_LIMIT;
+    let syntax_fast_path = !graph_flows_enabled;
+    let structural_id_only_lookup = structural_flow_lookup
+        && pattern.is_none()
+        && kind_filter.is_empty()
+        && filters.from.is_none()
+        && filters.from_kind.is_none()
+        && filters.to.is_none()
+        && filters.to_kind.is_none()
+        && filters.file.is_none()
+        && filters.in_fn.is_none();
+    // A bare `--flow F:` / `--group G:` open skips the whole-workspace
+    // occurrence scan only when that scan would be expensive: with a
+    // MatchAll matcher every var/call/arg in the workspace becomes a
+    // hit whose chains get enumerated — the exact blowup direct id
+    // lookups exist to avoid. Small workspaces keep the folded
+    // occurrence context (vars/calls sharing the flow id); dropping it
+    // everywhere lost render context the folding contract pins. The
+    // large-workspace skip is announced via `hit_truncation_reasons`,
+    // never silent.
+    // `show F:` / `show G:` drilldowns skip the occurrence scan
+    // unconditionally — they are pure structural-chain views; the id
+    // IS the query. `inspect --flow` keeps the folded occurrence
+    // context except on large workspaces (announced, never silent).
+    let occurrence_scan_skipped_for_id_lookup =
+        structural_id_only_lookup && (large_syntax_scan || render.structural_drilldown);
+    // Raw inspect taint-flow is query-bounded by default: syntax hits add
+    // their enclosing callable to this set, then we ask the taint graph
+    // only for those entries. The only workspace-wide fallback is a
+    // direct `--flow T:...` lookup without any query/filter signal,
+    // because the `T:` id is derived from taint row content rather
+    // than a persisted index key.
+    let taint_flow_id_lookup = taint_flow
+        && render
+            .flow_id_filter
+            .as_deref()
+            .is_some_and(|id| id.starts_with("T:"));
+    let direct_taint_id_lookup = taint_flow_id_lookup
+        && pattern.is_none()
+        && filters.from.is_none()
+        && filters.to.is_none()
+        && filters.file.is_none()
+        && filters.in_fn.is_none()
+        && kind_filter.is_empty();
+    let initial_taint_candidates = if direct_taint_id_lookup {
+        all_callable_entries(ws, &files_in_path_order)
+            .into_iter()
+            .collect()
+    } else {
+        ahash::AHashSet::default()
+    };
+    let taint_candidate_entry_cap = if taint_flow && !taint_flow_id_lookup && !paging_cfg.all {
+        INSPECT_DEFAULT_TAINT_ENTRY_LIMIT.min(max_hits).max(1)
+    } else {
+        usize::MAX
+    };
+    let taint_flow_cap = if taint_flow && !taint_flow_id_lookup && !paging_cfg.all {
+        INSPECT_DEFAULT_TAINT_FLOW_LIMIT.min(max_hits).max(1)
+    } else {
+        usize::MAX
+    };
+    let mut taint_candidates = TaintCandidates::new(initial_taint_candidates, taint_candidate_entry_cap);
+    let decl_hits = collect_decl_hits(
+        ws,
+        &chain_cache,
+        &mut edge_resolver,
+        DeclHitPass {
+            enabled: emit_decls,
+            files_in_path_order: &files_in_path_order,
+            matcher: &matcher,
+            filters,
+            taint_flow,
+            graph_flows_enabled,
+            max_flows,
+            max_entry_probes,
+            downstream_max_extra,
+            downstream_max_paths,
+            full_source_for_large_bodies,
+        },
+        &mut taint_candidates,
+    );
+    let occurrence_hits = collect_occurrence_hits(
+        ws,
+        &chain_cache,
+        &mut edge_resolver,
+        OccurrenceHitPass {
+            files_in_path_order: &files_in_path_order,
+            occurrence_matcher: &occurrence_matcher,
+            kind_selection: &kind_selection,
+            filter_only_occurrence_kind,
+            filters,
+            max_flows,
+            max_entry_probes,
+            max_hits,
+            downstream_max_extra,
+            downstream_max_paths,
+            full_source_for_large_bodies,
+            graph_flows_enabled,
+            syntax_fast_path,
+            taint_flow,
+            paging_cfg: &paging_cfg,
+            direct_taint_id_lookup,
+            occurrence_scan_skipped_for_id_lookup,
+            partial_workspace,
+            large_syntax_scan,
+        },
+        &mut taint_candidates,
+    );
+    finish_inspect(
+        root,
+        ws,
+        InspectFinish {
+            pattern,
+            is_regex,
+            kind_filter,
+            filters,
+            render,
+            paging_cfg,
+            format,
+            taint_flow,
+            taint_flow_explicit,
+            taint_flow_id_lookup,
+            syntax_fast_path,
+            large_syntax_scan,
+            graph_flows_enabled,
+            occurrence_scan_skipped_for_id_lookup,
+            taint_flow_cap,
+        },
+        decl_hits,
+        occurrence_hits,
+        taint_candidates,
+    )
 }
 
 fn import_hit_text(imp: &bonsai_lang_api::ImportSpec) -> String {
@@ -3156,16 +3415,7 @@ fn format_kind_filter(kinds: &[String]) -> String {
 /// `PageInfo` the caller writes into the footer. Owns header chrome,
 /// per-decl / per-hit blocks, and the final paging math; delegates
 /// per-flow rendering to `render_flow_block` / `render_group_block`.
-fn render_inspect_report_text(
-    ws: &Workspace,
-    report: &InspectReport,
-    render: &InspectRenderOptions,
-    paging_cfg: &paging::PagingConfig,
-    pattern: Option<&str>,
-    is_regex: bool,
-) -> paging::PageInfo {
-    let u = ui();
-    let view = resolve_view(render, report);
+fn render_inspect_header(u: &Ui, report: &InspectReport, view: ResolvedView) {
     cli_println!(
         "{} {} {} {} {}{}{}",
         u.label("inspect"),
@@ -3312,192 +3562,50 @@ fn render_inspect_report_text(
     for reason in &report.summary.semantic_flow_fallback_reasons {
         cli_println!("  {}", u.dim(&format!("[semantic-flow] {reason}")));
     }
-    // Paginate over a UNIFIED render-unit list: every decl_hit
-    // followed by every unique folded occurrence flow. This way
-    // `--page 2` truly advances — when page 1 renders decls + a
-    // handful of folded flows, page 2 picks up from the next
-    // folded flow, not re-render the same decls. The cursor
-    // offset is a position in that combined list.
-    let filters_hash = inspect_filters_hash(pattern, is_regex);
-    let folded_order: Vec<&InspectFlowRendered> = collect_folded_flow_order(&report.hits);
-    let total_decls = report.decl_hits.len();
-    let total_units = total_decls + folded_order.len();
+}
 
-    // Safety factor on full-body byte estimates. The raw estimate
-    // already matches actual output to within ~20 %. A 1.2× cushion
-    // covers per-line chrome (annotation
-    // prefix, step number, indent) that `func_full_cost` doesn't
-    // model exactly. Stored as numerator/denominator so we can
-    // express fractional factors without rationals.
-    const COST_SAFETY_NUM: u64 = 8;
-    const COST_SAFETY_DEN: u64 = 5;
-    // A flow/render unit carries more chrome than its source-body
-    // bytes alone: FLOW headers, chain displays, match-point rows,
-    // annotation prefixes, and owner context.
-    // The per-function estimator intentionally stays cheap, so put
-    // a floor on each unit. Without this, the planner could predict
-    // one page while the live renderer stopped after a handful of
-    // units, producing a next-page cursor with no stable page start.
-    const UNIT_RENDER_FLOOR_BYTES: u64 = 1_600;
-    let scale = |raw: u64| (raw * COST_SAFETY_NUM / COST_SAFETY_DEN).max(UNIT_RENDER_FLOOR_BYTES);
-    fn func_full_cost(f: &InspectFunctionRendered) -> u64 {
-        // Module path + def line + every body line. Mirrors what
-        // `render_full_source_bodies` actually emits.
-        let body: u64 = f.lines.iter().map(|l| (l.text.len() as u64) + 8).sum();
-        (f.module_path.len() as u64) + (f.signature.len() as u64) + body + 64
-    }
-    let flow_full_cost = |flow: &InspectFlowRendered| -> u64 {
-        // Chain header (`══` + name + chain display) + every
-        // function in the chain.
-        let chain_header = 64 + (flow.chain.iter().map(|n| n.len() as u64 + 4).sum::<u64>());
-        chain_header + flow.functions.iter().map(func_full_cost).sum::<u64>()
-    };
-    let decl_full_cost = |decl: &InspectOut| -> u64 {
-        let header = (decl.symbol.len() as u64) + (decl.file.len() as u64) + 32;
-        header + decl.flows.iter().map(&flow_full_cost).sum::<u64>()
-    };
-    let unit_full_cost = |idx: usize| -> u64 {
-        let raw = if idx < total_decls {
-            decl_full_cost(&report.decl_hits[idx])
-        } else {
-            flow_full_cost(folded_order[idx - total_decls])
-        };
-        scale(raw)
-    };
-    let unit_compact_cost = |idx: usize| -> u64 {
-        let raw = if idx < total_decls {
-            report.decl_hits[idx]
-                .flows
-                .iter()
-                .map(|f| 64 + (f.chain.len() as u64) * 80)
-                .sum::<u64>()
-                + 128
-        } else {
-            64 + (folded_order[idx - total_decls].chain.len() as u64) * 80
-        };
-        scale(raw)
-    };
-    // Budget after a 12 % chrome reserve. Covers the closing
-    // truncation hint + paging footer bytes that count toward
-    // `out_count::bytes()` but aren't part of the per-unit
-    // budget check, plus width-dependent table wrapping at common
-    // terminal sizes.
-    let budget_bytes = paging_cfg.effective_budget().map(|tokens| {
-        let raw = tokens.saturating_mul(paging::BYTES_PER_TOKEN);
-        raw.saturating_sub(raw * 12 / 100)
-    });
-    // Reserve a modest 12 % of budget for the OCCURRENCE HITS
-    // table on each page. That's enough for ~25 rows at the
-    // measured 200-byte-per-row cost, which covers most pages
-    // (the per-page table only holds rows whose flows are on
-    // the current page — typically 2-10 rows after the per-page
-    // filter introduced earlier). Was 35 %; the over-reservation
-    // capped pages at ~50 % budget fill — closing the gap so
-    // pages now hit ~70-75 % of the stated budget.
-    let unit_budget_bytes: Option<u64> = budget_bytes.map(|b| b - (b * 12 / 100));
+struct InspectPageContext<'a> {
+    ws: &'a Workspace,
+    ui: &'a Ui,
+    report: &'a InspectReport,
+    render: &'a InspectRenderOptions,
+    view: ResolvedView,
+    folded_order: &'a [&'a InspectFlowRendered],
+    total_decls: usize,
+    total_units: usize,
+    page_starts: &'a [usize],
+    start_offset: usize,
+    budget_bytes: Option<u64>,
+    unit_budget_bytes: Option<u64>,
+    filters_hash: u64,
+    paging_info: paging::PageInfo,
+}
+
+fn render_inspect_page(
+    context: InspectPageContext<'_>,
+    unit_full_cost: &impl Fn(usize) -> u64,
+    unit_compact_cost: &impl Fn(usize) -> u64,
+) -> paging::PageInfo {
+    let InspectPageContext {
+        ws,
+        ui: u,
+        report,
+        render,
+        view,
+        folded_order,
+        total_decls,
+        total_units,
+        page_starts,
+        start_offset,
+        budget_bytes,
+        unit_budget_bytes,
+        filters_hash,
+        mut paging_info,
+    } = context;
     const TAINT_FLOW_ROW_AVG_BYTES: u64 = 320;
     const HITS_ROW_AVG_BYTES: u64 = 220;
     const TAINT_FLOW_TABLE_BUDGET_PCT: u64 = 10;
     const HITS_TABLE_BUDGET_PCT: u64 = 10;
-    let first_page_unit_budget_bytes = match (unit_budget_bytes, budget_bytes) {
-        (Some(unit_budget), Some(total_budget))
-            if !report.taint_flows.is_empty() || !report.hits.is_empty() =>
-        {
-            let taint_budget = if report.taint_flows.is_empty() {
-                0
-            } else {
-                (total_budget * TAINT_FLOW_TABLE_BUDGET_PCT / 100).max(TAINT_FLOW_ROW_AVG_BYTES)
-            };
-            let hits_budget = if report.hits.is_empty() {
-                0
-            } else {
-                (total_budget * HITS_TABLE_BUDGET_PCT / 100).max(HITS_ROW_AVG_BYTES)
-            };
-            Some(unit_budget.saturating_sub(taint_budget + hits_budget))
-        }
-        _ => unit_budget_bytes,
-    };
-    let page_starts: Vec<usize> = simulate_page_starts(
-        total_units,
-        first_page_unit_budget_bytes,
-        unit_budget_bytes,
-        &unit_full_cost,
-        &unit_compact_cost,
-    );
-    let total_pages = page_starts.len().max(1);
-    // Resolve the requested page → start_offset (stable).
-    let requested_start_offset: usize = match &paging_cfg.page {
-        paging::PageArg::First => page_starts.first().copied().unwrap_or(0),
-        paging::PageArg::Number(n) => {
-            let idx = (*n as usize).saturating_sub(1).min(total_pages.saturating_sub(1));
-            page_starts.get(idx).copied().unwrap_or(0)
-        }
-        // Cursors are minted from the ACTUAL unit the previous render
-        // stopped at (`unit_cursor`), which lands mid-page whenever the
-        // real render outpaces `simulate_page_starts`' estimates. Resolve
-        // against every unit offset — matching only simulated page starts
-        // silently replayed page 1 whenever the two disagreed.
-        paging::PageArg::Cursor(c) => (0..=total_units)
-            .find(|off| paging::cursor_id("inspect", filters_hash, *off as u64) == *c)
-            .unwrap_or_else(|| page_starts.first().copied().unwrap_or(0)),
-        paging::PageArg::Next => {
-            // `--page next` advances past the page recorded in the
-            // last-cursor history; falls back to page 1 with no history.
-            // The recorded cursor can sit mid-page (see Cursor arm), so
-            // resolve it over unit offsets and advance to the first
-            // simulated page start after it.
-            paging::last_cursor("inspect", filters_hash)
-                .and_then(|cur| {
-                    (0..=total_units)
-                        .find(|off| paging::cursor_id("inspect", filters_hash, *off as u64) == cur)
-                        .map(|off| {
-                            page_starts
-                                .iter()
-                                .copied()
-                                .find(|&s| s > off)
-                                .unwrap_or(total_units)
-                        })
-                })
-                .unwrap_or_else(|| page_starts.first().copied().unwrap_or(0))
-        }
-    };
-    // 1-based page number for display. Exact page starts get their
-    // canonical number; a mid-page cursor-resume offset rounds UP to
-    // the next page number so cursor-following readers always see the
-    // number advance instead of repeating the page they just left.
-    let page_number = (page_starts
-        .iter()
-        .take_while(|&&s| s < requested_start_offset)
-        .count()
-        + 1) as u64;
-    let start_offset = requested_start_offset;
-    // Persist this page's cursor so a subsequent `--page next` advances
-    // from here, matching `paging::paginate`'s behavior.
-    paging::write_last_cursor(
-        "inspect",
-        filters_hash,
-        &paging::cursor_id("inspect", filters_hash, start_offset as u64),
-    );
-    // Estimate uncapped render size: sum every unit's full-cost
-    // estimate (chain bodies + headers). Gives the user an honest
-    // "the full inspect output would be ~N tokens if you passed
-    // --all" figure in the footer.
-    let total_uncapped_bytes: u64 = (0..total_units).map(&unit_full_cost).sum();
-    let total_tokens_uncapped = paging::bytes_to_tokens(total_uncapped_bytes);
-    let mut paging_info = paging::PageInfo {
-        page_number,
-        total_pages: total_pages as u64,
-        page_size: 0,
-        shown_rows: 0,
-        total_rows: total_units as u64,
-        budget: paging_cfg.effective_budget(),
-        tokens_used: 0,
-        cursor: paging::cursor_id("inspect", filters_hash, start_offset as u64),
-        next_cursor: None,
-        is_last: true,
-        start_offset: start_offset as u64,
-        total_tokens_uncapped,
-    };
     let bytes_before_payload = out_count::bytes();
 
     let mut rendered_taint_rows = 0usize;
@@ -3834,6 +3942,225 @@ fn render_inspect_report_text(
     paging_info.tokens_used = paging::bytes_to_tokens(payload_bytes);
     render_paging_footer(&paging_info, "bonsai-ninja inspect <workspace>");
     paging_info
+}
+
+fn render_inspect_report_text(
+    ws: &Workspace,
+    report: &InspectReport,
+    render: &InspectRenderOptions,
+    paging_cfg: &paging::PagingConfig,
+    pattern: Option<&str>,
+    is_regex: bool,
+) -> paging::PageInfo {
+    let u = ui();
+    let view = resolve_view(render, report);
+    render_inspect_header(u, report, view);
+    // Paginate over a UNIFIED render-unit list: every decl_hit
+    // followed by every unique folded occurrence flow. This way
+    // `--page 2` truly advances — when page 1 renders decls + a
+    // handful of folded flows, page 2 picks up from the next
+    // folded flow, not re-render the same decls. The cursor
+    // offset is a position in that combined list.
+    let filters_hash = inspect_filters_hash(pattern, is_regex);
+    let folded_order: Vec<&InspectFlowRendered> = collect_folded_flow_order(&report.hits);
+    let total_decls = report.decl_hits.len();
+    let total_units = total_decls + folded_order.len();
+
+    // Safety factor on full-body byte estimates. The raw estimate
+    // already matches actual output to within ~20 %. A 1.2× cushion
+    // covers per-line chrome (annotation
+    // prefix, step number, indent) that `func_full_cost` doesn't
+    // model exactly. Stored as numerator/denominator so we can
+    // express fractional factors without rationals.
+    const COST_SAFETY_NUM: u64 = 8;
+    const COST_SAFETY_DEN: u64 = 5;
+    // A flow/render unit carries more chrome than its source-body
+    // bytes alone: FLOW headers, chain displays, match-point rows,
+    // annotation prefixes, and owner context.
+    // The per-function estimator intentionally stays cheap, so put
+    // a floor on each unit. Without this, the planner could predict
+    // one page while the live renderer stopped after a handful of
+    // units, producing a next-page cursor with no stable page start.
+    const UNIT_RENDER_FLOOR_BYTES: u64 = 1_600;
+    let scale = |raw: u64| (raw * COST_SAFETY_NUM / COST_SAFETY_DEN).max(UNIT_RENDER_FLOOR_BYTES);
+    fn func_full_cost(f: &InspectFunctionRendered) -> u64 {
+        // Module path + def line + every body line. Mirrors what
+        // `render_full_source_bodies` actually emits.
+        let body: u64 = f.lines.iter().map(|l| (l.text.len() as u64) + 8).sum();
+        (f.module_path.len() as u64) + (f.signature.len() as u64) + body + 64
+    }
+    let flow_full_cost = |flow: &InspectFlowRendered| -> u64 {
+        // Chain header (`══` + name + chain display) + every
+        // function in the chain.
+        let chain_header = 64 + (flow.chain.iter().map(|n| n.len() as u64 + 4).sum::<u64>());
+        chain_header + flow.functions.iter().map(func_full_cost).sum::<u64>()
+    };
+    let decl_full_cost = |decl: &InspectOut| -> u64 {
+        let header = (decl.symbol.len() as u64) + (decl.file.len() as u64) + 32;
+        header + decl.flows.iter().map(&flow_full_cost).sum::<u64>()
+    };
+    let unit_full_cost = |idx: usize| -> u64 {
+        let raw = if idx < total_decls {
+            decl_full_cost(&report.decl_hits[idx])
+        } else {
+            flow_full_cost(folded_order[idx - total_decls])
+        };
+        scale(raw)
+    };
+    let unit_compact_cost = |idx: usize| -> u64 {
+        let raw = if idx < total_decls {
+            report.decl_hits[idx]
+                .flows
+                .iter()
+                .map(|f| 64 + (f.chain.len() as u64) * 80)
+                .sum::<u64>()
+                + 128
+        } else {
+            64 + (folded_order[idx - total_decls].chain.len() as u64) * 80
+        };
+        scale(raw)
+    };
+    // Budget after a 12 % chrome reserve. Covers the closing
+    // truncation hint + paging footer bytes that count toward
+    // `out_count::bytes()` but aren't part of the per-unit
+    // budget check, plus width-dependent table wrapping at common
+    // terminal sizes.
+    let budget_bytes = paging_cfg.effective_budget().map(|tokens| {
+        let raw = tokens.saturating_mul(paging::BYTES_PER_TOKEN);
+        raw.saturating_sub(raw * 12 / 100)
+    });
+    // Reserve a modest 12 % of budget for the OCCURRENCE HITS
+    // table on each page. That's enough for ~25 rows at the
+    // measured 200-byte-per-row cost, which covers most pages
+    // (the per-page table only holds rows whose flows are on
+    // the current page — typically 2-10 rows after the per-page
+    // filter introduced earlier). Was 35 %; the over-reservation
+    // capped pages at ~50 % budget fill — closing the gap so
+    // pages now hit ~70-75 % of the stated budget.
+    let unit_budget_bytes: Option<u64> = budget_bytes.map(|b| b - (b * 12 / 100));
+    const TAINT_FLOW_ROW_AVG_BYTES: u64 = 320;
+    const HITS_ROW_AVG_BYTES: u64 = 220;
+    const TAINT_FLOW_TABLE_BUDGET_PCT: u64 = 10;
+    const HITS_TABLE_BUDGET_PCT: u64 = 10;
+    let first_page_unit_budget_bytes = match (unit_budget_bytes, budget_bytes) {
+        (Some(unit_budget), Some(total_budget))
+            if !report.taint_flows.is_empty() || !report.hits.is_empty() =>
+        {
+            let taint_budget = if report.taint_flows.is_empty() {
+                0
+            } else {
+                (total_budget * TAINT_FLOW_TABLE_BUDGET_PCT / 100).max(TAINT_FLOW_ROW_AVG_BYTES)
+            };
+            let hits_budget = if report.hits.is_empty() {
+                0
+            } else {
+                (total_budget * HITS_TABLE_BUDGET_PCT / 100).max(HITS_ROW_AVG_BYTES)
+            };
+            Some(unit_budget.saturating_sub(taint_budget + hits_budget))
+        }
+        _ => unit_budget_bytes,
+    };
+    let page_starts: Vec<usize> = simulate_page_starts(
+        total_units,
+        first_page_unit_budget_bytes,
+        unit_budget_bytes,
+        &unit_full_cost,
+        &unit_compact_cost,
+    );
+    let total_pages = page_starts.len().max(1);
+    // Resolve the requested page → start_offset (stable).
+    let requested_start_offset: usize = match &paging_cfg.page {
+        paging::PageArg::First => page_starts.first().copied().unwrap_or(0),
+        paging::PageArg::Number(n) => {
+            let idx = (*n as usize).saturating_sub(1).min(total_pages.saturating_sub(1));
+            page_starts.get(idx).copied().unwrap_or(0)
+        }
+        // Cursors are minted from the ACTUAL unit the previous render
+        // stopped at (`unit_cursor`), which lands mid-page whenever the
+        // real render outpaces `simulate_page_starts`' estimates. Resolve
+        // against every unit offset — matching only simulated page starts
+        // silently replayed page 1 whenever the two disagreed.
+        paging::PageArg::Cursor(c) => (0..=total_units)
+            .find(|off| paging::cursor_id("inspect", filters_hash, *off as u64) == *c)
+            .unwrap_or_else(|| page_starts.first().copied().unwrap_or(0)),
+        paging::PageArg::Next => {
+            // `--page next` advances past the page recorded in the
+            // last-cursor history; falls back to page 1 with no history.
+            // The recorded cursor can sit mid-page (see Cursor arm), so
+            // resolve it over unit offsets and advance to the first
+            // simulated page start after it.
+            paging::last_cursor("inspect", filters_hash)
+                .and_then(|cur| {
+                    (0..=total_units)
+                        .find(|off| paging::cursor_id("inspect", filters_hash, *off as u64) == cur)
+                        .map(|off| {
+                            page_starts
+                                .iter()
+                                .copied()
+                                .find(|&s| s > off)
+                                .unwrap_or(total_units)
+                        })
+                })
+                .unwrap_or_else(|| page_starts.first().copied().unwrap_or(0))
+        }
+    };
+    // 1-based page number for display. Exact page starts get their
+    // canonical number; a mid-page cursor-resume offset rounds UP to
+    // the next page number so cursor-following readers always see the
+    // number advance instead of repeating the page they just left.
+    let page_number = (page_starts
+        .iter()
+        .take_while(|&&s| s < requested_start_offset)
+        .count()
+        + 1) as u64;
+    let start_offset = requested_start_offset;
+    // Persist this page's cursor so a subsequent `--page next` advances
+    // from here, matching `paging::paginate`'s behavior.
+    paging::write_last_cursor(
+        "inspect",
+        filters_hash,
+        &paging::cursor_id("inspect", filters_hash, start_offset as u64),
+    );
+    // Estimate uncapped render size: sum every unit's full-cost
+    // estimate (chain bodies + headers). Gives the user an honest
+    // "the full inspect output would be ~N tokens if you passed
+    // --all" figure in the footer.
+    let total_uncapped_bytes: u64 = (0..total_units).map(&unit_full_cost).sum();
+    let total_tokens_uncapped = paging::bytes_to_tokens(total_uncapped_bytes);
+    let paging_info = paging::PageInfo {
+        page_number,
+        total_pages: total_pages as u64,
+        page_size: 0,
+        shown_rows: 0,
+        total_rows: total_units as u64,
+        budget: paging_cfg.effective_budget(),
+        tokens_used: 0,
+        cursor: paging::cursor_id("inspect", filters_hash, start_offset as u64),
+        next_cursor: None,
+        is_last: true,
+        start_offset: start_offset as u64,
+        total_tokens_uncapped,
+    };
+    render_inspect_page(
+        InspectPageContext {
+            ws,
+            ui: u,
+            report,
+            render,
+            view,
+            folded_order: &folded_order,
+            total_decls,
+            total_units,
+            page_starts: &page_starts,
+            start_offset,
+            budget_bytes,
+            unit_budget_bytes,
+            filters_hash,
+            paging_info,
+        },
+        &unit_full_cost,
+        &unit_compact_cost,
+    )
 }
 
 /// Build the ordered, deduplicated list of folded occurrence flows
