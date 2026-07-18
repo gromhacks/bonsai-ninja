@@ -60,6 +60,25 @@
     expect_match_text: [werkzeug.Headers]
   description: "The external `werkzeug.Headers()` constructor returns `Headers`; type assigned locals so receiver-typed header rules are driven by library metadata. Typing-only — never a finding."
 
+- id: python.typing.django_http_response
+  enabled: true
+  language: python
+  returns_type: HttpResponse
+  match:
+    kind: call
+    callee:
+      attribute: [django, http, HttpResponse]
+  match_examples:
+  - name: django constructor returns HttpResponse
+    code: |
+      from django.http import HttpResponse
+      def example(user_input):
+          response = HttpResponse()
+          response[user_input] = "value"
+          return response
+    expect_match_text: [HttpResponse]
+  description: "`django.http.HttpResponse(...)` returns `HttpResponse`; the compiler import index expands the imported constructor before typing assigned response objects. Typing-only — never a finding."
+
 - id: python.typing.zipfile_zip_file
   enabled: true
   language: python
