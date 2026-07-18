@@ -324,7 +324,13 @@ impl AnalyzerDb {
     /// resident memory proportional to concurrently lowered files instead of
     /// retaining one concrete syntax tree for the lifetime of the database.
     pub fn release_syntax(&self, file: FileId) {
-        self.inner.parser.invalidate(file);
+        if let Some(adapter) = self.adapter_for(file) {
+            self.inner.parser.release(file, &adapter, &self.inner.vfs);
+        } else {
+            // A formerly supported file can lose its adapter after a registry
+            // change. Preserve broad invalidation for that exceptional path.
+            self.inner.parser.invalidate(file);
+        }
     }
 
     /// Declaration index for `file`, computed once per `(file,

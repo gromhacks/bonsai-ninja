@@ -118,6 +118,35 @@ fn repeated_exact_snapshot_reuses_parsed_file_and_tree_arcs() {
 }
 
 #[test]
+fn exact_release_evicts_only_the_lowered_workspace_file_and_language() {
+    let cache = ParserCache::with_options(ParserOptions::with_parse_timeout(None));
+    let vfs = Vfs::new();
+    let released_file = vfs.write("released.py", "def released():\n    return 1\n");
+    let retained_file = vfs.write("retained.py", "def retained():\n    return 2\n");
+    let adapter = test_python_adapter();
+
+    let released_before = cache
+        .parse(released_file, &adapter, &vfs)
+        .expect("parse released fixture");
+    let retained_before = cache
+        .parse(retained_file, &adapter, &vfs)
+        .expect("parse retained fixture");
+
+    cache.release(released_file, &adapter, &vfs);
+
+    let released_after = cache
+        .parse(released_file, &adapter, &vfs)
+        .expect("reparse released fixture");
+    let retained_after = cache
+        .parse(retained_file, &adapter, &vfs)
+        .expect("reuse retained fixture");
+    assert!(!Arc::ptr_eq(&released_before, &released_after));
+    assert!(!Arc::ptr_eq(&released_before.tree, &released_after.tree));
+    assert!(Arc::ptr_eq(&retained_before, &retained_after));
+    assert!(Arc::ptr_eq(&retained_before.tree, &retained_after.tree));
+}
+
+#[test]
 fn reparsing_an_edit_keeps_tree_and_source_on_the_same_version() {
     let cache = ParserCache::with_options(ParserOptions::with_parse_timeout(None));
     let vfs = Vfs::new();

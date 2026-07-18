@@ -324,7 +324,20 @@ impl ParserCache {
         Ok(parsed)
     }
 
-    /// Invalidate a single file.
+    /// Release the cached tree for this exact workspace/file/language key.
+    ///
+    /// Compiler lowering phases call this after all durable facts have been
+    /// extracted. Exact removal keeps phase-local eviction O(1) and avoids
+    /// serializing parallel workers behind a whole-cache scan. Edit
+    /// invalidation remains broader because a file may have been parsed by
+    /// more than one adapter over the cache's lifetime.
+    pub fn release(&self, file: FileId, adapter: &AdapterArc, vfs: &Vfs) {
+        self.cache
+            .write()
+            .remove(&(vfs.instance_id(), file, adapter.language_id()));
+    }
+
+    /// Invalidate every cached language interpretation of a single file.
     pub fn invalidate(&self, file: FileId) {
         self.cache
             .write()
