@@ -5716,31 +5716,18 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
     map: &mut std::collections::HashMap<String, AliasTarget, S>,
     events: &[crate::FlowEvent],
 ) {
-    // Collect (target, source_name, source_call, source_names)
-    // tuples from the flow tree. `source_name` carries bare-
-    // identifier RHS; `source_call` carries direct-call /
-    // constructor RHS; `source_names` is the full attribute chain
-    // (e.g. `["Logger", "getLogger"]` for `Logger.getLogger(...)`)
-    // — used to detect factory-method patterns where the type lives
-    // in the receiver, not the called name.
-    type AssignmentAlias = (String, Option<String>, Option<String>, Vec<String>);
+    // Collect assignment dependencies from the flow tree. Constructor and
+    // factory result types are compiler type facts on `Decl.type_aliases`;
+    // this generic alias pass must not infer types from call-name casing.
+    type AssignmentAlias = (String, Option<String>);
 
     fn collect(out: &mut Vec<AssignmentAlias>, events: &[crate::FlowEvent]) {
         for ev in events {
             match ev {
                 crate::FlowEvent::Assign {
-                    target,
-                    source_name,
-                    source_call,
-                    source_names,
-                    ..
+                    target, source_name, ..
                 } if !target.is_empty() => {
-                    out.push((
-                        target.clone(),
-                        source_name.clone(),
-                        source_call.clone(),
-                        source_names.clone(),
-                    ));
+                    out.push((target.clone(), source_name.clone()));
                 }
                 crate::FlowEvent::Branch {
                     then_events,
@@ -5770,59 +5757,11 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
     if triples.is_empty() {
         return;
     }
-    // First pass: bind constructor- and same-receiver factory-style assignments
-    // to AliasTarget::Type so the matcher can rewrite
-    // `<recv>.<method>` to `<Type>.<method>`. Three structural heuristics:
-    //
-    //  1. Constructor-style RHS (`val f = File(path)`, `new
-    //     HttpClient()`): `source_call` starts with an ASCII
-    //     uppercase letter — the PascalCase class-name convention
-    //     used in Java, Kotlin, C#, Scala, Swift, Dart, JS, TS,
-    //     Python, Ruby. The bound type is the call's bare name.
-    //
-    //  2. Factory-style RHS (`Logger log = Logger.getLogger("app")`,
-    //     `Path p = Path.of(...)`): the attribute chain in
-    //     `source_names` is exactly two segments and the leading
-    //     segment is PascalCase. The bound type is that leading
-    //     segment. This keeps the type fact anchored to an explicit
-    //     class-like receiver in the source text.
-    //
-    //  3. Constructor assignment facts where the adapter emits only
-    //     the constructor identifier in `source_names`
-    //     (`const client = new GraphQLClient(...)`).
-    //
-    // Both heuristics are based on class-name code shape, not framework
-    // or request-domain vocabulary. Lowercase method names are not mapped
-    // through semantic tables here; rulepack/API coverage owns those cases.
-    for (target, _, source_call, source_names) in &triples {
-        // Don't overwrite an existing import-alias binding.
-        if map.contains_key(target) {
-            continue;
-        }
-        let bound_type = if let Some(call) = source_call.as_deref() {
-            constructor_type_from_call_name(call).or_else(|| factory_type_from_source_names(source_names))
-        } else if source_names.len() == 1
-            && source_names[0]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_uppercase())
-        {
-            // Some grammars emit `const x = new Type(...)` as an
-            // assignment with only the constructor identifier in
-            // `source_names`; keep the same PascalCase type inference
-            // the `source_call` path uses.
-            Some(source_names[0].clone())
-        } else {
-            None
-        };
-        let Some(type_name) = bound_type else { continue };
-        map.insert(target.clone(), AliasTarget::Type { type_name });
-    }
     // Reverse assignment dependencies make propagation linear in the alias
     // graph rather than repeatedly rescanning every statement. Each target
     // is inserted at most once, so cycles terminate without a round limit.
     let mut dependents: ahash::AHashMap<&str, Vec<&str>> = ahash::AHashMap::new();
-    for (target, source, _, _) in &triples {
+    for (target, source) in &triples {
         let Some(source) = source.as_deref().filter(|source| !source.is_empty()) else {
             continue;
         };
@@ -5832,7 +5771,7 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
     let mut enqueued = ahash::AHashSet::new();
     // Seed in source-event order so competing reassignments remain
     // deterministic and match the adapter's lexical fact order.
-    for (_, source, _, _) in &triples {
+    for (_, source) in &triples {
         let Some(source) = source.as_deref().filter(|source| map.contains_key(*source)) else {
             continue;
         };
@@ -5853,44 +5792,6 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
                 pending.push_back(target);
             }
         }
-    }
-}
-
-fn constructor_type_from_call_name(call: &str) -> Option<String> {
-    let normalized = call.trim().trim_start_matches("new ").trim();
-    let constructor_receiver = [".new", "::new", "->new", "\\new", "::__construct"]
-        .iter()
-        .find_map(|suffix| normalized.strip_suffix(suffix))
-        .map(str::trim)
-        .filter(|receiver| !receiver.is_empty());
-    if let Some(receiver) = constructor_receiver {
-        return Some(receiver.to_string());
-    }
-
-    let bare = normalized
-        .rsplit(&['.', ':', '\\'][..])
-        .next()
-        .unwrap_or(normalized);
-    if bare.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-        Some(bare.to_string())
-    } else {
-        None
-    }
-}
-
-fn factory_type_from_source_names(source_names: &[String]) -> Option<String> {
-    if source_names.len() == 2
-        && source_names[0]
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_uppercase())
-    {
-        // Same-name-as-receiver factory: `Path.of(...)` →
-        // source_names = ["Path", "of"]. The receiver class itself
-        // is the only inferred type fact.
-        Some(source_names[0].clone())
-    } else {
-        None
     }
 }
 
@@ -8224,23 +8125,14 @@ pub fn populate_decl_return_types(
     }
 }
 
-/// The class name an assignment's RHS constructs, if its callee is
-/// constructor-shaped: the bare tail after the last `.`/`::` separator
-/// (dropping a leading `new`/generic args) when that tail is
-/// `PascalCase`. `ldap3.Connection` → `Connection`, `new Foo<T>` →
-/// `Foo`, `Util->new` → `Util`, `socket.socket` → `None` (lowercase tail,
-/// not a constructor), `obj.method` → `None`. This is the language-agnostic convention used
-/// for lightweight local type inference (`x = Pkg.Class(...)`), distinct
-/// from the `new`-only `receiver_type_from_constructor_expr` used for
-/// inline receiver expressions.
-fn constructor_call_type_name(callee: &str) -> Option<String> {
+/// Canonical type name carried by a call that has already been proven to be a
+/// constructor by adapter `CallKind` or declaration resolution. Spelling and
+/// casing are normalization only; they never prove constructor semantics.
+fn proven_constructor_type_name(callee: &str) -> Option<String> {
     let expr = callee.trim().strip_prefix("new ").unwrap_or(callee.trim());
     let without_generics = expr.split('<').next().unwrap_or(expr);
-    // Ruby / Crystal / Smalltalk-family `Foo.new` (and `Foo::new`):
-    // the constructor is the `new` method ON the class, so the type is
-    // the qualifier before `.new`, not the bare `new` tail. Only strip
-    // it when a qualifier remains (the uppercase check below then
-    // confirms it names a class), so a bare `new(...)` is unaffected.
+    // Ruby / Crystal / Smalltalk-family `Type.new` constructors name the
+    // type in the qualifier rather than the call tail.
     let constructor_target = without_generics
         .strip_suffix(".new")
         .or_else(|| without_generics.strip_suffix("::new"))
@@ -8252,19 +8144,29 @@ fn constructor_call_type_name(callee: &str) -> Option<String> {
         .next()
         .unwrap_or(constructor_target)
         .trim();
-    if bare.is_empty() || !bare.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-        return None;
-    }
-    // Reject SHOUTY_CONSTANT tails (`Foo.BAR(...)`) — those are not
-    // constructor calls. A real class name has at least one lowercase
-    // letter after the leading uppercase.
-    if bare
-        .chars()
-        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
-    {
+    if bare.is_empty() {
         return None;
     }
     Some(bare.to_string())
+}
+
+fn resolved_declared_constructor_type(
+    callee: &str,
+    declared_types: &ahash::AHashSet<String>,
+) -> Option<String> {
+    let candidate = proven_constructor_type_name(callee)?;
+    let mut matches = declared_types
+        .iter()
+        .filter(|name| {
+            name.as_str() == candidate
+                || name
+                    .rsplit(['.', ':', '\\'])
+                    .next()
+                    .is_some_and(|tail| tail == candidate)
+        })
+        .cloned();
+    let resolved = matches.next()?;
+    matches.next().is_none().then_some(resolved)
 }
 
 /// Collect `local -> ConstructedType` aliases from constructor-shaped
@@ -8279,12 +8181,23 @@ pub fn collect_constructor_result_type_aliases(
     events: &[crate::FlowEvent],
     out: &mut Vec<crate::TypeAliasBinding>,
 ) {
+    collect_constructor_result_type_aliases_with_declared_types(events, out, &ahash::AHashSet::new());
+}
+
+fn collect_constructor_result_type_aliases_with_declared_types(
+    events: &[crate::FlowEvent],
+    out: &mut Vec<crate::TypeAliasBinding>,
+    declared_types: &ahash::AHashSet<String>,
+) {
     let mut constructor_calls = events
         .iter()
         .filter_map(|event| match event {
-            FlowEvent::Call { name, span, .. } => {
-                constructor_call_type_name(name).map(|type_name| (*span, type_name))
-            }
+            FlowEvent::Call {
+                name,
+                span,
+                call_kind: CallKind::Constructor,
+                ..
+            } => proven_constructor_type_name(name).map(|type_name| (*span, type_name)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -8295,12 +8208,15 @@ pub fn collect_constructor_result_type_aliases(
             FlowEvent::Assign {
                 target,
                 source_call: Some(callee),
+                span,
                 ..
             } => {
                 if target.is_empty() {
                     continue;
                 }
-                if let Some(type_name) = constructor_call_type_name(callee) {
+                let type_name = contained_constructor_call_type(&constructor_calls, *span)
+                    .or_else(|| resolved_declared_constructor_type(callee, declared_types));
+                if let Some(type_name) = type_name {
                     out.push(crate::TypeAliasBinding {
                         name: target.clone(),
                         type_name,
@@ -8337,11 +8253,11 @@ pub fn collect_constructor_result_type_aliases(
                 else_events,
                 ..
             } => {
-                collect_constructor_result_type_aliases(then_events, out);
-                collect_constructor_result_type_aliases(else_events, out);
+                collect_constructor_result_type_aliases_with_declared_types(then_events, out, declared_types);
+                collect_constructor_result_type_aliases_with_declared_types(else_events, out, declared_types);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_constructor_result_type_aliases(body, out);
+                collect_constructor_result_type_aliases_with_declared_types(body, out, declared_types);
             }
             FlowEvent::Try {
                 body,
@@ -8349,9 +8265,17 @@ pub fn collect_constructor_result_type_aliases(
                 finally_events,
                 ..
             } => {
-                collect_constructor_result_type_aliases(body, out);
-                collect_constructor_result_type_aliases(catch_events, out);
-                collect_constructor_result_type_aliases(finally_events, out);
+                collect_constructor_result_type_aliases_with_declared_types(body, out, declared_types);
+                collect_constructor_result_type_aliases_with_declared_types(
+                    catch_events,
+                    out,
+                    declared_types,
+                );
+                collect_constructor_result_type_aliases_with_declared_types(
+                    finally_events,
+                    out,
+                    declared_types,
+                );
             }
             _ => {}
         }
@@ -8361,8 +8285,8 @@ pub fn collect_constructor_result_type_aliases(
 /// Find the constructor type for a `new`-expression RHS that the
 /// grammar surfaced as a sibling `Call` event rather than the
 /// assignment's `source_call` (the JS/TS shape). Searches a span-sorted
-/// constructor index for a `Call` whose span lies strictly inside `assign_span`'s
-/// RHS, preferring the leftmost (outermost) one so
+/// constructor index for a `Call` whose span lies inside or exactly covers the
+/// assignment expression, preferring the leftmost (outermost) one so
 /// `x = new Foo(new Bar())` resolves to `Foo`. Returns `None` when no
 /// contained constructor call exists, so unrelated adjacent statements
 /// (`x = compute(); Helper();`) never mistype `x`.
@@ -8372,7 +8296,7 @@ fn contained_constructor_call_type(
 ) -> Option<String> {
     let first = constructor_calls.partition_point(|(span, _)| {
         span.file.raw() < assign_span.file.raw()
-            || (span.file == assign_span.file && span.start <= assign_span.start)
+            || (span.file == assign_span.file && span.start < assign_span.start)
     });
     constructor_calls[first..]
         .iter()
@@ -8393,9 +8317,25 @@ fn contained_constructor_call_type(
 /// annotations, resolved call-result return types) take precedence over
 /// an inferred constructor type for the same name.
 pub fn apply_constructor_result_type_aliases(idx: &mut crate::DeclIndex) {
+    let declared_types = idx
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                crate::DeclKind::Class | crate::DeclKind::Struct | crate::DeclKind::Enum
+            )
+        })
+        .flat_map(|decl| std::iter::once(decl.name.clone()).chain(decl.qualified_name.clone()))
+        .filter(|name| !name.is_empty())
+        .collect::<ahash::AHashSet<_>>();
     for decl in &mut idx.defs {
         let mut ctor_aliases = Vec::new();
-        collect_constructor_result_type_aliases(&decl.flow_events, &mut ctor_aliases);
+        collect_constructor_result_type_aliases_with_declared_types(
+            &decl.flow_events,
+            &mut ctor_aliases,
+            &declared_types,
+        );
         for binding in ctor_aliases {
             if !decl.type_aliases.iter().any(|alias| alias.name == binding.name) {
                 decl.type_aliases.push(binding);
