@@ -13,7 +13,7 @@ lang_lua             5   3       0     6   0     0
 lang_objc            1   13      2     12  0     0
 lang_perl            2   15      1     4   0     0
 lang_php             6   6       1     5   0     0
-lang_python          2   13      1     2   3     0
+lang_python          2   10      1     2   3     0
 lang_ruby            12  4       1     2   1     0
 lang_rust            7   8       1     6   0     1
 lang_scala           9   10      1     6   2     0
