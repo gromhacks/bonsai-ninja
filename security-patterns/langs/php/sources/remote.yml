@@ -3,6 +3,8 @@
   language: php
   trust: remote
   tag: http-input
+  analysis_semantics:
+    flow_classes: [http-input]
   match:
     kind: read
     target:
@@ -68,6 +70,8 @@
   language: php
   trust: remote
   tag: http-input
+  analysis_semantics:
+    flow_classes: [http-input]
   match:
     kind: read
     target:

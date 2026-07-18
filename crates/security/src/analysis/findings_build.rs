@@ -48,6 +48,7 @@ fn make_pattern_finding(
     let source_rule_id = format!("pattern:{}", sink_rule.id);
     let finding_id = compute_finding_id(&source_rule_id, &sink_rule.id, &group_id, &snk.language);
     let source = FindingMatch {
+        origin: MatchOrigin::Pattern,
         rule_id: source_rule_id,
         file: snk.file.clone(),
         line: snk.line,
@@ -152,12 +153,16 @@ pub(super) fn make_finding(
     context: FindingBuildContext<'_>,
 ) -> Option<Finding> {
     let skr = pack.find_rule_by_id(&snk.rule_id)?;
-    let is_inferred = src.rule_id.starts_with("entry-point.");
-    let src_match = if is_inferred {
-        FindingMatch::from_inferred(src)
+    let is_inferred = src.origin != MatchOrigin::Rulepack;
+    let source_rule = if is_inferred {
+        None
     } else {
-        let sr = pack.find_rule_by_id(&src.rule_id)?;
-        FindingMatch::from_rule_match(src, sr)
+        Some(pack.find_rule_by_id(&src.rule_id)?)
+    };
+    let src_match = if let Some(rule) = source_rule {
+        FindingMatch::from_rule_match(src, rule)
+    } else {
+        FindingMatch::from_inferred(src)
     };
     let src_rule_id_for_id = if is_inferred {
         src.rule_id.as_str()
@@ -199,6 +204,7 @@ pub(super) fn make_finding(
             let dataflow_connected =
                 sanitizer_call_overlaps_tainted_call(sanitizer_match, context.tainted_call_spans)
                     || sanitizer_char_allowlist_guards_tainted_call(
+                        sanitizer_rule,
                         sanitizer_match,
                         context.tainted_call_spans,
                     )
@@ -412,7 +418,7 @@ pub(super) fn make_finding(
         }
     }
 
-    if source_sink_pair_is_low_signal(&src_match, skr) {
+    if source_sink_pair_is_low_signal(&src_match, source_rule, skr) {
         return None;
     }
 

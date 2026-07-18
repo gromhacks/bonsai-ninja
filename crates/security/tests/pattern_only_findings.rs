@@ -91,6 +91,7 @@ fn base_rule(lang: &str, id: &str, tag: &str, kind: MatchKind) -> Rule {
             target: None,
             search_depth: 0,
         },
+        analysis_semantics: None,
         taint_semantics: None,
         returns_type: None,
         constraints: RuleConstraint::default(),

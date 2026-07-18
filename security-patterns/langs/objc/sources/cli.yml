@@ -39,6 +39,8 @@
   trust: local
   tag: env-input
   payload_types: [text]
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: read
     target:
@@ -69,6 +71,8 @@
   language: objc
   trust: local
   tag: env-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:

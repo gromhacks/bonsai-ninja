@@ -8,6 +8,8 @@
   trust: local
   tag: local-input
   payload_types: [text]
+  analysis_semantics:
+    flow_classes: [environment-input]
   packages: [win32]
   match:
     kind: call
@@ -35,6 +37,8 @@
   trust: local
   tag: local-input
   payload_types: [text]
+  analysis_semantics:
+    flow_classes: [environment-input]
   packages: [win32]
   match:
     kind: call

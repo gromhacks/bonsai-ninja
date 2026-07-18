@@ -65,6 +65,8 @@
   trust: local
   tag: local-input
   payload_types: [text]
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:
@@ -85,6 +87,8 @@
   trust: local
   tag: local-input
   payload_types: [text]
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:
@@ -125,6 +129,8 @@
   trust: local
   tag: local-input
   payload_types: [text]
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:

@@ -240,6 +240,8 @@ match:
   target:
     name: args
     in_method: [main]
+constraints:
+  - enclosing_modifier_in: [static]
 description: Java main args.
 "#,
         crate::rule::RuleKind::Source,
@@ -742,6 +744,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         mode: ConstraintMode::Strict,
         taint_view: None,
         enclosing_decorators: None,
+        enclosing_modifiers: None,
         alias_chains: None,
         runtime_types: None,
         lifecycle_transitions: None,
@@ -761,6 +764,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         mode: ConstraintMode::Strict,
         taint_view: None,
         enclosing_decorators: None,
+        enclosing_modifiers: None,
         alias_chains: None,
         runtime_types: None,
         lifecycle_transitions: None,
@@ -780,6 +784,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         mode: ConstraintMode::Strict,
         taint_view: None,
         enclosing_decorators: None,
+        enclosing_modifiers: None,
         alias_chains: None,
         runtime_types: None,
         lifecycle_transitions: None,

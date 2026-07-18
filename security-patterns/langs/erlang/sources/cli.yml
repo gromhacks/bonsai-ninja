@@ -135,6 +135,8 @@
   trust: config
   tag: env-input
   payload_types: [text]
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:

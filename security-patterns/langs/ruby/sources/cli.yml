@@ -56,6 +56,8 @@
   language: ruby
   tag: env-input
   trust: local
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: read
     target:

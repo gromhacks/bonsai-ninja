@@ -6,7 +6,7 @@
 //! chain-group identity changes.
 
 use crate::matcher::RuleMatch;
-use crate::rule::{Rule, Severity};
+use crate::rule::{MatchOrigin, Rule, Severity};
 use bonsai_hash::fnv1a_names64;
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +73,10 @@ impl Default for FindingStatus {
 /// `match_site` block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FindingMatch {
+    /// Internal typed provenance. Stable rule ids remain presentation
+    /// identities and are never parsed to recover analysis behavior.
+    #[serde(skip)]
+    pub origin: MatchOrigin,
     pub rule_id: String,
     pub file: String,
     pub line: u32,
@@ -153,6 +157,7 @@ impl FindingMatch {
     /// types) onto the location data.
     pub fn from_rule_match(rule_match: &RuleMatch, rule: &Rule) -> Self {
         Self {
+            origin: rule_match.origin,
             rule_id: rule_match.rule_id.clone(),
             file: rule_match.file.clone(),
             line: rule_match.line,
@@ -183,6 +188,7 @@ impl FindingMatch {
     #[must_use]
     pub fn from_inferred(rule_match: &RuleMatch) -> Self {
         Self {
+            origin: rule_match.origin,
             rule_id: rule_match.rule_id.clone(),
             file: rule_match.file.clone(),
             line: rule_match.line,

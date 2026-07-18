@@ -6,6 +6,8 @@
   category: process-exec
   cwe:
   - CWE-78
+  analysis_semantics:
+    flow_classes: [process-execution]
   match:
     kind: call
     callee:
@@ -28,6 +30,8 @@
   category: process-exec
   cwe:
   - CWE-78
+  analysis_semantics:
+    flow_classes: [process-execution]
   match:
     kind: call
     callee:
@@ -58,6 +62,8 @@
   category: process-exec
   cwe:
   - CWE-78
+  analysis_semantics:
+    flow_classes: [process-execution]
   match:
     kind: call
     callee:

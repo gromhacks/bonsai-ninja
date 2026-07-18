@@ -5,6 +5,8 @@
   severity: medium
   cwe:
   - CWE-79
+  analysis_semantics:
+    flow_classes: [browser-output]
   match:
     kind: call
     callee:

@@ -21,7 +21,8 @@ use crate::matcher::{
     InterTaintView, RuleMatch, RuntimeDisabledRule,
 };
 use crate::rule::{
-    ConstraintKind, MatchKind, Rule, RuleKind, RuleTarget, Severity, SourceCallbackArgSemantics,
+    ConstraintKind, ContextFlowRole, FlowClass, GuardProfile, MatchKind, MatchOrigin, PostSinkPolicy, Rule,
+    RuleKind, RuleTarget, Severity, SourceCallbackArgSemantics,
 };
 use crate::sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};
 use ahash::{AHashMap, AHashSet};
@@ -1126,7 +1127,7 @@ where
         &mut on_progress,
     );
     let mut findings_raw = chain_build.findings;
-    extend_java_mdc_context_logger_findings(&mut findings_raw, &sink_hits, pack, ws);
+    extend_implicit_context_findings(&mut findings_raw, &sink_hits, pack, ws);
     on_progress(AnalysisProgress::PhaseStarted {
         label: "finalizing findings",
         total: 0,
@@ -1168,7 +1169,7 @@ where
             .then_with(|| af.sink.column.cmp(&bf.sink.column))
             .then_with(|| af.finding_id.cmp(&bf.finding_id))
     });
-    let mut findings = combine_findings_by_source_flow(findings_raw);
+    let mut findings = combine_findings_by_source_flow(findings_raw, pack);
     if let Some(max_precision) = options.max_precision {
         findings.retain(|combined| finding_precision_within(&combined.finding.precision, max_precision));
     }
@@ -1222,7 +1223,8 @@ where
             .then_with(|| a.finding.sink.line.cmp(&b.finding.sink.line))
             .then_with(|| a.finding.sink.column.cmp(&b.finding.sink.column))
             .then_with(|| {
-                source_reporting_rank(&a.finding.source).cmp(&source_reporting_rank(&b.finding.source))
+                source_reporting_rank(pack, &a.finding.source)
+                    .cmp(&source_reporting_rank(pack, &b.finding.source))
             })
             .then_with(|| a.finding.finding_id.cmp(&b.finding.finding_id))
     });
@@ -2516,7 +2518,7 @@ fn filter_source_hits_by_metadata(
 fn concrete_source_param_bases(hits: &[RuleMatch]) -> AHashMap<(String, String), AHashSet<String>> {
     let mut out: AHashMap<(String, String), AHashSet<String>> = AHashMap::default();
     for hit in hits {
-        if hit.rule_id.starts_with("entry-point.") {
+        if hit.origin != MatchOrigin::Rulepack {
             continue;
         }
         let Some(fn_name) = hit.enclosing_fn.clone() else {
@@ -2539,7 +2541,10 @@ fn inferred_param_subsumed_by_concrete(
     inferred: &RuleMatch,
     concrete: &AHashMap<(String, String), AHashSet<String>>,
 ) -> bool {
-    if !inferred.rule_id.starts_with("entry-point.") {
+    if !matches!(
+        inferred.origin,
+        MatchOrigin::InferredUnreferencedParameter | MatchOrigin::InferredFrameworkParameter
+    ) {
         return false;
     }
     let Some(fn_name) = inferred.enclosing_fn.as_ref() else {
@@ -2571,7 +2576,7 @@ fn source_hit_matches_metadata(
     category: Option<&str>,
     tag: Option<&str>,
 ) -> bool {
-    if hit.rule_id.starts_with("entry-point.") {
+    if hit.origin != MatchOrigin::Rulepack {
         return trust.is_none_or(|t| t == "local")
             && category.is_none_or(|c| c == "inferred")
             && tag.is_none_or(|t| t == "entry-point");
@@ -2581,7 +2586,7 @@ fn source_hit_matches_metadata(
 }
 
 fn source_finding_match(hit: &RuleMatch, pack: &Rulepack) -> Option<FindingMatch> {
-    if hit.rule_id.starts_with("entry-point.") {
+    if hit.origin != MatchOrigin::Rulepack {
         Some(FindingMatch::from_inferred(hit))
     } else {
         pack.find_rule_by_id(&hit.rule_id)
@@ -3993,8 +3998,8 @@ fn drop_field_mismatched_inferred_findings(
         // available source evidence for constructor-to-field
         // flows in some languages, so only collapse it when
         // another source already covers the same chain or sink.
-        let is_class_field = f.source.rule_id.contains(".class_field.inherited");
-        let is_unreferenced_entry = f.source.rule_id.contains(".unreferenced_entry.");
+        let is_class_field = f.source.origin == MatchOrigin::InferredClassField;
+        let is_unreferenced_entry = f.source.origin == MatchOrigin::InferredUnreferencedParameter;
         let same_sink_site_covered = concrete_sink_sites.contains_key(&(
             f.language.clone(),
             f.sink.file.clone(),
@@ -4102,10 +4107,12 @@ fn inferred_field_mentioned_in_sink_args(sink: &FindingMatch, field: &str) -> bo
 }
 
 fn source_is_inferred(source: &FindingMatch) -> bool {
-    source.rule_id.starts_with("entry-point.")
-        || source.rule_id.contains(".unreferenced_entry.")
-        || source.rule_id.contains(".class_field.inherited")
-        || source.category.as_deref() == Some("inferred")
+    matches!(
+        source.origin,
+        MatchOrigin::InferredUnreferencedParameter
+            | MatchOrigin::InferredFrameworkParameter
+            | MatchOrigin::InferredClassField
+    )
 }
 
 /// Extract the leaf field-name from an inferred source's `text` —
@@ -4155,12 +4162,18 @@ fn inferred_source_field_name(text: &str) -> Option<&str> {
 /// remote-trust outranks local-trust. Use sink semantics
 /// (`category`/`tag`) to break that tie when the rule pack tells us
 /// which input shape is the natural carrier for that sink class.
-fn source_preference_rank_for_sink(source: &FindingMatch, sink: Option<&FindingMatch>) -> u8 {
-    if source.rule_id.starts_with("entry-point.")
-        || source.rule_id.contains(".unreferenced_entry.")
-        || source.rule_id.contains(".class_field.inherited")
-        || source.category.as_deref() == Some("inferred")
-    {
+fn finding_has_flow_class(pack: &Rulepack, finding: &FindingMatch, class: FlowClass) -> bool {
+    pack.find_rule_by_id(&finding.rule_id)
+        .and_then(|rule| rule.analysis_semantics.as_ref())
+        .is_some_and(|semantics| semantics.flow_classes.contains(&class))
+}
+
+fn source_preference_rank_for_sink(
+    pack: &Rulepack,
+    source: &FindingMatch,
+    sink: Option<&FindingMatch>,
+) -> u8 {
+    if source_is_inferred(source) {
         return 30;
     }
     let base = match source.trust.as_deref() {
@@ -4170,35 +4183,10 @@ fn source_preference_rank_for_sink(source: &FindingMatch, sink: Option<&FindingM
         _ => 15,
     };
     let Some(sink) = sink else { return base };
-    // Build searchable tokens by concatenating each side's
-    // category + tag + rule_id. `contains()` does substring match,
-    // so "cli" matches "cli-input", "command" matches
-    // "command-injection", etc.
-    let sink_token = format!(
-        "{} {} {}",
-        sink.category.as_deref().unwrap_or(""),
-        sink.tag.as_deref().unwrap_or(""),
-        sink.rule_id,
-    );
-    let src_token = format!(
-        "{} {} {}",
-        source.category.as_deref().unwrap_or(""),
-        source.tag.as_deref().unwrap_or(""),
-        source.rule_id,
-    );
-    // Sink class — process-exec / cmd-injection vs xss/browser/html.
-    let sink_is_process =
-        sink_token.contains("process-exec") || sink_token.contains("command") || sink_token.contains("cmdi");
-    let sink_is_browser =
-        sink_token.contains("xss") || sink_token.contains("browser") || sink_token.contains("html");
-    // Source class — process/cli input vs http/web input.
-    let src_is_process_or_cli = src_token.contains("cli")
-        || src_token.contains("stdin")
-        || src_token.contains("process-input")
-        || src_token.contains("file-read")
-        || src_token.contains("readline");
-    let src_is_http =
-        src_token.contains("http") || src_token.contains("web") || src_token.contains("servlet");
+    let sink_is_process = finding_has_flow_class(pack, sink, FlowClass::ProcessExecution);
+    let sink_is_browser = finding_has_flow_class(pack, sink, FlowClass::BrowserOutput);
+    let src_is_process_or_cli = finding_has_flow_class(pack, source, FlowClass::ProcessInput);
+    let src_is_http = finding_has_flow_class(pack, source, FlowClass::HttpInput);
     // Adjustment magnitude is one full trust tier (10) so a semantic
     // match against the sink can flip the abstract trust order — e.g.
     // a `local`-trust cli source ranks ABOVE a `remote`-trust http
@@ -4228,24 +4216,18 @@ fn source_preference_rank_for_sink(source: &FindingMatch, sink: Option<&FindingM
     adjusted.clamp(0, 255) as u8
 }
 
-fn source_specificity_rank(source: &FindingMatch) -> u8 {
-    if source.rule_id.contains("request_json_field_get") {
-        return 0;
-    }
-    if source.rule_id.contains("request_get_json") || source.rule_id.ends_with(".request_json") {
-        return 5;
-    }
-    2
+fn source_specificity_rank(pack: &Rulepack, source: &FindingMatch) -> u8 {
+    pack.find_rule_by_id(&source.rule_id)
+        .and_then(|rule| rule.analysis_semantics.as_ref())
+        .and_then(|semantics| semantics.source_specificity_rank)
+        .unwrap_or(2)
 }
 
-fn source_reporting_rank(source: &FindingMatch) -> u8 {
-    if source.rule_id == "java.source.bytes_blob_param" {
-        return 10;
-    }
-    if source.tag.as_deref() == Some("caller-input") && source.trust.as_deref() != Some("remote") {
-        return 5;
-    }
-    0
+fn source_reporting_rank(pack: &Rulepack, source: &FindingMatch) -> u8 {
+    pack.find_rule_by_id(&source.rule_id)
+        .and_then(|rule| rule.analysis_semantics.as_ref())
+        .and_then(|semantics| semantics.source_reporting_rank)
+        .unwrap_or(0)
 }
 
 fn source_rule_allows_sink_tag(pack: &Rulepack, source_rule_id: &str, sink_rule: &Rule) -> bool {
@@ -4267,7 +4249,10 @@ fn same_sink_site(a: &FindingMatch, b: &FindingMatch) -> bool {
     a.rule_id == b.rule_id && a.file == b.file && a.line == b.line && a.column == b.column
 }
 
-fn combine_findings_by_source_flow(mut findings: Vec<FindingWithChain>) -> Vec<CombinedFindingWithChain> {
+fn combine_findings_by_source_flow(
+    mut findings: Vec<FindingWithChain>,
+    pack: &Rulepack,
+) -> Vec<CombinedFindingWithChain> {
     let mut groups: Vec<CombinedFindingWithChain> = Vec::new();
     let mut index: AHashMap<String, usize> = AHashMap::new();
 
@@ -4322,12 +4307,13 @@ fn combine_findings_by_source_flow(mut findings: Vec<FindingWithChain>) -> Vec<C
         bucket_a
             .cmp(&bucket_b)
             .then_with(|| {
-                source_preference_rank_for_sink(&a.finding.source, Some(&a.finding.sink)).cmp(
-                    &source_preference_rank_for_sink(&b.finding.source, Some(&b.finding.sink)),
+                source_preference_rank_for_sink(pack, &a.finding.source, Some(&a.finding.sink)).cmp(
+                    &source_preference_rank_for_sink(pack, &b.finding.source, Some(&b.finding.sink)),
                 )
             })
             .then_with(|| {
-                source_specificity_rank(&a.finding.source).cmp(&source_specificity_rank(&b.finding.source))
+                source_specificity_rank(pack, &a.finding.source)
+                    .cmp(&source_specificity_rank(pack, &b.finding.source))
             })
             .then_with(|| {
                 (
@@ -4448,36 +4434,37 @@ fn combined_finding_key(item: &FindingWithChain) -> String {
     }
 }
 
-fn extend_java_mdc_context_logger_findings(
+fn extend_implicit_context_findings(
     findings: &mut Vec<FindingWithChain>,
     sink_hits: &[RuleMatch],
     pack: &Rulepack,
     ws: &Workspace,
 ) {
-    const MDC_PUT_RULE: &str = "java.log_injection.mdc_put";
-    const MDC_CONTEXT_LOGGER_RULE: &str = "java.log_injection.mdc_context_logger_info";
-
-    let Some(sink_rule) = pack.find_rule_by_id(MDC_CONTEXT_LOGGER_RULE) else {
-        return;
-    };
-    let logger_sinks: Vec<&RuleMatch> = sink_hits
+    let context_consumers: Vec<(&Rule, &RuleMatch)> = sink_hits
         .iter()
-        .filter(|hit| hit.rule_id == MDC_CONTEXT_LOGGER_RULE && hit.language == "java")
+        .filter_map(|hit| {
+            let rule = pack.find_rule_by_id(&hit.rule_id)?;
+            let context = rule.analysis_semantics.as_ref()?.context_flow.as_ref()?;
+            (context.role == ContextFlowRole::Consumer).then_some((rule, hit))
+        })
         .collect();
-    if logger_sinks.is_empty() {
+    if context_consumers.is_empty() {
         return;
     }
 
-    let mdc_flows: Vec<FindingWithChain> = findings
+    let producer_flows: Vec<FindingWithChain> = findings
         .iter()
         .filter(|item| {
-            item.finding.language == "java"
-                && item.finding.sink.rule_id == MDC_PUT_RULE
-                && item.finding.status == FindingStatus::Unsanitized
+            item.finding.status == FindingStatus::Unsanitized
+                && pack
+                    .find_rule_by_id(&item.finding.sink.rule_id)
+                    .and_then(|rule| rule.analysis_semantics.as_ref())
+                    .and_then(|semantics| semantics.context_flow.as_ref())
+                    .is_some_and(|context| context.role == ContextFlowRole::Producer)
         })
         .cloned()
         .collect();
-    if mdc_flows.is_empty() {
+    if producer_flows.is_empty() {
         return;
     }
 
@@ -4485,64 +4472,83 @@ fn extend_java_mdc_context_logger_findings(
         .iter()
         .map(|item| item.finding.finding_id.clone())
         .collect();
-    let mut consumed_mdc_finding_ids: AHashSet<String> = AHashSet::new();
-    for mdc_flow in mdc_flows {
-        let mut emitted_for_mdc_flow = false;
-        for logger_sink in &logger_sinks {
-            let mut sink_match = FindingMatch::from_rule_match(logger_sink, sink_rule);
+    let mut consumed_producer_finding_ids: AHashSet<String> = AHashSet::new();
+    for producer_flow in producer_flows {
+        let Some(producer_context) = pack
+            .find_rule_by_id(&producer_flow.finding.sink.rule_id)
+            .and_then(|rule| rule.analysis_semantics.as_ref())
+            .and_then(|semantics| semantics.context_flow.as_ref())
+        else {
+            continue;
+        };
+        let mut emitted_for_producer = false;
+        for &(sink_rule, consumer_sink) in &context_consumers {
+            let Some(consumer_context) = sink_rule
+                .analysis_semantics
+                .as_ref()
+                .and_then(|semantics| semantics.context_flow.as_ref())
+            else {
+                continue;
+            };
+            if consumer_context.channel != producer_context.channel
+                || consumer_sink.language != producer_flow.finding.language
+            {
+                continue;
+            }
+            let mut sink_match = FindingMatch::from_rule_match(consumer_sink, sink_rule);
             sink_match.tainted_args.push(TaintedArgInfo {
                 index: usize::MAX,
-                value_text: "MDC context".to_string(),
+                value_text: consumer_context.value_label.clone(),
                 ..TaintedArgInfo::default()
             });
 
-            let mut chain_display = mdc_flow.finding.chain_display.clone();
-            if let Some(sink_fn) = logger_sink.enclosing_fn.as_ref() {
+            let mut chain_display = producer_flow.finding.chain_display.clone();
+            if let Some(sink_fn) = consumer_sink.enclosing_fn.as_ref() {
                 if !chain_display.iter().any(|name| name == sink_fn) {
                     chain_display.push(sink_fn.clone());
                 }
             }
 
-            let mut chain_funcs = mdc_flow.chain_funcs.clone();
-            if let Some(sink_func) = func_id_for_match(ws, logger_sink) {
+            let mut chain_funcs = producer_flow.chain_funcs.clone();
+            if let Some(sink_func) = func_id_for_match(ws, consumer_sink) {
                 if !chain_funcs.contains(&sink_func) {
                     chain_funcs.push(sink_func);
                 }
             }
 
-            let mut taint_path = mdc_flow.finding.taint_path.clone();
+            let mut taint_path = producer_flow.finding.taint_path.clone();
             taint_path.push(TaintPropagationStep {
-                caller: logger_sink
+                caller: consumer_sink
                     .enclosing_fn
                     .clone()
-                    .unwrap_or_else(|| "<logger>".to_string()),
-                callee: logger_sink.match_text.clone(),
-                file: logger_sink.file.clone(),
-                line: logger_sink.line,
-                column: logger_sink.column,
+                    .unwrap_or_else(|| "<context-consumer>".to_string()),
+                callee: consumer_sink.match_text.clone(),
+                file: consumer_sink.file.clone(),
+                line: consumer_sink.line,
+                column: consumer_sink.column,
                 tainted_args: vec![TaintPropagationArg {
                     index: usize::MAX,
-                    value_text: "MDC context".to_string(),
-                    param_name: "mdc".to_string(),
+                    value_text: consumer_context.value_label.clone(),
+                    param_name: consumer_context.parameter_name.clone(),
                 }],
             });
 
             let group_id = group_id_for_taint_path(&chain_display, &taint_path);
             let flow_id = flow_id_for_taint_path(&chain_display, &taint_path);
-            let source_identity = finding_match_identity_token(&mdc_flow.finding.source);
+            let source_identity = finding_match_identity_token(&producer_flow.finding.source);
             let sink_identity = finding_match_identity_token(&sink_match);
             let finding_id = compute_finding_id(
                 &source_identity,
                 &sink_identity,
                 &group_id,
-                &mdc_flow.finding.language,
+                &producer_flow.finding.language,
             );
             if !existing_ids.insert(finding_id.clone()) {
                 continue;
             }
 
             let root = ws.db().workspace_root();
-            let from_test = path_is_test_file_with_root(root.as_deref(), &mdc_flow.finding.source.file)
+            let from_test = path_is_test_file_with_root(root.as_deref(), &producer_flow.finding.source.file)
                 || path_is_test_file_with_root(root.as_deref(), &sink_match.file)
                 || taint_path
                     .iter()
@@ -4551,14 +4557,14 @@ fn extend_java_mdc_context_logger_findings(
             findings.push(FindingWithChain {
                 finding: Finding {
                     finding_id,
-                    language: mdc_flow.finding.language.clone(),
-                    source: mdc_flow.finding.source.clone(),
+                    language: producer_flow.finding.language.clone(),
+                    source: producer_flow.finding.source.clone(),
                     sink: sink_match,
-                    sanitizers_seen: mdc_flow.finding.sanitizers_seen.clone(),
+                    sanitizers_seen: producer_flow.finding.sanitizers_seen.clone(),
                     group_id: Some(group_id),
                     representative_flow_id: Some(flow_id),
-                    analysis_complete: mdc_flow.finding.analysis_complete,
-                    analysis_incomplete_reasons: mdc_flow.finding.analysis_incomplete_reasons.clone(),
+                    analysis_complete: producer_flow.finding.analysis_complete,
+                    analysis_incomplete_reasons: producer_flow.finding.analysis_incomplete_reasons.clone(),
                     chain_display,
                     taint_path,
                     hops: Vec::new(),
@@ -4572,14 +4578,14 @@ fn extend_java_mdc_context_logger_findings(
                 },
                 chain_funcs,
             });
-            emitted_for_mdc_flow = true;
+            emitted_for_producer = true;
         }
-        if emitted_for_mdc_flow {
-            consumed_mdc_finding_ids.insert(mdc_flow.finding.finding_id);
+        if emitted_for_producer {
+            consumed_producer_finding_ids.insert(producer_flow.finding.finding_id);
         }
     }
-    if !consumed_mdc_finding_ids.is_empty() {
-        findings.retain(|item| !consumed_mdc_finding_ids.contains(&item.finding.finding_id));
+    if !consumed_producer_finding_ids.is_empty() {
+        findings.retain(|item| !consumed_producer_finding_ids.contains(&item.finding.finding_id));
     }
 }
 
@@ -6758,7 +6764,7 @@ fn source_index_sink_corridor(
         .decl_of(SymbolId::new(source_func.raw()))
         .map(|decl| output_arg_names_for_match(pack, src, decl))
         .unwrap_or_default();
-    let anchor = if rule_match_kind_is_param(pack, &src.rule_id) || src.rule_id.starts_with("entry-point.") {
+    let anchor = if rule_match_kind_is_param(pack, &src.rule_id) || src.origin != MatchOrigin::Rulepack {
         None
     } else {
         Some(src.span)
@@ -7297,7 +7303,7 @@ fn source_can_precede_sink(
     if src_func != sink_func {
         return true;
     }
-    if src.rule_id.starts_with("entry-point.") || rule_match_kind_is_param(pack, &src.rule_id) {
+    if src.origin != MatchOrigin::Rulepack || rule_match_kind_is_param(pack, &src.rule_id) {
         return true;
     }
     if src.line < snk.line || (src.line == snk.line && src.column <= snk.column) {
@@ -7498,10 +7504,11 @@ fn sanitizer_call_overlaps_tainted_call(san: &RuleMatch, tainted_call_spans: &AH
 }
 
 fn sanitizer_char_allowlist_guards_tainted_call(
+    sanitizer_rule: Option<&Rule>,
     san: &RuleMatch,
     tainted_call_spans: &AHashSet<Span>,
 ) -> bool {
-    if !san.rule_id.contains("char_allowlist") && !san.rule_id.contains("char-allowlist") {
+    if sanitizer_rule.and_then(|rule| rule.tag.as_deref()) != Some("char-allowlist") {
         return false;
     }
     tainted_call_spans.iter().any(|span| {
@@ -8405,10 +8412,11 @@ fn post_sink_path_construction_containment_allowed(
     {
         return false;
     }
-    matches!(
-        sink_rule.id.as_str(),
-        "go.path.filepath_join" | "go.path.path_join"
-    )
+    sink_rule
+        .analysis_semantics
+        .as_ref()
+        .and_then(|semantics| semantics.post_sink_policy)
+        == Some(PostSinkPolicy::PathConstructionContainment)
 }
 
 /// True when match `a` is at the same position as or before match
@@ -8450,7 +8458,7 @@ fn rule_match_kind_is_param(pack: &Rulepack, rule_id: &str) -> bool {
 }
 
 fn source_anchor_for_rule_match(pack: &Rulepack, src: &RuleMatch) -> Option<Span> {
-    if src.rule_id.starts_with("entry-point.") || rule_match_kind_is_param(pack, &src.rule_id) {
+    if src.origin != MatchOrigin::Rulepack || rule_match_kind_is_param(pack, &src.rule_id) {
         None
     } else {
         Some(src.span)
@@ -8565,7 +8573,7 @@ fn output_arg_names_for_match(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_la
 
 fn source_seed_set(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_lang_api::Decl) -> TokenSet {
     let mut out = TokenSet::default();
-    let is_inferred = src.rule_id.starts_with("entry-point.");
+    let is_inferred = src.origin != MatchOrigin::Rulepack;
     let rule = pack.find_rule_by_id(&src.rule_id);
     let is_param_rule = rule.is_some_and(|rule| rule.match_spec.kind == MatchKind::Param);
     let source_output_args = rule
@@ -9495,6 +9503,7 @@ mod source_seed_tests {
 
     fn source_rule_match_at(span: Span) -> RuleMatch {
         RuleMatch {
+            origin: MatchOrigin::Rulepack,
             rule_id: "python.flask.request_args_get".to_string(),
             language: "python".to_string(),
             file: "app.py".to_string(),

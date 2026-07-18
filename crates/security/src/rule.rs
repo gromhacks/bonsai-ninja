@@ -365,6 +365,113 @@ pub struct TaintSemantics {
     pub taint_receiver_from_args: bool,
 }
 
+/// Language-independent semantic classes used only when selecting the
+/// representative source for several proven flows that collapse into one
+/// finding group. These are rulepack declarations, not names inferred from
+/// rule ids, API spellings, or source text.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlowClass {
+    /// Local process input such as argv, stdin, or an interactive CLI.
+    ProcessInput,
+    /// Remote HTTP/web request input.
+    HttpInput,
+    /// Input originating from the process environment.
+    EnvironmentInput,
+    /// A process execution or command-interpreter sink.
+    ProcessExecution,
+    /// A browser/HTML output sink.
+    BrowserOutput,
+}
+
+/// Provenance of a rule/finding match inside the analysis pipeline.
+///
+/// Synthetic source classification is carried as data so consumers never
+/// infer behavior from the spelling of a generated rule id.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MatchOrigin {
+    #[default]
+    Rulepack,
+    InferredUnreferencedParameter,
+    InferredFrameworkParameter,
+    InferredClassField,
+    Pattern,
+    EngineSanitizer,
+}
+
+/// Structured guard recognizers implemented over compiler flow facts.
+///
+/// A sink opts into one profile declaratively. The recognizer still proves
+/// the guard from [`bonsai_lang_api::FlowEvent`] branches, calls, and
+/// assignments; this enum merely selects which proof to run.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GuardProfile {
+    GoJwtInlineKeyfuncAlgorithm,
+    GoXmlDecoderHardening,
+    JavaUrlSsrfGuard,
+}
+
+/// Role a sink rule plays in an implicit context channel.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContextFlowRole {
+    Producer,
+    Consumer,
+}
+
+/// Declarative description of an implicit context flow. Producer findings
+/// can be continued to consumer sink hits with the same channel and language.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextFlowSemantics {
+    /// Stable rulepack-owned channel identity, e.g. `logging.mdc`.
+    pub channel: String,
+    /// Whether the rule writes to or consumes from the channel.
+    pub role: ContextFlowRole,
+    /// Human-readable synthetic value used in taint-path evidence.
+    pub value_label: String,
+    /// Synthetic parameter name used in the continuation edge.
+    pub parameter_name: String,
+}
+
+/// Explicit exceptions to the normal source-before-sanitizer-before-sink
+/// ordering contract. The rulepack selects the policy; the engine proves its
+/// preconditions from structured spans and rule metadata.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PostSinkPolicy {
+    /// A path-construction sink may be contained by a later path sanitizer in
+    /// the same file because the joined value is not consumed until after the
+    /// containment check.
+    PathConstructionContainment,
+}
+
+/// Optional analysis behavior compiled from the rulepack.
+///
+/// This keeps engine policy independent of rule ids and language/API names.
+/// Every field is semantic and closed over a typed vocabulary; absence means
+/// the normal generic analysis behavior.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisSemantics {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flow_classes: Vec<FlowClass>,
+    /// Lower values win when equally proven source sites are grouped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_specificity_rank: Option<u8>,
+    /// Higher values sort later in otherwise identical report ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_reporting_rank: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_profile: Option<GuardProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_flow: Option<ContextFlowSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_sink_policy: Option<PostSinkPolicy>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceCallbackArgSemantics {
@@ -481,6 +588,11 @@ pub enum ConstraintKind {
     EnclosingDecoratorIn {
         enclosing_decorator_in: Vec<String>,
     },
+    /// `enclosing_modifier_in: [static, ...]` — the enclosing declaration
+    /// must carry at least one requested modifier token in its parsed AST.
+    EnclosingModifierIn {
+        enclosing_modifier_in: Vec<String>,
+    },
     /// Source rules only: defer source/sink compatibility until a proven
     /// taint path reaches a sink, then require the sink's semantic tag to be
     /// one of these values. This keeps narrowly purposed generic sources
@@ -531,6 +643,7 @@ impl ConstraintKind {
             Self::ArgGe { .. } => "arg_ge",
             Self::RequiresRuntimeType { .. } => "requires_runtime_type",
             Self::EnclosingDecoratorIn { .. } => "enclosing_decorator_in",
+            Self::EnclosingModifierIn { .. } => "enclosing_modifier_in",
             Self::SinkTagIn { .. } => "sink_tag_in",
             Self::MustAlias { .. } => "must_alias",
             Self::RequiresState { .. } => "requires_state",
@@ -921,6 +1034,11 @@ pub struct Rule {
     pub payload_types: Vec<PayloadType>,
     #[serde(rename = "match")]
     pub match_spec: MatchSpec,
+    /// Rulepack-compiled analysis policy. This is separate from transfer
+    /// semantics because it controls finding attribution, structured guard
+    /// proofs, and implicit context continuation rather than IDG edges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_semantics: Option<AnalysisSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint_semantics: Option<TaintSemantics>,
     /// Rulepack-declared factory-method return type. When a rule names

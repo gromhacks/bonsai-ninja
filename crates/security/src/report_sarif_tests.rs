@@ -7,6 +7,7 @@ use serde_json::Value;
 
 fn sample_match(rule_id: &str, file: &str, line: u32) -> FindingMatch {
     FindingMatch {
+        origin: crate::rule::MatchOrigin::Rulepack,
         rule_id: rule_id.to_string(),
         file: file.to_string(),
         line,

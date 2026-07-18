@@ -63,6 +63,8 @@
   language: typescript
   trust: local
   tag: env-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: read
     target:
@@ -114,6 +116,8 @@
   language: typescript
   trust: local
   tag: env-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:
@@ -165,6 +169,8 @@
   language: typescript
   trust: local
   tag: env-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: read
     target:
@@ -189,6 +195,8 @@
   language: typescript
   trust: local
   tag: env-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:

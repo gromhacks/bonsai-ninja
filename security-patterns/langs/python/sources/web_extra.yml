@@ -14,6 +14,8 @@
   payload_types: [json]
   frameworks: [flask, google-cloud-functions]
   packages: [flask, functions_framework]
+  analysis_semantics:
+    source_specificity_rank: 5
   match:
     kind: call
     callee:
@@ -43,6 +45,8 @@
   payload_types: [json]
   frameworks: [flask]
   packages: [flask]
+  analysis_semantics:
+    source_specificity_rank: 0
   match:
     kind: call
     callee:
@@ -219,6 +223,8 @@
   description: "Disabled duplicate - current matching also emits `request.query` for `.get(...)`; python.aiohttp.request_query covers the same query source."
 
 - id: python.aiohttp.request_json
+  analysis_semantics:
+    source_specificity_rank: 5
   enabled: true
   language: python
   trust: remote
@@ -389,6 +395,8 @@
 # ---------------------------------------------------------------------------
 
 - id: python.sanic.request_json
+  analysis_semantics:
+    source_specificity_rank: 5
   enabled: true
   language: python
   trust: remote

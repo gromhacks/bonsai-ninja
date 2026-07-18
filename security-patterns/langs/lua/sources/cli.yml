@@ -21,6 +21,8 @@
   language: lua
   trust: local
   tag: env-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:

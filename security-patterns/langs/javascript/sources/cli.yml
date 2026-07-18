@@ -81,6 +81,8 @@
   language: javascript
   trust: local
   tag: env-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: read
     target:
@@ -121,6 +123,8 @@
   language: javascript
   trust: local
   tag: env-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:
@@ -172,6 +176,8 @@
   language: javascript
   trust: local
   tag: env-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: read
     target:
@@ -195,6 +201,8 @@
   language: javascript
   trust: local
   tag: env-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:

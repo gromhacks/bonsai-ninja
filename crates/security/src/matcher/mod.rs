@@ -6,7 +6,7 @@
 //! [`crate::compile`]. The matcher just tells callers *which facts* in the
 //! workspace look like a source / sink / sanitizer.
 
-use crate::rule::{ArgTaintedSpec, ConstraintKind, MatchKind, Rule, RuleTarget};
+use crate::rule::{ArgTaintedSpec, ConstraintKind, MatchKind, MatchOrigin, Rule, RuleTarget};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{qualified_names_match, FileId, Span, SymbolId};
 use bonsai_lang_api::{
@@ -82,6 +82,10 @@ fn record_runtime_disabled_rule(rule_id: &str, reason: impl Into<String>) {
 /// One rule match — the specific fact + location that triggered.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct RuleMatch {
+    /// Typed provenance used by analysis policy. Generated rule ids remain
+    /// stable display identities and are never parsed to recover this value.
+    #[serde(skip)]
+    pub origin: MatchOrigin,
     pub rule_id: String,
     pub language: String,
     pub file: String,
@@ -610,6 +614,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
                 mode: ConstraintMode::Strict,
                 taint_view: Some(taint_view),
                 enclosing_decorators: Some(facts.decl_decorators.as_slice()),
+                enclosing_modifiers: None,
                 alias_chains: Some(&facts.alias_chains),
                 runtime_types: Some(&facts.runtime_types),
                 lifecycle_transitions: Some(&facts.lifecycle_transitions),
@@ -683,6 +688,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
                 mode: ConstraintMode::Strict,
                 taint_view: Some(taint_view),
                 enclosing_decorators: None,
+                enclosing_modifiers: None,
                 alias_chains: None,
                 runtime_types: None,
                 lifecycle_transitions: None,
@@ -722,6 +728,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
             mode: ConstraintMode::Strict,
             taint_view: Some(taint_view),
             enclosing_decorators: None,
+            enclosing_modifiers: None,
             alias_chains: None,
             runtime_types: None,
             lifecycle_transitions: None,
@@ -1660,9 +1667,6 @@ impl<'a> PreparedRule<'a> {
 fn text_anchor_groups_for_rule(rule: &Rule, target: &RuleTarget) -> Vec<Vec<String>> {
     let mut groups = Vec::new();
     groups.extend(text_anchor_groups_for_target(target, rule.match_spec.kind));
-    if rule.id == "java.source.main_args" {
-        groups.push(vec!["static".to_string()]);
-    }
     let mut class_group = Vec::new();
     for class_name in &target.in_class {
         push_text_anchor(&mut class_group, class_name);
@@ -1693,6 +1697,20 @@ fn text_anchor_groups_for_rule(rule: &Rule, target: &RuleTarget) -> Vec<Vec<Stri
     }
     if !decorator_group.is_empty() {
         groups.push(decorator_group);
+    }
+    let mut modifier_group = Vec::new();
+    for constraint in &rule.constraints.0 {
+        if let ConstraintKind::EnclosingModifierIn {
+            enclosing_modifier_in,
+        } = constraint
+        {
+            for modifier in enclosing_modifier_in {
+                push_text_anchor(&mut modifier_group, modifier);
+            }
+        }
+    }
+    if !modifier_group.is_empty() {
+        groups.push(modifier_group);
     }
     groups
 }
@@ -2499,6 +2517,7 @@ fn scan_returns_batch(
                 let span = canonical_flow_read_match_span(ws, file, span, &match_text, &assignment_values);
                 let (file_path, line, col) = resolve_span(ws, file, span);
                 out.push(RuleMatch {
+                    origin: MatchOrigin::Rulepack,
                     rule_id: prepared.rule.id.clone(),
                     language: prepared.rule.language.clone(),
                     file: file_path,
@@ -2561,6 +2580,17 @@ fn scan_params_batch(
     let alias_map = file_alias_map_with_retention(ws, file, retention);
     for decl in &file_index.defs {
         let decl_decorators = decl_decorator_names(ws, file, file_index, decl.span, decl.name_span);
+        let decl_modifiers = if rules.iter().any(|prepared| {
+            prepared
+                .rule
+                .constraints
+                .iter()
+                .any(|constraint| matches!(constraint, ConstraintKind::EnclosingModifierIn { .. }))
+        }) {
+            decl_modifier_names(ws, file, decl)
+        } else {
+            Vec::new()
+        };
         for (idx, param) in decl.params.iter().enumerate() {
             // T204: per-param annotations are parallel-indexed with
             // `params`. Empty if the adapter doesn't surface them.
@@ -2620,6 +2650,7 @@ fn scan_params_batch(
                     mode: ConstraintMode::Strict,
                     taint_view: None,
                     enclosing_decorators: Some(decl_decorators.as_slice()),
+                    enclosing_modifiers: Some(decl_modifiers.as_slice()),
                     alias_chains: None,
                     runtime_types: None,
                     lifecycle_transitions: None,
@@ -2627,6 +2658,7 @@ fn scan_params_batch(
                     continue;
                 }
                 out.push(RuleMatch {
+                    origin: MatchOrigin::Rulepack,
                     rule_id: prepared.rule.id.clone(),
                     language: prepared.rule.language.clone(),
                     file: file_path,
@@ -2703,6 +2735,41 @@ fn decl_target_context_allows(
             .bases
             .iter()
             .any(|base| target.in_class.iter().any(|want| want == base))
+}
+
+fn decl_modifier_names(ws: &Workspace, file: FileId, decl: &Decl) -> Vec<String> {
+    let Ok(parsed) = ws.db().parse(file) else {
+        return Vec::new();
+    };
+    let Ok(snapshot) = ws.vfs().snapshot(file) else {
+        return Vec::new();
+    };
+    let root = parsed.tree.root_node();
+    let start = decl.span.start as usize;
+    let end = decl.span.end as usize;
+    let Some(decl_node) = root.named_descendant_for_byte_range(start, end) else {
+        return Vec::new();
+    };
+    let mut modifiers = Vec::new();
+    let mut pending = vec![(decl_node, false)];
+    while let Some((node, inside_modifier)) = pending.pop() {
+        let inside_modifier = inside_modifier || node.kind().contains("modifier");
+        if node.child_count() == 0 {
+            if inside_modifier && node.start_byte() < decl.name_span.start as usize {
+                if let Some(text) = snapshot.text.get(node.start_byte()..node.end_byte()) {
+                    let text = text.trim();
+                    if !text.is_empty() && !modifiers.iter().any(|existing| existing == text) {
+                        modifiers.push(text.to_string());
+                    }
+                }
+            }
+            continue;
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.children(&mut cursor).collect();
+        pending.extend(children.into_iter().rev().map(|child| (child, inside_modifier)));
+    }
+    modifiers
 }
 
 fn local_decl_by_symbol(file_index: &DeclIndex, symbol: SymbolId) -> Option<&Decl> {
@@ -2833,6 +2900,7 @@ fn scan_calls_batch(
                     mode,
                     taint_view,
                     enclosing_decorators: Some(facts.decl_decorators.as_slice()),
+                    enclosing_modifiers: None,
                     alias_chains: Some(&facts.alias_chains),
                     runtime_types: Some(&facts.runtime_types),
                     lifecycle_transitions: Some(&facts.lifecycle_transitions),
@@ -2847,6 +2915,7 @@ fn scan_calls_batch(
                 }
                 let (file_path, line, col) = resolve_span(ws, file, call.span);
                 out.push(RuleMatch {
+                    origin: MatchOrigin::Rulepack,
                     rule_id: prepared.rule.id.clone(),
                     language: prepared.rule.language.clone(),
                     file: file_path,
@@ -2903,6 +2972,7 @@ fn scan_calls_batch(
                 mode,
                 taint_view,
                 enclosing_decorators: None,
+                enclosing_modifiers: None,
                 alias_chains: None,
                 runtime_types: None,
                 lifecycle_transitions: None,
@@ -2916,6 +2986,7 @@ fn scan_calls_batch(
             }
             let (file_path, line, col) = resolve_span(ws, file, r.span);
             out.push(RuleMatch {
+                origin: MatchOrigin::Rulepack,
                 rule_id: prepared.rule.id.clone(),
                 language: prepared.rule.language.clone(),
                 file: file_path,
@@ -3073,6 +3144,7 @@ fn scan_missing_batch(
                 mode,
                 taint_view,
                 enclosing_decorators: Some(facts.decl_decorators.as_slice()),
+                enclosing_modifiers: None,
                 alias_chains: Some(&facts.alias_chains),
                 runtime_types: Some(&facts.runtime_types),
                 lifecycle_transitions: Some(&facts.lifecycle_transitions),
@@ -3114,6 +3186,7 @@ fn scan_missing_batch(
 
             let (file_path, line, col) = resolve_span(ws, file, target_span);
             out.push(RuleMatch {
+                origin: MatchOrigin::Rulepack,
                 rule_id: prepared.rule.id.clone(),
                 language: prepared.rule.language.clone(),
                 file: file_path,
@@ -4457,6 +4530,7 @@ fn scan_refs_batch(
             let (file_path, line, col) = resolve_span(ws, file, r.span);
             let enclosing_fn = enclosing_decl.map(|d| d.name.clone());
             out.push(RuleMatch {
+                origin: MatchOrigin::Rulepack,
                 rule_id: prepared.rule.id.clone(),
                 language: prepared.rule.language.clone(),
                 file: file_path,
@@ -4530,6 +4604,7 @@ fn scan_flow_reads_batch(
                 }
                 let (file_path, line, col) = resolve_span(ws, file, span);
                 out.push(RuleMatch {
+                    origin: MatchOrigin::Rulepack,
                     rule_id: prepared.rule.id.clone(),
                     language: prepared.rule.language.clone(),
                     file: file_path,
@@ -5132,6 +5207,7 @@ fn scan_writes_batch(
                     mode,
                     taint_view,
                     enclosing_decorators: None,
+                    enclosing_modifiers: None,
                     alias_chains: None,
                     runtime_types: None,
                     lifecycle_transitions: None,
@@ -5140,6 +5216,7 @@ fn scan_writes_batch(
                 }
                 let (file_path, line, col) = resolve_span(ws, file, write.span);
                 out.push(RuleMatch {
+                    origin: MatchOrigin::Rulepack,
                     rule_id: prepared.rule.id.clone(),
                     language: prepared.rule.language.clone(),
                     file: file_path,
@@ -5208,6 +5285,7 @@ fn scan_ref_writes_batch(
                 mode,
                 taint_view,
                 enclosing_decorators: None,
+                enclosing_modifiers: None,
                 alias_chains: None,
                 runtime_types: None,
                 lifecycle_transitions: None,
@@ -5223,6 +5301,7 @@ fn scan_ref_writes_batch(
             let (file_path, line, col) = resolve_span(ws, file, r.span);
             let enclosing_fn = innermost_decl_for_span(decls, r.span).map(|d| d.name.clone());
             out.push(RuleMatch {
+                origin: MatchOrigin::Rulepack,
                 rule_id: prepared.rule.id.clone(),
                 language: prepared.rule.language.clone(),
                 file: file_path,
@@ -6223,6 +6302,7 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
             | ConstraintKind::ArgGe { .. }
             | ConstraintKind::RequiresRuntimeType { .. }
             | ConstraintKind::EnclosingDecoratorIn { .. }
+            | ConstraintKind::EnclosingModifierIn { .. }
             | ConstraintKind::SinkTagIn { .. }
             | ConstraintKind::MustAlias { .. }
             | ConstraintKind::RequiresState { .. } => None,
@@ -6271,6 +6351,9 @@ struct ConstraintEval<'a, 't> {
     taint_view: Option<&'a InterTaintView<'t>>,
     /// Decorator names on the enclosing decl, for `EnclosingDecoratorIn`.
     enclosing_decorators: Option<&'a [String]>,
+    /// Modifier tokens on the enclosing declaration, extracted from the
+    /// parsed Tree-sitter node rather than inferred from source/rule names.
+    enclosing_modifiers: Option<&'a [String]>,
     /// Intra-procedural rename chain (`y = x` → `y → x`) for `MustAlias`.
     alias_chains: Option<&'a AHashMap<String, String>>,
     /// CFG-aware narrowings for `RequiresRuntimeType`.
@@ -6552,6 +6635,24 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 let any_match = decorators
                     .iter()
                     .any(|attached| enclosing_decorator_in.iter().any(|want| want == attached));
+                if !any_match {
+                    return false;
+                }
+            }
+            ConstraintKind::EnclosingModifierIn {
+                enclosing_modifier_in,
+            } => {
+                if enclosing_modifier_in.is_empty() {
+                    return false;
+                }
+                let Some(modifiers) = ctx.enclosing_modifiers else {
+                    return false;
+                };
+                let any_match = modifiers.iter().any(|attached| {
+                    enclosing_modifier_in
+                        .iter()
+                        .any(|want| want.eq_ignore_ascii_case(attached))
+                });
                 if !any_match {
                     return false;
                 }
@@ -7022,6 +7123,11 @@ where
                     }
                     let (file_path, line, col) = resolve_span(ws, file, decl.name_span);
                     out.push(RuleMatch {
+                        origin: if matches!(ek, EntryKind::Unreferenced) {
+                            MatchOrigin::InferredUnreferencedParameter
+                        } else {
+                            MatchOrigin::InferredFrameworkParameter
+                        },
                         rule_id: format!("entry-point.{}.param_{idx}", ek.rule_slug()),
                         language: language.clone(),
                         file: file_path,
@@ -7056,6 +7162,7 @@ where
                         };
                         let (file_path, line, col) = resolve_span(ws, file, read_span);
                         out.push(RuleMatch {
+                            origin: MatchOrigin::InferredClassField,
                             rule_id: "entry-point.class_field.inherited".to_string(),
                             language: language.clone(),
                             file: file_path,
