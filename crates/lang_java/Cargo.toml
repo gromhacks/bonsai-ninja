@@ -20,4 +20,3 @@ bonsai_conformance = { workspace = true }
 bonsai_db = { workspace = true }
 bonsai_testkit = { workspace = true }
 bonsai_vfs = { workspace = true }
-bonsai_workspace = { workspace = true }

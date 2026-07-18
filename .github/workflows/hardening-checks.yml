@@ -10,6 +10,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  unused-dependencies:
+    name: Unused Rust dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: taiki-e/install-action@cargo-machete
+      - name: Reject stale manifest edges
+        run: cargo machete --with-metadata
+
   dependency-audit:
     name: Rust dependency advisories
     runs-on: ubuntu-latest

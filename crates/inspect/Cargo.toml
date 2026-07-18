@@ -11,7 +11,6 @@ description = "Chain enumeration + filter engine — the SDK powering `bonsai-ni
 bonsai_common = { workspace = true }
 bonsai_hash = { workspace = true }
 bonsai_callgraph = { workspace = true }
-bonsai_index = { workspace = true }
 bonsai_lang_api = { workspace = true }
 bonsai_resolve = { workspace = true }
 bonsai_taint = { workspace = true }

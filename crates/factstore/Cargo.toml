@@ -8,14 +8,11 @@ description = "Memory-mapped, content-addressed fact store with workspace-wide s
 
 [dependencies]
 ahash.workspace = true
-bonsai_common.workspace = true
-bonsai_hash.workspace = true
 crossbeam-channel.workspace = true
 lru.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -283,7 +283,6 @@ dependencies = [
  "bonsai_testkit",
  "bonsai_workspace",
  "serde_yaml",
- "tree-sitter",
 ]
 
 [[package]]
@@ -320,15 +319,12 @@ name = "bonsai_factstore"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "bonsai_common",
- "bonsai_hash",
  "crossbeam-channel",
  "lru",
  "parking_lot",
  "serde",
  "tempfile",
  "thiserror 1.0.69",
- "tracing",
 ]
 
 [[package]]
@@ -355,7 +351,6 @@ dependencies = [
  "smallvec",
  "tempfile",
  "thiserror 1.0.69",
- "tracing",
 ]
 
 [[package]]
@@ -376,7 +371,6 @@ dependencies = [
  "bonsai_callgraph",
  "bonsai_common",
  "bonsai_hash",
- "bonsai_index",
  "bonsai_lang_api",
  "bonsai_lang_python",
  "bonsai_resolve",
@@ -410,9 +404,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_diagnostics",
  "bonsai_lang_api",
- "bonsai_testkit",
  "bonsai_vfs",
- "bonsai_workspace",
  "parking_lot",
  "tree-sitter",
 ]
@@ -425,9 +417,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_diagnostics",
  "bonsai_lang_api",
- "bonsai_testkit",
  "bonsai_vfs",
- "bonsai_workspace",
  "parking_lot",
  "tree-sitter",
 ]
@@ -440,7 +430,6 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_lang_api",
  "bonsai_testkit",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -484,9 +473,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_db",
  "bonsai_lang_api",
- "bonsai_testkit",
  "bonsai_vfs",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -500,7 +487,6 @@ dependencies = [
  "bonsai_lang_api",
  "bonsai_testkit",
  "bonsai_vfs",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -514,7 +500,6 @@ dependencies = [
  "bonsai_lang_api",
  "bonsai_testkit",
  "bonsai_vfs",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -526,7 +511,6 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_lang_api",
  "bonsai_testkit",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -562,7 +546,6 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_lang_api",
  "bonsai_testkit",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -574,9 +557,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_db",
  "bonsai_lang_api",
- "bonsai_testkit",
  "bonsai_vfs",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -588,9 +569,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_db",
  "bonsai_lang_api",
- "bonsai_testkit",
  "bonsai_vfs",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -602,9 +581,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_db",
  "bonsai_lang_api",
- "bonsai_testkit",
  "bonsai_vfs",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -616,7 +593,6 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_lang_api",
  "bonsai_testkit",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -628,9 +604,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_db",
  "bonsai_lang_api",
- "bonsai_testkit",
  "bonsai_vfs",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -654,9 +628,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_diagnostics",
  "bonsai_lang_api",
- "bonsai_testkit",
  "bonsai_vfs",
- "bonsai_workspace",
  "parking_lot",
  "tree-sitter",
 ]
@@ -670,7 +642,6 @@ dependencies = [
  "bonsai_lang_api",
  "bonsai_lang_javascript",
  "bonsai_testkit",
- "bonsai_workspace",
  "tree-sitter",
 ]
 
@@ -704,7 +675,6 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "bonsai_adapters",
- "bonsai_callgraph",
  "bonsai_common",
  "bonsai_factstore",
  "bonsai_hash",
@@ -736,7 +706,6 @@ dependencies = [
  "bonsai_trace",
  "bonsai_workspace",
  "fs2",
- "rayon",
  "regex",
  "serde",
  "serde_json",
@@ -751,7 +720,6 @@ dependencies = [
  "bonsai_adapters",
  "bonsai_callgraph",
  "bonsai_common",
- "bonsai_db",
  "bonsai_diagnostics",
  "bonsai_hash",
  "bonsai_idg",
