@@ -5437,6 +5437,199 @@ impl SemanticGraphExecution {
     }
 }
 
+struct SemanticGraphCompilationRequest<'a> {
+    ws: &'a Workspace,
+    pack: &'a Rulepack,
+    transfer_languages: &'a AHashSet<String>,
+    config: &'a InterTaintConfig,
+    files: &'a [FileId],
+    funcs: &'a [FuncId],
+    call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+    max_precision: Option<Precision>,
+    partitioned: bool,
+    source_group_count: usize,
+    source_unit_count: usize,
+}
+
+struct CompiledSemanticGraph {
+    execution: SemanticGraphExecution,
+    cache_persist_started: bool,
+}
+
+fn compile_taint_semantic_graph<F>(
+    request: SemanticGraphCompilationRequest<'_>,
+    on_progress: &mut F,
+) -> CompiledSemanticGraph
+where
+    F: FnMut(AnalysisProgress),
+{
+    let mut fingerprint_options = idg_transfer_options_from_rulepack_shapes(
+        &request.config.clean_output_overwrites,
+        &request.config.source_output_args,
+        &request.config.source_callback_args,
+        &request.config.output_arg_flows,
+        &request.config.receiver_state_propagations,
+    );
+    fingerprint_options.symbolic_field_languages = symbolic_field_languages(request.ws, request.files);
+    fingerprint_options.call_result_passthroughs =
+        idg_call_result_passthrough_specs(&request.config.call_result_passthroughs);
+    fingerprint_options.symbolic_field_forwarding = !fingerprint_options.symbolic_field_languages.is_empty();
+    let taint_graph_fingerprint = taint_cache::scoped_config_fingerprint(
+        request.pack,
+        "taint-analysis",
+        request.max_precision,
+        request.files,
+        request.funcs,
+        fingerprint_options.semantic_fingerprint(),
+    );
+    let cache_report =
+        taint_cache::prepare_workspace_cache(request.ws, "taint-analysis", taint_graph_fingerprint);
+    on_progress(AnalysisProgress::Note {
+        label: "taint-cache",
+        detail: cache_report.detail(),
+    });
+
+    let execution = if request.partitioned {
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "planning scoped semantic graph batches",
+            total: 0,
+        });
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "semantic graph source-unit streaming enabled funcs={} files={} source_groups={} units={}",
+            request.funcs.len(),
+            request.files.len(),
+            request.source_group_count,
+            request.source_unit_count
+        );
+        on_progress(AnalysisProgress::PhaseFinished);
+        SemanticGraphExecution::Partitioned
+    } else {
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "building scoped semantic graph",
+            total: 0,
+        });
+        let service = seed_idg_service_for_rulepack_for_files(
+            request.ws,
+            request.pack,
+            request.transfer_languages,
+            request.files,
+            request.funcs,
+            request.call_graph,
+        );
+        on_progress(AnalysisProgress::PhaseFinished);
+        SemanticGraphExecution::Shared(service)
+    };
+    CompiledSemanticGraph {
+        execution,
+        cache_persist_started: cache_report.persist_started,
+    }
+}
+
+struct ReachableTaintScopeRequest<'a, 'source> {
+    ws: &'a Workspace,
+    global: &'a Arc<GlobalIndex>,
+    pack: &'a Rulepack,
+    source_work: &'a [SourceWorkItem<'source>],
+    source_groups: &'a AHashMap<FuncId, Vec<usize>>,
+    sink_by_func: &'a AHashMap<FuncId, Vec<&'source RuleMatch>>,
+    max_precision: Option<Precision>,
+}
+
+struct ReachableTaintScope {
+    source_funcs: Vec<FuncId>,
+    sink_funcs: AHashSet<FuncId>,
+    callback_targets: AHashMap<FuncId, AHashSet<FuncId>>,
+    source_groups: Vec<(FuncId, Vec<usize>)>,
+    scheduling_total: u64,
+    call_graph: bonsai_workspace::SourceReachableCallGraph,
+    resolution: ResolutionCoverage,
+}
+
+fn compile_reachable_taint_scope<F>(
+    request: ReachableTaintScopeRequest<'_, '_>,
+    on_progress: &mut F,
+) -> ReachableTaintScope
+where
+    F: FnMut(AnalysisProgress),
+{
+    let mut source_funcs: Vec<FuncId> = request.source_groups.keys().copied().collect();
+    source_funcs.sort_by_key(|func| func.raw());
+    let resolved_call_graph = request.ws.cached_resolved_call_graph();
+    let callback_targets = configured_source_callback_targets_by_source(
+        request.source_work,
+        request.pack,
+        request.global.as_ref(),
+        resolved_call_graph.as_ref(),
+    );
+    let mut graph_source_funcs = source_funcs.clone();
+    graph_source_funcs.extend(
+        callback_targets
+            .values()
+            .flat_map(|targets| targets.iter().copied()),
+    );
+    graph_source_funcs.sort_by_key(|func| func.raw());
+    graph_source_funcs.dedup();
+    let mut sink_func_list: Vec<FuncId> = request.sink_by_func.keys().copied().collect();
+    sink_func_list.sort_by_key(|func| func.raw());
+
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "building source-reachable callgraph",
+        total: 0,
+    });
+    let call_graph = request.ws.source_reachable_resolved_call_graph(
+        &graph_source_funcs,
+        &sink_func_list,
+        request.max_precision,
+    );
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "semantic graph scope source_funcs={} sink_funcs={} reached_sinks={} funcs={} files={}",
+        source_funcs.len(),
+        sink_func_list.len(),
+        call_graph.reached_targets,
+        call_graph.funcs.len(),
+        call_graph.files.len()
+    );
+    if call_graph.funcs.len() <= 64 {
+        let names: Vec<String> = call_graph
+            .funcs
+            .iter()
+            .filter_map(|func| {
+                request
+                    .global
+                    .decl_of(SymbolId::new(func.raw()))
+                    .map(|decl| format!("{}:{:?}", decl.name, decl.kind))
+            })
+            .collect();
+        bonsai_diagnostics::debug_log!("security-phase", "semantic graph funcs={}", names.join(", "));
+    }
+    on_progress(AnalysisProgress::PhaseFinished);
+
+    let resolution =
+        ResolutionCoverage::from_graph(call_graph.graph.as_ref(), call_graph.funcs.iter().copied());
+    let sink_funcs = request.sink_by_func.keys().copied().collect();
+    let mut source_groups: Vec<(FuncId, Vec<usize>)> = request
+        .source_groups
+        .iter()
+        .map(|(func, indices)| (*func, indices.clone()))
+        .collect();
+    source_groups.sort_by_key(|(func, _)| func.raw());
+    let scheduling_total = source_groups
+        .iter()
+        .map(|(_, indices)| indices.len() as u64)
+        .sum();
+    ReachableTaintScope {
+        source_funcs,
+        sink_funcs,
+        callback_targets,
+        source_groups,
+        scheduling_total,
+        call_graph,
+        resolution,
+    }
+}
+
 struct SourceScheduleRequest<'a> {
     source_groups: Vec<(FuncId, Vec<usize>)>,
     callback_corridors: &'a AHashMap<FuncId, Arc<SourceSinkCorridor>>,
@@ -5458,6 +5651,88 @@ struct SourceScheduleRequest<'a> {
 struct SourceSchedulePlan {
     groups: Vec<ScheduledSourceGroup>,
     partitioned_source_indices: AHashMap<FuncId, Arc<Vec<usize>>>,
+}
+
+struct SinkScheduleRequest<'a, 'matches> {
+    pack: &'a Rulepack,
+    sinks_by_func: &'a AHashMap<FuncId, Vec<&'matches RuleMatch>>,
+    sink_funcs: &'a AHashSet<FuncId>,
+    semantic_funcs: &'a [FuncId],
+    semantic_graph: &'a SemanticGraphExecution,
+    prefilter_enabled: bool,
+    source_work_count: usize,
+}
+
+struct SinkSchedulePlan {
+    targets: Option<SinkTargetNodes>,
+    use_coarse_schedule: bool,
+}
+
+fn plan_sink_schedule(request: SinkScheduleRequest<'_, '_>) -> SinkSchedulePlan {
+    let semantic_func_set: AHashSet<FuncId> = request.semantic_funcs.iter().copied().collect();
+    let semantic_sink_func_set: AHashSet<FuncId> = request
+        .sink_funcs
+        .intersection(&semantic_func_set)
+        .copied()
+        .collect();
+    let targets = if request.prefilter_enabled {
+        request.semantic_graph.shared().map(|service| {
+            sink_target_nodes_for_funcs(
+                service.as_ref(),
+                request.pack,
+                request.sinks_by_func,
+                &semantic_sink_func_set,
+            )
+        })
+    } else {
+        None
+    };
+    let sink_match_count: usize = if request.prefilter_enabled {
+        semantic_sink_func_set
+            .iter()
+            .filter_map(|func| request.sinks_by_func.get(func))
+            .map(Vec::len)
+            .sum()
+    } else {
+        request.sinks_by_func.values().map(Vec::len).sum()
+    };
+    let schedule_node_cut_enabled = targets
+        .as_ref()
+        .is_some_and(|targets| targets.complete && !targets.nodes.is_empty());
+    let graph_node_cut_enabled = targets.as_ref().is_some_and(|targets| !targets.nodes.is_empty());
+
+    // Choose from semantic work shape rather than a project-size or language
+    // constant. The coarse corridor is a conservative superset, so this only
+    // changes scheduling cost; the final IDG closure remains identical.
+    let scheduler_parallelism = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let exact_schedule_pair_work = request
+        .source_work_count
+        .saturating_mul(targets.as_ref().map_or(0, |targets| targets.nodes.len()));
+    let graph_parallel_work = request
+        .semantic_funcs
+        .len()
+        .max(1)
+        .saturating_mul(scheduler_parallelism);
+    let use_coarse_schedule =
+        request.semantic_graph.is_partitioned() || exact_schedule_pair_work > graph_parallel_work;
+    if let Some(targets) = targets.as_ref() {
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "sink target nodes nodes={} sink_matches={} complete={} unresolved_funcs={} schedule_node_cut={} graph_node_cut={}",
+            targets.nodes.len(),
+            sink_match_count,
+            targets.complete,
+            targets.unresolved_funcs.len(),
+            schedule_node_cut_enabled,
+            graph_node_cut_enabled
+        );
+    }
+    SinkSchedulePlan {
+        targets,
+        use_coarse_schedule,
+    }
 }
 
 fn schedule_source_groups<F>(request: SourceScheduleRequest<'_>, on_progress: &mut F) -> SourceSchedulePlan
@@ -5896,6 +6171,139 @@ where
         .collect()
 }
 
+struct ScheduledTaintExecutionRequest<'a, 'analysis> {
+    executor: &'a SourceGroupExecutor<'analysis>,
+    global: &'a GlobalIndex,
+    ws: &'a Workspace,
+    pack: &'a Rulepack,
+    transfer_languages: &'a AHashSet<String>,
+    call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+    semantic_graph: &'a SemanticGraphExecution,
+    source_groups: Vec<ScheduledSourceGroup>,
+    shared_corridors: &'a SharedSourceSinkCorridors,
+    partitioned_source_indices: &'a AHashMap<FuncId, Arc<Vec<usize>>>,
+    source_group_count: usize,
+    prefilter_enabled: bool,
+}
+
+fn execute_scheduled_taint_groups<F>(
+    request: ScheduledTaintExecutionRequest<'_, '_>,
+    on_progress: &mut F,
+) -> Vec<FindingWithChain>
+where
+    F: FnMut(AnalysisProgress),
+{
+    let ScheduledTaintExecutionRequest {
+        executor,
+        global,
+        ws,
+        pack,
+        transfer_languages,
+        call_graph,
+        semantic_graph,
+        source_groups,
+        shared_corridors,
+        partitioned_source_indices,
+        source_group_count,
+        prefilter_enabled,
+    } = request;
+    let mut scheduled_corridors = AHashSet::default();
+    let mut scheduled_reachable_funcs = AHashSet::default();
+    if semantic_graph.is_partitioned() {
+        for (corridor, sources) in shared_corridors
+            .corridors
+            .iter()
+            .zip(&shared_corridors.sources_by_corridor)
+        {
+            if sources
+                .iter()
+                .any(|source| partitioned_source_indices.contains_key(source))
+            {
+                scheduled_corridors.insert(Arc::as_ptr(corridor) as usize);
+                scheduled_reachable_funcs.extend(corridor.lineage_funcs.iter().copied());
+            }
+        }
+    }
+    for group in &source_groups {
+        let corridor_key = Arc::as_ptr(&group.corridor) as usize;
+        if scheduled_corridors.insert(corridor_key) {
+            scheduled_reachable_funcs.extend(group.corridor.lineage_funcs.iter().copied());
+        }
+    }
+    let streamed_group_count = shared_corridors
+        .sources_by_corridor
+        .iter()
+        .flat_map(|sources| sources.iter())
+        .filter(|source| partitioned_source_indices.contains_key(source))
+        .count();
+    let total_groups = source_groups.len().saturating_add(streamed_group_count);
+    let reachable_funcs = scheduled_reachable_funcs.len();
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "source groups scheduled total={} filtered={} prefilter_enabled={} reachable_funcs={} distinct_slices={}",
+        source_group_count,
+        total_groups,
+        prefilter_enabled,
+        reachable_funcs,
+        scheduled_corridors.len()
+    );
+    on_progress(AnalysisProgress::Note {
+        label: "scope",
+        detail: format!(
+            "taint-analysis source_groups={} scheduled_groups={} reachable_funcs={} source_sink_prefilter={}",
+            source_group_count, total_groups, reachable_funcs, prefilter_enabled
+        ),
+    });
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "building taint chains",
+        total: total_groups as u64,
+    });
+
+    let worker_count = security_taint_worker_count();
+    let rayon_pool = if worker_count > 1 && total_groups > 1 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_count)
+            .build()
+            .ok()
+    } else {
+        None
+    };
+    match semantic_graph {
+        SemanticGraphExecution::Partitioned => {
+            // Source groups are streamed directly from each parsed source
+            // file; each file gets its exact cross-file source→all-sinks
+            // corridor and is released before the next compilation unit.
+            execute_partitioned_source_groups(
+                PartitionedExecutionRequest {
+                    context: PartitionedExecutionContext {
+                        executor,
+                        pool: rayon_pool.as_ref(),
+                        global,
+                        ws,
+                        pack,
+                        transfer_languages,
+                        call_graph,
+                    },
+                    source_groups,
+                    shared_corridors,
+                    partitioned_source_indices,
+                },
+                on_progress,
+            )
+        }
+        SemanticGraphExecution::Shared(global_idg) => execute_source_groups(
+            executor,
+            rayon_pool.as_ref(),
+            &source_groups,
+            global_idg.as_ref(),
+            on_progress,
+        )
+        .into_iter()
+        .flatten()
+        .collect(),
+    }
+}
+
 fn build_findings_chain_aware<F>(request: ChainAnalysisRequest<'_, F>) -> ChainBuildResult
 where
     F: FnMut(AnalysisProgress),
@@ -5959,7 +6367,6 @@ where
         finish_taint_cache_write_through(ws, cache_report.persist_started, on_progress);
         return ChainBuildResult::default();
     }
-    let mut out = Vec::new();
     let SourceWorkPlan {
         items: source_work,
         groups: source_groups,
@@ -5982,78 +6389,32 @@ where
     on_progress(AnalysisProgress::PhaseFinished);
 
     let clean_overwrite_policy = CleanOverwritePolicy::new(ws, &config.clean_output_overwrites);
-    let mut source_func_ids: Vec<FuncId> = source_groups.keys().copied().collect();
-    source_func_ids.sort_by_key(|func| func.raw());
-    let resolved_call_graph = ws.cached_resolved_call_graph();
-    let source_callback_targets = configured_source_callback_targets_by_source(
-        &source_work,
-        pack,
-        global.as_ref(),
-        resolved_call_graph.as_ref(),
+    let ReachableTaintScope {
+        source_funcs: source_func_ids,
+        sink_funcs: sink_func_set,
+        callback_targets: source_callback_targets,
+        source_groups: source_groups_sorted,
+        scheduling_total,
+        call_graph: reachable_call_graph,
+        resolution,
+    } = compile_reachable_taint_scope(
+        ReachableTaintScopeRequest {
+            ws,
+            global: &global,
+            pack,
+            source_work: &source_work,
+            source_groups: &source_groups,
+            sink_by_func: &sink_by_func,
+            max_precision: config.max_edge_precision,
+        },
+        on_progress,
     );
-    let mut source_func_ids_for_graph = source_func_ids.clone();
-    source_func_ids_for_graph.extend(
-        source_callback_targets
-            .values()
-            .flat_map(|targets| targets.iter().copied()),
-    );
-    source_func_ids_for_graph.sort_by_key(|func| func.raw());
-    source_func_ids_for_graph.dedup();
-    let mut sink_func_ids: Vec<FuncId> = sink_by_func.keys().copied().collect();
-    sink_func_ids.sort_by_key(|func| func.raw());
-    on_progress(AnalysisProgress::PhaseStarted {
-        label: "building source-reachable callgraph",
-        total: 0,
-    });
-    let reachable_call_graph = ws.source_reachable_resolved_call_graph(
-        &source_func_ids_for_graph,
-        &sink_func_ids,
-        config.max_edge_precision,
-    );
-    bonsai_diagnostics::debug_log!(
-        "security-phase",
-        "semantic graph scope source_funcs={} sink_funcs={} reached_sinks={} funcs={} files={}",
-        source_func_ids.len(),
-        sink_func_ids.len(),
-        reachable_call_graph.reached_targets,
-        reachable_call_graph.funcs.len(),
-        reachable_call_graph.files.len()
-    );
-    if reachable_call_graph.funcs.len() <= 64 {
-        let global = ws.db().global_index();
-        let names: Vec<String> = reachable_call_graph
-            .funcs
-            .iter()
-            .filter_map(|func| {
-                global
-                    .decl_of(bonsai_common::SymbolId::new(func.raw()))
-                    .map(|decl| format!("{}:{:?}", decl.name, decl.kind))
-            })
-            .collect();
-        bonsai_diagnostics::debug_log!("security-phase", "semantic graph funcs={}", names.join(", "));
-    }
-    on_progress(AnalysisProgress::PhaseFinished);
-
     let chain_call_graph = reachable_call_graph.graph.clone();
     // Preserve the exact graph scope already built for this scan so the
     // completeness pass can identify unresolved internal calls without
     // rebuilding a whole-workspace call graph after a scoped analysis.
-    let resolution = Some(ResolutionCoverage::from_graph(
-        chain_call_graph.as_ref(),
-        reachable_call_graph.funcs.iter().copied(),
-    ));
-    let sink_func_set: AHashSet<FuncId> = sink_by_func.keys().copied().collect();
+    let resolution = Some(resolution);
     let source_sink_prefilter_enabled = !source_work.is_empty() && !sink_func_set.is_empty();
-    // AHashMap iteration order is hash-randomized per process. Sort
-    // by FuncId.raw() so the per-source-group analysis order and
-    // resulting finding fingerprints are stable across runs.
-    let mut source_groups_sorted: Vec<(FuncId, Vec<usize>)> =
-        source_groups.iter().map(|(k, v)| (*k, v.clone())).collect();
-    source_groups_sorted.sort_by_key(|(k, _)| k.raw());
-    let scheduling_total = source_groups_sorted
-        .iter()
-        .map(|(_, indices)| indices.len() as u64)
-        .sum();
 
     let SemanticScopePlan {
         callback_corridors: coarse_corridors_by_func,
@@ -6072,31 +6433,6 @@ where
         max_precision: config.max_edge_precision,
         prefilter_enabled: source_sink_prefilter_enabled,
     });
-    let mut fingerprint_options = idg_transfer_options_from_rulepack_shapes(
-        &config.clean_output_overwrites,
-        &config.source_output_args,
-        &config.source_callback_args,
-        &config.output_arg_flows,
-        &config.receiver_state_propagations,
-    );
-    fingerprint_options.symbolic_field_languages = symbolic_field_languages(ws, &semantic_files);
-    fingerprint_options.call_result_passthroughs =
-        idg_call_result_passthrough_specs(&config.call_result_passthroughs);
-    fingerprint_options.symbolic_field_forwarding = !fingerprint_options.symbolic_field_languages.is_empty();
-    let idg_transfer_fingerprint = fingerprint_options.semantic_fingerprint();
-    let taint_graph_fingerprint = taint_cache::scoped_config_fingerprint(
-        pack,
-        "taint-analysis",
-        max_precision,
-        &semantic_files,
-        &semantic_funcs,
-        idg_transfer_fingerprint,
-    );
-    let cache_report = taint_cache::prepare_workspace_cache(ws, "taint-analysis", taint_graph_fingerprint);
-    on_progress(AnalysisProgress::Note {
-        label: "taint-cache",
-        detail: cache_report.detail(),
-    });
     bonsai_diagnostics::debug_log!(
         "security-phase",
         "semantic graph idg scope funcs={} files={} full_funcs={} full_files={} source_units={} callback_corridors={}",
@@ -6113,97 +6449,46 @@ where
     // choosing a whole-workspace strategy from a project-size threshold.
     let partition_semantic_graph = source_sink_prefilter_enabled
         && (shared_coarse_corridors.source_units.len() > 1 || !coarse_corridors_by_func.is_empty());
-    let semantic_graph = if partition_semantic_graph {
-        on_progress(AnalysisProgress::PhaseStarted {
-            label: "planning scoped semantic graph batches",
-            total: 0,
-        });
-        bonsai_diagnostics::debug_log!(
-            "security-phase",
-            "semantic graph source-unit streaming enabled funcs={} files={} source_groups={} units={}",
-            semantic_funcs.len(),
-            semantic_files.len(),
-            source_groups.len(),
-            shared_coarse_corridors.source_units.len()
-        );
-        on_progress(AnalysisProgress::PhaseFinished);
-        SemanticGraphExecution::Partitioned
-    } else {
-        on_progress(AnalysisProgress::PhaseStarted {
-            label: "building scoped semantic graph",
-            total: 0,
-        });
-        let service = seed_idg_service_for_rulepack_for_files(
+    let CompiledSemanticGraph {
+        execution: semantic_graph,
+        cache_persist_started,
+    } = compile_taint_semantic_graph(
+        SemanticGraphCompilationRequest {
             ws,
             pack,
-            &transfer_languages,
-            &semantic_files,
-            &semantic_funcs,
-            chain_call_graph.as_ref(),
-        );
-        on_progress(AnalysisProgress::PhaseFinished);
-        SemanticGraphExecution::Shared(service)
-    };
+            transfer_languages: &transfer_languages,
+            config: &config,
+            files: &semantic_files,
+            funcs: &semantic_funcs,
+            call_graph: chain_call_graph.as_ref(),
+            max_precision,
+            partitioned: partition_semantic_graph,
+            source_group_count: source_groups.len(),
+            source_unit_count: shared_coarse_corridors.source_units.len(),
+        },
+        on_progress,
+    );
     let use_partitioned_scoped_idg = semantic_graph.is_partitioned();
-    let sink_target_nodes = if source_sink_prefilter_enabled {
-        let semantic_func_set: AHashSet<FuncId> = semantic_funcs.iter().copied().collect();
-        let semantic_sink_func_set: AHashSet<FuncId> =
-            sink_func_set.intersection(&semantic_func_set).copied().collect();
-        semantic_graph.shared().map(|service| {
-            sink_target_nodes_for_funcs(service.as_ref(), pack, &sink_by_func, &semantic_sink_func_set)
-        })
-    } else {
-        None
-    };
-    let sink_match_count: usize = if source_sink_prefilter_enabled {
-        let semantic_func_set: AHashSet<FuncId> = semantic_funcs.iter().copied().collect();
-        sink_func_set
-            .intersection(&semantic_func_set)
-            .filter_map(|func| sink_by_func.get(func))
-            .map(Vec::len)
-            .sum()
-    } else {
-        sink_by_func.values().map(Vec::len).sum()
-    };
+    let SinkSchedulePlan {
+        targets: sink_target_nodes,
+        use_coarse_schedule: use_coarse_source_sink_schedule,
+    } = plan_sink_schedule(SinkScheduleRequest {
+        pack,
+        sinks_by_func: &sink_by_func,
+        sink_funcs: &sink_func_set,
+        semantic_funcs: &semantic_funcs,
+        semantic_graph: &semantic_graph,
+        prefilter_enabled: source_sink_prefilter_enabled,
+        source_work_count: source_work.len(),
+    });
     let sink_target_nodes_for_schedule = sink_target_nodes
         .as_ref()
         .filter(|targets| targets.complete && !targets.nodes.is_empty())
         .map(|targets| targets.nodes.as_slice());
-    // Choose the scheduling strategy from the shape of the semantic work, not
-    // from a language name or a project-size magic number.  The coarse
-    // corridor is a conservative superset, so this only trades scheduling
-    // precision for work; it never changes the final IDG closure.
-    let scheduler_parallelism = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
-    let exact_schedule_pair_work = source_work.len().saturating_mul(
-        sink_target_nodes
-            .as_ref()
-            .map_or(0, |targets| targets.nodes.len()),
-    );
-    let graph_parallel_work = semantic_funcs.len().max(1).saturating_mul(scheduler_parallelism);
-    let use_coarse_source_sink_schedule =
-        use_partitioned_scoped_idg || exact_schedule_pair_work > graph_parallel_work;
-    let target_node_graph_cut_enabled = sink_target_nodes
+    let sink_target_nodes_for_graph = sink_target_nodes
         .as_ref()
-        .is_some_and(|targets| !targets.nodes.is_empty());
-    if let Some(targets) = sink_target_nodes.as_ref() {
-        bonsai_diagnostics::debug_log!(
-            "security-phase",
-            "sink target nodes nodes={} sink_matches={} complete={} unresolved_funcs={} schedule_node_cut={} graph_node_cut={}",
-            targets.nodes.len(),
-            sink_match_count,
-            targets.complete,
-            targets.unresolved_funcs.len(),
-            sink_target_nodes_for_schedule.is_some(),
-            target_node_graph_cut_enabled
-        );
-    }
-    let sink_target_nodes_for_graph: Option<&[bonsai_idg::WsNodeId]> = if target_node_graph_cut_enabled {
-        sink_target_nodes.as_ref().map(|targets| targets.nodes.as_slice())
-    } else {
-        None
-    };
+        .filter(|targets| !targets.nodes.is_empty())
+        .map(|targets| targets.nodes.as_slice());
     let taint_caches = ws.inter_taint_caches();
     taint_caches.seed_resolved_call_graph(chain_call_graph.as_ref());
     // (Workspace taint-graph index + sidecar prepare happen at the top
@@ -6249,60 +6534,6 @@ where
     }
     on_progress(AnalysisProgress::PhaseFinished);
 
-    let mut scheduled_corridors = AHashSet::default();
-    let mut scheduled_reachable_funcs = AHashSet::default();
-    if use_partitioned_scoped_idg {
-        for (corridor, sources) in shared_coarse_corridors
-            .corridors
-            .iter()
-            .zip(&shared_coarse_corridors.sources_by_corridor)
-        {
-            if sources
-                .iter()
-                .any(|source| partitioned_source_indices.contains_key(source))
-            {
-                scheduled_corridors.insert(Arc::as_ptr(corridor) as usize);
-                scheduled_reachable_funcs.extend(corridor.lineage_funcs.iter().copied());
-            }
-        }
-    }
-    for group in &scheduled_source_groups {
-        let corridor_key = Arc::as_ptr(&group.corridor) as usize;
-        if scheduled_corridors.insert(corridor_key) {
-            scheduled_reachable_funcs.extend(group.corridor.lineage_funcs.iter().copied());
-        }
-    }
-    let streamed_group_count = shared_coarse_corridors
-        .sources_by_corridor
-        .iter()
-        .flat_map(|sources| sources.iter())
-        .filter(|source| partitioned_source_indices.contains_key(source))
-        .count();
-    let total_groups = scheduled_source_groups.len().saturating_add(streamed_group_count);
-    let reachable_funcs = scheduled_reachable_funcs.len();
-    bonsai_diagnostics::debug_log!(
-        "security-phase",
-        "source groups scheduled total={} filtered={} prefilter_enabled={} reachable_funcs={} distinct_slices={}",
-        source_groups.len(),
-        total_groups,
-        source_sink_prefilter_enabled,
-        reachable_funcs,
-        scheduled_corridors.len()
-    );
-    on_progress(AnalysisProgress::Note {
-        label: "scope",
-        detail: format!(
-            "taint-analysis source_groups={} scheduled_groups={} reachable_funcs={} source_sink_prefilter={}",
-            source_groups.len(),
-            total_groups,
-            reachable_funcs,
-            source_sink_prefilter_enabled
-        ),
-    });
-    on_progress(AnalysisProgress::PhaseStarted {
-        label: "building taint chains",
-        total: total_groups as u64,
-    });
     let workspace_callable_cache = WorkspaceCallableCache::default();
     let source_group_executor = SourceGroupExecutor {
         ws,
@@ -6324,56 +6555,26 @@ where
         workspace_callable_cache: &workspace_callable_cache,
         debug_taint_phase,
     };
-    let worker_count = security_taint_worker_count();
-    let rayon_pool = if worker_count > 1 && total_groups > 1 {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(worker_count)
-            .build()
-            .ok()
-    } else {
-        None
-    };
-    let findings = match &semantic_graph {
-        SemanticGraphExecution::Partitioned => {
-            // Source groups are streamed directly from each parsed source
-            // file; each file gets its exact cross-file source→all-sinks
-            // corridor and is released before the next compilation unit.
-            execute_partitioned_source_groups(
-                PartitionedExecutionRequest {
-                    context: PartitionedExecutionContext {
-                        executor: &source_group_executor,
-                        pool: rayon_pool.as_ref(),
-                        global: global.as_ref(),
-                        ws,
-                        pack,
-                        transfer_languages: &transfer_languages,
-                        call_graph: chain_call_graph.as_ref(),
-                    },
-                    source_groups: scheduled_source_groups,
-                    shared_corridors: &shared_coarse_corridors,
-                    partitioned_source_indices: &partitioned_source_indices,
-                },
-                on_progress,
-            )
-        }
-        SemanticGraphExecution::Shared(global_idg) => execute_source_groups(
-            &source_group_executor,
-            rayon_pool.as_ref(),
-            &scheduled_source_groups,
-            global_idg.as_ref(),
-            on_progress,
-        )
-        .into_iter()
-        .flatten()
-        .collect(),
-    };
-    out.extend(findings);
+    let findings = execute_scheduled_taint_groups(
+        ScheduledTaintExecutionRequest {
+            executor: &source_group_executor,
+            global: global.as_ref(),
+            ws,
+            pack,
+            transfer_languages: &transfer_languages,
+            call_graph: chain_call_graph.as_ref(),
+            semantic_graph: &semantic_graph,
+            source_groups: scheduled_source_groups,
+            shared_corridors: &shared_coarse_corridors,
+            partitioned_source_indices: &partitioned_source_indices,
+            source_group_count: source_groups.len(),
+            prefilter_enabled: source_sink_prefilter_enabled,
+        },
+        on_progress,
+    );
     on_progress(AnalysisProgress::PhaseFinished);
-    finish_taint_cache_write_through(ws, cache_report.persist_started, on_progress);
-    ChainBuildResult {
-        findings: out,
-        resolution,
-    }
+    finish_taint_cache_write_through(ws, cache_persist_started, on_progress);
+    ChainBuildResult { findings, resolution }
 }
 
 fn sorted_seed_key(seeds: &TokenSet) -> Vec<String> {
