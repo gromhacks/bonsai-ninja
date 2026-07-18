@@ -1,0 +1,21 @@
+# External-library constructor return types. These compile into receiver type
+# facts and never produce findings.
+- id: swift.typing.sqlite_statement
+  enabled: true
+  language: swift
+  returns_type: Statement
+  match:
+    kind: call
+    callee:
+      attribute: [SQLite, Statement]
+  match_examples:
+  - name: SQLite.swift constructor returns Statement
+    code: |
+      import SQLite
+      import struct SQLite.Statement
+      func example(input: String) {
+          let statement = Statement()
+          statement.bind(input)
+      }
+    expect_match_text: [Statement]
+  description: "`SQLite.Statement(...)` returns `Statement`; imported member aliases are resolved through compiler import facts so bind rules do not depend on local variable names. Typing-only — never a finding."

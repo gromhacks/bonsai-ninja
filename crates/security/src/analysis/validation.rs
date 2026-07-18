@@ -22,6 +22,7 @@ pub fn validate_pack(
     }
 
     let rules = select_pack_rules(pack, options);
+    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
     let mut issues = Vec::new();
     let mut example_count = 0usize;
     let mut enabled_example_count = 0usize;
@@ -227,7 +228,7 @@ pub fn validate_pack(
             let match_texts = if skip_taint_example {
                 Vec::new()
             } else {
-                match_example_owner_texts(pack, rule, &ws)
+                match_example_owner_texts(pack, rule, &ws, &factory_returns)
             };
             if example.expect_no_match {
                 if skip_taint_example {
@@ -347,7 +348,9 @@ pub fn validate_pack(
         let owner = prepared.owner;
         let peer_key = (owner.language.clone(), owner.kind, rule_match_target_key(owner));
         let peers = peer_groups.get(&peer_key).cloned().unwrap_or_default();
-        for hit in crate::matcher::match_rules_against_facts(&prepared.ws, &peers) {
+        for hit in
+            crate::matcher::match_rules_against_facts_with_factory(&prepared.ws, &peers, &factory_returns)
+        {
             if hit.rule_id == owner.id || !id_seen.contains(hit.rule_id.as_str()) {
                 continue;
             }
@@ -385,11 +388,16 @@ pub fn validate_pack(
     }
 }
 
-fn match_example_owner_texts(pack: &Rulepack, rule: &Rule, ws: &Workspace) -> Vec<String> {
+fn match_example_owner_texts(
+    pack: &Rulepack,
+    rule: &Rule,
+    ws: &Workspace,
+    factory: &Arc<crate::matcher::FactoryReturns>,
+) -> Vec<String> {
     if rule.kind == RuleKind::Sink && rule_has_taint_dependent_constraint(rule) {
         return match_arg_tainted_example_owner_texts(pack, rule, ws);
     }
-    crate::matcher::match_rule_against_facts(ws, rule)
+    crate::matcher::match_rule_against_facts_with_factory(ws, rule, factory)
         .into_iter()
         .map(|hit| hit.match_text)
         .collect()

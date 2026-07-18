@@ -1220,6 +1220,11 @@ fn declared_rule_match_examples_fire() {
         "rulepack must include YAML match_examples"
     );
     assert_eq!(report.errors, 0, "validator errors: {:#?}", report.issues);
+    assert_eq!(
+        report.warnings, 0,
+        "every enabled example must remain warning-free: {:#?}",
+        report.issues
+    );
 }
 
 #[test]

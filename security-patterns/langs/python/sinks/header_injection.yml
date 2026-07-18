@@ -22,13 +22,15 @@
     code: |
       import werkzeug
       def example(user_input):
-          return Headers.add("X-Name", user_input)
+          headers = werkzeug.Headers()
+          return headers.add("X-Name", user_input)
   - name: werkzeug headers add literal negative
     code: |
       import werkzeug
 
       def example(user_input):
-          return Headers.add('X-Name', 'safe')
+          headers = werkzeug.Headers()
+          return headers.add('X-Name', 'safe')
     expect_no_match: true
   description: "werkzeug/flask Headers.add - CRLF possible if value tainted."
 - id: python.header.werkzeug_headers_set
@@ -55,13 +57,15 @@
     code: |
       import werkzeug
       def example(user_input):
-          return Headers.set("X-Name", user_input)
+          headers = werkzeug.Headers()
+          return headers.set("X-Name", user_input)
   - name: werkzeug headers set literal negative
     code: |
       import werkzeug
 
       def example(user_input):
-          return Headers.set('X-Name', 'safe')
+          headers = werkzeug.Headers()
+          return headers.set('X-Name', 'safe')
     expect_no_match: true
   description: "Headers.set() - overwrite a response header with a tainted value; newline injection splits the response."
 - id: python.header.django_response_setitem

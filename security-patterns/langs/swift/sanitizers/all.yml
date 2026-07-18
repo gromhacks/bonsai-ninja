@@ -119,8 +119,7 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.bind$"
-      base_name_in: [statement, stmt, prepared, preparedStatement]
+      attribute: [Statement, bind]
   constraints:
   - min_args: 1
   imports:
