@@ -562,6 +562,15 @@ impl AnalyzerDb {
 
     fn populate_global_index_consuming(&self, gi: &mut GlobalIndex, files: &[FileId]) {
         let workers = global_index_worker_count();
+        self.populate_global_index_consuming_with_workers(gi, files, workers);
+    }
+
+    fn populate_global_index_consuming_with_workers(
+        &self,
+        gi: &mut GlobalIndex,
+        files: &[FileId],
+        workers: usize,
+    ) {
         if workers <= 1 || files.len() <= 1 {
             for &file in files {
                 if let Some(idx) = self.take_decl_index_for_global(file) {
@@ -603,7 +612,12 @@ impl AnalyzerDb {
     fn take_decl_index_for_global(&self, file: FileId) -> Option<DeclIndex> {
         let snap = self.inner.vfs.snapshot(file).ok()?;
         let key = (file, snap.version);
-        let index = if let Some(cached) = self.inner.cache.write().decl_index.remove(&key) {
+        // Bind the removed entry before branching. A write guard created in
+        // an `if let` scrutinee lives through the entire expression, which
+        // would put the expensive parse/lower `else` branch under this
+        // exclusive cache lock and serialize the compiler frontend.
+        let cached = self.inner.cache.write().decl_index.remove(&key);
+        let index = if let Some(cached) = cached {
             Some(unwrap_or_clone_decl_index(cached))
         } else {
             self.build_decl_index_uncached(file)

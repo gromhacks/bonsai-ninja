@@ -48,6 +48,12 @@ struct CountingPythonAdapter {
     declaration_calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+struct ConcurrentPythonAdapter {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    max_active: Arc<std::sync::atomic::AtomicUsize>,
+    rendezvous: Arc<(parking_lot::Mutex<usize>, parking_lot::Condvar)>,
+}
+
 impl LanguageAdapter for CountingPythonAdapter {
     fn language_id(&self) -> LanguageId {
         LanguageId::new("python")
@@ -73,6 +79,57 @@ impl LanguageAdapter for CountingPythonAdapter {
         self.declaration_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         std::thread::sleep(std::time::Duration::from_millis(100));
+        DeclIndex {
+            file,
+            ..Default::default()
+        }
+    }
+
+    fn extract_imports(&self, file: FileId, _ctx: &AdapterContext<'_>) -> ImportIndex {
+        ImportIndex {
+            file,
+            imports: Vec::new(),
+        }
+    }
+}
+
+impl LanguageAdapter for ConcurrentPythonAdapter {
+    fn language_id(&self) -> LanguageId {
+        LanguageId::new("python")
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Python declaration concurrency recorder"
+    }
+
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &["py"]
+    }
+
+    fn tree_sitter_language(&self) -> Result<tree_sitter::Language, AdapterError> {
+        bonsai_lang_python::PythonAdapter::new().tree_sitter_language()
+    }
+
+    fn capabilities(&self) -> bonsai_lang_api::LanguageCapabilities {
+        bonsai_lang_api::LanguageCapabilities::unsupported()
+    }
+
+    fn extract_declarations(&self, file: FileId, _ctx: &AdapterContext<'_>) -> DeclIndex {
+        let active = self.active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        self.max_active
+            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+
+        let (entered, wake) = &*self.rendezvous;
+        let mut entered = entered.lock();
+        *entered += 1;
+        if *entered < 2 {
+            wake.wait_for(&mut entered, std::time::Duration::from_secs(1));
+        } else {
+            wake.notify_all();
+        }
+        drop(entered);
+        self.active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+
         DeclIndex {
             file,
             ..Default::default()
@@ -234,6 +291,33 @@ fn global_index_concurrent_callers_lower_each_file_once() {
         "parallel callers must share one workspace lowering pass"
     );
     assert!(Arc::ptr_eq(&left, &right));
+}
+
+#[test]
+fn global_index_lowering_does_not_hold_the_decl_cache_lock() {
+    let vfs = Arc::new(Vfs::new());
+    vfs.write("left.py", "def left():\n    return 1\n");
+    vfs.write("right.py", "def right():\n    return 2\n");
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(ConcurrentPythonAdapter {
+        active,
+        max_active: Arc::clone(&max_active),
+        rendezvous: Arc::new((parking_lot::Mutex::new(0), parking_lot::Condvar::new())),
+    }));
+    let db = AnalyzerDb::new(Arc::clone(&vfs), registry);
+    let files = vfs.all_files();
+    let mut global = GlobalIndex::new();
+
+    db.populate_global_index_consuming_with_workers(&mut global, &files, 2);
+
+    assert_eq!(global.all_files().count(), 2);
+    assert_eq!(
+        max_active.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "per-file AST lowering must run outside the declaration-cache write lock"
+    );
 }
 
 #[test]
