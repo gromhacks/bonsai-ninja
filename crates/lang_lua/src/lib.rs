@@ -51,6 +51,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     await_kinds: &[],
     defer_kinds: &[],
     using_kinds: &[],
+    special_forms: &[],
     method_receiver_param_index: None,
     implicit_receiver_names: &[],
     implicit_receiver_prefixes: &[],

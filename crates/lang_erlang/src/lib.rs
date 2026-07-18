@@ -4,7 +4,8 @@ use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, AssignmentValueIndex, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, Visibility,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, SyntaxSpecialForm,
+    Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -51,6 +52,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     await_kinds: &[],
     defer_kinds: &[],
     using_kinds: &["receive_expr"],
+    special_forms: &[SyntaxSpecialForm::FunctionalLoopCall],
     method_receiver_param_index: None,
     implicit_receiver_names: &[],
     implicit_receiver_prefixes: &[],

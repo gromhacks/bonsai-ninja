@@ -619,6 +619,31 @@ fn taint_crate_has_no_language_name_branches() {
 }
 
 #[test]
+fn shared_ast_lowering_selects_adapter_capabilities_not_language_ids() {
+    let root = repo_root();
+    let walker = root.join("crates/lang_api/src/kit/walker");
+    let mut files = Vec::new();
+    collect_rs_files(&walker, &mut files);
+    let forbidden = ["LanguageId::", "handler.id", "language_id ==", "language_id !="];
+    let mut violations = Vec::new();
+
+    for path in files {
+        let source = live_code(&read(&path));
+        for needle in forbidden {
+            if source.contains(needle) {
+                violations.push(format!("{} contains {needle}", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "shared Tree-sitter lowering must dispatch through GrammarHandler syntax capabilities:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+#[test]
 fn taint_crate_has_no_concrete_adapter_imports_in_runtime() {
     // Belt-and-braces with the engine-crate dep test: catches the
     // case where someone adds `bonsai_lang_python` as a dep AND

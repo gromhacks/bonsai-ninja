@@ -8,7 +8,7 @@ use bonsai_lang_api::{
     },
     rewrite_implicit_member_reads, AdapterContext, AdapterError, CallKind, DeclIndex, DeclKind, FieldWrite,
     FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, Ref, RefKind, TypeAliasBinding, Visibility,
+    LanguageCapabilities, LanguageId, Ref, RefKind, SyntaxSpecialForm, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -60,6 +60,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     await_kinds: &["await_expression"],
     defer_kinds: &[],
     using_kinds: &[],
+    special_forms: &[
+        SyntaxSpecialForm::SplitSelectorCall,
+        SyntaxSpecialForm::CascadeSection,
+        SyntaxSpecialForm::ObjectConstructionExpression,
+    ],
     method_receiver_param_index: None,
     implicit_receiver_names: &["this", "super"],
     implicit_receiver_prefixes: &[],

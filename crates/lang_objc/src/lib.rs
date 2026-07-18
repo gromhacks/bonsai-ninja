@@ -13,7 +13,7 @@ use bonsai_lang_api::{
     },
     AdapterContext, AdapterError, AssignValueKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
     GrammarHandler, ImportIndex, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath,
-    TypeAliasBinding,
+    SyntaxSpecialForm, TypeAliasBinding,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -67,6 +67,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     await_kinds: &[],
     defer_kinds: &[],
     using_kinds: &["synchronized_statement", "autoreleasepool_statement"],
+    special_forms: &[SyntaxSpecialForm::DirectCallArguments],
     method_receiver_param_index: None,
     implicit_receiver_names: &["self", "super"],
     implicit_receiver_prefixes: &[],

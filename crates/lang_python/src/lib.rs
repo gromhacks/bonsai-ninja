@@ -81,6 +81,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     await_kinds: GENERIC_HANDLER.await_kinds,
     defer_kinds: GENERIC_HANDLER.defer_kinds,
     using_kinds: GENERIC_HANDLER.using_kinds,
+    special_forms: &[],
     method_receiver_param_index: Some(0),
     // `self` for ordinary instance methods; `super` so `super().foo()`
     // and `super(Class, self).foo()` resolve to the parent class's

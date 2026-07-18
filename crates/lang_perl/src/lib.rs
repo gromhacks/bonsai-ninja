@@ -47,6 +47,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     await_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.await_kinds,
     defer_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.defer_kinds,
     using_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.using_kinds,
+    special_forms: &[],
     method_receiver_param_index: bonsai_lang_api::kit::GENERIC_HANDLER.method_receiver_param_index,
     implicit_receiver_names: bonsai_lang_api::kit::GENERIC_HANDLER.implicit_receiver_names,
     implicit_receiver_prefixes: bonsai_lang_api::kit::GENERIC_HANDLER.implicit_receiver_prefixes,
