@@ -1,4 +1,4 @@
-//! IDG-backed interprocedural taint API surface.
+//! Public compatibility API projected from the canonical IDG engine.
 //!
 //! The former per-function worklist lived in `inter/mod.rs`. All public
 //! entry points now derive their result from one IDG forward closure. The

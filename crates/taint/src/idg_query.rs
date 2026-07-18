@@ -63,9 +63,9 @@ impl<'a> IdgTaintSource<'a> {
 
 #[derive(Clone, Copy)]
 pub struct IdgTaintTransfers<'a> {
-    pub receiver_state: &'a [crate::inter::ReceiverStatePropagation],
-    pub call_result_passthroughs: &'a [crate::inter::CallResultPassthrough],
-    pub output_args: &'a [crate::inter::OutputArgFlow],
+    pub receiver_state: &'a [crate::idg_api::ReceiverStatePropagation],
+    pub call_result_passthroughs: &'a [crate::idg_api::CallResultPassthrough],
+    pub output_args: &'a [crate::idg_api::OutputArgFlow],
     pub call_results_materialized: bool,
 }
 
@@ -111,7 +111,7 @@ pub struct IdgTaintQuery<'a> {
     pub max_precision: Option<Precision>,
     pub db: &'a AnalyzerDb,
     pub idg: &'a bonsai_idg::IdgQueryService,
-    pub caches: Option<&'a crate::inter::InterTaintCaches>,
+    pub caches: Option<&'a crate::idg_api::InterTaintCaches>,
 }
 
 impl<'a> IdgTaintQuery<'a> {
@@ -151,7 +151,7 @@ impl<'a> IdgTaintQuery<'a> {
     }
 
     #[must_use]
-    pub const fn with_caches(mut self, caches: &'a crate::inter::InterTaintCaches) -> Self {
+    pub const fn with_caches(mut self, caches: &'a crate::idg_api::InterTaintCaches) -> Self {
         self.caches = Some(caches);
         self
     }
@@ -160,7 +160,7 @@ impl<'a> IdgTaintQuery<'a> {
 #[derive(Clone, Copy)]
 pub struct IdgReturnQuery<'a> {
     pub source: IdgTaintSource<'a>,
-    pub receiver_state: &'a [crate::inter::ReceiverStatePropagation],
+    pub receiver_state: &'a [crate::idg_api::ReceiverStatePropagation],
     pub max_precision: Option<Precision>,
     pub db: &'a AnalyzerDb,
     pub idg: &'a bonsai_idg::IdgQueryService,
@@ -170,7 +170,7 @@ impl<'a> IdgReturnQuery<'a> {
     #[must_use]
     pub const fn semantic(
         source: IdgTaintSource<'a>,
-        receiver_state: &'a [crate::inter::ReceiverStatePropagation],
+        receiver_state: &'a [crate::idg_api::ReceiverStatePropagation],
         db: &'a AnalyzerDb,
         idg: &'a bonsai_idg::IdgQueryService,
     ) -> Self {

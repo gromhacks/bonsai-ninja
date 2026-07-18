@@ -3405,7 +3405,7 @@ fn quoted_runtime_callable_literal<'a>(
 /// `alias_index` is a precomputed [`WorkspaceAliasIndex`] for the
 /// `Type::method` short-tail gate. `build_with_file_info` builds the
 /// index once at the start of the callgraph pass and passes
-/// `Some(&idx)`; standalone callers (legacy taint engine, individual
+/// `Some(&idx)`; standalone resolver callers and individual
 /// `dump-resolve` lookups) pass `None` and pay the O(decls) scan that
 /// the helper falls back to.
 fn resolve_callable_symbol_with_alias_index(
@@ -5703,7 +5703,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         // an in-workspace alias. See the matching guard at the
         // build-time call site above for the full rationale.
         let allow_short_fallback = if let Some(idx) = name.find("::") {
-            // The legacy taint engine still routes through this entry and
+            // Standalone resolver consumers still route through this entry and
             // doesn't share the callgraph build's WorkspaceAliasIndex, so we
             // build a local one. Build it lazily inside this `::` arm only:
             // the no-qualifier majority (the `else` below) never consults it,

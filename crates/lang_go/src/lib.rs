@@ -276,7 +276,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             // resolution. `_` / `.` aliases bind no local name, so
             // we skip them. Coupled with the self-binding and
             // path-style detectors in `bonsai_resolve` and
-            // `bonsai_taint::inter::resolve_call_candidates`.
+            // the canonical callgraph resolver.
             let alias = if explicit_alias.is_some() {
                 let alias_text = explicit_alias.as_deref();
                 // `_` (blank) and `.` (wildcard) bind no local name.

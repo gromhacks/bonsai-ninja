@@ -11,9 +11,9 @@
 // Submodules stay private; external callers use the re-exports below so the
 // implementation can evolve without exposing module layout.
 pub(crate) mod assignment;
+mod idg_api;
 pub mod idg_build;
 mod idg_query;
-pub(crate) mod inter;
 pub(crate) mod intra;
 pub(crate) mod reachable;
 mod text;
@@ -21,16 +21,16 @@ mod tokens;
 pub mod value_flow;
 
 pub use assignment::{assign_chain_taints, target_is_tainted};
-pub use idg_build::{compiler_idg_service, ensure_idg_service};
-pub use idg_query::{
-    IdgReturnQuery, IdgTaintQuery, IdgTaintSeed, IdgTaintSource, IdgTaintTargets, IdgTaintTransfers,
-};
-pub use inter::{
+pub use idg_api::{
     call_site_receives_taint, call_site_receives_taint_with_caches, function_summary, interprocedural_taint,
     interprocedural_taint_with_caches, CallPropagation, CallResultPassthrough, CleanOutputOverwrite,
     FunctionSeed, FunctionSummary, InterTaintCaches, InterTaintConfig, InterTaintResult, OutputArgFlow,
     ParamSideEffect, ReceiverStatePropagation, ReturnAccessPath, ReturnElementTaint, ReturnFieldTaint,
     SourceCallbackArgs, SourceOutputArgs, TaintedArg, TaintedArgAtCall, TaintedCall, TaintedCallKind,
+};
+pub use idg_build::{compiler_idg_service, ensure_idg_service};
+pub use idg_query::{
+    IdgReturnQuery, IdgTaintQuery, IdgTaintSeed, IdgTaintSource, IdgTaintTargets, IdgTaintTransfers,
 };
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{

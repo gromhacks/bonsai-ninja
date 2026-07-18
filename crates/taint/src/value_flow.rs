@@ -9,7 +9,9 @@ use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::DeclKind;
 use serde::{Deserialize, Serialize};
 
-use crate::inter::{interprocedural_taint_with_caches, InterTaintCaches, InterTaintConfig, InterTaintResult};
+use crate::idg_api::{
+    interprocedural_taint_with_caches, InterTaintCaches, InterTaintConfig, InterTaintResult,
+};
 use crate::reachable::collect_assign_targets;
 use crate::TokenSet;
 

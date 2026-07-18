@@ -1162,8 +1162,8 @@ fn interprocedural_taint_uses_db_cached_idg_services() {
     // reuse the database-owned semantic graph instead of rebuilding CFGs from
     // FlowEvents for each query.
     let root = repo_root();
-    let inter_rs = root.join("crates/taint/src/inter.rs");
-    let text = read(&inter_rs);
+    let idg_api = root.join("crates/taint/src/idg_api.rs");
+    let text = read(&idg_api);
     let idg_build = read(&root.join("crates/taint/src/idg_build.rs"));
     assert!(
         text.contains("idg_service_for_inter_config(db, config)")
@@ -1533,7 +1533,7 @@ fn flow_surfaces_do_not_reintroduce_loose_resolution_or_fabricated_paths() {
             ][..],
         ),
         (
-            "crates/taint/src/inter.rs",
+            "crates/taint/src/idg_api.rs",
             &["candidates.first().map(|c| c.func)"][..],
         ),
         (
@@ -2117,7 +2117,7 @@ fn method_dispatch_does_not_use_span_containment_as_parent_fallback() {
     for rel in [
         "crates/callgraph/src/lib.rs",
         "crates/workspace/src/cross_module.rs",
-        "crates/taint/src/inter.rs",
+        "crates/taint/src/idg_api.rs",
         "crates/security/src/matcher/mod.rs",
         "crates/browse/src/classes.rs",
         "crates/browse/src/native_export.rs",
@@ -2220,7 +2220,7 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
 
     let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
     let browse_taint = read(&root.join("crates/browse/src/taint.rs"));
-    let taint_inter = read(&root.join("crates/taint/src/inter.rs"));
+    let taint_idg_api = read(&root.join("crates/taint/src/idg_api.rs"));
     let taint_value_flow = read(&root.join("crates/taint/src/value_flow.rs"));
     let workspace_trace = read(&root.join("crates/workspace/src/cross_module.rs"));
     let trace_schema = read(&root.join("crates/trace/src/lib.rs"));
@@ -2231,7 +2231,7 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     let native_export = read(&root.join("crates/browse/src/native_export.rs"));
 
     assert!(
-        taint_inter.contains("max_edge_precision: Some(Precision::Narrowed)"),
+        taint_idg_api.contains("max_edge_precision: Some(Precision::Narrowed)"),
         "InterTaintConfig::default must cap flow evidence at the semantic precision ceiling"
     );
 
@@ -3361,7 +3361,7 @@ fn structured_security_guards_are_rulepack_driven() {
 fn unified_taint_closure_is_uncapped_compiler_dataflow() {
     let root = repo_root();
     let idg_query = read(&root.join("crates/idg/src/query.rs"));
-    let taint_inter = read(&root.join("crates/taint/src/inter.rs"));
+    let taint_idg_api = read(&root.join("crates/taint/src/idg_api.rs"));
 
     for function in [
         "bitvector_closure",
@@ -3405,11 +3405,13 @@ fn unified_taint_closure_is_uncapped_compiler_dataflow() {
     );
 
     assert!(
-        !root.join("crates/taint/src/inter/mod.rs").exists()
+        root.join("crates/taint/src/idg_api.rs").exists()
+            && !root.join("crates/taint/src/inter.rs").exists()
+            && !root.join("crates/taint/src/inter/mod.rs").exists()
             && !root.join("crates/taint/src/inter/tests.rs").exists(),
-        "the retired interprocedural worklist must not return"
+        "the canonical IDG API must not be confused with the retired interprocedural worklist"
     );
-    let entry = function_body(&taint_inter, "interprocedural_taint");
+    let entry = function_body(&taint_idg_api, "interprocedural_taint");
     assert!(
         entry.contains("idg_backed_interprocedural_taint")
             && !entry.contains("worklist")

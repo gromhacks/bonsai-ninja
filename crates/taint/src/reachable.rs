@@ -131,7 +131,7 @@ pub struct EntryTaintGraph {
     /// each tagged with the precision of the resolution.
     pub call_records: Vec<TaintedCallEdge>,
     /// Leaf call sites where one or more arguments arrived tainted.
-    pub tainted_calls: Vec<crate::inter::TaintedCall>,
+    pub tainted_calls: Vec<crate::idg_api::TaintedCall>,
     #[serde(default = "default_graph_precision")]
     pub precision: Precision,
     /// Compatibility metric for the number of resolved cross-call relations
@@ -173,7 +173,7 @@ pub struct TaintedCallEdge {
     pub callee: FuncId,
     pub call_span: Span,
     #[serde(default)]
-    pub tainted_args: Vec<crate::inter::TaintedArg>,
+    pub tainted_args: Vec<crate::idg_api::TaintedArg>,
     #[serde(default = "default_graph_precision")]
     pub precision: Precision,
     /// Resolver sub-kind retained from the IDG cross-call edge.
@@ -510,7 +510,7 @@ pub fn taint_facts_and_graph_for_entry(
     entry_func: FuncId,
     db: &AnalyzerDb,
 ) -> (KindedTokens, EntryTaintGraph) {
-    let caches = crate::inter::InterTaintCaches::default();
+    let caches = crate::idg_api::InterTaintCaches::default();
     taint_facts_and_graph_for_entry_with_caches(entry_func, db, &caches)
 }
 
@@ -521,7 +521,7 @@ pub fn taint_facts_and_graph_for_entry(
 pub fn taint_facts_and_graph_for_entry_with_caches(
     entry_func: FuncId,
     db: &AnalyzerDb,
-    caches: &crate::inter::InterTaintCaches,
+    caches: &crate::idg_api::InterTaintCaches,
 ) -> (KindedTokens, EntryTaintGraph) {
     let mut facts = KindedTokens::default();
     let mut graph = EntryTaintGraph::default();
@@ -556,11 +556,11 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
         // misses without changing `AnalyzerDb::idg_service()` lifecycle.
         let idg = crate::idg_build::compiler_idg_service(db);
         caches.mark_used();
-        let config = crate::inter::InterTaintConfig {
+        let config = crate::idg_api::InterTaintConfig {
             max_edge_precision: Some(Precision::Narrowed),
             ..Default::default()
         };
-        let graph_result = crate::inter::idg_backed_interprocedural_taint_with_service(
+        let graph_result = crate::idg_api::idg_backed_interprocedural_taint_with_service(
             entry_func,
             &graph_seed,
             &config,
@@ -591,7 +591,7 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
         let result = if seed == graph_seed {
             &graph_result
         } else {
-            fact_result = crate::inter::idg_backed_interprocedural_taint_with_service(
+            fact_result = crate::idg_api::idg_backed_interprocedural_taint_with_service(
                 entry_func,
                 &seed,
                 &config,
@@ -1476,7 +1476,7 @@ pub fn source_seed_reaches_return_from_idg(
     seeds: &TokenSet,
     source_anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
+    receiver_state_propagations: &[crate::idg_api::ReceiverStatePropagation],
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
 ) -> bool {
@@ -1554,7 +1554,7 @@ pub fn entry_taint_call_records_from_idg(
     seeds: &TokenSet,
     source_anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
+    receiver_state_propagations: &[crate::idg_api::ReceiverStatePropagation],
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
 ) -> EntryTaintGraph {
@@ -1812,7 +1812,7 @@ pub fn entry_taint_graph_from_idg(
     seeds: &TokenSet,
     source_anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
+    receiver_state_propagations: &[crate::idg_api::ReceiverStatePropagation],
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
 ) -> EntryTaintGraph {
@@ -2126,13 +2126,13 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
     }
     promote_nested_tainted_call_args(&mut by_site, global.as_ref(), &mut call_summary_cache);
 
-    let mut tainted_calls: Vec<crate::inter::TaintedCall> = Vec::new();
+    let mut tainted_calls: Vec<crate::idg_api::TaintedCall> = Vec::new();
     let compiled_call_result_passthroughs = compile_call_result_passthroughs(call_result_passthroughs);
     let cross_call_transit_index = CrossCallTransitIndex::new(&cross_calls);
     let mut passthrough_callee_cache = CalleeNameCache::default();
     let mut tainted_names_by_caller: ahash::AHashMap<FuncId, ahash::AHashSet<String>> =
         ahash::AHashMap::new();
-    let mut function_summary_cache: ahash::AHashMap<FuncId, crate::inter::FunctionSummary> =
+    let mut function_summary_cache: ahash::AHashMap<FuncId, crate::idg_api::FunctionSummary> =
         ahash::AHashMap::default();
     let mut sorted_sites: Vec<((FuncId, bonsai_common::Span), Vec<u32>)> = by_site.into_iter().collect();
     // Tie-break on span.end too — two call sites in the same caller
@@ -2151,7 +2151,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         else {
             continue;
         };
-        let mut tainted_args: Vec<crate::inter::TaintedArgAtCall> = arg_indices
+        let mut tainted_args: Vec<crate::idg_api::TaintedArgAtCall> = arg_indices
             .iter()
             .filter_map(|idx| {
                 if tainted_arg_is_clean_nested_call_return(
@@ -2171,7 +2171,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
                     return None;
                 }
                 call_summary.args_value_text.get(*idx as usize).map(|value_text| {
-                    crate::inter::TaintedArgAtCall {
+                    crate::idg_api::TaintedArgAtCall {
                         index: *idx as usize,
                         value_text: value_text.clone(),
                     }
@@ -2195,7 +2195,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         if tainted_args.is_empty() && tainted_receiver.is_none() {
             continue;
         }
-        tainted_calls.push(crate::inter::TaintedCall {
+        tainted_calls.push(crate::idg_api::TaintedCall {
             parent_trace_id,
             caller,
             name: call_summary.name.clone(),
@@ -2203,7 +2203,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
                 .unwrap_or(call_span),
             tainted_args,
             tainted_receiver,
-            kind: crate::inter::TaintedCallKind::Call,
+            kind: crate::idg_api::TaintedCallKind::Call,
         });
     }
 
@@ -2220,7 +2220,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
     // surfaced by the caller's flow_events with span overlapping
     // the function's body becomes its own row, attributed to
     // the lineage `parent_trace_id` for the function.
-    let mut return_tainted_calls: Vec<crate::inter::TaintedCall> = Vec::new();
+    let mut return_tainted_calls: Vec<crate::idg_api::TaintedCall> = Vec::new();
     {
         let return_funcs: Vec<FuncId> = idg.funcs_with_return_nodes_in_reachable_nodes(&closure_nodes);
         for func in return_funcs {
@@ -2236,14 +2236,14 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
             return_spans.dedup();
             let parent_trace_id = first_inflow.get(&func).copied();
             for return_span in return_spans {
-                return_tainted_calls.push(crate::inter::TaintedCall {
+                return_tainted_calls.push(crate::idg_api::TaintedCall {
                     parent_trace_id,
                     caller: func,
                     name: "return".to_string(),
                     call_span: return_span,
                     tainted_args: Vec::new(),
                     tainted_receiver: None,
-                    kind: crate::inter::TaintedCallKind::Return,
+                    kind: crate::idg_api::TaintedCallKind::Return,
                 });
             }
         }
@@ -2258,7 +2258,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
     // assignment span. The receiver-only `proc.launch()` call has
     // no positional taint to expose, so attribution must come from
     // the assignment.
-    let mut write_tainted_calls: Vec<crate::inter::TaintedCall> = Vec::new();
+    let mut write_tainted_calls: Vec<crate::idg_api::TaintedCall> = Vec::new();
     {
         let mut funcs_in_closure: ahash::AHashSet<FuncId> = ahash::AHashSet::default();
         funcs_in_closure.insert(source_func);
@@ -2305,11 +2305,11 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
     // and the inner `Call` to `os.system`), the dedup pass at the
     // security-analysis layer picks the Call as the lineage anchor
     // and surfaces `arg[0] x` instead of "tainted value".
-    fn evidence_rank(c: &crate::inter::TaintedCall) -> u8 {
+    fn evidence_rank(c: &crate::idg_api::TaintedCall) -> u8 {
         match c.kind {
-            crate::inter::TaintedCallKind::Call => 0,
-            crate::inter::TaintedCallKind::Write => 1,
-            crate::inter::TaintedCallKind::Return => 2,
+            crate::idg_api::TaintedCallKind::Call => 0,
+            crate::idg_api::TaintedCallKind::Write => 1,
+            crate::idg_api::TaintedCallKind::Return => 2,
         }
     }
     tainted_calls.sort_by(|a, b| {
@@ -2422,9 +2422,9 @@ fn direct_assignment_call_span(
 #[allow(clippy::too_many_arguments)] // Shared transfer surface carries seed, transfer tables, IDG, precision, and scope.
 pub fn apply_configured_transfer_fixpoint(
     seed_nodes: &mut Vec<bonsai_idg::WsNodeId>,
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
-    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
-    output_arg_flows: &[crate::inter::OutputArgFlow],
+    receiver_state_propagations: &[crate::idg_api::ReceiverStatePropagation],
+    call_result_passthroughs: &[crate::idg_api::CallResultPassthrough],
+    output_arg_flows: &[crate::idg_api::OutputArgFlow],
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     max_precision: Option<Precision>,
@@ -2492,7 +2492,7 @@ fn collect_tainted_writes(
     func: FuncId,
     tainted_names: &ahash::AHashSet<String>,
     parent_trace_id: Option<u64>,
-    out: &mut Vec<crate::inter::TaintedCall>,
+    out: &mut Vec<crate::idg_api::TaintedCall>,
 ) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
@@ -2509,8 +2509,8 @@ fn collect_tainted_writes(
                 if target.is_empty() {
                     continue;
                 }
-                let mut tainted_args: Vec<crate::inter::TaintedArgAtCall> = Vec::new();
-                let push_if_tainted = |value: &str, args: &mut Vec<crate::inter::TaintedArgAtCall>| {
+                let mut tainted_args: Vec<crate::idg_api::TaintedArgAtCall> = Vec::new();
+                let push_if_tainted = |value: &str, args: &mut Vec<crate::idg_api::TaintedArgAtCall>| {
                     if value.is_empty() {
                         return;
                     }
@@ -2532,7 +2532,7 @@ fn collect_tainted_writes(
                         return;
                     }
                     let index = args.len();
-                    args.push(crate::inter::TaintedArgAtCall {
+                    args.push(crate::idg_api::TaintedArgAtCall {
                         index,
                         value_text: value.to_string(),
                     });
@@ -2559,14 +2559,14 @@ fn collect_tainted_writes(
                 if tainted_args.is_empty() {
                     continue;
                 }
-                out.push(crate::inter::TaintedCall {
+                out.push(crate::idg_api::TaintedCall {
                     parent_trace_id,
                     caller: func,
                     name: target.clone(),
                     call_span: *span,
                     tainted_args,
                     tainted_receiver: None,
-                    kind: crate::inter::TaintedCallKind::Write,
+                    kind: crate::idg_api::TaintedCallKind::Write,
                 });
             }
             FlowEvent::Branch {
@@ -2685,7 +2685,7 @@ fn closure_evidence_with_targets(
 /// converge in a small constant number of rounds for any rulepack.
 fn apply_receiver_state_fixpoint(
     seed_nodes: &mut Vec<bonsai_idg::WsNodeId>,
-    propagations: &[crate::inter::ReceiverStatePropagation],
+    propagations: &[crate::idg_api::ReceiverStatePropagation],
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     max_precision: Option<Precision>,
@@ -2758,7 +2758,7 @@ fn apply_receiver_state_fixpoint(
 /// semantics.
 fn apply_call_result_passthrough_fixpoint(
     seed_nodes: &mut Vec<bonsai_idg::WsNodeId>,
-    passthroughs: &[crate::inter::CallResultPassthrough],
+    passthroughs: &[crate::idg_api::CallResultPassthrough],
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     max_precision: Option<Precision>,
@@ -3060,7 +3060,7 @@ fn normalize_storage_text(text: &str) -> String {
 /// argument indices; the IDG only supplies call-site shape and closure.
 fn apply_output_arg_flow_fixpoint(
     seed_nodes: &mut Vec<bonsai_idg::WsNodeId>,
-    flows: &[crate::inter::OutputArgFlow],
+    flows: &[crate::idg_api::OutputArgFlow],
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     max_precision: Option<Precision>,
@@ -3189,12 +3189,12 @@ fn call_result_passthrough_matches(call_name: &str, configured: &str) -> bool {
 }
 
 struct CompiledCallResultPassthrough<'a> {
-    passthrough: &'a crate::inter::CallResultPassthrough,
+    passthrough: &'a crate::idg_api::CallResultPassthrough,
     callee: ConfiguredCalleeMatcher,
 }
 
 fn compile_call_result_passthroughs(
-    passthroughs: &[crate::inter::CallResultPassthrough],
+    passthroughs: &[crate::idg_api::CallResultPassthrough],
 ) -> Vec<CompiledCallResultPassthrough<'_>> {
     passthroughs
         .iter()
@@ -3206,7 +3206,7 @@ fn compile_call_result_passthroughs(
 }
 
 struct CompiledOutputArgFlow<'a> {
-    flow: &'a crate::inter::OutputArgFlow,
+    flow: &'a crate::idg_api::OutputArgFlow,
     callee: ConfiguredCalleeMatcher,
 }
 
@@ -3389,7 +3389,7 @@ fn walk_call_events_for_propagation(
     events: &[bonsai_lang_api::FlowEvent],
     caller: FuncId,
     target_spans: &[bonsai_common::Span],
-    propagations: &[crate::inter::ReceiverStatePropagation],
+    propagations: &[crate::idg_api::ReceiverStatePropagation],
     idg: &bonsai_idg::IdgQueryService,
     seed_nodes: &mut Vec<bonsai_idg::WsNodeId>,
     applied: &mut ahash::AHashSet<(FuncId, bonsai_common::Span, String)>,
@@ -3528,7 +3528,7 @@ fn walk_call_events_for_propagation(
 /// `configured_receiver_state_propagation_matches` so both paths
 /// agree on which calls participate in receiver inheritance.
 fn receiver_state_matches(
-    configured: &[crate::inter::ReceiverStatePropagation],
+    configured: &[crate::idg_api::ReceiverStatePropagation],
     observed: &str,
     receiver_types: &[String],
 ) -> bool {
@@ -3853,7 +3853,7 @@ fn tainted_args_for_cross_call_edge(
     edge: &bonsai_idg::CrossCallEdge,
     callee_decl: Option<&bonsai_lang_api::Decl>,
     call_summary: Option<&CallEventSummary>,
-) -> Vec<crate::inter::TaintedArg> {
+) -> Vec<crate::idg_api::TaintedArg> {
     if edge.arg_idx == u32::MAX {
         if matches!(
             edge.relation,
@@ -3879,7 +3879,7 @@ fn tainted_args_for_cross_call_edge(
                     // tainted actual when the compiler could not prove that.
                     return Vec::new();
                 };
-                return vec![crate::inter::TaintedArg {
+                return vec![crate::idg_api::TaintedArg {
                     index,
                     value_text: receiver.to_string(),
                     param_name,
@@ -3899,7 +3899,7 @@ fn tainted_args_for_cross_call_edge(
             } else {
                 param_name.clone()
             };
-            return vec![crate::inter::TaintedArg {
+            return vec![crate::idg_api::TaintedArg {
                 index: edge.param_idx as usize,
                 value_text,
                 param_name,
@@ -3919,7 +3919,7 @@ fn tainted_args_for_cross_call_edge(
     };
     // `TaintedArg.index` is the call-site argument slot. Keep the IDG edge's
     // `arg_idx`; `param_idx` can differ for methods with implicit receivers.
-    vec![crate::inter::TaintedArg {
+    vec![crate::idg_api::TaintedArg {
         index: edge.arg_idx as usize,
         value_text,
         param_name,
@@ -4111,7 +4111,7 @@ fn tainted_arg_is_clean_nested_call_return(
     idg: &bonsai_idg::IdgQueryService,
     global: &GlobalIndex,
     call_summary_cache: &mut CallEventSummaryCache<'_>,
-    function_summary_cache: &mut ahash::AHashMap<FuncId, crate::inter::FunctionSummary>,
+    function_summary_cache: &mut ahash::AHashMap<FuncId, crate::idg_api::FunctionSummary>,
     call_result_passthroughs: &[CompiledCallResultPassthrough<'_>],
     callee_name_cache: &mut CalleeNameCache,
     source_call_spans: &ahash::AHashSet<bonsai_common::Span>,
@@ -4203,7 +4203,7 @@ fn tainted_arg_is_clean_nested_call_return(
         }
         let summary = function_summary_cache
             .entry(callee)
-            .or_insert_with(|| crate::inter::function_summary_from_idg(global, idg, callee));
+            .or_insert_with(|| crate::idg_api::function_summary_from_idg(global, idg, callee));
         if function_summary_returns_any_tainted_param(summary, &tainted_params) {
             return false;
         }
@@ -4230,7 +4230,7 @@ fn nested_call_return_matches_configured_passthrough(
 }
 
 fn function_summary_returns_any_tainted_param(
-    summary: &crate::inter::FunctionSummary,
+    summary: &crate::idg_api::FunctionSummary,
     tainted_params: &ahash::AHashSet<usize>,
 ) -> bool {
     summary
