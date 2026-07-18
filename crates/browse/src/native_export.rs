@@ -285,6 +285,7 @@ struct ExportFile<'a> {
     refs: Vec<ExportRef>,
     assignment_values: Vec<ExportAssignmentValue>,
     runtime_type_narrowings: Vec<bonsai_lang_api::RuntimeTypeNarrowingFact>,
+    branch_conditions: Vec<bonsai_lang_api::BranchConditionFact>,
     strings: Vec<ExportString>,
 }
 
@@ -1148,6 +1149,7 @@ fn build_export_file<'a>(
             refs: Vec::new(),
             assignment_values: Vec::new(),
             runtime_type_narrowings: Vec::new(),
+            branch_conditions: Vec::new(),
             strings: Vec::new(),
         };
     };
@@ -1264,6 +1266,7 @@ fn build_export_file<'a>(
         refs,
         assignment_values,
         runtime_type_narrowings: index.runtime_type_narrowings.clone(),
+        branch_conditions: index.branch_conditions.clone(),
         strings,
     }
 }

@@ -3248,3 +3248,60 @@ fn security_matcher_uses_compiler_expression_facts() {
         "language IR must retain direct-call and runtime-guard relationships"
     );
 }
+
+/// Library/API identities belong to rulepack semantics. Structured security
+/// proofs may interpret compiler call/assignment/branch facts, but must not
+/// select behavior from API spellings embedded in engine source.
+#[test]
+fn structured_security_guards_are_rulepack_driven() {
+    let root = repo_root();
+    let analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
+    let guards = read(&root.join("crates/security/src/analysis/guard_sanitizers.rs"));
+    let rules = read(&root.join("crates/security/src/rule.rs"));
+    let path_pack = read(&root.join("security-patterns/langs/python/sinks/path.yml"));
+    let language_types = read(&root.join("crates/lang_api/src/types.rs"));
+    let language_kit = read(&root.join("crates/lang_api/src/kit/mod.rs"));
+    let ruby = read(&root.join("crates/lang_ruby/src/lib.rs"));
+    let native_export = read(&root.join("crates/browse/src/native_export.rs"));
+
+    for spelling in ["os.path.join", "realpath", "setLocation"] {
+        assert!(
+            !analysis.contains(spelling) && !guards.contains(spelling),
+            "security analysis must obtain `{spelling}` roles from rulepack semantics"
+        );
+    }
+
+    let receiver_flow = function_body(&analysis, "guarded_variable_flows_into_receiver_before_sink");
+    assert!(
+        receiver_flow.contains("receiver_mutation_targets")
+            && receiver_flow.contains("rule_target_matches_call"),
+        "receiver mutation proofs must consume taint_receiver_from_args rule targets"
+    );
+    let path_guard = function_body(&guards, "path_containment_guard_sanitizer");
+    assert!(
+        path_guard.contains("GuardProfile::PythonPathContainment")
+            && path_guard.contains("path_containment_guard"),
+        "path containment must be selected by typed analysis semantics"
+    );
+    assert!(
+        rules.contains("pub struct PathContainmentGuardSemantics")
+            && path_pack.contains("guard_profile: python-path-containment")
+            && path_pack.contains("path_containment_guard:"),
+        "callable roles for path containment must be declared in the rule schema and rulepack"
+    );
+    let condition_proof = function_body(&guards, "path_containment_guard_condition");
+    assert!(
+        condition_proof.contains("branch_condition_fact_for_span")
+            && condition_proof.contains("BranchConditionPolarity::Negated")
+            && !condition_proof.contains("compact_guard_text")
+            && !condition_proof.contains("branch.condition"),
+        "path containment polarity must come from Tree-sitter condition facts, not rendered text"
+    );
+    assert!(
+        language_types.contains("pub struct BranchConditionFact")
+            && language_kit.contains("extract_branch_condition_facts(&tree")
+            && ruby.contains("extract_branch_condition_facts(&tree")
+            && native_export.contains("branch_conditions: index.branch_conditions.clone()"),
+        "branch-condition compiler facts must be emitted by shared/custom frontend paths and preserved by export"
+    );
+}

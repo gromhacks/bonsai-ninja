@@ -768,6 +768,7 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
         defs: vec![bonsai_lang_api::Decl {
             symbol: SymbolId::new(0),
             kind: bonsai_lang_api::DeclKind::Function,
@@ -886,6 +887,7 @@ fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input()
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
         defs: vec![bonsai_lang_api::Decl {
             symbol: SymbolId::new(0),
             kind: bonsai_lang_api::DeclKind::Function,

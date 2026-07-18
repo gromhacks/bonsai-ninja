@@ -1522,6 +1522,37 @@ pub struct RuntimeTypeNarrowingFact {
     pub type_name: String,
 }
 
+/// Syntactic polarity of a parsed branch condition.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchConditionPolarity {
+    Positive,
+    Negated,
+}
+
+/// Compiler-owned condition boundary for one parsed branch. Consumers use
+/// `condition_span` to relate calls to the condition and `polarity` instead of
+/// reparsing [`FlowEvent::Branch::condition`] rendering.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchConditionFact {
+    pub branch_span: Span,
+    pub condition_span: Span,
+    pub polarity: BranchConditionPolarity,
+}
+
+/// Locate the condition fact for an exact branch span in the sorted file
+/// table.
+#[must_use]
+pub fn branch_condition_fact_for_span(
+    facts: &[BranchConditionFact],
+    branch_span: Span,
+) -> Option<&BranchConditionFact> {
+    let key = |span: Span| (span.file.raw(), span.start, span.end);
+    let wanted = key(branch_span);
+    let index = facts.partition_point(|fact| key(fact.branch_span) < wanted);
+    facts.get(index).filter(|fact| fact.branch_span == branch_span)
+}
+
 /// Compiler-owned value flow for a method-call receiver.
 ///
 /// `call_span` is the exact span used by the sibling [`FlowEvent::Call`].
@@ -1661,6 +1692,9 @@ pub struct DeclIndex {
     /// Parsed branch-local type refinements keyed by their guarded arm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_type_narrowings: Vec<RuntimeTypeNarrowingFact>,
+    /// Parsed branch-condition boundaries and polarity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branch_conditions: Vec<BranchConditionFact>,
     /// Grammar-declared aggregate field layouts in this file. These are
     /// workspace-level type facts rather than function declarations, so they
     /// live beside the per-file declaration index and remain available for

@@ -125,6 +125,13 @@ Adapters must not emit both arms under `then_events` and trust the
 repair to fix it. The repair is a last resort, not a primary strategy.
 Same caveat for the missing first-else assignment synthesis.
 
+The common declaration-index pass also emits `BranchConditionFact` for every
+grammar-proven conditional, including the exact condition span and parsed
+negation polarity. Adapters using `decl_index_with_handler` receive these
+facts automatically. A custom declaration-index path must call
+`extract_branch_condition_facts`; downstream analyses must not reconstruct
+condition polarity from `FlowEvent::Branch.condition` text.
+
 ## Capability declarations are the narrow source of truth
 
 `LanguageCapabilities` (`crates/lang_api/src/capabilities.rs`) is

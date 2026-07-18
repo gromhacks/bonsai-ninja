@@ -76,30 +76,48 @@ fn js_dev_only_env_guard_condition(condition: &str) -> bool {
     mentions_dev_env
 }
 
-pub(super) fn python_realpath_containment_guard_sanitizer(
+pub(super) fn path_containment_guard_sanitizer(
     ws: &Workspace,
     sink_func: FuncId,
     snk: &RuleMatch,
     sink_rule: &Rule,
     sink_tainted_args: &[TaintedArgInfo],
 ) -> Option<FindingMatch> {
-    if snk.language != "python" || sink_rule.tag.as_deref() != Some("path-traversal") {
+    let semantics = sink_rule.analysis_semantics.as_ref()?;
+    if semantics.guard_profile != Some(GuardProfile::PythonPathContainment) {
         return None;
     }
-    let (candidate, base) = python_realpath_join_target_and_base(ws, sink_func, snk.span)?;
-    if sink_tainted_args
-        .iter()
-        .any(|arg| clean_overwrite_target_key(&arg.value_text).as_deref() == Some(base.as_str()))
-    {
+    let guard = semantics.path_containment_guard.as_ref()?;
+    let (candidate, base) = path_containment_target_and_base(ws, sink_func, snk, sink_rule, guard)?;
+    if sink_tainted_args.iter().any(|arg| {
+        arg.place
+            .as_deref()
+            .and_then(clean_overwrite_target_key)
+            .as_deref()
+            == Some(base.as_str())
+            || arg
+                .source_names
+                .iter()
+                .filter_map(|source| clean_overwrite_target_key(source))
+                .any(|source| source == base)
+    }) {
         return None;
     }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let file_index = ws.db().decl_index(snk.span.file)?;
     let global = ws.db().global_index();
     let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
     let mut branches = Vec::new();
     collect_following_branches_on_path(&decl.flow_events, snk.span, &mut branches);
     for branch in branches {
-        if !python_path_containment_guard_condition(branch.condition, &candidate, &base) {
+        if !path_containment_guard_condition(
+            &decl.flow_events,
+            &file_index.branch_conditions,
+            branch,
+            &candidate,
+            &base,
+            guard,
+        ) {
             continue;
         }
         if !branch_arm_abruptly_exits(branch.then_events) {
@@ -109,9 +127,9 @@ pub(super) fn python_realpath_containment_guard_sanitizer(
             snk,
             snapshot.text.as_ref(),
             branch.span,
-            "engine.sanitizer.python_realpath_containment_guard",
+            "engine.sanitizer.path_containment_guard",
             "path-sanitize",
-            "realpath-containment-guard",
+            "path-containment-guard",
         );
     }
     None
@@ -325,21 +343,31 @@ fn python_regex_has_unescaped_wildcard_dot(pattern: &str) -> bool {
     false
 }
 
-fn python_realpath_join_target_and_base(
+fn path_containment_target_and_base(
     ws: &Workspace,
     sink_func: FuncId,
-    sink_span: Span,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+    guard: &PathContainmentGuardSemantics,
 ) -> Option<(String, String)> {
     let global = ws.db().global_index();
     let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
-    let target = containing_realpath_assignment_target(&decl.flow_events, sink_span)?;
-    let base = os_path_join_base_arg_at(&decl.flow_events, sink_span)?;
+    let sink_target = sink_rule.match_spec.callee.as_ref()?;
+    let target =
+        containing_canonicalized_assignment_target(&decl.flow_events, snk.span, &guard.canonicalizer)?;
+    let base = sink_call_base_arg_at(
+        &decl.flow_events,
+        snk.span,
+        sink_target,
+        guard.sink_base_arg_index,
+    )?;
     Some((target, base))
 }
 
-fn containing_realpath_assignment_target(
+fn containing_canonicalized_assignment_target(
     events: &[bonsai_lang_api::FlowEvent],
     sink_span: Span,
+    canonicalizer: &RuleTarget,
 ) -> Option<String> {
     use bonsai_lang_api::FlowEvent;
     for event in events {
@@ -352,7 +380,7 @@ fn containing_realpath_assignment_target(
             } if span_contains(*span, sink_span)
                 && source_call
                     .as_deref()
-                    .is_some_and(|call| clean_overwrite_callee_tail(call) == "realpath") =>
+                    .is_some_and(|call| rule_target_matches_call(call, &[], canonicalizer)) =>
             {
                 return clean_overwrite_target_key(target);
             }
@@ -361,14 +389,18 @@ fn containing_realpath_assignment_target(
                 else_events,
                 ..
             } => {
-                if let Some(target) = containing_realpath_assignment_target(then_events, sink_span)
-                    .or_else(|| containing_realpath_assignment_target(else_events, sink_span))
+                if let Some(target) =
+                    containing_canonicalized_assignment_target(then_events, sink_span, canonicalizer).or_else(
+                        || containing_canonicalized_assignment_target(else_events, sink_span, canonicalizer),
+                    )
                 {
                     return Some(target);
                 }
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if let Some(target) = containing_realpath_assignment_target(body, sink_span) {
+                if let Some(target) =
+                    containing_canonicalized_assignment_target(body, sink_span, canonicalizer)
+                {
                     return Some(target);
                 }
             }
@@ -378,9 +410,18 @@ fn containing_realpath_assignment_target(
                 finally_events,
                 ..
             } => {
-                if let Some(target) = containing_realpath_assignment_target(body, sink_span)
-                    .or_else(|| containing_realpath_assignment_target(catch_events, sink_span))
-                    .or_else(|| containing_realpath_assignment_target(finally_events, sink_span))
+                if let Some(target) =
+                    containing_canonicalized_assignment_target(body, sink_span, canonicalizer)
+                        .or_else(|| {
+                            containing_canonicalized_assignment_target(catch_events, sink_span, canonicalizer)
+                        })
+                        .or_else(|| {
+                            containing_canonicalized_assignment_target(
+                                finally_events,
+                                sink_span,
+                                canonicalizer,
+                            )
+                        })
                 {
                     return Some(target);
                 }
@@ -391,31 +432,51 @@ fn containing_realpath_assignment_target(
     None
 }
 
-fn os_path_join_base_arg_at(events: &[bonsai_lang_api::FlowEvent], sink_span: Span) -> Option<String> {
+fn sink_call_base_arg_at(
+    events: &[bonsai_lang_api::FlowEvent],
+    sink_span: Span,
+    sink_target: &RuleTarget,
+    base_arg_index: usize,
+) -> Option<String> {
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
-            FlowEvent::Call { span, name, args, .. }
-                if (*span == sink_span || spans_overlap(*span, sink_span))
-                    && name.ends_with("os.path.join") =>
+            FlowEvent::Call {
+                span,
+                name,
+                receiver_types,
+                args,
+                ..
+            } if (*span == sink_span || spans_overlap(*span, sink_span))
+                && rule_target_matches_call(name, receiver_types, sink_target) =>
             {
-                return args
-                    .first()
-                    .and_then(|arg| clean_overwrite_target_key(&arg.value_text));
+                return args.get(base_arg_index).and_then(|arg| {
+                    arg.place
+                        .as_deref()
+                        .and_then(clean_overwrite_target_key)
+                        .or_else(|| {
+                            let mut sources = arg
+                                .source_names
+                                .iter()
+                                .filter_map(|source| clean_overwrite_target_key(source));
+                            let source = sources.next()?;
+                            sources.next().is_none().then_some(source)
+                        })
+                });
             }
             FlowEvent::Branch {
                 then_events,
                 else_events,
                 ..
             } => {
-                if let Some(base) = os_path_join_base_arg_at(then_events, sink_span)
-                    .or_else(|| os_path_join_base_arg_at(else_events, sink_span))
+                if let Some(base) = sink_call_base_arg_at(then_events, sink_span, sink_target, base_arg_index)
+                    .or_else(|| sink_call_base_arg_at(else_events, sink_span, sink_target, base_arg_index))
                 {
                     return Some(base);
                 }
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if let Some(base) = os_path_join_base_arg_at(body, sink_span) {
+                if let Some(base) = sink_call_base_arg_at(body, sink_span, sink_target, base_arg_index) {
                     return Some(base);
                 }
             }
@@ -425,9 +486,9 @@ fn os_path_join_base_arg_at(events: &[bonsai_lang_api::FlowEvent], sink_span: Sp
                 finally_events,
                 ..
             } => {
-                if let Some(base) = os_path_join_base_arg_at(body, sink_span)
-                    .or_else(|| os_path_join_base_arg_at(catch_events, sink_span))
-                    .or_else(|| os_path_join_base_arg_at(finally_events, sink_span))
+                if let Some(base) = sink_call_base_arg_at(body, sink_span, sink_target, base_arg_index)
+                    .or_else(|| sink_call_base_arg_at(catch_events, sink_span, sink_target, base_arg_index))
+                    .or_else(|| sink_call_base_arg_at(finally_events, sink_span, sink_target, base_arg_index))
                 {
                     return Some(base);
                 }
@@ -438,14 +499,113 @@ fn os_path_join_base_arg_at(events: &[bonsai_lang_api::FlowEvent], sink_span: Sp
     None
 }
 
-fn python_path_containment_guard_condition(condition: &str, candidate: &str, base: &str) -> bool {
-    let compact = compact_guard_text(condition);
-    let startswith_sep = format!("not{candidate}.startswith({base}+os.sep)");
-    let startswith_slash_single = format!("not{candidate}.startswith({base}+'/')");
-    let startswith_slash_double = format!("not{candidate}.startswith({base}+\"/\")");
-    compact.contains(&startswith_sep)
-        || compact.contains(&startswith_slash_single)
-        || compact.contains(&startswith_slash_double)
+fn path_containment_guard_condition(
+    events: &[FlowEvent],
+    condition_facts: &[BranchConditionFact],
+    branch: StructuredBranch<'_>,
+    candidate: &str,
+    base: &str,
+    guard: &PathContainmentGuardSemantics,
+) -> bool {
+    let Some(condition) = branch_condition_fact_for_span(condition_facts, branch.span) else {
+        return false;
+    };
+    if condition.polarity != BranchConditionPolarity::Negated {
+        return false;
+    }
+    let query = ContainmentCheckQuery {
+        condition_span: condition.condition_span,
+        candidate,
+        base,
+        guard,
+    };
+    containment_check_call_before_body(events, &query)
+}
+
+#[derive(Copy, Clone)]
+struct ContainmentCheckQuery<'a> {
+    condition_span: Span,
+    candidate: &'a str,
+    base: &'a str,
+    guard: &'a PathContainmentGuardSemantics,
+}
+
+fn containment_check_call_before_body(events: &[FlowEvent], query: &ContainmentCheckQuery<'_>) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                receiver_types,
+                args,
+                ..
+            } if span_contains(query.condition_span, *span) => {
+                let receiver_matches = receiver
+                    .as_deref()
+                    .and_then(clean_overwrite_target_key)
+                    .is_some_and(|receiver| receiver == query.candidate);
+                if !receiver_matches
+                    || !rule_target_matches_call(name, receiver_types, &query.guard.containment_check)
+                {
+                    continue;
+                }
+                let Some(argument) = args.first() else {
+                    continue;
+                };
+                let base_is_operand = argument
+                    .place
+                    .as_deref()
+                    .and_then(clean_overwrite_target_key)
+                    .is_some_and(|place| place == query.base)
+                    || argument
+                        .source_names
+                        .iter()
+                        .filter_map(|source| clean_overwrite_target_key(source))
+                        .any(|source| source == query.base);
+                if base_is_operand
+                    && query
+                        .guard
+                        .boundary_places
+                        .iter()
+                        .all(|boundary| argument.source_names.iter().any(|source| source == boundary))
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if containment_check_call_before_body(then_events, query)
+                    || containment_check_call_before_body(else_events, query)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if containment_check_call_before_body(body, query) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if [body, catch_events, finally_events]
+                    .into_iter()
+                    .any(|region| containment_check_call_before_body(region, query))
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 pub(super) fn python_lxml_parser_keyword_sanitizer(

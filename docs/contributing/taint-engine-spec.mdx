@@ -542,11 +542,17 @@ whole-aggregate destructuring edge.
 
 ## Branch conditions and constant facts
 
-`FlowEvent::Branch` optionally carries a `condition` text. The engine
-recognises a small set of language-neutral patterns (literal booleans,
-`flag`, `!flag`, `flag == 0`) so guarded code doesn't generate spurious
-flows. The list grows conservatively — a constant fact must be
-language-neutral and trivially safe to reason about.
+`FlowEvent::Branch` optionally carries condition text for rendering and the
+narrow constant evaluator. That evaluator recognises only a small set of
+language-neutral patterns (literal booleans, `flag`, `!flag`, `flag == 0`) so
+guarded code does not generate spurious flows.
+
+Semantic consumers do not reparse that rendering. The shared Tree-sitter
+frontend emits `BranchConditionFact { branch_span, condition_span, polarity }`;
+security and future control-flow proofs relate call facts to the exact
+condition span and consume the AST-derived polarity. Native export includes
+the same facts. The textual constant list grows conservatively only when a
+fact is language-neutral and trivially safe to reason about.
 
 Tainted conditions are not dataflow. A tainted branch guard may choose
 which clean/dynamic container is returned, but it does not make every

@@ -192,7 +192,7 @@ pub enum MatchKind {
 
 /// The match target — either a callee (for `call` / `new`) or a read / write
 /// target (for `read` / `write`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleTarget {
     /// Unqualified name match (e.g. `system`).
@@ -411,6 +411,25 @@ pub enum GuardProfile {
     GoJwtInlineKeyfuncAlgorithm,
     GoXmlDecoderHardening,
     JavaUrlSsrfGuard,
+    PythonPathContainment,
+}
+
+/// Rulepack-owned callable roles used by the structured path-containment
+/// proof. The engine consumes these as compiler match targets over call and
+/// assignment facts; standard-library spellings never live in analysis code.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathContainmentGuardSemantics {
+    /// Call whose result canonicalizes the sink-produced path.
+    pub canonicalizer: RuleTarget,
+    /// Receiver call used to prove that the canonical path stays below the
+    /// configured base directory.
+    pub containment_check: RuleTarget,
+    /// Argument on the matched sink call that denotes the trusted base path.
+    pub sink_base_arg_index: usize,
+    /// AST-derived place operands that must accompany the base argument in
+    /// the containment check (for example a platform path separator).
+    pub boundary_places: Vec<String>,
 }
 
 /// Role a sink rule plays in an implicit context channel.
@@ -466,6 +485,8 @@ pub struct AnalysisSemantics {
     pub source_reporting_rank: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard_profile: Option<GuardProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_containment_guard: Option<PathContainmentGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_flow: Option<ContextFlowSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

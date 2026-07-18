@@ -162,6 +162,7 @@ fn insert_file(global: &mut GlobalIndex, file: FileId, defs: Vec<Decl>) {
         comments: Vec::new(),
         call_receivers: Vec::new(),
         runtime_type_narrowings: Vec::new(),
+        branch_conditions: Vec::new(),
     });
 }
 

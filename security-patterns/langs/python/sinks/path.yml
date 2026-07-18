@@ -190,6 +190,15 @@
   constraints:
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    guard_profile: python-path-containment
+    path_containment_guard:
+      canonicalizer:
+        attribute: [os, path, realpath]
+      containment_check:
+        name: startswith
+      sink_base_arg_index: 0
+      boundary_places: [os.sep]
   match_examples:
   - name: os path join request segment
     code: "import os\ndef read_file(user_input):\n    path = os.path.join(\"/srv/files\", user_input)\n    return path\n"
