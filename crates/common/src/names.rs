@@ -14,7 +14,7 @@
 /// surrounding syntactic context.
 ///
 /// Kept here because three crates (`bonsai_taint::text`,
-/// `bonsai_taint::inter`, `bonsai_security::matcher` indirectly via
+/// `bonsai_taint`'s IDG compatibility API, `bonsai_security::matcher` indirectly via
 /// `qualified_access_bases`) all need the same set; defining it
 /// once prevents drift.
 pub const IDENTIFIER_SIGILS: &[char] = &['$', '@', '%'];

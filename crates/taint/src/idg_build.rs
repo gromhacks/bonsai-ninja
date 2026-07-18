@@ -75,7 +75,7 @@ pub fn compiler_idg_service(db: &AnalyzerDb) -> Arc<IdgQueryService> {
 /// service: a later caller may use a different configuration.
 pub(crate) fn idg_service_for_inter_config(
     db: &AnalyzerDb,
-    config: &crate::inter::InterTaintConfig,
+    config: &crate::idg_api::InterTaintConfig,
 ) -> Arc<IdgQueryService> {
     if config.clean_output_overwrites.is_empty()
         && config.source_output_args.is_empty()

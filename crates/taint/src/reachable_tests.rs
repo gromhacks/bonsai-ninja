@@ -812,7 +812,7 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
     );
     apply_call_result_passthrough_fixpoint(
         &mut seed_nodes,
-        &[crate::inter::CallResultPassthrough {
+        &[crate::idg_api::CallResultPassthrough {
             callee: "removingPercentEncoding".to_string(),
             receiver_type: None,
             input_arg_indices: Vec::new(),
@@ -832,7 +832,7 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
     let mut regex_seed_nodes = service.param_nodes_of(func);
     apply_call_result_passthrough_fixpoint(
         &mut regex_seed_nodes,
-        &[crate::inter::CallResultPassthrough {
+        &[crate::idg_api::CallResultPassthrough {
             callee: r"regex:^[A-Za-z_$][A-Za-z0-9_$\.]*PercentEncoding$".to_string(),
             receiver_type: None,
             input_arg_indices: Vec::new(),
@@ -960,7 +960,7 @@ fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input()
     );
     apply_call_result_passthrough_fixpoint(
         &mut seed_nodes,
-        &[crate::inter::CallResultPassthrough {
+        &[crate::idg_api::CallResultPassthrough {
             callee: "reduce".to_string(),
             receiver_type: None,
             input_arg_indices: vec![1],
@@ -1015,7 +1015,7 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
         receiver: None,
         receiver_types: Vec::new(),
     };
-    let passthroughs = vec![crate::inter::CallResultPassthrough {
+    let passthroughs = vec![crate::idg_api::CallResultPassthrough {
         callee: "String.to_charlist".to_string(),
         receiver_type: None,
         input_arg_indices: vec![0],
@@ -1214,7 +1214,7 @@ fn collect_tainted_writes_requires_identifier_token_match() {
         value_kind: None,
     }];
 
-    let mut out: Vec<crate::inter::TaintedCall> = Vec::new();
+    let mut out: Vec<crate::idg_api::TaintedCall> = Vec::new();
     collect_tainted_writes(&events, FuncId::new(0), &tainted_names, None, &mut out);
     assert!(
         out.is_empty(),
@@ -1241,14 +1241,14 @@ fn collect_tainted_writes_keeps_whole_identifier_and_dotted_member() {
         value_kind: None,
     }];
 
-    let mut out: Vec<crate::inter::TaintedCall> = Vec::new();
+    let mut out: Vec<crate::idg_api::TaintedCall> = Vec::new();
     collect_tainted_writes(&events, FuncId::new(0), &tainted_names, None, &mut out);
     assert_eq!(
         out.len(),
         1,
         "a whole tainted token inside a member access must still emit a Write row; got {out:#?}"
     );
-    assert_eq!(out[0].kind, crate::inter::TaintedCallKind::Write);
+    assert_eq!(out[0].kind, crate::idg_api::TaintedCallKind::Write);
     assert_eq!(out[0].name, "out");
     assert_eq!(out[0].tainted_args.len(), 1);
     assert_eq!(out[0].tainted_args[0].value_text, "data.cmd");

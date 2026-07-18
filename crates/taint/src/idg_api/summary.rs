@@ -1,4 +1,4 @@
-//! Per-function return-taint summary types and the public
+//! IDG-derived per-function return-taint summary types and the public
 //! [`function_summary`] accessor.
 //!
 //! Summaries are derived from the same IDG used by every taint query. The
