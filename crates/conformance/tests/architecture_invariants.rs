@@ -2415,6 +2415,7 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     );
 
     let findings_build = read(&root.join("crates/security/src/analysis/findings_build.rs"));
+    let chain_executor = read(&root.join("crates/security/src/analysis/chain_executor.rs"));
     let make_finding_body = function_body(&findings_build, "make_finding");
     assert!(
         make_finding_body.contains("analysis_complete: context.analysis_incomplete_reasons.is_empty()"),
@@ -2425,8 +2426,9 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
         "security findings must carry scoped incomplete reasons into the report"
     );
     assert!(
-        security_analysis.contains("GraphUnresolvedCallIndex")
-            && security_analysis.contains("reasons_for_terminal_call(call)")
+        chain_executor.contains("GraphUnresolvedCallIndex")
+            && chain_executor.contains("reasons_for_terminal_call(call)")
+            && !chain_executor.contains("graph_incomplete_reasons")
             && !security_analysis.contains("graph_incomplete_reasons"),
         "security findings must scope unresolved-call completeness to the terminal evidence path, not the whole source graph"
     );
