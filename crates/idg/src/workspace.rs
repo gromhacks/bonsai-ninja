@@ -463,6 +463,8 @@ impl IdgWorkspace {
     /// errors. After load, rebuilds the `FuncId → SegmentId` lookup
     /// and each segment's reverse-lookup dictionaries.
     pub fn load_from_disk(path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<Option<Self>> {
+        use rayon::prelude::*;
+
         if !path.exists() {
             bonsai_diagnostics::debug_log!(
                 "idg-build",
@@ -522,55 +524,68 @@ impl IdgWorkspace {
             field_flow: Vec::with_capacity(metadata.field_flow_count.min(usize::MAX as u64) as usize),
             symbolic_field: SymbolicFieldGraph::new(),
         };
-        for idx in 0..metadata.segment_count {
-            let Some(hit) = reader.get((idx + 1) as u64)? else {
-                // Truncated sidecar — fail-closed so the caller rebuilds.
-                bonsai_diagnostics::debug_log!(
-                    "idg-build",
-                    "workspace sidecar miss: path={} reason=missing-segment segment={}",
-                    path.display(),
-                    idx
-                );
+        // Segment entries are independent positioned reads. Decode and rebuild
+        // their local dictionaries in parallel, then install them in segment-id
+        // order so persisted IDs remain deterministic. This is compiler
+        // scheduling only: every segment is still decoded and validated.
+        let decoded_segments = (0..metadata.segment_count)
+            .into_par_iter()
+            .map(|idx| -> crate::IdgResult<Option<IdgSegment>> {
+                let Some(hit) = reader.get((idx + 1) as u64)? else {
+                    bonsai_diagnostics::debug_log!(
+                        "idg-build",
+                        "workspace sidecar miss: path={} reason=missing-segment segment={}",
+                        path.display(),
+                        idx
+                    );
+                    return Ok(None);
+                };
+                let mut segment: IdgSegment = wire::decode(&hit.payload).map_err(|e| {
+                    crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                })?;
+                if segment.version != IDG_SEGMENT_VERSION {
+                    bonsai_diagnostics::debug_log!(
+                        "idg-build",
+                        "workspace sidecar miss: path={} reason=segment-version segment={} version={} expected={}",
+                        path.display(),
+                        idx,
+                        segment.version,
+                        IDG_SEGMENT_VERSION
+                    );
+                    return Ok(None);
+                }
+                segment.places.rebuild_lookup();
+                segment.nodes.rebuild_lookup();
+                segment.strings.rebuild_lookup();
+                Ok(Some(segment))
+            })
+            .collect::<Vec<_>>();
+        for (idx, decoded) in decoded_segments.into_iter().enumerate() {
+            let Some(segment) = decoded? else {
                 return Ok(None);
             };
-            let mut segment: IdgSegment = wire::decode(&hit.payload)
-                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-            if segment.version != IDG_SEGMENT_VERSION {
-                bonsai_diagnostics::debug_log!(
-                    "idg-build",
-                    "workspace sidecar miss: path={} reason=segment-version segment={} version={} expected={}",
-                    path.display(),
-                    idx,
-                    segment.version,
-                    IDG_SEGMENT_VERSION
-                );
-                return Ok(None);
-            }
-            segment.places.rebuild_lookup();
-            segment.nodes.rebuild_lookup();
-            segment.strings.rebuild_lookup();
-            let seg_id = SegmentId(idx);
+            let seg_id = SegmentId(u32::try_from(idx).expect("segment index came from u32 metadata"));
             for func_raw in &segment.funcs {
                 ws.by_func.insert(*func_raw, seg_id);
             }
             ws.segments.push(segment);
         }
         let cross_base = first_cross_file_chunk_key(metadata.segment_count);
-        for chunk_idx in 0..metadata.cross_file_chunk_count {
-            let Some(hit) = reader.get(cross_base + u64::from(chunk_idx))? else {
-                bonsai_diagnostics::debug_log!(
-                    "idg-build",
-                    "workspace sidecar miss: path={} reason=missing-cross-file-chunk chunk={}",
-                    path.display(),
-                    chunk_idx
-                );
-                return Ok(None);
-            };
-            let chunk: Vec<CrossFileEdge> = wire::decode(&hit.payload)
-                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-            for edge in chunk {
-                ws.cross_file.push(edge);
-            }
+        let Some(cross_chunks) = load_sidecar_chunks::<CrossFileEdge>(
+            &reader,
+            path,
+            cross_base,
+            metadata.cross_file_chunk_count,
+            "cross-file",
+        )?
+        else {
+            return Ok(None);
+        };
+        ws.cross_file
+            .edges
+            .reserve(metadata.cross_file_edge_count.min(usize::MAX as u64) as usize);
+        for chunk in cross_chunks {
+            ws.cross_file.edges.extend(chunk);
         }
         if ws.cross_file.len() as u64 != metadata.cross_file_edge_count {
             bonsai_diagnostics::debug_log!(
@@ -583,18 +598,17 @@ impl IdgWorkspace {
             return Ok(None);
         }
         let field_base = first_field_flow_chunk_key(metadata.segment_count, metadata.cross_file_chunk_count);
-        for chunk_idx in 0..metadata.field_flow_chunk_count {
-            let Some(hit) = reader.get(field_base + u64::from(chunk_idx))? else {
-                bonsai_diagnostics::debug_log!(
-                    "idg-build",
-                    "workspace sidecar miss: path={} reason=missing-field-flow-chunk chunk={}",
-                    path.display(),
-                    chunk_idx
-                );
-                return Ok(None);
-            };
-            let chunk: Vec<FieldFlowLink> = wire::decode(&hit.payload)
-                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        let Some(field_chunks) = load_sidecar_chunks::<FieldFlowLink>(
+            &reader,
+            path,
+            field_base,
+            metadata.field_flow_chunk_count,
+            "field-flow",
+        )?
+        else {
+            return Ok(None);
+        };
+        for chunk in field_chunks {
             ws.field_flow.extend(chunk);
         }
         if ws.field_flow.len() as u64 != metadata.field_flow_count {
@@ -628,18 +642,17 @@ impl IdgWorkspace {
             return Ok(None);
         }
         let mut symbolic = SymbolicFieldGraph::from_parts(strings, bases, Vec::new());
-        for chunk_idx in 0..metadata.symbolic_transform_chunk_count {
-            let Some(hit) = reader.get(symbolic_header + 1 + u64::from(chunk_idx))? else {
-                bonsai_diagnostics::debug_log!(
-                    "idg-build",
-                    "workspace sidecar miss: path={} reason=missing-symbolic-transform-chunk chunk={}",
-                    path.display(),
-                    chunk_idx
-                );
-                return Ok(None);
-            };
-            let chunk: Vec<SymbolicFieldTransform> = wire::decode(&hit.payload)
-                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        let Some(transform_chunks) = load_sidecar_chunks::<SymbolicFieldTransform>(
+            &reader,
+            path,
+            symbolic_header + 1,
+            metadata.symbolic_transform_chunk_count,
+            "symbolic-transform",
+        )?
+        else {
+            return Ok(None);
+        };
+        for chunk in transform_chunks {
             symbolic.extend_transforms(chunk);
         }
         if symbolic.transforms().len() as u64 != metadata.symbolic_transform_count {
@@ -714,6 +727,45 @@ struct IdgWorkspaceMetadataOwned {
     symbolic_base_count: u64,
     symbolic_transform_count: u64,
     symbolic_transform_chunk_count: u32,
+}
+
+/// Decode independent factstore chunks concurrently while preserving their
+/// key order in the returned vector. Missing entries fail closed with
+/// `Ok(None)` so callers rebuild the complete sidecar; decode/I/O failures
+/// retain their typed error.
+fn load_sidecar_chunks<T>(
+    reader: &bonsai_factstore::FactStoreReader,
+    path: &std::path::Path,
+    first_key: u64,
+    chunk_count: u32,
+    kind: &'static str,
+) -> crate::IdgResult<Option<Vec<Vec<T>>>>
+where
+    T: serde::de::DeserializeOwned + Send,
+{
+    use rayon::prelude::*;
+
+    let decoded = (0..chunk_count)
+        .into_par_iter()
+        .map(|chunk_idx| -> crate::IdgResult<Option<Vec<T>>> {
+            let Some(hit) = reader.get(first_key + u64::from(chunk_idx))? else {
+                bonsai_diagnostics::debug_log!(
+                    "idg-build",
+                    "workspace sidecar miss: path={} reason=missing-chunk kind={} chunk={}",
+                    path.display(),
+                    kind,
+                    chunk_idx
+                );
+                return Ok(None);
+            };
+            wire::decode(&hit.payload)
+                .map(Some)
+                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<crate::IdgResult<Vec<_>>>()?;
+    Ok(decoded.into_iter().collect())
 }
 
 /// Factstore table id for the workspace-wide IDG sidecar. Distinct
