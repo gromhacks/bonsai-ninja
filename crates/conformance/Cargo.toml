@@ -16,7 +16,6 @@ bonsai_testkit = { workspace = true }
 [dev-dependencies]
 bonsai_adapters = { workspace = true }
 serde_yaml = "0.9"
-tree-sitter = { workspace = true }
 
 [lints]
 workspace = true
