@@ -21,8 +21,8 @@ pub use kit::{
     extract_assignment_value_facts, extract_call_receiver_facts, extract_imports_via,
     extract_runtime_type_narrowing_facts, inject_lifecycle_events, normalize_call_result_assignment_sources,
     populate_decl_return_types, rewrite_implicit_member_reads, with_fn_kinds, AliasTarget, GrammarHandler,
-    ImplicitMemberReadCall, LifecycleTransition, ModifierVocabulary, TypeAliasVocabulary, GENERIC_HANDLER,
-    WILDCARD_IMPORT_ALIAS_PREFIX,
+    ImplicitMemberReadCall, LifecycleTransition, ModifierVocabulary, SyntaxSpecialForm, TypeAliasVocabulary,
+    GENERIC_HANDLER, WILDCARD_IMPORT_ALIAS_PREFIX,
 };
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};

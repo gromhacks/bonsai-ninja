@@ -10,7 +10,8 @@ use bonsai_lang_api::{
     },
     rewrite_implicit_member_reads, AdapterContext, AdapterError, CallKind, Decl, DeclIndex, DeclKind,
     FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility,
+    LanguageCapabilities, LanguageId, ModifierVocabulary, SyntaxSpecialForm, TypeAliasBinding,
+    TypeAliasVocabulary, Visibility,
 };
 use tree_sitter::Node;
 
@@ -53,6 +54,7 @@ pub const LANG_ID: LanguageId = LanguageId::new("swift");
 const PACK_NAME: &str = "swift";
 const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: &["init"],
+    special_forms: &[SyntaxSpecialForm::TrailingClosureDefer],
     ..with_fn_kinds_and_implicit_receivers(&["function_declaration"], &["self", "super"], &[])
 };
 

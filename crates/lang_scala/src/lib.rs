@@ -10,8 +10,8 @@ use bonsai_lang_api::{
     },
     rewrite_implicit_member_reads, AdapterContext, AdapterError, CallArg, CallKind, Decl, DeclIndex,
     DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary,
-    Visibility,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, SyntaxSpecialForm, TypeAliasBinding,
+    TypeAliasVocabulary, Visibility,
 };
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
@@ -43,6 +43,7 @@ pub const LANG_ID: LanguageId = LanguageId::new("scala");
 const PACK_NAME: &str = "scala";
 const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    special_forms: &[SyntaxSpecialForm::PostfixOperatorCall],
     // Scala block-bodied `def f() = { …; tailExpr }` returns its tail
     // expression. The body node kind is `block` (never descended by
     // implicit-return synthesis), so — like Rust and Ruby — the tail

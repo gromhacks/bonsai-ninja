@@ -14,7 +14,8 @@ use bonsai_lang_api::{
         language_from_pack, node_at_span, node_text, parse_with, span_of,
     },
     with_fn_kinds, AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind, Visibility,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind,
+    SyntaxSpecialForm, Visibility,
 };
 use bonsai_lang_api::{AssignValueKind, FlowEvent};
 use tree_sitter::{Language, Node, Tree};
@@ -35,6 +36,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // Elixir functions return their final expression; the kit emits a
     // `Return` for the last statement of the `do` block.
     tail_expression_returns: true,
+    special_forms: &[
+        SyntaxSpecialForm::CallEncodedControlFlow,
+        SyntaxSpecialForm::DirectDoBlockBody,
+    ],
     ..with_fn_kinds(&["call"])
 };
 

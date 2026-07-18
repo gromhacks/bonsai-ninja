@@ -6,7 +6,7 @@ use bonsai_lang_api::{
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
     ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref,
-    RefKind,
+    RefKind, SyntaxSpecialForm,
 };
 use tree_sitter::{Language, Tree};
 
@@ -32,6 +32,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // compound arm in the kit then re-adds the LHS as a source
     // operand (read-modify-write).
     assignment_kinds: &["operator_assignment"],
+    special_forms: &[SyntaxSpecialForm::BlockLoopCall],
     ..BASE_HANDLER
 };
 

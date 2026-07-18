@@ -130,6 +130,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     await_kinds: &["await_expression"],
     defer_kinds: &[],
     using_kinds: &[],
+    special_forms: &[],
     method_receiver_param_index: Some(0),
     implicit_receiver_names: &["self"],
     implicit_receiver_prefixes: &[],
