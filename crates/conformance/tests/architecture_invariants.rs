@@ -3305,3 +3305,67 @@ fn structured_security_guards_are_rulepack_driven() {
         "branch-condition compiler facts must be emitted by shared/custom frontend paths and preserved by export"
     );
 }
+
+/// The unified taint engine is compiler dataflow over the IDG. Semantic
+/// closure must run to a fixed point with no breadth/depth/iteration budget;
+/// bounded traversal belongs only to explicit diagnostic rendering APIs.
+#[test]
+fn unified_taint_closure_is_uncapped_compiler_dataflow() {
+    let root = repo_root();
+    let idg_query = read(&root.join("crates/idg/src/query.rs"));
+    let taint_inter = read(&root.join("crates/taint/src/inter.rs"));
+
+    for function in [
+        "bitvector_closure",
+        "bitvector_closure_within",
+        "sparse_closure_nodes",
+        "sparse_closure_nodes_within",
+    ] {
+        let body = function_body(&idg_query, function);
+        assert!(
+            body.contains("pending.pop()") && body.contains("reached"),
+            "{function} must remain a sparse monotone stack fixed point"
+        );
+        for forbidden in [
+            "VecDeque",
+            "pop_front",
+            "max_depth",
+            "max_len",
+            "max_paths",
+            "k_hops",
+            "iteration_limit",
+            "round_limit",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "semantic closure {function} must not contain `{forbidden}`"
+            );
+        }
+    }
+
+    for function in ["forward_closure", "backward_closure"] {
+        let body = function_body(&idg_query, function);
+        assert!(
+            body.contains("bitvector_closure") && !body.contains("bitvector_bounded_closure"),
+            "{function} must use the uncapped fixed-point kernel"
+        );
+    }
+    assert!(
+        function_body(&idg_query, "forward_neighbourhood").contains("bitvector_bounded_closure")
+            && function_body(&idg_query, "backward_neighbourhood").contains("bitvector_bounded_closure"),
+        "hop-bounded closure must remain isolated to explicit neighbourhood diagnostics"
+    );
+
+    assert!(
+        !root.join("crates/taint/src/inter/mod.rs").exists()
+            && !root.join("crates/taint/src/inter/tests.rs").exists(),
+        "the retired interprocedural worklist must not return"
+    );
+    let entry = function_body(&taint_inter, "interprocedural_taint");
+    assert!(
+        entry.contains("idg_backed_interprocedural_taint")
+            && !entry.contains("worklist")
+            && !entry.contains("VecDeque"),
+        "the public interprocedural API must delegate directly to the IDG engine"
+    );
+}
