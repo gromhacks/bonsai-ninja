@@ -116,11 +116,7 @@ pub struct InterTaintView<'a> {
     verdict_cache: parking_lot::Mutex<AHashMap<(String, FileId, u64, u64), bool>>,
 }
 
-type CalleeCallsView<'a> = (
-    std::borrow::Cow<'a, [CallFact]>,
-    Option<std::collections::HashMap<String, AliasTarget>>,
-    Option<&'a std::collections::HashMap<String, AliasTarget>>,
-);
+type CalleeCallsView<'a> = std::borrow::Cow<'a, [CallFact]>;
 
 impl<'a> InterTaintView<'a> {
     /// Build a view over the engine's tainted-call records. Pre-bins
@@ -3356,26 +3352,27 @@ fn missing_target_in_reachable_callees(
             // a decl with no flow_events skip it), fall through
             // to the prior inline shape.
             let callee_facts = callee_bundle.by_decl_span.get(&callee_decl.span).cloned();
-            let (calls_view, callee_alias_owned, callee_alias_borrow): CalleeCallsView<'_> =
-                if let Some(facts) = &callee_facts {
-                    (
-                        std::borrow::Cow::Borrowed(facts.calls.as_slice()),
-                        None,
-                        Some(&facts.alias_map),
-                    )
-                } else {
-                    let mut callee_alias = file_alias_map_with_retention(ws, callee_file, retention);
-                    extend_alias_map_with_declared_types(&mut callee_alias, &callee_decl.type_aliases);
-                    bonsai_lang_api::extend_alias_map_with_flow_events(
-                        &mut callee_alias,
-                        &callee_decl.flow_events,
-                    );
-                    let mut calls = collect_calls(&callee_decl.flow_events);
-                    enrich_call_fact_receiver_types(&mut calls, &callee_decl.type_aliases);
-                    (std::borrow::Cow::Owned(calls), Some(callee_alias), None)
-                };
-            let callee_alias_ref = callee_alias_borrow
-                .unwrap_or_else(|| callee_alias_owned.as_ref().expect("alias map populated"));
+            let callee_alias_owned;
+            let (calls_view, callee_alias_ref): (
+                CalleeCallsView<'_>,
+                &std::collections::HashMap<String, AliasTarget>,
+            ) = if let Some(facts) = &callee_facts {
+                (
+                    std::borrow::Cow::Borrowed(facts.calls.as_slice()),
+                    &facts.alias_map,
+                )
+            } else {
+                let mut callee_alias = file_alias_map_with_retention(ws, callee_file, retention);
+                extend_alias_map_with_declared_types(&mut callee_alias, &callee_decl.type_aliases);
+                bonsai_lang_api::extend_alias_map_with_flow_events(
+                    &mut callee_alias,
+                    &callee_decl.flow_events,
+                );
+                let mut calls = collect_calls(&callee_decl.flow_events);
+                enrich_call_fact_receiver_types(&mut calls, &callee_decl.type_aliases);
+                callee_alias_owned = callee_alias;
+                (std::borrow::Cow::Owned(calls), &callee_alias_owned)
+            };
             for call in calls_view.iter() {
                 if callee_or_alias_matches(
                     &call.callee,
