@@ -1876,7 +1876,9 @@ fn skip_balanced_perl_braces(source: &str, open: usize) -> usize {
     let mut escaped = false;
     let mut cursor = open;
     while cursor < source.len() {
-        let ch = source[cursor..].chars().next().expect("valid char boundary");
+        let Some(ch) = source[cursor..].chars().next() else {
+            break;
+        };
         cursor += ch.len_utf8();
         if let Some(open_quote) = quote {
             if escaped {
