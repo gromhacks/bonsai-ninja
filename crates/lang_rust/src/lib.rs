@@ -635,15 +635,21 @@ fn classify_rust_declared_constructor_calls(idx: &mut DeclIndex) {
         })
         .map(|decl| (decl.symbol, decl.name.clone()))
         .collect::<std::collections::HashMap<_, _>>();
-    let constructors = idx
+    let mut constructors: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    for decl in idx
         .defs
         .iter()
         .filter(|decl| decl.kind == bonsai_lang_api::DeclKind::Constructor)
-        .filter_map(|decl| {
-            let owner = decl.parent.and_then(|parent| owner_name_by_symbol.get(&parent))?;
-            Some((owner.clone(), decl.name.clone()))
-        })
-        .collect::<std::collections::HashSet<_>>();
+    {
+        let Some(owner) = decl.parent.and_then(|parent| owner_name_by_symbol.get(&parent)) else {
+            continue;
+        };
+        constructors
+            .entry(owner.clone())
+            .or_default()
+            .insert(decl.name.clone());
+    }
     if constructors.is_empty() {
         return;
     }
@@ -655,19 +661,30 @@ fn classify_rust_declared_constructor_calls(idx: &mut DeclIndex) {
 
 fn classify_rust_constructor_calls_in_events(
     events: &mut [FlowEvent],
-    constructors: &std::collections::HashSet<(String, String)>,
+    constructors: &std::collections::HashMap<String, std::collections::HashSet<String>>,
 ) {
     for event in events {
         match event {
-            FlowEvent::Call { name, call_kind, .. } => {
+            FlowEvent::Call {
+                name,
+                receiver_types,
+                call_kind,
+                ..
+            } => {
                 let Some((owner, method)) = name.rsplit_once("::") else {
                     continue;
                 };
                 let Some(owner) = rust_type_tail(owner) else {
                     continue;
                 };
-                if constructors.contains(&(owner, method.to_string())) {
+                if constructors
+                    .get(owner.as_str())
+                    .is_some_and(|methods| methods.contains(method))
+                {
                     *call_kind = CallKind::Constructor;
+                    if !receiver_types.iter().any(|existing| existing == &owner) {
+                        receiver_types.insert(0, owner);
+                    }
                 }
             }
             FlowEvent::Branch {

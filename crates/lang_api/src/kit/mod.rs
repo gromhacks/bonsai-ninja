@@ -8154,6 +8154,18 @@ fn proven_constructor_type_name(callee: &str) -> Option<String> {
     Some(bare.to_string())
 }
 
+/// Result type carried by a compiler-classified constructor call. Adapters
+/// attach the declared owner as the first receiver type for factory-shaped
+/// constructors such as Rust `Type::assemble(...)`; direct constructor syntax
+/// falls back to the normalized callee spelling.
+fn proven_constructor_result_type_name(callee: &str, receiver_types: &[String]) -> Option<String> {
+    receiver_types
+        .first()
+        .filter(|type_name| !type_name.trim().is_empty())
+        .cloned()
+        .or_else(|| proven_constructor_type_name(callee))
+}
+
 fn resolved_declared_constructor_type(
     callee: &str,
     declared_types: &ahash::AHashSet<String>,
@@ -8199,9 +8211,12 @@ fn collect_constructor_result_type_aliases_with_declared_types(
             FlowEvent::Call {
                 name,
                 span,
+                receiver_types,
                 call_kind: CallKind::Constructor,
                 ..
-            } => proven_constructor_type_name(name).map(|type_name| (*span, type_name)),
+            } => {
+                proven_constructor_result_type_name(name, receiver_types).map(|type_name| (*span, type_name))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -8630,7 +8645,18 @@ fn apply_call_receiver_types_to_events(
                     ) {
                         push_unique_receiver_type(receiver_types, ty);
                     }
-                } else if !matches!(call_kind, crate::CallKind::Constructor) {
+                } else if matches!(call_kind, crate::CallKind::Constructor) {
+                    // A bare constructor call inside a class-like declaration
+                    // (`new(...)`, `Self(...)`) constructs the AST-declared
+                    // enclosing type. Preserve that parent-symbol fact on the
+                    // call so return/assignment typing never has to interpret
+                    // the constructor spelling.
+                    if let Some(types) = implicit_receiver_types {
+                        for ty in types {
+                            push_unique_receiver_type(receiver_types, ty.clone());
+                        }
+                    }
+                } else {
                     let Some(types) = implicit_receiver_types else {
                         continue;
                     };
