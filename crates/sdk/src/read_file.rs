@@ -299,7 +299,7 @@ fn read_file_with_taint_options(
     marks.sort_by_key(|m| m.line);
 
     // Cross-file callers / callees for this file's decls.
-    let resolved = ws.resolved_call_graph();
+    let resolved = ws.cached_resolved_call_graph();
     let global = ws.db().global_index();
     let file_funcs: Vec<FuncId> = global
         .decls_in(file_id)

@@ -254,7 +254,7 @@ pub fn tree(
         }
     }
 
-    let resolved = ws.resolved_call_graph();
+    let resolved = ws.cached_resolved_call_graph();
     let global = ws.db().global_index();
     let cross_edges = build_cross_edges(&resolved, ws);
 
