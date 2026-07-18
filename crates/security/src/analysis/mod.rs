@@ -5419,6 +5419,24 @@ struct SemanticScopePlan {
     funcs: Vec<FuncId>,
 }
 
+enum SemanticGraphExecution {
+    Partitioned,
+    Shared(Arc<bonsai_idg::IdgQueryService>),
+}
+
+impl SemanticGraphExecution {
+    fn is_partitioned(&self) -> bool {
+        matches!(self, Self::Partitioned)
+    }
+
+    fn shared(&self) -> Option<&Arc<bonsai_idg::IdgQueryService>> {
+        match self {
+            Self::Partitioned => None,
+            Self::Shared(service) => Some(service),
+        }
+    }
+}
+
 struct SourceScheduleRequest<'a> {
     source_groups: Vec<(FuncId, Vec<usize>)>,
     callback_corridors: &'a AHashMap<FuncId, Arc<SourceSinkCorridor>>,
@@ -6093,9 +6111,9 @@ where
     // Disconnected callgraph components have no possible interprocedural IDG
     // edge between them. Build and release them independently instead of
     // choosing a whole-workspace strategy from a project-size threshold.
-    let use_partitioned_scoped_idg = source_sink_prefilter_enabled
+    let partition_semantic_graph = source_sink_prefilter_enabled
         && (shared_coarse_corridors.source_units.len() > 1 || !coarse_corridors_by_func.is_empty());
-    let idg = if use_partitioned_scoped_idg {
+    let semantic_graph = if partition_semantic_graph {
         on_progress(AnalysisProgress::PhaseStarted {
             label: "planning scoped semantic graph batches",
             total: 0,
@@ -6109,7 +6127,7 @@ where
             shared_coarse_corridors.source_units.len()
         );
         on_progress(AnalysisProgress::PhaseFinished);
-        None
+        SemanticGraphExecution::Partitioned
     } else {
         on_progress(AnalysisProgress::PhaseStarted {
             label: "building scoped semantic graph",
@@ -6124,13 +6142,14 @@ where
             chain_call_graph.as_ref(),
         );
         on_progress(AnalysisProgress::PhaseFinished);
-        Some(service)
+        SemanticGraphExecution::Shared(service)
     };
+    let use_partitioned_scoped_idg = semantic_graph.is_partitioned();
     let sink_target_nodes = if source_sink_prefilter_enabled {
         let semantic_func_set: AHashSet<FuncId> = semantic_funcs.iter().copied().collect();
         let semantic_sink_func_set: AHashSet<FuncId> =
             sink_func_set.intersection(&semantic_func_set).copied().collect();
-        idg.as_ref().map(|service| {
+        semantic_graph.shared().map(|service| {
             sink_target_nodes_for_funcs(service.as_ref(), pack, &sink_by_func, &semantic_sink_func_set)
         })
     } else {
@@ -6208,7 +6227,7 @@ where
             use_coarse_schedule: use_coarse_source_sink_schedule,
             prefilter_enabled: source_sink_prefilter_enabled,
             partitioned_idg: use_partitioned_scoped_idg,
-            idg: idg.as_ref(),
+            idg: semantic_graph.shared(),
             target_nodes_for_schedule: sink_target_nodes_for_schedule,
             source_work: &source_work,
             pack,
@@ -6314,35 +6333,30 @@ where
     } else {
         None
     };
-    let findings = if use_partitioned_scoped_idg {
-        // Source groups are streamed directly from each parsed source file;
-        // each file gets its exact cross-file source→all-sinks corridor and
-        // is released before the next compilation unit.
-        execute_partitioned_source_groups(
-            PartitionedExecutionRequest {
-                context: PartitionedExecutionContext {
-                    executor: &source_group_executor,
-                    pool: rayon_pool.as_ref(),
-                    global: global.as_ref(),
-                    ws,
-                    pack,
-                    transfer_languages: &transfer_languages,
-                    call_graph: chain_call_graph.as_ref(),
+    let findings = match &semantic_graph {
+        SemanticGraphExecution::Partitioned => {
+            // Source groups are streamed directly from each parsed source
+            // file; each file gets its exact cross-file source→all-sinks
+            // corridor and is released before the next compilation unit.
+            execute_partitioned_source_groups(
+                PartitionedExecutionRequest {
+                    context: PartitionedExecutionContext {
+                        executor: &source_group_executor,
+                        pool: rayon_pool.as_ref(),
+                        global: global.as_ref(),
+                        ws,
+                        pack,
+                        transfer_languages: &transfer_languages,
+                        call_graph: chain_call_graph.as_ref(),
+                    },
+                    source_groups: scheduled_source_groups,
+                    shared_corridors: &shared_coarse_corridors,
+                    partitioned_source_indices: &partitioned_source_indices,
                 },
-                source_groups: scheduled_source_groups,
-                shared_corridors: &shared_coarse_corridors,
-                partitioned_source_indices: &partitioned_source_indices,
-            },
-            on_progress,
-        )
-    } else {
-        let Some(global_idg) = idg.as_ref() else {
-            return ChainBuildResult {
-                findings: out,
-                resolution,
-            };
-        };
-        execute_source_groups(
+                on_progress,
+            )
+        }
+        SemanticGraphExecution::Shared(global_idg) => execute_source_groups(
             &source_group_executor,
             rayon_pool.as_ref(),
             &scheduled_source_groups,
@@ -6351,7 +6365,7 @@ where
         )
         .into_iter()
         .flatten()
-        .collect()
+        .collect(),
     };
     out.extend(findings);
     on_progress(AnalysisProgress::PhaseFinished);
