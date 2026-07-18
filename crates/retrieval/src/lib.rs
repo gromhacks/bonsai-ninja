@@ -892,7 +892,7 @@ fn build_persisted_candidate_docs(ws: &Workspace) -> Vec<FactDoc> {
 
     let mut edge_groups: AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>> =
         AHashMap::default();
-    for edge in &ws.resolved_call_graph().inner().edges {
+    for edge in &ws.cached_resolved_call_graph().inner().edges {
         if !edge.precision.is_semantic() {
             continue;
         }
@@ -1752,7 +1752,7 @@ fn push_simple_doc(
 
 fn push_edge_docs(ws: &Workspace, docs: &mut Vec<FactDoc>, pipeline: u64) {
     let global = ws.db().global_index();
-    for edge in &ws.resolved_call_graph().inner().edges {
+    for edge in &ws.cached_resolved_call_graph().inner().edges {
         if !edge.precision.is_semantic() {
             continue;
         }

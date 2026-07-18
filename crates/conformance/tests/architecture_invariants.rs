@@ -2653,6 +2653,39 @@ fn entrypoints_command_uses_canonical_semantic_callgraph_path() {
 }
 
 #[test]
+fn production_callgraph_consumers_share_the_workspace_graph() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    collect_rs_files(&root.join("crates"), &mut files);
+    let mut clone_sites = Vec::new();
+    for file in files {
+        let relative = file.strip_prefix(&root).unwrap_or(&file);
+        let file_name = file.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if file.components().any(|part| part.as_os_str() == "tests")
+            || file_name == "tests.rs"
+            || file_name.ends_with("_tests.rs")
+        {
+            continue;
+        }
+        for (line_index, line) in read(&file).lines().enumerate() {
+            if line.contains(".resolved_call_graph()") {
+                clone_sites.push(format!(
+                    "{}:{}:{}",
+                    relative.display(),
+                    line_index + 1,
+                    line.trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        clone_sites.is_empty(),
+        "read-only production consumers must use `cached_resolved_call_graph()`; cloning the full graph is prohibitive on large workspaces:\n  {}",
+        clone_sites.join("\n  ")
+    );
+}
+
+#[test]
 fn first_class_path_and_slice_use_syntax_derived_indexes_only() {
     let root = repo_root();
     let paths_rs = read(&root.join("crates/browse/src/paths.rs"));

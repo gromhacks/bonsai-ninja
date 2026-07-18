@@ -114,7 +114,7 @@ pub struct CallgraphRow {
 /// Build the per-function callers / outgoing summary, sorted
 /// hottest-first (most callers, then most outgoing, then alpha).
 pub fn dump_callgraph(ws: &Workspace) -> Vec<CallgraphRow> {
-    callgraph_summary(ws, &ws.resolved_call_graph())
+    callgraph_summary(ws, &ws.cached_resolved_call_graph())
 }
 
 /// Variant of [`dump_callgraph`] that takes a pre-built resolved

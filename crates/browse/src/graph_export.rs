@@ -243,7 +243,7 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
         }
     }
 
-    let resolved = ws.resolved_call_graph();
+    let resolved = ws.cached_resolved_call_graph();
     for edge in resolved
         .inner()
         .edges

@@ -109,7 +109,7 @@ pub fn compute_edge_id(
 /// filters. The public surface is semantic-only (exact/narrowed).
 pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
     let global = ws.db().global_index();
-    let resolved = ws.resolved_call_graph();
+    let resolved = ws.cached_resolved_call_graph();
     let mut records: Vec<EdgeRecord> = resolved
         .inner()
         .edges

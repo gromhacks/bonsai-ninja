@@ -1766,7 +1766,7 @@ fn export_structural_callgraph(
     spans: &ExportSpanCache,
 ) -> Vec<CallEdgeOut> {
     let phase_started = Instant::now();
-    let resolved = ws.resolved_call_graph();
+    let resolved = ws.cached_resolved_call_graph();
     let mut out: Vec<CallEdgeOut> = Vec::new();
     for edge in resolved
         .inner()
@@ -1816,7 +1816,7 @@ fn export_structural_callgraph(
 fn export_taint_call_edges(ws: &Workspace) -> Vec<ExportCallEdge> {
     // ---- call_edges: every resolved FuncId→FuncId link ----
     let phase_started = Instant::now();
-    let resolved = ws.resolved_call_graph();
+    let resolved = ws.cached_resolved_call_graph();
     let mut call_edges: Vec<ExportCallEdge> = resolved
         .inner()
         .edges
@@ -2675,7 +2675,7 @@ fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec
     let global = db.global_index();
 
     let callees_seen: ahash::AHashSet<bonsai_common::SymbolId> = ws
-        .resolved_call_graph()
+        .cached_resolved_call_graph()
         .inner()
         .edges
         .iter()

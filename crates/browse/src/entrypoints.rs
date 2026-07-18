@@ -45,7 +45,7 @@ pub struct EntryPointOut {
 /// resolved callgraph.
 pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<EntryPointOut>, regex::Error> {
     let global = ws.db().global_index();
-    let graph = ws.resolved_call_graph();
+    let graph = ws.cached_resolved_call_graph();
     let name_match = make_name_filter(f.name, f.regex)?;
     let mut out = Vec::new();
     for file in global.all_files() {
