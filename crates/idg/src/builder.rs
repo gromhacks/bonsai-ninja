@@ -1486,6 +1486,7 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
     drop(candidates);
 }
 
+#[derive(Clone, Copy)]
 struct ResolvedCandidateStitch<'a> {
     caller: FuncId,
     caller_seg: SegmentId,
@@ -1516,18 +1517,9 @@ struct ResolvedCandidateOutputs<'a> {
 fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: ResolvedCandidateOutputs<'_>) {
     let ResolvedCandidateStitch {
         caller,
-        caller_seg,
-        caller_remap,
-        site,
-        caller_params,
-        caller_is_constructor,
-        caller_receiver_param_index,
-        caller_implicit_receiver_bases,
-        caller_receiver_names,
-        caller_receiver,
         resolver,
         candidate: cand,
-        endpoints,
+        ..
     } = request;
     let ResolvedCandidateOutputs {
         ws,
@@ -1543,6 +1535,41 @@ fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: Reso
         stats.wired_candidates = stats.wired_candidates.saturating_add(1);
     }
     let is_ancestor_dispatch = resolver.is_ancestor_dispatch(caller, cand.func);
+    stitch_candidate_receiver_inputs(request, is_ancestor_dispatch, ws, field_arg_sites, &mut stats);
+    stitch_candidate_explicit_arguments(request, ws, field_arg_sites, &mut stats);
+    stitch_candidate_capture_inputs(request, ws, &mut stats);
+    stitch_candidate_return_outputs(
+        request,
+        ws,
+        return_field_sites,
+        scalar_return_sites,
+        passthrough_field_copy_sites,
+        &mut stats,
+    );
+    stitch_candidate_constructor_receiver_effects(request, is_ancestor_dispatch, receiver_mutation_sites);
+    stitch_candidate_constructor_result(request, ws, constructor_return_sites);
+}
+
+fn stitch_candidate_receiver_inputs(
+    request: ResolvedCandidateStitch<'_>,
+    is_ancestor_dispatch: bool,
+    ws: &mut IdgWorkspace,
+    field_arg_sites: &mut FieldArgSiteQueue,
+    stats: &mut Option<&mut StitchStats>,
+) {
+    let ResolvedCandidateStitch {
+        caller,
+        caller_seg,
+        caller_remap,
+        site,
+        caller_implicit_receiver_bases,
+        caller_receiver_names,
+        caller_receiver,
+        resolver,
+        candidate: cand,
+        endpoints,
+        ..
+    } = request;
     // For method receivers, emit the synthetic receiver slot to
     // the callee's adapter-declared receiver parameter. This is
     // separate from positional args so explicit arguments keep
@@ -1567,7 +1594,7 @@ fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: Reso
                             cand.edge_kind,
                         );
                         place_inter_edge(caller_seg, endpoints.segment, edge, ws);
-                        if let Some(stats) = &mut stats {
+                        if let Some(stats) = stats.as_deref_mut() {
                             stats.inter_edges = stats.inter_edges.saturating_add(1);
                         }
                     }
@@ -1649,7 +1676,7 @@ fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: Reso
                             cand.edge_kind,
                         );
                         place_inter_edge(caller_seg, endpoints.segment, edge, ws);
-                        if let Some(stats) = &mut stats {
+                        if let Some(stats) = stats.as_deref_mut() {
                             stats.inter_edges = stats.inter_edges.saturating_add(1);
                         }
                     }
@@ -1719,6 +1746,23 @@ fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: Reso
             cand.edge_kind,
         );
     }
+}
+
+fn stitch_candidate_explicit_arguments(
+    request: ResolvedCandidateStitch<'_>,
+    ws: &mut IdgWorkspace,
+    field_arg_sites: &mut FieldArgSiteQueue,
+    stats: &mut Option<&mut StitchStats>,
+) {
+    let ResolvedCandidateStitch {
+        caller,
+        caller_seg,
+        caller_remap,
+        site,
+        candidate: cand,
+        endpoints,
+        ..
+    } = request;
     // For each explicit arg index, emit
     // `caller.CallArg(site, i) → callee.Param(j)`. When the
     // callee has a declared receiver parameter, `j` skips that
@@ -1791,14 +1835,30 @@ fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: Reso
                 cand.edge_kind,
                 ws,
             );
-            if let Some(stats) = &mut stats {
+            if let Some(stats) = stats.as_deref_mut() {
                 stats.inter_edges = stats.inter_edges.saturating_add(added);
             }
         }
-        if let Some(stats) = &mut stats {
+        if let Some(stats) = stats.as_deref_mut() {
             stats.inter_edges = stats.inter_edges.saturating_add(1);
         }
     }
+}
+
+fn stitch_candidate_capture_inputs(
+    request: ResolvedCandidateStitch<'_>,
+    ws: &mut IdgWorkspace,
+    stats: &mut Option<&mut StitchStats>,
+) {
+    let ResolvedCandidateStitch {
+        caller,
+        caller_seg,
+        site,
+        resolver,
+        candidate: cand,
+        endpoints,
+        ..
+    } = request;
     if resolver.is_local_callable_binding(caller, cand.func) {
         let added = stitch_lexical_capture_reads(
             caller,
@@ -1810,10 +1870,29 @@ fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: Reso
             cand.edge_kind,
             ws,
         );
-        if let Some(stats) = &mut stats {
+        if let Some(stats) = stats.as_deref_mut() {
             stats.inter_edges = stats.inter_edges.saturating_add(added);
         }
     }
+}
+
+fn stitch_candidate_return_outputs(
+    request: ResolvedCandidateStitch<'_>,
+    ws: &mut IdgWorkspace,
+    return_field_sites: &mut ReturnFieldSiteQueue,
+    scalar_return_sites: &mut ScalarReturnSiteQueue,
+    passthrough_field_copy_sites: &mut Vec<FieldCopySite>,
+    stats: &mut Option<&mut StitchStats>,
+) {
+    let ResolvedCandidateStitch {
+        caller,
+        caller_seg,
+        caller_remap,
+        site,
+        candidate: cand,
+        endpoints,
+        ..
+    } = request;
     // Emit `callee.Return → caller.CallRet(site)`.
     let caller_call_ret = caller_remap.get(site.call_ret_node);
     if let Some(callee_return) = endpoints.return_node {
@@ -1826,7 +1905,7 @@ fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: Reso
                 cand.edge_kind,
             );
             place_inter_edge(endpoints.segment, caller_seg, edge, ws);
-            if let Some(stats) = &mut stats {
+            if let Some(stats) = stats.as_deref_mut() {
                 stats.inter_edges = stats.inter_edges.saturating_add(1);
             }
         }
@@ -1926,6 +2005,27 @@ fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: Reso
             }
         }
     }
+}
+
+fn stitch_candidate_constructor_receiver_effects(
+    request: ResolvedCandidateStitch<'_>,
+    is_ancestor_dispatch: bool,
+    receiver_mutation_sites: &mut Vec<Arc<ReceiverMutationStitch>>,
+) {
+    let ResolvedCandidateStitch {
+        caller,
+        caller_seg,
+        site,
+        caller_params,
+        caller_is_constructor,
+        caller_receiver_param_index,
+        caller_implicit_receiver_bases,
+        caller_receiver_names,
+        resolver,
+        candidate: cand,
+        endpoints,
+        ..
+    } = request;
     if matches!(site.call_kind, CallKind::Method | CallKind::Constructor)
         && resolver.is_constructor_func(cand.func)
     {
@@ -1975,6 +2075,23 @@ fn stitch_resolved_candidate(request: ResolvedCandidateStitch<'_>, outputs: Reso
             }
         }
     }
+}
+
+fn stitch_candidate_constructor_result(
+    request: ResolvedCandidateStitch<'_>,
+    ws: &mut IdgWorkspace,
+    constructor_return_sites: &mut ConstructorReturnSiteQueue,
+) {
+    let ResolvedCandidateStitch {
+        caller,
+        caller_seg,
+        caller_remap,
+        site,
+        resolver,
+        candidate: cand,
+        endpoints,
+        ..
+    } = request;
     if resolver.is_constructor_func(cand.func) {
         let caller_call_ret = caller_remap.get(site.call_ret_node);
         if !caller_call_ret.is_sentinel() {
