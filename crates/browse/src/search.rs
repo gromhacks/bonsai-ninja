@@ -396,22 +396,7 @@ fn display_imports_for_search(
     ws: &Workspace,
     file: bonsai_common::FileId,
 ) -> Vec<bonsai_lang_api::ImportSpec> {
-    if let Some(imports) = ws
-        .db()
-        .import_index(file)
-        .map(|index| index.imports.clone())
-        .filter(|imports| !imports.is_empty())
-    {
-        return imports;
-    }
-    let Some(imports) = ws.db().parse(file).ok().and_then(|parsed| {
-        ws.vfs().snapshot(file).ok().map(|snapshot| {
-            bonsai_lang_api::kit::extract_generic_imports(&parsed.tree, file, snapshot.text.as_bytes())
-        })
-    }) else {
-        return Vec::new();
-    };
-    imports
+    ws.db().imports_for(file)
 }
 
 /// Lower rank = more informative, so wins when dedupping a
@@ -749,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn search_display_imports_fall_back_to_generic_syntax_when_adapter_index_is_empty() {
+    fn search_imports_respect_authoritative_adapter_index() {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = "from os import system as run_command\n";
         std::fs::write(dir.path().join("app.py"), source).expect("write fixture");
@@ -767,24 +752,21 @@ mod tests {
                 .expect("adapter import index")
                 .imports
                 .is_empty(),
-            "test fixture must exercise the display fallback, not adapter imports"
+            "test fixture must provide an authoritative empty adapter index"
         );
 
         let canonical =
             search_canonical(&ws, "run_command", &filters, usize::MAX, None).expect("canonical search");
         let retrieved = search(&ws, "run_command", &filters, usize::MAX).expect("retrieval search");
 
-        for hits in [&canonical, &retrieved] {
-            assert_eq!(hits.len(), 1, "search should render one fallback import row");
-            assert_eq!(hits[0].kind, "import-alias");
-            assert_eq!(hits[0].name, "os");
-            assert_eq!(hits[0].context.as_deref(), Some("os as run_command"));
-            assert!(hits[0].code.contains("from os import system as run_command"));
-        }
+        assert!(
+            canonical.is_empty(),
+            "canonical search must not override an adapter's authoritative empty import index"
+        );
         assert_eq!(
             signatures(&retrieved),
             signatures(&canonical),
-            "retrieval candidates must hydrate through the same fallback import row"
+            "retrieval search must hydrate through the same canonical import facts"
         );
     }
 

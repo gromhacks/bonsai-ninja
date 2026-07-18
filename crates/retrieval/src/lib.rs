@@ -1323,25 +1323,7 @@ where
 }
 
 fn import_specs_for_retrieval(ws: &Workspace, file: bonsai_common::FileId) -> Vec<ImportSpec> {
-    if let Some(imports) = ws
-        .db()
-        .import_index(file)
-        .map(|index| index.imports.clone())
-        .filter(|imports| !imports.is_empty())
-    {
-        return imports;
-    }
-    generic_import_specs_for_file(ws, file).unwrap_or_default()
-}
-
-fn generic_import_specs_for_file(ws: &Workspace, file: bonsai_common::FileId) -> Option<Vec<ImportSpec>> {
-    let parsed = ws.db().parse(file).ok()?;
-    let snapshot = ws.vfs().snapshot(file).ok()?;
-    Some(bonsai_lang_api::kit::extract_generic_imports(
-        &parsed.tree,
-        file,
-        snapshot.text.as_bytes(),
-    ))
+    ws.db().imports_for(file)
 }
 
 fn push_import_doc(
@@ -2546,7 +2528,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_import_fallback_extracts_renamed_import_candidates() {
+    fn canonical_import_query_extracts_renamed_import_candidates() {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = "from os import system as run_command\n";
         std::fs::write(dir.path().join("app.py"), source).expect("write source");
@@ -2554,7 +2536,7 @@ mod tests {
         ws.ingest_dir(dir.path()).expect("ingest");
         let file = ws.vfs().all_files().into_iter().next().expect("fixture file");
 
-        let imports = generic_import_specs_for_file(&ws, file).expect("generic imports");
+        let imports = ws.db().imports_for(file);
 
         assert!(
             imports.iter().any(|spec| {
@@ -2562,7 +2544,7 @@ mod tests {
                     && spec.alias.as_deref() == Some("run_command")
                     && spec.original_name.as_deref() == Some("system")
             }),
-            "generic fallback must preserve module, alias, and original symbol metadata: {imports:?}"
+            "canonical import facts must preserve module, alias, and original symbol metadata: {imports:?}"
         );
     }
 

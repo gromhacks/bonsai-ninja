@@ -1686,26 +1686,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
 
             // Imports (fallback to generic scan when the adapter didn't provide any).
             if want("import") {
-                let imports_vec = ws
-                    .db()
-                    .import_index(file)
-                    .map(|i| i.imports.clone())
-                    .filter(|i| !i.is_empty())
-                    .unwrap_or_else(|| {
-                        ws.db()
-                            .parse(file)
-                            .ok()
-                            .and_then(|parsed| {
-                                ws.vfs().snapshot(file).ok().map(|snap| {
-                                    bonsai_lang_api::kit::extract_generic_imports(
-                                        &parsed.tree,
-                                        file,
-                                        snap.text.as_bytes(),
-                                    )
-                                })
-                            })
-                            .unwrap_or_default()
-                    });
+                let imports_vec = ws.db().imports_for(file);
                 for imp in &imports_vec {
                     let alias_match = imp
                         .alias
