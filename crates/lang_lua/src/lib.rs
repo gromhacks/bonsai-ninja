@@ -638,7 +638,7 @@ fn collect_lua_module_export_table(tree: &Tree, src: &[u8]) -> Option<String> {
     if returned_exprs.len() != 1 {
         return None;
     }
-    let only_expr = returned_exprs.pop().expect("single expression");
+    let only_expr = returned_exprs.pop()?;
     // Computed returns (`return setmetatable(...)`) are skipped — only
     // a bare identifier names the module-table.
     if only_expr.kind() != "identifier" {

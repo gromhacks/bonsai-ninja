@@ -228,7 +228,9 @@ pub(crate) fn value_bearing_identifier_text(text: &str) -> String {
         }
 
         // No operator matched here — copy one char verbatim and advance.
-        let ch = text[cursor..].chars().next().expect("valid char boundary");
+        let Some(ch) = text[cursor..].chars().next() else {
+            break;
+        };
         sanitised.push(ch);
         cursor += ch.len_utf8();
     }
@@ -274,7 +276,9 @@ fn skip_balanced_parens(text: &str, open_pos: usize) -> usize {
     let mut escaped = false;
     let mut cursor = open_pos;
     while cursor < text.len() {
-        let ch = text[cursor..].chars().next().expect("valid char boundary");
+        let Some(ch) = text[cursor..].chars().next() else {
+            break;
+        };
         cursor += ch.len_utf8();
         if let Some(open_quote) = quote {
             // Inside a string literal — track escapes and the closing quote.

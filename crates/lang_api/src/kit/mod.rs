@@ -3657,7 +3657,9 @@ fn strip_value_free_operator_operands(text: &str) -> String {
                 continue;
             }
         }
-        let ch = text[cursor..].chars().next().expect("valid char boundary");
+        let Some(ch) = text[cursor..].chars().next() else {
+            break;
+        };
         out.push(ch);
         cursor += ch.len_utf8();
     }

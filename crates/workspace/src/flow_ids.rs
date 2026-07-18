@@ -25,7 +25,7 @@ use bonsai_common::{workspace_bonsai_dir, FuncId, SymbolId, MATCHER_POLICY_FINGE
 use bonsai_db::AnalyzerDb;
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_lang_api::DeclKind;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -594,16 +594,16 @@ impl FlowIdCache {
             todo.len().saturating_mul(MAX_LABELS_PER_FUNC),
         )
         .map_err(map_factstore_io)?;
-        let written_keys = std::sync::Mutex::new(AHashSet::<u64>::default());
-        let write_error = std::sync::Mutex::new(None::<std::io::Error>);
+        let written_keys = Mutex::new(AHashSet::<u64>::default());
+        let write_error = Mutex::new(None::<std::io::Error>);
         for (func, entry) in memory_entries {
             let key = u64::from(func.raw());
             let payload = encode_flow_id_entry(&entry);
             writer.add_owned(key, 0, payload).map_err(map_factstore_io)?;
-            written_keys.lock().expect("written keys lock").insert(key);
+            written_keys.lock().insert(key);
         }
         todo.par_iter().for_each(|&f| {
-            if write_error.lock().expect("write error lock").is_some() {
+            if write_error.lock().is_some() {
                 return;
             }
             let options = FlowIdLabelOptions::default();
@@ -617,28 +617,28 @@ impl FlowIdCache {
             let payload = encode_flow_id_entry(&entry);
             let key = u64::from(f.raw());
             if let Err(err) = writer.add_owned(key, 0, payload) {
-                let mut first_error = write_error.lock().expect("write error lock");
+                let mut first_error = write_error.lock();
                 if first_error.is_none() {
                     *first_error = Some(map_factstore_io(err));
                 }
             } else {
-                written_keys.lock().expect("written keys lock").insert(key);
+                written_keys.lock().insert(key);
             }
             on_each_done(f);
         });
-        if let Some(error) = write_error.lock().expect("write error lock").take() {
+        if let Some(error) = write_error.lock().take() {
             return Err(error);
         }
         if let Some(reader) = disk_clone {
             for item in reader.iter() {
                 let (key, hit) = item.map_err(map_factstore_io)?;
-                if written_keys.lock().expect("written keys lock").contains(&key) {
+                if written_keys.lock().contains(&key) {
                     continue;
                 }
                 writer
                     .add(key, hit.body_hash, &hit.payload)
                     .map_err(map_factstore_io)?;
-                written_keys.lock().expect("written keys lock").insert(key);
+                written_keys.lock().insert(key);
             }
         }
         let written = writer.finish().map_err(map_factstore_io)?;

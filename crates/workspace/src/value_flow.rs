@@ -21,7 +21,7 @@ use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_lang_api::DeclKind;
 use bonsai_taint::{value_flow_for_function_with_caches, InterTaintCaches, InterTaintConfig};
 pub use bonsai_taint::{ValueFlowEdge, ValueFlowGraph, ValueFlowNode, ValueFlowNodeKind};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -356,8 +356,8 @@ impl ValueFlowCache {
             todo.len().saturating_mul(64),
         )
         .map_err(map_factstore_io)?;
-        let written_keys = std::sync::Mutex::new(AHashSet::<FuncId>::default());
-        let write_error = std::sync::Mutex::new(None::<std::io::Error>);
+        let written_keys = Mutex::new(AHashSet::<FuncId>::default());
+        let write_error = Mutex::new(None::<std::io::Error>);
         for (func, graph, returning) in memory_entries {
             let entry = ValueFlowEntry {
                 graph: (*graph).clone(),
@@ -367,10 +367,10 @@ impl ValueFlowCache {
             writer
                 .add_owned(u64::from(func.raw()), RESERVED_BODY_HASH, payload)
                 .map_err(map_factstore_io)?;
-            written_keys.lock().expect("written keys lock").insert(func);
+            written_keys.lock().insert(func);
         }
         todo.par_iter().for_each(|&f| {
-            if write_error.lock().expect("write error lock").is_some() {
+            if write_error.lock().is_some() {
                 return;
             }
             let graph = value_flow_for_function_with_caches(f, db, &InterTaintConfig::default(), caches);
@@ -381,15 +381,15 @@ impl ValueFlowCache {
             };
             let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
             if let Err(err) = writer.add_owned(u64::from(f.raw()), RESERVED_BODY_HASH, payload) {
-                let mut first_error = write_error.lock().expect("write error lock");
+                let mut first_error = write_error.lock();
                 if first_error.is_none() {
                     *first_error = Some(map_factstore_io(err));
                 }
             } else {
-                written_keys.lock().expect("written keys lock").insert(f);
+                written_keys.lock().insert(f);
             }
         });
-        if let Some(error) = write_error.lock().expect("write error lock").take() {
+        if let Some(error) = write_error.lock().take() {
             // Dropping the writer closes the bounded channel and joins its
             // worker without publishing the temporary sidecar.  Never turn a
             // partial parallel prewarm into a cache that looks complete.
@@ -405,7 +405,7 @@ impl ValueFlowCache {
                         "value-flow sidecar key out of FuncId u32 range",
                     )
                 })?);
-                if written_keys.lock().expect("written keys lock").contains(&func) {
+                if written_keys.lock().contains(&func) {
                     continue;
                 }
                 let entry = decode_value_flow_entry(&hit.payload, &pool)
@@ -414,7 +414,7 @@ impl ValueFlowCache {
                 writer
                     .add_owned(u64::from(func.raw()), RESERVED_BODY_HASH, payload)
                     .map_err(map_factstore_io)?;
-                written_keys.lock().expect("written keys lock").insert(func);
+                written_keys.lock().insert(func);
             }
         }
         let written = writer.finish().map_err(map_factstore_io)?;
