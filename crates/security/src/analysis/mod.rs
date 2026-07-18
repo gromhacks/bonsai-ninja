@@ -843,6 +843,269 @@ pub struct SourceAnalysisReport {
 const SOURCE_ANALYSIS_LINEAGE_RENDER_HOPS: usize = 6;
 const SOURCE_ANALYSIS_LINEAGE_RENDER_PATHS: usize = 24;
 
+struct SelectedTaintRules<'a> {
+    sources: Vec<&'a Rule>,
+    sinks: Vec<&'a Rule>,
+    sanitizers: Vec<&'a Rule>,
+    sink_rule_count: usize,
+    factory_returns: Arc<crate::matcher::FactoryReturns>,
+}
+
+fn select_taint_analysis_rules<'a>(
+    ws: &Workspace,
+    pack: &'a Rulepack,
+    options: &TaintAnalysisOptions,
+) -> Result<SelectedTaintRules<'a>> {
+    let mut sources = select_rules(pack, RuleKind::Source, None, options.source.as_deref(), |rule| {
+        source_rule_matches_filters(rule, options.trust.as_deref(), options.category.as_deref(), None)
+    })?;
+    let mut sinks = select_rules(pack, RuleKind::Sink, None, options.sink.as_deref(), |rule| {
+        options
+            .severity
+            .is_none_or(|minimum| rule.severity.is_some_and(|severity| severity >= minimum))
+            && options
+                .tag
+                .as_deref()
+                .is_none_or(|tag| rule.tag.as_deref() == Some(tag))
+    })?;
+    let mut sanitizers = select_rules(pack, RuleKind::Sanitizer, None, None, |_| true)?;
+
+    // `returns_type` rules are typing declarations for factory results. They
+    // enrich AST-derived receiver facts but never produce findings themselves.
+    sources.retain(|rule| rule.returns_type.is_none());
+    sinks.retain(|rule| rule.returns_type.is_none());
+    sanitizers.retain(|rule| rule.returns_type.is_none());
+    filter_rules_to_workspace_languages(ws, &mut sources);
+    filter_rules_to_workspace_languages(ws, &mut sinks);
+    filter_rules_to_workspace_languages(ws, &mut sanitizers);
+
+    Ok(SelectedTaintRules {
+        sink_rule_count: sinks.len(),
+        factory_returns: crate::matcher::build_factory_returns(&pack.all_rules()),
+        sources,
+        sinks,
+        sanitizers,
+    })
+}
+
+struct TaintFindingFinalization<'a> {
+    ws: &'a Workspace,
+    sink_hits: &'a [RuleMatch],
+    pattern_sink_hits: &'a [RuleMatch],
+    pack: &'a Rulepack,
+    options: &'a TaintAnalysisOptions,
+}
+
+fn finalize_taint_findings<F>(
+    mut findings_raw: Vec<FindingWithChain>,
+    request: TaintFindingFinalization<'_>,
+    on_progress: &mut F,
+) -> Vec<CombinedFindingWithChain>
+where
+    F: FnMut(AnalysisProgress),
+{
+    let TaintFindingFinalization {
+        ws,
+        sink_hits,
+        pattern_sink_hits,
+        pack,
+        options,
+    } = request;
+    extend_implicit_context_findings(&mut findings_raw, sink_hits, pack, ws);
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "finalizing findings",
+        total: 0,
+    });
+    let taint_sink_sites: AHashSet<(String, String, u32, u32)> = findings_raw
+        .iter()
+        .map(|finding| {
+            (
+                finding.finding.sink.rule_id.clone(),
+                finding.finding.sink.file.clone(),
+                finding.finding.sink.line,
+                finding.finding.sink.column,
+            )
+        })
+        .collect();
+    findings_raw.extend(build_pattern_only_findings(
+        ws,
+        pattern_sink_hits,
+        pack,
+        &taint_sink_sites,
+    ));
+    // Sort findings_raw deterministically before grouping. Without
+    // this, AHashSet-driven iteration upstream can flip which
+    // finding becomes a group's primary vs additional source between
+    // back-to-back runs of the same workspace, producing different
+    // `S:` ids each time and breaking the json/sarif coherence
+    // guard. The sort key combines source rule + sink rule + sink
+    // location + finding_id so identical (source-rule, sink-site)
+    // pairs always pick the same primary.
+    findings_raw.sort_by(|a, b| {
+        let af = &a.finding;
+        let bf = &b.finding;
+        af.source
+            .rule_id
+            .cmp(&bf.source.rule_id)
+            .then_with(|| af.sink.rule_id.cmp(&bf.sink.rule_id))
+            .then_with(|| af.sink.file.cmp(&bf.sink.file))
+            .then_with(|| af.sink.line.cmp(&bf.sink.line))
+            .then_with(|| af.sink.column.cmp(&bf.sink.column))
+            .then_with(|| af.finding_id.cmp(&bf.finding_id))
+    });
+    let mut findings = combine_findings_by_source_flow(findings_raw, pack);
+    if let Some(max_precision) = options.max_precision {
+        findings.retain(|combined| finding_precision_within(&combined.finding.precision, max_precision));
+    }
+    if !options.exclude_files.is_empty() || options.exclude_tests {
+        findings.retain(|combined| {
+            !finding_has_excluded_path(
+                ws,
+                &combined.finding,
+                &options.exclude_files,
+                options.exclude_tests,
+            )
+        });
+    }
+    if options.exclude_tests {
+        // Test-path post-filter — catches cross-file flows where one
+        // side wasn't pruned earlier (e.g. prod source → test sink).
+        findings.retain(|combined| !combined.finding.from_test);
+    }
+    if !options.show_sanitized {
+        findings.retain(|combined| combined.finding.status != FindingStatus::Sanitized);
+    }
+    drop_dominated_wrapper_findings(&mut findings);
+    drop_dominated_receiver_projection_findings(&mut findings);
+    // §C cleanup pass: when `--inferred-sources` synthesizes
+    // `entry-point.class_field.inherited` sources for every record/
+    // case-class component, each component reaches the sink through
+    // the same flat container — so a sink that semantically consumes
+    // only the `cmd` component still picks up inferred findings on
+    // sibling components (`this.kind`, `this.user`). Drop those
+    // sibling-attributed findings when (a) a concrete source already
+    // covers the same chain end-to-end, and (b) the inferred source's
+    // field name doesn't appear in any of the sink's `tainted_args`.
+    findings = drop_field_mismatched_inferred_findings(findings);
+    if let Some(flow_id) = options.flow_id.as_deref() {
+        findings.retain(|combined| {
+            combined
+                .finding
+                .representative_flow_id
+                .as_deref()
+                .is_some_and(|candidate| candidate == flow_id)
+        });
+    }
+    // Sort highest-severity-first, then by finding id so two runs
+    // produce identical output ordering.
+    findings.sort_by(|a, b| {
+        b.finding
+            .severity
+            .cmp(&a.finding.severity)
+            .then_with(|| a.finding.sink.rule_id.cmp(&b.finding.sink.rule_id))
+            .then_with(|| a.finding.sink.file.cmp(&b.finding.sink.file))
+            .then_with(|| a.finding.sink.line.cmp(&b.finding.sink.line))
+            .then_with(|| a.finding.sink.column.cmp(&b.finding.sink.column))
+            .then_with(|| {
+                source_reporting_rank(pack, &a.finding.source)
+                    .cmp(&source_reporting_rank(pack, &b.finding.source))
+            })
+            .then_with(|| a.finding.finding_id.cmp(&b.finding.finding_id))
+    });
+    on_progress(AnalysisProgress::PhaseFinished);
+    findings
+}
+
+fn hydrate_taint_flow_evidence<F>(
+    ws: &Workspace,
+    findings: &mut [CombinedFindingWithChain],
+    attach: bool,
+    on_progress: &mut F,
+) where
+    F: FnMut(AnalysisProgress),
+{
+    if attach {
+        // Embed per-hop source bodies so JSON/SARIF carry the same code the text
+        // view renders. Done last, on surviving findings only, so filtered-out
+        // findings never pay the VFS read.
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "attaching flow evidence",
+            total: findings.len() as u64,
+        });
+        let mut flow_body_cache = crate::flow_evidence::FlowBodyCache::new(ws);
+        for combined in findings.iter_mut() {
+            combined.finding.hops = flow_body_cache.build_flow_bodies(
+                &combined.chain_funcs,
+                &combined.finding.source,
+                &combined.finding.taint_path,
+                crate::flow_evidence::FlowRole::Sink,
+            );
+            on_progress(AnalysisProgress::PhaseTicked);
+        }
+        on_progress(AnalysisProgress::PhaseFinished);
+    } else {
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "skipping bulk flow evidence",
+            total: 0,
+        });
+        on_progress(AnalysisProgress::PhaseFinished);
+    }
+}
+
+struct TaintReportCompletion<'a> {
+    ws: &'a Workspace,
+    scan_files: &'a [FileId],
+    resolution: Option<&'a ResolutionCoverage>,
+    unattributed_source_matches: usize,
+    unattributed_sink_matches: usize,
+    source_rule_count: usize,
+    sink_rule_count: usize,
+    sanitizer_rule_count: usize,
+}
+
+fn finish_taint_analysis_report(
+    findings: Vec<CombinedFindingWithChain>,
+    completion: TaintReportCompletion<'_>,
+) -> TaintAnalysisReport {
+    let TaintReportCompletion {
+        ws,
+        scan_files,
+        resolution,
+        unattributed_source_matches,
+        unattributed_sink_matches,
+        source_rule_count,
+        sink_rule_count,
+        sanitizer_rule_count,
+    } = completion;
+    let runtime_disabled_rules = crate::matcher::drain_runtime_disabled_rules();
+    let mut analysis_incomplete_reasons: BTreeSet<String> =
+        taint_analysis_incomplete_reasons(ws, scan_files, &findings, resolution)
+            .into_iter()
+            .collect();
+    if unattributed_source_matches > 0 {
+        analysis_incomplete_reasons.insert(format!(
+            "unattributed-source-matches:{unattributed_source_matches}"
+        ));
+    }
+    if unattributed_sink_matches > 0 {
+        analysis_incomplete_reasons.insert(format!("unattributed-sink-matches:{unattributed_sink_matches}"));
+    }
+    if !runtime_disabled_rules.is_empty() {
+        analysis_incomplete_reasons
+            .insert(format!("runtime-disabled-rules:{}", runtime_disabled_rules.len()));
+    }
+    let analysis_incomplete_reasons: Vec<String> = analysis_incomplete_reasons.into_iter().collect();
+    TaintAnalysisReport {
+        findings,
+        source_rule_count,
+        sink_rule_count,
+        sanitizer_rule_count,
+        analysis_complete: analysis_incomplete_reasons.is_empty(),
+        analysis_incomplete_reasons,
+        runtime_disabled_rules,
+    }
+}
+
 /// Top-level taint analysis entry point. Combines source / sink /
 /// sanitizer matching with interprocedural taint propagation and
 /// returns the assembled findings. No progress reporting — see the
@@ -901,29 +1164,13 @@ where
     let _taint_analysis_guard = ws.lock_taint_analysis();
     let _ = crate::matcher::drain_runtime_disabled_rules();
     let options = options.semantic_precision_only();
-    let mut sources = select_rules(pack, RuleKind::Source, None, options.source.as_deref(), |r| {
-        source_rule_matches_filters(r, options.trust.as_deref(), options.category.as_deref(), None)
-    })?;
-    let mut sinks = select_rules(pack, RuleKind::Sink, None, options.sink.as_deref(), |r| {
-        options
-            .severity
-            .is_none_or(|min| r.severity.is_some_and(|s| s >= min))
-            && options.tag.as_deref().is_none_or(|t| r.tag.as_deref() == Some(t))
-    })?;
-    let mut sanitizers = select_rules(pack, RuleKind::Sanitizer, None, None, |_| true)?;
-    // `returns_type` rules are typing-only: they declare a factory
-    // method's return type for receiver-typing and must not themselves
-    // produce findings. They are still read (from the full pack) by
-    // `build_factory_returns` below. No-op until the pack ships such
-    // rules.
-    sources.retain(|r| r.returns_type.is_none());
-    sinks.retain(|r| r.returns_type.is_none());
-    sanitizers.retain(|r| r.returns_type.is_none());
-    filter_rules_to_workspace_languages(ws, &mut sources);
-    filter_rules_to_workspace_languages(ws, &mut sinks);
-    filter_rules_to_workspace_languages(ws, &mut sanitizers);
-    let selected_sink_rule_count = sinks.len();
-    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
+    let SelectedTaintRules {
+        sources,
+        mut sinks,
+        mut sanitizers,
+        sink_rule_count: selected_sink_rule_count,
+        factory_returns,
+    } = select_taint_analysis_rules(ws, pack, &options)?;
 
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, options.exclude_tests);
     let total_files = scan_files.len() as u64;
@@ -1134,164 +1381,33 @@ where
         factory_returns: &factory_returns,
         on_progress: &mut on_progress,
     });
-    let mut findings_raw = chain_build.findings;
-    extend_implicit_context_findings(&mut findings_raw, &sink_hits, pack, ws);
-    on_progress(AnalysisProgress::PhaseStarted {
-        label: "finalizing findings",
-        total: 0,
-    });
-    let taint_sink_sites: AHashSet<(String, String, u32, u32)> = findings_raw
-        .iter()
-        .map(|finding| {
-            (
-                finding.finding.sink.rule_id.clone(),
-                finding.finding.sink.file.clone(),
-                finding.finding.sink.line,
-                finding.finding.sink.column,
-            )
-        })
-        .collect();
-    findings_raw.extend(build_pattern_only_findings(
-        ws,
-        &pattern_sink_hits,
-        pack,
-        &taint_sink_sites,
-    ));
-    // Sort findings_raw deterministically before grouping. Without
-    // this, AHashSet-driven iteration upstream can flip which
-    // finding becomes a group's primary vs additional source between
-    // back-to-back runs of the same workspace, producing different
-    // `S:` ids each time and breaking the json/sarif coherence
-    // guard. The sort key combines source rule + sink rule + sink
-    // location + finding_id so identical (source-rule, sink-site)
-    // pairs always pick the same primary.
-    findings_raw.sort_by(|a, b| {
-        let af = &a.finding;
-        let bf = &b.finding;
-        af.source
-            .rule_id
-            .cmp(&bf.source.rule_id)
-            .then_with(|| af.sink.rule_id.cmp(&bf.sink.rule_id))
-            .then_with(|| af.sink.file.cmp(&bf.sink.file))
-            .then_with(|| af.sink.line.cmp(&bf.sink.line))
-            .then_with(|| af.sink.column.cmp(&bf.sink.column))
-            .then_with(|| af.finding_id.cmp(&bf.finding_id))
-    });
-    let mut findings = combine_findings_by_source_flow(findings_raw, pack);
-    if let Some(max_precision) = options.max_precision {
-        findings.retain(|combined| finding_precision_within(&combined.finding.precision, max_precision));
-    }
-    if !options.exclude_files.is_empty() || options.exclude_tests {
-        findings.retain(|combined| {
-            !finding_has_excluded_path(
-                ws,
-                &combined.finding,
-                &options.exclude_files,
-                options.exclude_tests,
-            )
-        });
-    }
-    if options.exclude_tests {
-        // Test-path post-filter — catches cross-file flows where one
-        // side wasn't pruned earlier (e.g. prod source → test sink).
-        findings.retain(|combined| !combined.finding.from_test);
-    }
-    if !options.show_sanitized {
-        findings.retain(|combined| combined.finding.status != FindingStatus::Sanitized);
-    }
-    drop_dominated_wrapper_findings(&mut findings);
-    drop_dominated_receiver_projection_findings(&mut findings);
-    // §C cleanup pass: when `--inferred-sources` synthesizes
-    // `entry-point.class_field.inherited` sources for every record/
-    // case-class component, each component reaches the sink through
-    // the same flat container — so a sink that semantically consumes
-    // only the `cmd` component still picks up inferred findings on
-    // sibling components (`this.kind`, `this.user`). Drop those
-    // sibling-attributed findings when (a) a concrete source already
-    // covers the same chain end-to-end, and (b) the inferred source's
-    // field name doesn't appear in any of the sink's `tainted_args`.
-    findings = drop_field_mismatched_inferred_findings(findings);
-    if let Some(flow_id) = options.flow_id.as_deref() {
-        findings.retain(|combined| {
-            combined
-                .finding
-                .representative_flow_id
-                .as_deref()
-                .is_some_and(|candidate| candidate == flow_id)
-        });
-    }
-    // Sort highest-severity-first, then by finding id so two runs
-    // produce identical output ordering.
-    findings.sort_by(|a, b| {
-        b.finding
-            .severity
-            .cmp(&a.finding.severity)
-            .then_with(|| a.finding.sink.rule_id.cmp(&b.finding.sink.rule_id))
-            .then_with(|| a.finding.sink.file.cmp(&b.finding.sink.file))
-            .then_with(|| a.finding.sink.line.cmp(&b.finding.sink.line))
-            .then_with(|| a.finding.sink.column.cmp(&b.finding.sink.column))
-            .then_with(|| {
-                source_reporting_rank(pack, &a.finding.source)
-                    .cmp(&source_reporting_rank(pack, &b.finding.source))
-            })
-            .then_with(|| a.finding.finding_id.cmp(&b.finding.finding_id))
-    });
-    on_progress(AnalysisProgress::PhaseFinished);
+    let mut findings = finalize_taint_findings(
+        chain_build.findings,
+        TaintFindingFinalization {
+            ws,
+            sink_hits: &sink_hits,
+            pattern_sink_hits: &pattern_sink_hits,
+            pack,
+            options: &options,
+        },
+        &mut on_progress,
+    );
 
-    if options.attach_flow_evidence {
-        // Embed per-hop source bodies so JSON/SARIF carry the same code the text
-        // view renders. Done last, on surviving findings only, so filtered-out
-        // findings never pay the VFS read.
-        on_progress(AnalysisProgress::PhaseStarted {
-            label: "attaching flow evidence",
-            total: findings.len() as u64,
-        });
-        let mut flow_body_cache = crate::flow_evidence::FlowBodyCache::new(ws);
-        for combined in &mut findings {
-            combined.finding.hops = flow_body_cache.build_flow_bodies(
-                &combined.chain_funcs,
-                &combined.finding.source,
-                &combined.finding.taint_path,
-                crate::flow_evidence::FlowRole::Sink,
-            );
-            on_progress(AnalysisProgress::PhaseTicked);
-        }
-        on_progress(AnalysisProgress::PhaseFinished);
-    } else {
-        on_progress(AnalysisProgress::PhaseStarted {
-            label: "skipping bulk flow evidence",
-            total: 0,
-        });
-        on_progress(AnalysisProgress::PhaseFinished);
-    }
+    hydrate_taint_flow_evidence(ws, &mut findings, options.attach_flow_evidence, &mut on_progress);
 
-    let runtime_disabled_rules = crate::matcher::drain_runtime_disabled_rules();
-    let mut analysis_incomplete_reasons: BTreeSet<String> =
-        taint_analysis_incomplete_reasons(ws, &scan_files, &findings, chain_build.resolution.as_ref())
-            .into_iter()
-            .collect();
-    if unattributed_source_matches > 0 {
-        analysis_incomplete_reasons.insert(format!(
-            "unattributed-source-matches:{unattributed_source_matches}"
-        ));
-    }
-    if unattributed_sink_matches > 0 {
-        analysis_incomplete_reasons.insert(format!("unattributed-sink-matches:{unattributed_sink_matches}"));
-    }
-    if !runtime_disabled_rules.is_empty() {
-        analysis_incomplete_reasons
-            .insert(format!("runtime-disabled-rules:{}", runtime_disabled_rules.len()));
-    }
-    let analysis_incomplete_reasons: Vec<String> = analysis_incomplete_reasons.into_iter().collect();
-    Ok(TaintAnalysisReport {
+    Ok(finish_taint_analysis_report(
         findings,
-        source_rule_count: sources.len(),
-        sink_rule_count: selected_sink_rule_count,
-        sanitizer_rule_count: sanitizers.len(),
-        analysis_complete: analysis_incomplete_reasons.is_empty(),
-        analysis_incomplete_reasons,
-        runtime_disabled_rules,
-    })
+        TaintReportCompletion {
+            ws,
+            scan_files: &scan_files,
+            resolution: chain_build.resolution.as_ref(),
+            unattributed_source_matches,
+            unattributed_sink_matches,
+            source_rule_count: sources.len(),
+            sink_rule_count: selected_sink_rule_count,
+            sanitizer_rule_count: sanitizers.len(),
+        },
+    ))
 }
 
 /// Top-level source-only enumeration. Returns every source rule match
