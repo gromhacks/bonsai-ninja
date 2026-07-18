@@ -183,6 +183,28 @@ impl CallGraph {
         self.edges.push(edge);
     }
 
+    /// Build adjacency indexes over an already de-duplicated edge vector.
+    ///
+    /// The resolved-callgraph compiler first builds one `CallGraph` per
+    /// source file, so [`Self::add_edge`] has already removed overlapping
+    /// adapter facts for every possible duplicate key: that key includes the
+    /// source `FileId`, and therefore cannot collide across file partitions.
+    /// Reusing the flattened edge vector avoids both a second edge allocation
+    /// and a second, potentially quadratic, per-caller duplicate scan.
+    fn from_unique_edges(edges: Vec<CallEdge>) -> Self {
+        let mut outgoing: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
+        let mut incoming: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
+        for (idx, edge) in edges.iter().enumerate() {
+            outgoing.entry(edge.from).or_default().push(idx);
+            incoming.entry(edge.to).or_default().push(idx);
+        }
+        Self {
+            edges,
+            outgoing,
+            incoming,
+        }
+    }
+
     /// Edges where `func` is the caller.
     pub fn callees(&self, func: FuncId) -> impl Iterator<Item = &CallEdge> {
         self.outgoing
@@ -1070,9 +1092,9 @@ impl ResolvedCallGraph {
             })
             .collect::<Vec<_>>();
         use rayon::prelude::*;
-        let edge_chunks = file_infos
+        let edges = file_infos
             .par_iter()
-            .map(|info| {
+            .flat_map_iter(|info| {
                 let path_lookup = |file| context.file_paths.get(&file).cloned();
                 let language_lookup = |file| context.file_languages.get(&file).copied().flatten();
                 let mut method_candidate_cache =
@@ -1129,13 +1151,9 @@ impl ResolvedCallGraph {
                 local_cg.edges
             })
             .collect::<Vec<_>>();
-        let mut cg = CallGraph::new();
-        for edges in edge_chunks {
-            for edge in edges {
-                cg.add_edge(edge);
-            }
+        Self {
+            cg: CallGraph::from_unique_edges(edges),
         }
-        Self { cg }
     }
 
     fn build_with_file_info_and_super_tokens_scoped<F, T, P, L, G, S, B>(
@@ -1153,129 +1171,32 @@ impl ResolvedCallGraph {
         B: Fn(FileId) -> bool,
     {
         let CallGraphFileSemantics {
-            aliases: mut aliases_for_file,
-            alias_targets: mut alias_targets_for_file,
+            aliases: aliases_for_file,
+            alias_targets: alias_targets_for_file,
             path: path_for_file,
             export_aliases: export_aliases_for_file,
             language: language_for_file,
             super_receiver_tokens: super_receiver_tokens_for_file,
             bare_call_constructor_syntax: bare_call_constructor_syntax_for_file,
         } = file_semantics;
-        let alias_index = WorkspaceAliasIndex::build(global);
-        let callable_index = WorkspaceCallableBindingIndex::build(global);
-        let all_files = global.all_files().collect::<Vec<_>>();
-        let files = if let Some(included_files) = included_files {
-            let mut files = included_files.to_vec();
-            files.sort_by_key(|file| file.raw());
-            files.dedup();
-            files
-        } else {
-            all_files.clone()
-        };
-        let file_paths: AHashMap<FileId, String> = all_files
-            .iter()
-            .filter_map(|&file| path_for_file(file).map(|path| (file, path)))
-            .collect();
-        let file_path_parts: AHashMap<FileId, Vec<String>> = file_paths
-            .iter()
-            .map(|(&file, path)| (file, module_path_parts(path)))
-            .collect();
-        let build_targets =
-            BuildTargetIndex::from_file_paths(file_paths.iter().map(|(&file, path)| (file, path.clone())));
-        let file_languages: AHashMap<FileId, Option<&'static str>> = all_files
-            .iter()
-            .map(|&file| (file, language_for_file(file)))
-            .collect();
-        struct FileCallgraphInfo {
-            file: FileId,
-            aliases: AHashMap<String, String>,
-            alias_targets: AHashMap<String, AliasTarget>,
-            export_aliases: &'static [&'static str],
-            super_receiver_tokens: &'static [&'static str],
-            language: Option<&'static str>,
-            bare_call_constructor_syntax: bool,
-        }
-        let file_infos = files
-            .into_iter()
-            .map(|file| FileCallgraphInfo {
-                file,
-                aliases: aliases_for_file(file),
-                alias_targets: alias_targets_for_file(file),
-                export_aliases: export_aliases_for_file(file),
-                super_receiver_tokens: super_receiver_tokens_for_file(file),
-                language: language_for_file(file),
-                bare_call_constructor_syntax: bare_call_constructor_syntax_for_file(file),
-            })
-            .collect::<Vec<_>>();
-        let peer_class_index = build_shared_peer_class_index(global);
-        let constructor_index = build_constructor_index(global);
-        use rayon::prelude::*;
-        let edge_chunks = file_infos
-            .par_iter()
-            .map(|info| {
-                let path_lookup = |file| file_paths.get(&file).cloned();
-                let language_lookup = |file| file_languages.get(&file).copied().flatten();
-                let mut method_candidate_cache =
-                    MethodCandidateCache::with_peer_class_index(peer_class_index.clone());
-                let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
-                let mut callable_target_cache = CallableTargetCache::default();
-                let mut local_cg = CallGraph::new();
-                for decl in global.decls_in(info.file) {
-                    if !matches!(
-                        decl.kind,
-                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                    ) {
-                        continue;
-                    }
-                    let from = FuncId::new(decl.symbol.raw());
-                    let alias_targets = alias_targets_for_decl(&info.alias_targets, decl);
-                    let local_bindings = collect_local_callable_bindings_with_alias_index(
-                        &decl.flow_events,
-                        global,
-                        decl,
-                        &alias_targets,
-                        &alias_index,
-                        Some(&callable_index),
-                    );
-                    let resolution = CallResolutionContext {
-                        from,
-                        caller_decl: decl,
-                        global,
-                        aliases: &info.aliases,
-                        alias_targets: &alias_targets,
-                        local_bindings: &local_bindings,
-                        path_for_file: &path_lookup,
-                        file_path_parts: &file_path_parts,
-                        caller_export_aliases: info.export_aliases,
-                        caller_super_receiver_tokens: info.super_receiver_tokens,
-                        caller_language: info.language,
-                        bare_call_constructor_syntax: info.bare_call_constructor_syntax,
-                        language_for_file: &language_lookup,
-                        alias_index: &alias_index,
-                        build_targets: &build_targets,
-                        constructor_index: &constructor_index,
-                    };
-                    add_resolved_call_edges(
-                        &decl.flow_events,
-                        &resolution,
-                        &mut CallGraphBuildState {
-                            method_candidate_cache: &mut method_candidate_cache,
-                            workspace_module_cache: &mut workspace_module_cache,
-                            callable_target_cache: &mut callable_target_cache,
-                            graph: &mut local_cg,
-                        },
-                    );
-                }
-                local_cg.edges
-            })
-            .collect::<Vec<_>>();
-        let mut cg = CallGraph::new();
-        for edges in edge_chunks {
-            for edge in edges {
-                cg.add_edge(edge);
-            }
-        }
-        Self { cg }
+        let context = Self::build_context(
+            global,
+            path_for_file,
+            language_for_file,
+            bare_call_constructor_syntax_for_file,
+        );
+        let files = included_files
+            .map(<[FileId]>::to_vec)
+            .unwrap_or_else(|| global.all_files().collect());
+        Self::build_with_file_info_and_super_tokens_for_files_with_context(
+            global,
+            aliases_for_file,
+            alias_targets_for_file,
+            export_aliases_for_file,
+            super_receiver_tokens_for_file,
+            &files,
+            &context,
+        )
     }
 
     /// All `(caller, edge)` pairs that target `func`. Exposes the edge
