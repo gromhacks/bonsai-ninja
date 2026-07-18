@@ -92,22 +92,41 @@ fn decl_type_alias(db: &AnalyzerDb, fn_name: &str, var: &str) -> Option<String> 
 
 #[test]
 fn local_constructor_assignment_infers_receiver_type() {
-    // `conn = ldap3.Connection(server)` should type `conn` as `Connection`
-    // so `receiver_type_in` / `[Type, method]` rules resolve the receiver
-    // semantically instead of relying on a loosened package gate.
+    // A workspace declaration, not identifier casing, proves that the call
+    // constructs `Connection` and therefore types `conn`.
     let db = python_db(
         r#"
-import ldap3
+class Connection:
+    def __init__(self, server):
+        self.server = server
 
 def handler(server, user_input):
-    conn = ldap3.Connection(server)
+    conn = Connection(server)
     return conn.search("dc=example", user_input)
 "#,
     );
     assert_eq!(
         decl_type_alias(&db, "handler", "conn").as_deref(),
         Some("Connection"),
-        "qualified constructor `ldap3.Connection(...)` should infer type `Connection`"
+        "declared constructor `Connection(...)` should infer type `Connection`"
+    );
+}
+
+#[test]
+fn external_class_spelling_does_not_mint_a_type_without_stubs() {
+    let db = python_db(
+        r#"
+import ldap3
+
+def handler(server):
+    conn = ldap3.Connection(server)
+    return conn
+"#,
+    );
+    assert_eq!(
+        decl_type_alias(&db, "handler", "conn"),
+        None,
+        "an unresolved external member needs a stub or rulepack typing fact"
     );
 }
 

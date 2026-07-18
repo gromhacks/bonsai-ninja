@@ -3212,6 +3212,55 @@ fn constructor_call_resolves_by_kind_and_class_parent_not_method_spelling() {
 }
 
 #[test]
+fn receiverless_qualified_factory_constructor_uses_adapter_receiver_type() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let class = decl_with(file, 1, "AuditedRepository", DeclKind::Class, None, Vec::new());
+    let constructor = with_params(
+        decl_with(file, 2, "wrap", DeclKind::Constructor, Some(1), Vec::new()),
+        &["data"],
+    );
+    let repository = decl_with(file, 4, "Repository", DeclKind::Class, None, Vec::new());
+    let repository_constructor = with_params(
+        decl_with(file, 5, "new", DeclKind::Constructor, Some(4), Vec::new()),
+        &["data"],
+    );
+    let caller = decl(
+        file,
+        3,
+        "persist",
+        vec![FlowEvent::Call {
+            span: Span::new(file, 100, 140),
+            name: "AuditedRepository::wrap".to_string(),
+            receiver: None,
+            receiver_types: vec!["AuditedRepository".to_string(), "Repository".to_string()],
+            call_kind: CallKind::Constructor,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: Span::new(file, 130, 138),
+                name: None,
+                value_text: "envelope".to_string(),
+                place: Some("envelope".to_string()),
+                source_names: vec!["envelope".to_string()],
+            }],
+        }],
+    );
+    insert_file(
+        &mut global,
+        file,
+        vec![class, constructor, repository, repository_constructor, caller],
+    );
+
+    let graph = build_graph(&global, |_| Some("rust"));
+    let persist = FuncId::new(global.find_by_name("persist")[0].raw());
+    let constructor = func_id_by_name_and_parent(&global, "wrap", "AuditedRepository");
+    assert_eq!(
+        graph.callees_of(persist).map(|edge| edge.to).collect::<Vec<_>>(),
+        vec![constructor]
+    );
+}
+
+#[test]
 fn receiverless_ast_constructor_call_resolves_named_parent_before_member_lookup() {
     let file = FileId::new(1);
     let mut global = GlobalIndex::new();

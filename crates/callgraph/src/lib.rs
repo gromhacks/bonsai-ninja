@@ -3796,12 +3796,35 @@ fn collect_constructor_targets_for_class_call(
         .with_file_path_lookup(path_for_file);
     let mut class_candidates = Vec::new();
     let mut seen_classes = AHashSet::new();
+    let mut declared_factory_name = None;
+    // `Type::factory(args)` carries two independent compiler facts: the
+    // qualified owner and the declared constructor member. Resolve that
+    // owner before considering adapter-enriched receiver ancestry. The
+    // ancestry is useful for later virtual dispatch, but it must not turn
+    // one construction into every ancestor constructor.
+    if receiver.is_none() {
+        if let Some((owner, member)) = type_qualified_method_tail(call_name) {
+            let mut resolved_owner = false;
+            for class_sym in resolve_class(global, owner, &ctx) {
+                if seen_classes.insert(class_sym) {
+                    class_candidates.push(class_sym);
+                }
+                resolved_owner = true;
+            }
+            if resolved_owner {
+                declared_factory_name = Some(member);
+            }
+        }
+    }
     // Prefer the class named by the AST constructor expression. Adapter
     // receiver types may include its complete ancestry for later virtual
     // dispatch; treating that enrichment as co-equal constructor targets
     // would fan one `Repository(...)` expression out to `Repository` and
     // every base initializer.
-    for candidate in receiver.into_iter().chain(std::iter::once(call_name)) {
+    for candidate in receiver
+        .into_iter()
+        .chain(class_candidates.is_empty().then_some(call_name))
+    {
         for type_name in receiver_type_names_for_expr(caller_decl, alias_targets, candidate) {
             for class_sym in resolve_class(global, &type_name, &ctx) {
                 if seen_classes.insert(class_sym) {
@@ -3843,6 +3866,20 @@ fn collect_constructor_targets_for_class_call(
         }
     }
     let mut targets = declared_constructor_targets(global, &class_candidates, constructor_index);
+    if let Some(factory_name) = declared_factory_name {
+        let mut exact = targets
+            .iter()
+            .copied()
+            .filter(|func| {
+                global
+                    .decl_of(SymbolId::new(func.raw()))
+                    .is_some_and(|decl| decl.name == factory_name)
+            })
+            .collect::<Vec<_>>();
+        if !exact.is_empty() {
+            std::mem::swap(&mut targets, &mut exact);
+        }
+    }
     if targets.is_empty() {
         // Constructor inheritance is declaration semantics, not a spelling
         // heuristic. When the constructed class declares no initializer,
@@ -4734,6 +4771,21 @@ fn collect_assigned_receiver_type_names(
                         &format!("{source_call}()"),
                         Some(*span),
                         method_candidate_cache,
+                    ) {
+                        push_assigned_receiver_type(out, best_distance, type_name, distance);
+                    }
+                    // Some adapters encode a direct class construction only
+                    // on the assignment (`x = DeclaredType(...)`) without a
+                    // nested Call event. Resolve the source call against the
+                    // global class index; exact declaration identity, not
+                    // spelling or casing, proves the result type.
+                    for type_name in constructor_type_names_from_call_fact(
+                        global,
+                        caller_decl,
+                        alias_targets,
+                        source_call,
+                        None,
+                        &[],
                     ) {
                         push_assigned_receiver_type(out, best_distance, type_name, distance);
                     }
