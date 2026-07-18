@@ -2269,29 +2269,33 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     );
 
     let source_body = function_body(&security_analysis, "run_source_analysis_with_phase_progress");
+    let source_scope_compilation_body = function_body(&security_analysis, "compile_source_lineage_scope");
+    let source_group_body = function_body(&security_analysis, "build_source_group_candidates");
     assert!(
         source_body.contains("max_edge_precision: Some(Precision::Narrowed)"),
         "security source-analysis must build source-seeded graphs with a semantic precision ceiling"
     );
     assert!(
-        source_body.contains("source_analysis_lineage_func_scope")
-            && source_body.contains("building source lineage scope")
-            && source_body.contains("append_taint_target_key(")
-            && source_body.contains("\"source_lineage\"")
-            && source_body.contains("group.lineage_funcs.as_ref()"),
+        source_body.contains("compile_source_lineage_scope")
+            && source_body.contains("enumerate_source_candidates")
+            && source_scope_compilation_body.contains("source_analysis_lineage_func_scope")
+            && source_scope_compilation_body.contains("building source lineage scope")
+            && source_scope_compilation_body.contains("append_taint_target_key(")
+            && source_scope_compilation_body.contains("\"source_lineage\"")
+            && source_scope_compilation_body.contains("group.lineage_funcs = Some")
+            && source_group_body.contains("group.lineage_funcs.as_ref()"),
         "security source-analysis must scope default source path graphs through a semantic source-lineage corridor, not an unbounded source-only closure"
     );
     assert!(
-        source_body.contains("if !precision.is_semantic()"),
+        source_group_body.contains("if !precision.is_semantic()"),
         "security source-analysis must drop diagnostic precision classes before emitting candidates"
     );
-    let source_path_graph_body = source_body;
     assert!(
-        source_path_graph_body.contains("entry_taint_call_records_from_idg_query")
-            && source_path_graph_body.contains("call_result_passthroughs")
-            && source_path_graph_body.contains("IdgTaintTargets")
-            && source_path_graph_body.contains("lineage_funcs")
-            && source_path_graph_body.contains("with_caches"),
+        source_group_body.contains("entry_taint_call_records_from_idg_query")
+            && source_group_body.contains("call_result_passthroughs")
+            && source_group_body.contains("IdgTaintTargets")
+            && source_group_body.contains("lineage_funcs")
+            && source_group_body.contains("with_caches"),
         "security source-analysis must use the cached typed IDG call-record query; configured transfers are materialized into the shared IDG before attribution"
     );
     let source_lineage_scope_body = function_body(&security_analysis, "source_analysis_lineage_func_scope");
@@ -2308,13 +2312,18 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
 
     let taint_reachable = read(&root.join("crates/taint/src/reachable.rs"));
     let call_records_body = function_body(&taint_reachable, "entry_taint_call_records_from_idg_query");
+    let closure_compiler_body = function_body(&taint_reachable, "compile_idg_taint_closure");
+    let cross_call_compiler_body = function_body(&taint_reachable, "renderable_cross_calls_from_closure");
     assert!(
-        call_records_body.contains("apply_configured_transfer_fixpoint")
-            && call_records_body.contains("closure_evidence_with_targets")
-            && call_records_body.contains("symbolic_cross_calls")
-            && call_records_body.contains("cross_call_edges_in_reachable_nodes_filtered_with_max_precision")
-            && call_records_body.contains("is_renderable_call")
-            && call_records_body.contains("lineage_funcs"),
+        call_records_body.contains("compile_idg_taint_closure")
+            && call_records_body.contains("renderable_cross_calls_from_closure")
+            && closure_compiler_body.contains("apply_configured_transfer_fixpoint")
+            && closure_compiler_body.contains("closure_evidence_with_targets")
+            && closure_compiler_body.contains("symbolic_cross_calls")
+            && cross_call_compiler_body
+                .contains("cross_call_edges_in_reachable_nodes_filtered_with_max_precision")
+            && cross_call_compiler_body.contains("is_renderable_call")
+            && cross_call_compiler_body.contains("lineage_funcs"),
         "IDG call-record export used by source-analysis must preserve symbolic provenance, support target/lineage cuts and configured transfers, and never render projected heap state as a call"
     );
 
