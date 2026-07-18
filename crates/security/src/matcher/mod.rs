@@ -8,7 +8,7 @@
 
 use crate::rule::{ArgTaintedSpec, ConstraintKind, MatchKind, Rule, RuleTarget};
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{FileId, Span, SymbolId};
+use bonsai_common::{qualified_names_match, FileId, Span, SymbolId};
 use bonsai_lang_api::{
     AliasTarget, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ImportSpec,
     ModulePath, RefKind, TypeAliasBinding,
@@ -5704,21 +5704,10 @@ fn drop_shadowed_assignment_call_facts(calls: &mut Vec<CallFact>) {
         if call.origin != CallFactOrigin::AssignmentSourceCall {
             return true;
         }
-        !real_calls
-            .iter()
-            .any(|(callee, span)| call_names_match(callee, &call.callee) && spans_overlap(*span, call.span))
+        !real_calls.iter().any(|(callee, span)| {
+            qualified_names_match(callee, &call.callee) && spans_overlap(*span, call.span)
+        })
     });
-}
-
-/// True when two callee names refer to the same call. Exact match
-/// first; falls back to tail equality to handle adapters that emit
-/// `Class.method` in one event but `method` in another.
-fn call_names_match(left: &str, right: &str) -> bool {
-    left == right
-        || left
-            .rsplit(['.', ':', '\\'])
-            .next()
-            .is_some_and(|left_tail| right.rsplit(['.', ':', '\\']).next() == Some(left_tail))
 }
 
 fn callee_matches_with_receiver_types(

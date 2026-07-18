@@ -3,7 +3,8 @@
 //! Owns the cross-crate constants for identifier sigils
 //! ([`IDENTIFIER_SIGILS`]) and qualified-name separators
 //! ([`QUALIFIED_NAME_SEPARATORS`]) plus the canonical
-//! `short_qualified_tail` and `callable_reference_variants` helpers.
+//! `short_qualified_tail`, `qualified_names_match`, and
+//! `callable_reference_variants` helpers.
 
 /// Identifier sigils used by adapters to mark scalar/array/hash
 /// (`$`, `@`, `%`) variables (Perl, PHP). The engine treats `$foo`,
@@ -38,9 +39,10 @@ pub const ALL_NAME_PUNCTUATION: &[char] = &['$', '@', '%', '&', '*'];
 /// Qualified-name separators recognized by the workspace. `.` is the
 /// universal member access; `::` is Rust/C++/Perl module separator;
 /// `->` is C/C++/PHP/Perl pointer member access; `:` is Erlang
-/// remote call. Order matters when used by callers that try
-/// candidates in priority order — pick the longer alternative first.
-pub const QUALIFIED_NAME_SEPARATORS: &[&str] = &["::", "->", ".", ":"];
+/// remote call; and `\\` is a PHP namespace separator. Order matters
+/// when used by callers that try candidates in priority order — pick
+/// the longer alternative first.
+pub const QUALIFIED_NAME_SEPARATORS: &[&str] = &["::", "->", ".", ":", "\\"];
 
 /// Canonical projection forms that EVERY `normalise_qualified_text`-style
 /// canonicalizer must agree on. Subscript / arrow / symbol-key field
@@ -157,28 +159,32 @@ pub fn value_text_returns_self_constructor(value_text: &str) -> bool {
 
 /// Tail of a qualified call/reference name.
 ///
-/// Handles the separators emitted by supported adapters: dotted
-/// namespaces, Rust/C++ `::`, pointer/member `->`, and Erlang-style
-/// single `:` module calls. The single-colon case deliberately ignores
-/// the second byte of `::`.
+/// Handles every separator in [`QUALIFIED_NAME_SEPARATORS`]. This is a
+/// lexical operation over an adapter-emitted callable name; semantic
+/// resolution remains the responsibility of the resolver.
 #[must_use]
 pub fn short_qualified_tail(name: &str) -> &str {
-    let last_dot = name.rfind('.').map(|i| i + 1).unwrap_or(0);
-    let last_double_colon = name.rfind("::").map(|i| i + 2).unwrap_or(0);
-    let last_arrow = name.rfind("->").map(|i| i + 2).unwrap_or(0);
-    let last_single_colon = name
-        .rfind(':')
-        .filter(|&i| {
-            let bytes = name.as_bytes();
-            !(i > 0 && bytes[i - 1] == b':')
-        })
-        .map(|i| i + 1)
+    let cut = QUALIFIED_NAME_SEPARATORS
+        .iter()
+        .filter_map(|separator| name.rfind(separator).map(|index| index + separator.len()))
+        .max()
         .unwrap_or(0);
-    let cut = last_dot
-        .max(last_double_colon)
-        .max(last_arrow)
-        .max(last_single_colon);
     &name[cut..]
+}
+
+/// True when two adapter-emitted qualified names are identical or
+/// share the same non-empty callable tail.
+///
+/// Tail equality is intentionally a candidate/de-duplication rule, not
+/// proof that two symbols resolve to the same declaration. Callers that
+/// need symbol identity must still use the resolver.
+#[must_use]
+pub fn qualified_names_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let left_tail = short_qualified_tail(left);
+    !left_tail.is_empty() && left_tail == short_qualified_tail(right)
 }
 
 /// Return normalized callable-reference spellings for language syntax

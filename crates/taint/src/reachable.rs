@@ -24,7 +24,7 @@
 
 use crate::text::normalise_qualified_text;
 use ahash::AHashSet;
-use bonsai_common::{short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
+use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_db::AnalyzerDb;
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::FlowEvent;
@@ -302,7 +302,7 @@ pub fn name_reachable_through_func_kinded(func: FuncId, db: &AnalyzerDb) -> Kind
             | bonsai_lang_api::RefKind::Other => continue,
         };
         kinded.insert(kind, &reference.name);
-        let short = short_callee(&reference.name);
+        let short = short_qualified_tail(&reference.name);
         if short != reference.name.as_str() {
             kinded.insert(kind, short);
         }
@@ -357,7 +357,7 @@ fn collect_flow_event_tokens_kinded(events: &[FlowEvent], tokens: &mut KindedTok
         match event {
             FlowEvent::Call { name, args, .. } => {
                 tokens.insert(FactKind::Call, name);
-                let short = short_callee(name);
+                let short = short_qualified_tail(name);
                 if short != name.as_str() {
                     tokens.insert(FactKind::Call, short);
                 }
@@ -382,7 +382,7 @@ fn collect_flow_event_tokens_kinded(events: &[FlowEvent], tokens: &mut KindedTok
                 }
                 if let Some(call) = source_call {
                     tokens.insert(FactKind::Call, call);
-                    let short = short_callee(call);
+                    let short = short_qualified_tail(call);
                     if short != call.as_str() {
                         tokens.insert(FactKind::Call, short);
                     }
@@ -419,20 +419,6 @@ fn collect_flow_event_tokens_kinded(events: &[FlowEvent], tokens: &mut KindedTok
             _ => {}
         }
     }
-}
-
-/// Short tail (after the last separator in
-/// `bonsai_common::QUALIFIED_NAME_SEPARATORS`) of a qualified callee
-/// name. Matches the CLI's original short-callee semantics so
-/// tokenization is identical before vs. after extraction.
-fn short_callee(name: &str) -> &str {
-    let mut tail = name;
-    for sep in bonsai_common::QUALIFIED_NAME_SEPARATORS {
-        if let Some(idx) = tail.rfind(sep) {
-            tail = &tail[idx + sep.len()..];
-        }
-    }
-    tail
 }
 
 /// `outer` span contains `inner` span when both are in the same file
@@ -622,7 +608,7 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
         }
         for call in &result.tainted_calls {
             facts.insert(FactKind::TaintedCall, &call.name);
-            let short = short_callee(&call.name);
+            let short = short_qualified_tail(&call.name);
             if short != call.name.as_str() {
                 facts.insert(FactKind::TaintedCall, short);
             }
@@ -695,7 +681,7 @@ pub(crate) fn collect_assign_targets(
                 if include_source_calls {
                     if let Some(call) = source_call {
                         out.insert(call.clone());
-                        let short = short_callee(call);
+                        let short = short_qualified_tail(call);
                         if short != call.as_str() {
                             out.insert(short.to_string());
                         }
@@ -703,7 +689,7 @@ pub(crate) fn collect_assign_targets(
                     for source in source_names {
                         if !source.is_empty() {
                             out.insert(source.clone());
-                            let short = short_callee(source);
+                            let short = short_qualified_tail(source);
                             if short != source.as_str() {
                                 out.insert(short.to_string());
                             }
@@ -881,7 +867,7 @@ fn source_name_is_call_target_component(source_name: &str, source_call: Option<&
     if source_name.is_empty() || source_call.is_empty() {
         return false;
     }
-    if source_name == source_call || source_name == short_callee(source_call) {
+    if source_name == source_call || source_name == short_qualified_tail(source_call) {
         return true;
     }
     for sep in bonsai_common::QUALIFIED_NAME_SEPARATORS {
@@ -922,7 +908,7 @@ fn collect_flow_facts(events: &[bonsai_lang_api::FlowEvent], facts: &mut KindedT
         match event {
             FlowEvent::Call { name, args, .. } => {
                 facts.insert(FactKind::Call, name);
-                let short = short_callee(name);
+                let short = short_qualified_tail(name);
                 if short != name.as_str() {
                     facts.insert(FactKind::Call, short);
                 }
@@ -956,7 +942,7 @@ fn collect_flow_facts(events: &[bonsai_lang_api::FlowEvent], facts: &mut KindedT
                 if let Some(call) = source_call {
                     if !call.is_empty() {
                         facts.insert(FactKind::Call, call);
-                        let short = short_callee(call);
+                        let short = short_qualified_tail(call);
                         if short != call.as_str() {
                             facts.insert(FactKind::Call, short);
                         }
@@ -2589,8 +2575,7 @@ fn direct_assignment_call_span(
     let index = global.file_index(assignment_span.file)?;
     let fact = bonsai_lang_api::assignment_value_fact_for_span(&index.assignment_values, assignment_span)?;
     let direct_name = fact.direct_call_name.as_deref()?;
-    let names_match =
-        direct_name == call_name || short_qualified_tail(direct_name) == short_qualified_tail(call_name);
+    let names_match = qualified_names_match(direct_name, call_name);
     names_match.then(|| fact.call_sites.first().copied()).flatten()
 }
 

@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use super::{callable_reference_variants, is_bonsai_case_probe_path, short_qualified_tail};
+use super::{
+    callable_reference_variants, is_bonsai_case_probe_path, qualified_names_match, short_qualified_tail,
+};
 
 #[test]
 fn qualified_tail_uses_rightmost_supported_separator() {
@@ -8,6 +10,7 @@ fn qualified_tail_uses_rightmost_supported_separator() {
     assert_eq!(short_qualified_tail("std::fs::read"), "read");
     assert_eq!(short_qualified_tail("ptr->call"), "call");
     assert_eq!(short_qualified_tail("Module:function"), "function");
+    assert_eq!(short_qualified_tail("App\\Service\\run"), "run");
     assert_eq!(short_qualified_tail("plain"), "plain");
 }
 
@@ -15,6 +18,14 @@ fn qualified_tail_uses_rightmost_supported_separator() {
 fn single_colon_does_not_split_inside_double_colon_tail() {
     assert_eq!(short_qualified_tail("A::B:C"), "C");
     assert_eq!(short_qualified_tail("A::B::C"), "C");
+}
+
+#[test]
+fn qualified_name_matching_uses_the_canonical_non_empty_tail() {
+    assert!(qualified_names_match("App::Service.run", "run"));
+    assert!(qualified_names_match("App\\Service\\run", "Service.run"));
+    assert!(!qualified_names_match("App::read", "App::write"));
+    assert!(!qualified_names_match("App::", "Other::"));
 }
 
 #[test]

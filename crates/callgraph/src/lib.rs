@@ -14,7 +14,8 @@ pub use chains::{
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{
-    callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId,
+    callable_reference_variants, qualified_names_match, short_qualified_tail, FileId, FuncId, Precision,
+    Span, SymbolId,
 };
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
@@ -2032,7 +2033,7 @@ fn assign_source_call_shadowed_by_explicit_call(
 ) -> bool {
     events.iter().any(|event| match event {
         FlowEvent::Call { name, span, .. } => {
-            call_names_match(source_call, name) && spans_overlap(assign_span, *span)
+            qualified_names_match(source_call, name) && spans_overlap(assign_span, *span)
         }
         FlowEvent::Branch {
             then_events,
@@ -2057,10 +2058,6 @@ fn assign_source_call_shadowed_by_explicit_call(
         }
         _ => false,
     })
-}
-
-fn call_names_match(left: &str, right: &str) -> bool {
-    left == right || short_callee(left) == short_callee(right)
 }
 
 fn spans_overlap(left: Span, right: Span) -> bool {
