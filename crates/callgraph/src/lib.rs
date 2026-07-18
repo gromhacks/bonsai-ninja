@@ -5800,25 +5800,23 @@ pub fn short_callee(name: &str) -> &str {
 ///   `AliasTarget::Type` rebindings (`let r: Repository`) and
 ///   Rust-style `Foo::method` where `Foo` is a user struct, trait,
 ///   or enum — not just a `class`.
-/// * `module_canonicals` — every decl's `module_path.segments`
-///   joined with both `::` and `.` separators, so alias targets
-///   spelled `crate::storage`, `storage`, or `app.storage` all
-///   resolve. Stored as `(canonical, leading_segment)` so the
-///   suffix-match in `is_workspace_alias_target` doesn't have to
-///   call `ends_with(&format!(...))` per candidate.
+/// * `module_names` — every suffix of every declaration's
+///   `module_path.segments`, joined with both `::` and `.` separators.
+///   Alias targets spelled `crate::storage`, `storage`, or `app.storage`
+///   therefore resolve with one hash lookup. Materialising the compiler's
+///   module-name index once is crucial on large Java workspaces: scanning
+///   every known module for every imported call turns callgraph construction
+///   into quadratic work.
 #[derive(Clone, Debug, Default)]
 struct WorkspaceAliasIndex {
     class_names: ahash::AHashSet<String>,
-    /// Pairs of (canonical_module_path, language_separator).
-    /// canonical is the joined module path, separator is `::` or
-    /// `.` depending on which form the adapter records.
-    module_canonicals: ahash::AHashSet<String>,
+    module_names: ahash::AHashSet<String>,
 }
 
 impl WorkspaceAliasIndex {
     fn build(global: &GlobalIndex) -> Self {
         let mut class_names: ahash::AHashSet<String> = ahash::AHashSet::default();
-        let mut module_canonicals: ahash::AHashSet<String> = ahash::AHashSet::default();
+        let mut module_names: ahash::AHashSet<String> = ahash::AHashSet::default();
         for file in global.all_files() {
             for decl in global.decls_in(file) {
                 if matches!(
@@ -5833,14 +5831,17 @@ impl WorkspaceAliasIndex {
                 }
                 if !decl.module_path.is_empty() {
                     let segs = &decl.module_path.segments;
-                    module_canonicals.insert(segs.join("::"));
-                    module_canonicals.insert(segs.join("."));
+                    for start in 0..segs.len() {
+                        let suffix = &segs[start..];
+                        module_names.insert(suffix.join("::"));
+                        module_names.insert(suffix.join("."));
+                    }
                 }
             }
         }
         Self {
             class_names,
-            module_canonicals,
+            module_names,
         }
     }
 
@@ -5853,28 +5854,7 @@ impl WorkspaceAliasIndex {
             return true;
         }
         let stripped = trimmed.trim_start_matches("crate::").trim_start_matches("crate.");
-        if self.module_canonicals.contains(trimmed) || self.module_canonicals.contains(stripped) {
-            return true;
-        }
-        // Suffix-match: alias targets like `app` should also hit
-        // `crate::app` / `pkg.app.sub`. Iterate the precomputed
-        // canonical set and check ::trimmed / .trimmed suffixes.
-        // O(canonicals) but bounded by file count, not decl count,
-        // and each contains-check is hash-table-fast.
-        let needle_cc = format!("::{trimmed}");
-        let needle_dot = format!(".{trimmed}");
-        let needle_cc_stripped = format!("::{stripped}");
-        let needle_dot_stripped = format!(".{stripped}");
-        for canonical in &self.module_canonicals {
-            if canonical.ends_with(&needle_cc)
-                || canonical.ends_with(&needle_dot)
-                || canonical.ends_with(&needle_cc_stripped)
-                || canonical.ends_with(&needle_dot_stripped)
-            {
-                return true;
-            }
-        }
-        false
+        self.module_names.contains(trimmed) || self.module_names.contains(stripped)
     }
 }
 
