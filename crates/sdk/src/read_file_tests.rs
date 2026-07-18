@@ -1,9 +1,10 @@
 use super::*;
 use bonsai_common::Precision;
-use bonsai_security::{TaintPropagationStep, TaintedArgInfo};
+use bonsai_security::{MatchOrigin, TaintPropagationStep, TaintedArgInfo};
 
 fn site(rule_id: &str, text: &str, enclosing_fn: &str) -> FindingMatch {
     FindingMatch {
+        origin: MatchOrigin::Rulepack,
         rule_id: rule_id.to_string(),
         file: "app.py".to_string(),
         line: 1,
