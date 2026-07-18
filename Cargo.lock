@@ -283,6 +283,7 @@ dependencies = [
  "bonsai_testkit",
  "bonsai_workspace",
  "serde_yaml",
+ "tree-sitter",
 ]
 
 [[package]]
