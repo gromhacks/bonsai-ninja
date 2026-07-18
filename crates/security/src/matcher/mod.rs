@@ -1190,7 +1190,7 @@ enum FactRetention {
 enum ScanDeclIndex<'a> {
     Global(&'a DeclIndex),
     Cached(Arc<DeclIndex>),
-    Transient(DeclIndex),
+    Transient(Box<DeclIndex>),
 }
 
 impl AsRef<DeclIndex> for ScanDeclIndex<'_> {
@@ -1198,7 +1198,7 @@ impl AsRef<DeclIndex> for ScanDeclIndex<'_> {
         match self {
             Self::Global(index) => index,
             Self::Cached(index) => index.as_ref(),
-            Self::Transient(index) => index,
+            Self::Transient(index) => index.as_ref(),
         }
     }
 }
@@ -1214,7 +1214,11 @@ fn scan_decl_index<'a>(
     }
     match retention {
         FactRetention::Cached => ws.db().decl_index(file).map(ScanDeclIndex::Cached),
-        FactRetention::Transient => ws.db().decl_index_uncached(file).map(ScanDeclIndex::Transient),
+        FactRetention::Transient => ws
+            .db()
+            .decl_index_uncached(file)
+            .map(Box::new)
+            .map(ScanDeclIndex::Transient),
     }
 }
 
