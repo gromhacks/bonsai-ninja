@@ -22,6 +22,9 @@
 //! already matches against today — this crate is the named home for
 //! that logic.
 
+use crate::idg_query::{
+    IdgReturnQuery, IdgTaintQuery, IdgTaintSeed, IdgTaintSource, IdgTaintTargets, IdgTaintTransfers,
+};
 use crate::text::normalise_qualified_text;
 use ahash::AHashSet;
 use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
@@ -641,18 +644,17 @@ pub fn inspect_entry_taint_graph_from_idg_with_target_funcs(
     if graph_seed.is_empty() {
         return EntryTaintGraph::default();
     }
-    entry_taint_graph_from_idg_with_target_funcs_and_max_precision(
-        entry_func,
-        &graph_seed,
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        target_funcs,
-        Some(Precision::Narrowed),
-        db,
-        idg,
+    entry_taint_graph_from_idg_query(
+        IdgTaintQuery::semantic(
+            IdgTaintSource::rule_match(entry_func, &graph_seed, None, &[]),
+            db,
+            idg,
+        )
+        .with_targets(IdgTaintTargets {
+            nodes: None,
+            funcs: target_funcs,
+            lineage_funcs: None,
+        }),
     )
 }
 
@@ -1478,43 +1480,47 @@ pub fn source_seed_reaches_return_from_idg(
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
 ) -> bool {
-    source_seed_reaches_return_from_idg_with_max_precision(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
+    source_seed_reaches_return_from_idg_query(IdgReturnQuery::semantic(
+        IdgTaintSource::rule_match(source_func, seeds, source_anchor, output_arg_names),
         receiver_state_propagations,
-        Some(Precision::Narrowed),
         db,
         idg,
-    )
+    ))
 }
 
 #[must_use]
-#[allow(clippy::too_many_arguments)] // Public IDG query surface carries seed, precision, db, and service context.
-pub fn source_seed_reaches_return_from_idg_with_max_precision(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
-    max_precision: Option<Precision>,
-    db: &AnalyzerDb,
-    idg: &bonsai_idg::IdgQueryService,
-) -> bool {
-    let global = db.global_index();
-    let mut seed_nodes = compose_idg_seed_nodes(
-        IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
-        global.as_ref(),
+pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) -> bool {
+    let IdgReturnQuery {
+        source,
+        receiver_state,
+        max_precision,
+        db,
         idg,
-    );
+    } = request;
+    let IdgTaintSource {
+        func: source_func,
+        tokens: seeds,
+        seed,
+    } = source;
+    let global = db.global_index();
+    let mut seed_nodes = match seed {
+        IdgTaintSeed::RuleMatch {
+            source_anchor,
+            output_arg_names,
+        } => compose_idg_seed_nodes(
+            IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
+            global.as_ref(),
+            idg,
+        ),
+        IdgTaintSeed::Precomposed(nodes) => nodes.to_vec(),
+    };
     if seed_nodes.is_empty() {
         return false;
     }
-    if !receiver_state_propagations.is_empty() {
+    if !receiver_state.is_empty() {
         apply_receiver_state_fixpoint(
             &mut seed_nodes,
-            receiver_state_propagations,
+            receiver_state,
             global.as_ref(),
             idg,
             max_precision,
@@ -1542,9 +1548,6 @@ pub fn source_seed_reaches_return_from_idg_with_max_precision(
 /// `seeds`.
 ///
 /// Semantic-only call-record graph over the IDG.
-///
-/// Use [`entry_taint_call_records_from_idg_with_max_precision`] with
-/// `None` only for explicit diagnostics.
 #[must_use]
 pub fn entry_taint_call_records_from_idg(
     source_func: FuncId,
@@ -1555,108 +1558,66 @@ pub fn entry_taint_call_records_from_idg(
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
 ) -> EntryTaintGraph {
-    entry_taint_call_records_from_idg_with_max_precision(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
-        receiver_state_propagations,
-        Some(Precision::Narrowed),
-        db,
-        idg,
+    entry_taint_call_records_from_idg_query(
+        IdgTaintQuery::semantic(
+            IdgTaintSource::rule_match(source_func, seeds, source_anchor, output_arg_names),
+            db,
+            idg,
+        )
+        .with_transfers(IdgTaintTransfers {
+            receiver_state: receiver_state_propagations,
+            ..IdgTaintTransfers::none()
+        }),
     )
 }
 
+/// Computes call-record evidence for an explicitly scoped compiler query.
+/// Use `request.with_max_precision(None)` only for diagnostic reachability.
 #[must_use]
-#[allow(clippy::too_many_arguments)] // Public IDG query surface carries seed, precision, db, and service context.
-pub fn entry_taint_call_records_from_idg_with_max_precision(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
-    max_precision: Option<Precision>,
-    db: &AnalyzerDb,
-    idg: &bonsai_idg::IdgQueryService,
-) -> EntryTaintGraph {
-    entry_taint_call_records_from_idg_with_target_filters_and_max_precision(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
-        receiver_state_propagations,
-        &[],
-        &[],
-        None,
-        None,
+pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTaintGraph {
+    let IdgTaintQuery {
+        source,
+        transfers,
+        targets,
         max_precision,
         db,
         idg,
-        false,
-    )
-}
-
-#[must_use]
-#[allow(clippy::too_many_arguments)] // Public IDG query surface carries seed, target, precision, db, and service context.
-pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
-    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
-    output_arg_flows: &[crate::inter::OutputArgFlow],
-    target_funcs: Option<&AHashSet<FuncId>>,
-    lineage_funcs: Option<&AHashSet<FuncId>>,
-    max_precision: Option<Precision>,
-    db: &AnalyzerDb,
-    idg: &bonsai_idg::IdgQueryService,
-    call_result_passthroughs_materialized: bool,
-) -> EntryTaintGraph {
-    entry_taint_call_records_from_idg_with_target_filters_and_max_precision_and_caches(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
-        receiver_state_propagations,
+        caches,
+    } = request;
+    let IdgTaintSource {
+        func: source_func,
+        tokens: seeds,
+        seed,
+    } = source;
+    let IdgTaintTransfers {
+        receiver_state: receiver_state_propagations,
         call_result_passthroughs,
-        output_arg_flows,
-        target_funcs,
+        output_args: output_arg_flows,
+        call_results_materialized: call_result_passthroughs_materialized,
+    } = transfers;
+    let IdgTaintTargets {
+        nodes: _,
+        funcs: target_funcs,
         lineage_funcs,
-        max_precision,
-        db,
-        idg,
-        call_result_passthroughs_materialized,
-        None,
-    )
-}
-
-#[must_use]
-#[allow(clippy::too_many_arguments)]
-pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision_and_caches(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
-    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
-    output_arg_flows: &[crate::inter::OutputArgFlow],
-    target_funcs: Option<&AHashSet<FuncId>>,
-    lineage_funcs: Option<&AHashSet<FuncId>>,
-    max_precision: Option<Precision>,
-    db: &AnalyzerDb,
-    idg: &bonsai_idg::IdgQueryService,
-    call_result_passthroughs_materialized: bool,
-    caches: Option<&crate::inter::InterTaintCaches>,
-) -> EntryTaintGraph {
+    } = targets;
     let global = db.global_index();
     let mut graph = EntryTaintGraph::default();
 
-    let mut seed_nodes = compose_idg_seed_nodes(
-        IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
-        global.as_ref(),
-        idg,
-    );
+    let (mut seed_nodes, source_anchor, output_arg_names) = match seed {
+        IdgTaintSeed::RuleMatch {
+            source_anchor,
+            output_arg_names,
+        } => (
+            compose_idg_seed_nodes(
+                IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
+                global.as_ref(),
+                idg,
+            ),
+            source_anchor,
+            output_arg_names,
+        ),
+        IdgTaintSeed::Precomposed(nodes) => (nodes.to_vec(), None, &[] as &[String]),
+    };
     if seed_nodes.is_empty() {
         return graph;
     }
@@ -1845,9 +1806,6 @@ pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision_a
 }
 
 /// Semantic-only taint graph over the IDG.
-///
-/// Use [`entry_taint_graph_from_idg_with_max_precision`] with `None`
-/// only for explicit diagnostics.
 #[must_use]
 pub fn entry_taint_graph_from_idg(
     source_func: FuncId,
@@ -1858,192 +1816,67 @@ pub fn entry_taint_graph_from_idg(
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
 ) -> EntryTaintGraph {
-    entry_taint_graph_from_idg_with_max_precision(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
-        receiver_state_propagations,
-        &[],
-        &[],
-        Some(Precision::Narrowed),
-        db,
-        idg,
+    entry_taint_graph_from_idg_query(
+        IdgTaintQuery::semantic(
+            IdgTaintSource::rule_match(source_func, seeds, source_anchor, output_arg_names),
+            db,
+            idg,
+        )
+        .with_transfers(IdgTaintTransfers {
+            receiver_state: receiver_state_propagations,
+            ..IdgTaintTransfers::none()
+        }),
     )
 }
 
+/// Computes the full taint evidence graph for an explicitly scoped compiler
+/// query. Use `request.with_max_precision(None)` only for diagnostics.
 #[must_use]
-#[allow(clippy::too_many_arguments)] // Public IDG query surface carries seed, precision, db, and service context.
-pub fn entry_taint_graph_from_idg_with_max_precision(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
-    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
-    output_arg_flows: &[crate::inter::OutputArgFlow],
-    max_precision: Option<Precision>,
-    db: &AnalyzerDb,
-    idg: &bonsai_idg::IdgQueryService,
-) -> EntryTaintGraph {
-    entry_taint_graph_from_idg_with_target_funcs_and_max_precision(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
-        receiver_state_propagations,
-        call_result_passthroughs,
-        output_arg_flows,
-        None,
+pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTaintGraph {
+    let IdgTaintQuery {
+        source,
+        transfers,
+        targets,
         max_precision,
         db,
         idg,
-    )
-}
-
-#[must_use]
-#[allow(clippy::too_many_arguments)] // Public IDG query surface carries seed, targets, precision, db, and service context.
-pub fn entry_taint_graph_from_idg_with_target_funcs_and_max_precision(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
-    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
-    output_arg_flows: &[crate::inter::OutputArgFlow],
-    target_funcs: Option<&AHashSet<FuncId>>,
-    max_precision: Option<Precision>,
-    db: &AnalyzerDb,
-    idg: &bonsai_idg::IdgQueryService,
-) -> EntryTaintGraph {
-    entry_taint_graph_from_idg_with_target_filters_and_max_precision(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
-        receiver_state_propagations,
+        caches,
+    } = request;
+    let IdgTaintSource {
+        func: source_func,
+        tokens: seeds,
+        seed,
+    } = source;
+    let IdgTaintTransfers {
+        receiver_state: receiver_state_propagations,
         call_result_passthroughs,
-        output_arg_flows,
-        target_funcs,
-        None,
-        max_precision,
-        db,
-        idg,
-    )
-}
-
-#[must_use]
-#[allow(clippy::too_many_arguments)] // Public IDG query surface carries seed, targets, precision, db, and service context.
-pub fn entry_taint_graph_from_idg_with_target_filters_and_max_precision(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
-    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
-    output_arg_flows: &[crate::inter::OutputArgFlow],
-    target_funcs: Option<&AHashSet<FuncId>>,
-    lineage_funcs: Option<&AHashSet<FuncId>>,
-    max_precision: Option<Precision>,
-    db: &AnalyzerDb,
-    idg: &bonsai_idg::IdgQueryService,
-) -> EntryTaintGraph {
-    entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
-        receiver_state_propagations,
-        call_result_passthroughs,
-        output_arg_flows,
-        None,
-        target_funcs,
+        output_args: output_arg_flows,
+        call_results_materialized: call_result_passthroughs_materialized,
+    } = transfers;
+    let IdgTaintTargets {
+        nodes: target_nodes,
+        funcs: target_funcs,
         lineage_funcs,
-        max_precision,
-        db,
-        idg,
-        &[],
-        false,
-    )
-}
-
-#[must_use]
-#[allow(clippy::too_many_arguments)] // Public IDG query surface carries seed, node targets, function targets, precision, db, and service context.
-pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
-    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
-    output_arg_flows: &[crate::inter::OutputArgFlow],
-    target_nodes: Option<&[bonsai_idg::WsNodeId]>,
-    target_funcs: Option<&AHashSet<FuncId>>,
-    lineage_funcs: Option<&AHashSet<FuncId>>,
-    max_precision: Option<Precision>,
-    db: &AnalyzerDb,
-    idg: &bonsai_idg::IdgQueryService,
-    extra_seed_nodes: &[bonsai_idg::WsNodeId],
-    call_result_passthroughs_materialized: bool,
-) -> EntryTaintGraph {
-    entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision_and_caches(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
-        receiver_state_propagations,
-        call_result_passthroughs,
-        output_arg_flows,
-        target_nodes,
-        target_funcs,
-        lineage_funcs,
-        max_precision,
-        db,
-        idg,
-        extra_seed_nodes,
-        call_result_passthroughs_materialized,
-        None,
-    )
-}
-
-#[must_use]
-#[allow(clippy::too_many_arguments)]
-pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision_and_caches(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
-    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
-    output_arg_flows: &[crate::inter::OutputArgFlow],
-    target_nodes: Option<&[bonsai_idg::WsNodeId]>,
-    target_funcs: Option<&AHashSet<FuncId>>,
-    lineage_funcs: Option<&AHashSet<FuncId>>,
-    max_precision: Option<Precision>,
-    db: &AnalyzerDb,
-    idg: &bonsai_idg::IdgQueryService,
-    extra_seed_nodes: &[bonsai_idg::WsNodeId],
-    call_result_passthroughs_materialized: bool,
-    caches: Option<&crate::inter::InterTaintCaches>,
-) -> EntryTaintGraph {
+    } = targets;
     let global = db.global_index();
     let mut graph = EntryTaintGraph::default();
 
-    // Compose the seed set. When the caller supplies `extra_seed_nodes`
-    // (the token-seeding API, which resolves sigil'd / call-name /
-    // clean-overwrite-safe seeds ITSELF), use exactly those — mixing in
-    // the rule-match policy's name-based read/write seeding would
-    // re-add post-overwrite writes and the sink's own read, defeating SSA.
-    // The security path passes an empty slice, so it keeps the
-    // span-anchored rule-match seeding untouched.
-    let mut seed_nodes = if extra_seed_nodes.is_empty() {
-        compose_idg_seed_nodes(
-            IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
-            global.as_ref(),
-            idg,
-        )
-    } else {
-        extra_seed_nodes.to_vec()
+    // A precomposed source uses exactly its caller-selected AST/IDG nodes.
+    // Rule matches compose their source span and declared output carriers.
+    let (mut seed_nodes, source_anchor, output_arg_names) = match seed {
+        IdgTaintSeed::RuleMatch {
+            source_anchor,
+            output_arg_names,
+        } => (
+            compose_idg_seed_nodes(
+                IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
+                global.as_ref(),
+                idg,
+            ),
+            source_anchor,
+            output_arg_names,
+        ),
+        IdgTaintSeed::Precomposed(nodes) => (nodes.to_vec(), None, &[] as &[String]),
     };
     seed_nodes.sort();
     seed_nodes.dedup();

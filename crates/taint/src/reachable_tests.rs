@@ -371,15 +371,14 @@ fn default_source_return_idg_query_is_semantic_only() {
     let db = empty_db();
 
     assert!(
-        source_seed_reaches_return_from_idg_with_max_precision(
-            func,
-            &TokenSet::default(),
-            None,
-            &[],
-            &[],
-            None,
-            &db,
-            &service,
+        source_seed_reaches_return_from_idg_query(
+            IdgReturnQuery::semantic(
+                IdgTaintSource::rule_match(func, &TokenSet::default(), None, &[]),
+                &[],
+                &db,
+                &service,
+            )
+            .with_max_precision(None),
         ),
         "explicit diagnostic precision scope can traverse the over-approximate edge"
     );
@@ -421,22 +420,31 @@ fn default_entry_taint_graph_idg_query_is_semantic_only() {
     let service = service_from_segment(segment);
     let db = empty_db();
 
-    let diagnostic = entry_taint_graph_from_idg_with_max_precision(
-        caller,
-        &TokenSet::default(),
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        None,
-        &db,
-        &service,
+    let diagnostic = entry_taint_graph_from_idg_query(
+        IdgTaintQuery::semantic(
+            IdgTaintSource::rule_match(caller, &TokenSet::default(), None, &[]),
+            &db,
+            &service,
+        )
+        .with_max_precision(None),
     );
     assert_eq!(
         diagnostic.call_records.len(),
         1,
         "explicit diagnostic precision scope can expose the over-approximate call edge"
+    );
+
+    let precomposed = entry_taint_graph_from_idg_query(
+        IdgTaintQuery::semantic(
+            IdgTaintSource::precomposed(caller, &TokenSet::default(), &[]),
+            &db,
+            &service,
+        )
+        .with_max_precision(None),
+    );
+    assert!(
+        precomposed.call_records.is_empty(),
+        "an empty precomposed seed is exact and must not fall back to broader rule-match seeding"
     );
 
     let semantic = entry_taint_graph_from_idg(caller, &TokenSet::default(), None, &[], &[], &db, &service);

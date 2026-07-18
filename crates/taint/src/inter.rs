@@ -234,22 +234,17 @@ pub(crate) fn idg_backed_interprocedural_taint_with_service(
         global.as_ref(),
         idg,
     );
-    let graph = crate::reachable::entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision(
-        entry_func,
-        entry_sources,
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        None,
-        None,
-        None,
-        config.max_edge_precision,
-        db,
-        idg,
-        &seed_nodes,
-        true,
+    let graph = crate::reachable::entry_taint_graph_from_idg_query(
+        crate::IdgTaintQuery::semantic(
+            crate::IdgTaintSource::precomposed(entry_func, entry_sources, &seed_nodes),
+            db,
+            idg,
+        )
+        .with_transfers(crate::IdgTaintTransfers {
+            call_results_materialized: true,
+            ..crate::IdgTaintTransfers::none()
+        })
+        .with_max_precision(config.max_edge_precision),
     );
     entry_taint_graph_to_inter_result(graph, entry_func, entry_sources)
 }
@@ -358,22 +353,17 @@ fn idg_backed_call_site_receives_taint(
         global.as_ref(),
         idg.as_ref(),
     );
-    let graph = crate::reachable::entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision(
-        func,
-        entry_sources,
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        None,
-        None,
-        None,
-        config.max_edge_precision,
-        db,
-        idg.as_ref(),
-        &seed_nodes,
-        true,
+    let graph = crate::reachable::entry_taint_graph_from_idg_query(
+        crate::IdgTaintQuery::semantic(
+            crate::IdgTaintSource::precomposed(func, entry_sources, &seed_nodes),
+            db,
+            idg.as_ref(),
+        )
+        .with_transfers(crate::IdgTaintTransfers {
+            call_results_materialized: true,
+            ..crate::IdgTaintTransfers::none()
+        })
+        .with_max_precision(config.max_edge_precision),
     );
     let spans_match = |candidate: Span| {
         candidate == sink_span

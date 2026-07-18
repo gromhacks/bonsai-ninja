@@ -9,7 +9,6 @@ mod common;
 
 use ahash::AHashSet;
 use bonsai_callgraph::ResolvedCallGraph;
-use bonsai_common::Precision;
 use bonsai_db::AnalyzerDb;
 use bonsai_idg::{workspace_adapter, IdgQueryService, TransferOptions};
 use bonsai_lang_api::AdapterArc;
@@ -21,9 +20,8 @@ use bonsai_lang_python::PythonAdapter;
 use bonsai_lang_rust::RustAdapter;
 use bonsai_lang_solidity::SolidityAdapter;
 use bonsai_taint::{
-    entry_taint_graph_from_idg, entry_taint_graph_from_idg_with_max_precision,
-    entry_taint_graph_from_idg_with_target_funcs_and_max_precision, interprocedural_taint,
-    CallResultPassthrough, TokenSet,
+    entry_taint_graph_from_idg, entry_taint_graph_from_idg_query, interprocedural_taint,
+    CallResultPassthrough, IdgTaintQuery, IdgTaintSource, IdgTaintTargets, IdgTaintTransfers, TokenSet,
 };
 use common::{build_db, cfg, func_id_or_none, seed, sink_reached};
 use std::sync::Arc;
@@ -624,18 +622,17 @@ fn sink_cmd(_cmd: String) {}
 
     let mut raw_tokens = TokenSet::default();
     raw_tokens.insert("raw".to_string());
-    let raw_graph = entry_taint_graph_from_idg_with_target_funcs_and_max_precision(
-        entry,
-        &raw_tokens,
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        Some(&target_funcs),
-        Some(Precision::Narrowed),
-        &db,
-        idg.as_ref(),
+    let raw_graph = entry_taint_graph_from_idg_query(
+        IdgTaintQuery::semantic(
+            IdgTaintSource::rule_match(entry, &raw_tokens, None, &[]),
+            &db,
+            idg.as_ref(),
+        )
+        .with_targets(IdgTaintTargets {
+            nodes: None,
+            funcs: Some(&target_funcs),
+            lineage_funcs: None,
+        }),
     );
     assert!(
         raw_graph
@@ -648,18 +645,17 @@ fn sink_cmd(_cmd: String) {}
 
     let mut user_tokens = TokenSet::default();
     user_tokens.insert("user".to_string());
-    let user_graph = entry_taint_graph_from_idg_with_target_funcs_and_max_precision(
-        entry,
-        &user_tokens,
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
-        Some(&target_funcs),
-        Some(Precision::Narrowed),
-        &db,
-        idg.as_ref(),
+    let user_graph = entry_taint_graph_from_idg_query(
+        IdgTaintQuery::semantic(
+            IdgTaintSource::rule_match(entry, &user_tokens, None, &[]),
+            &db,
+            idg.as_ref(),
+        )
+        .with_targets(IdgTaintTargets {
+            nodes: None,
+            funcs: Some(&target_funcs),
+            lineage_funcs: None,
+        }),
     );
     assert!(
         !user_graph
@@ -1214,17 +1210,16 @@ func execute(cmd string) {
     let mut raw_tokens = TokenSet::default();
     raw_tokens.insert("raw".to_string());
     let passthroughs = strings_fields_passthrough();
-    let raw_graph = entry_taint_graph_from_idg_with_max_precision(
-        entry,
-        &raw_tokens,
-        None,
-        &[],
-        &[],
-        &passthroughs,
-        &[],
-        Some(Precision::Narrowed),
-        &db,
-        idg.as_ref(),
+    let raw_graph = entry_taint_graph_from_idg_query(
+        IdgTaintQuery::semantic(
+            IdgTaintSource::rule_match(entry, &raw_tokens, None, &[]),
+            &db,
+            idg.as_ref(),
+        )
+        .with_transfers(IdgTaintTransfers {
+            call_result_passthroughs: &passthroughs,
+            ..IdgTaintTransfers::none()
+        }),
     );
     assert!(
         raw_graph
@@ -1245,17 +1240,16 @@ func execute(cmd string) {
 
     let mut user_tokens = TokenSet::default();
     user_tokens.insert("user".to_string());
-    let user_graph = entry_taint_graph_from_idg_with_max_precision(
-        entry,
-        &user_tokens,
-        None,
-        &[],
-        &[],
-        &passthroughs,
-        &[],
-        Some(Precision::Narrowed),
-        &db,
-        idg.as_ref(),
+    let user_graph = entry_taint_graph_from_idg_query(
+        IdgTaintQuery::semantic(
+            IdgTaintSource::rule_match(entry, &user_tokens, None, &[]),
+            &db,
+            idg.as_ref(),
+        )
+        .with_transfers(IdgTaintTransfers {
+            call_result_passthroughs: &passthroughs,
+            ..IdgTaintTransfers::none()
+        }),
     );
     assert!(
         user_graph
@@ -1305,17 +1299,16 @@ func entry(cmd string) {
     );
 
     let passthroughs = strings_fields_passthrough();
-    let configured_graph = entry_taint_graph_from_idg_with_max_precision(
-        entry,
-        &cmd_tokens,
-        None,
-        &[],
-        &[],
-        &passthroughs,
-        &[],
-        Some(Precision::Narrowed),
-        &db,
-        idg.as_ref(),
+    let configured_graph = entry_taint_graph_from_idg_query(
+        IdgTaintQuery::semantic(
+            IdgTaintSource::rule_match(entry, &cmd_tokens, None, &[]),
+            &db,
+            idg.as_ref(),
+        )
+        .with_transfers(IdgTaintTransfers {
+            call_result_passthroughs: &passthroughs,
+            ..IdgTaintTransfers::none()
+        }),
     );
     assert!(
         configured_graph

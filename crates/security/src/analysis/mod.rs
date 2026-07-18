@@ -1666,17 +1666,29 @@ where
             .get(group.start, &group.graph_key)
             .unwrap_or_else(|| {
                 let first = &group.jobs[0];
-                let graph = Arc::new(exact_source_path_graph(
-                    group.start,
-                    &first.seeds,
-                    &source_graph_config,
-                    ws.db(),
-                    source_graph_caches,
-                    idg,
-                    first.anchor,
-                    &first.output_arg_names,
-                    group.lineage_funcs.as_ref(),
-                    group.lineage_funcs.as_ref(),
+                let graph = Arc::new(bonsai_taint::entry_taint_call_records_from_idg_query(
+                    bonsai_taint::IdgTaintQuery::semantic(
+                        bonsai_taint::IdgTaintSource::rule_match(
+                            group.start,
+                            &first.seeds,
+                            first.anchor,
+                            &first.output_arg_names,
+                        ),
+                        ws.db(),
+                        idg,
+                    )
+                    .with_transfers(bonsai_taint::IdgTaintTransfers {
+                        call_result_passthroughs: &source_graph_config.call_result_passthroughs,
+                        call_results_materialized: true,
+                        ..bonsai_taint::IdgTaintTransfers::none()
+                    })
+                    .with_targets(bonsai_taint::IdgTaintTargets {
+                        nodes: None,
+                        funcs: group.lineage_funcs.as_ref(),
+                        lineage_funcs: group.lineage_funcs.as_ref(),
+                    })
+                    .with_max_precision(source_graph_config.max_edge_precision)
+                    .with_caches(source_graph_caches),
                 ));
                 workspace_taint_index.insert_if_absent(group.start, group.graph_key.clone(), graph)
             });
@@ -6943,81 +6955,6 @@ fn sorted_seed_key_with_anchor(
         sorted.push(format!("__output_args@{}", args.join(",")));
     }
     sorted
-}
-
-#[allow(clippy::too_many_arguments)] // IDG source graph construction needs explicit source/sink/cache context.
-fn exact_source_seed_graph(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    config: &InterTaintConfig,
-    db: &bonsai_db::AnalyzerDb,
-    caches: &InterTaintCaches,
-    idg: &bonsai_idg::IdgQueryService,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    target_nodes: Option<&[bonsai_idg::WsNodeId]>,
-    target_funcs: Option<&AHashSet<FuncId>>,
-    lineage_funcs: Option<&AHashSet<FuncId>>,
-) -> EntryTaintGraph {
-    // IDG-driven path. Phase 8's SSA-style CFG narrowing produces
-    // correct findings for straight-line, branched, side-effecting,
-    // sigil-aliased, and method-receiver flows. Callback /
-    // higher-order-function flows are handled by the IDG builder's
-    // callback-binding stitching pass (Phase 3 callback resolution),
-    // which adds synthetic `CallArg → bound-func.Param` edges for
-    // every Call whose callee name matches a function parameter,
-    // walking the callgraph to find each caller's binding. The
-    // Rulepack-declared receiver mutation, call-result, and output-argument
-    // summaries are already materialized into this IDG once per call site.
-    bonsai_taint::entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision_and_caches(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
-        &[],
-        &config.call_result_passthroughs,
-        &[],
-        target_nodes,
-        target_funcs,
-        lineage_funcs,
-        config.max_edge_precision,
-        db,
-        idg,
-        &[],
-        true,
-        Some(caches),
-    )
-}
-
-#[allow(clippy::too_many_arguments)] // IDG path graph construction needs explicit source/sink/cache context.
-fn exact_source_path_graph(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    config: &InterTaintConfig,
-    db: &bonsai_db::AnalyzerDb,
-    caches: &InterTaintCaches,
-    idg: &bonsai_idg::IdgQueryService,
-    source_anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    target_funcs: Option<&AHashSet<FuncId>>,
-    lineage_funcs: Option<&AHashSet<FuncId>>,
-) -> EntryTaintGraph {
-    bonsai_taint::entry_taint_call_records_from_idg_with_target_filters_and_max_precision_and_caches(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
-        &[],
-        &config.call_result_passthroughs,
-        &[],
-        target_funcs,
-        lineage_funcs,
-        config.max_edge_precision,
-        db,
-        idg,
-        true,
-        Some(caches),
-    )
 }
 
 /// True when the source could syntactically reach the sink — same-fn
