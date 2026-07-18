@@ -4468,6 +4468,281 @@ pub fn extract_call_receiver_facts(
     facts
 }
 
+/// Read-only inputs shared by the declaration-lowering passes.
+///
+/// Keeping these inputs together makes the pass boundary explicit: lowering
+/// reads the Tree-sitter CST plus grammar capabilities and appends semantic
+/// declarations. It does not rediscover language syntax from rendered text.
+struct CallableLowering<'a> {
+    tree: &'a Tree,
+    file: FileId,
+    src: &'a [u8],
+    handler: &'a GrammarHandler,
+    class_names: &'a [String],
+    error_spans: &'a [Span],
+    file_has_syntax_errors: bool,
+}
+
+/// Lower anonymous callable nodes into the same declaration IR used by named
+/// callables. Call-argument lambdas are intentionally omitted because the
+/// enclosing flow walker already lowers those bodies in place.
+fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<crate::Decl>, next: &mut u32) {
+    let lambda_nodes = collect_kinds(lowering.tree, lowering.handler.lambda_kinds);
+    for lambda in lambda_nodes {
+        // Some adapters promote expression-bodied callables to normal
+        // declarations because their grammar exposes enough structure
+        // to name and walk them directly. Do not index the same syntax
+        // again as a lambda; duplicate FuncIds split call resolution
+        // from matcher attribution for a single semantic function.
+        if lowering.handler.fn_kinds.contains(&lambda.kind()) {
+            continue;
+        }
+        // Skip lambdas that are passed directly as call arguments.
+        // `walk_into` inlines those bodies into the enclosing call's
+        // owner via `walk_lambda_body`; emitting a second synthetic
+        // decl for the same source events creates duplicate source
+        // starts and duplicate findings with different chain roots.
+        // Keep non-call-argument lambdas, including local or top-level
+        // assignments, because their bodies are not otherwise inlined.
+        if lambda_is_inlined_call_argument(&lambda, lowering.handler) {
+            continue;
+        }
+        let span = span_of(lowering.file, &lambda);
+        let binding_name = binding_name_node(&lambda, lowering.src);
+        let name = binding_name.map_or_else(
+            || {
+                format!(
+                    "<lambda@{}:{}>",
+                    lambda.start_position().row + 1,
+                    lambda.start_position().column + 1
+                )
+            },
+            |name_node| callable_binding_name_from_node(&name_node, lowering.src),
+        );
+        if name.is_empty() {
+            continue;
+        }
+        let params = extract_param_names(&lambda, lowering.src);
+        let body_node = lambda
+            .child_by_field_name("body")
+            .or_else(|| lambda.child_by_field_name("block"))
+            .or_else(|| first_named_child_of_kind(&lambda, "block"))
+            .or_else(|| first_named_child_of_kind(&lambda, "compound_statement"))
+            .or_else(|| first_named_child_of_kind(&lambda, "statement_block"))
+            // Kotlin `lambda_literal` and Swift closure bodies nest their
+            // statements under a `statements` node (after the params).
+            .or_else(|| first_named_child_of_kind(&lambda, "statements"))
+            // Erlang `F = fun() -> Body end` (H17): the fun body nests under
+            // `clause_body` (directly, or via a `fun_clause` wrapper), the
+            // same field the main function-decl path handles.
+            .or_else(|| first_named_child_of_kind(&lambda, "clause_body"))
+            .or_else(|| {
+                first_named_child_of_kind(&lambda, "fun_clause")
+                    .and_then(|fc| first_named_child_of_kind(&fc, "clause_body"))
+            })
+            // Elixir `fn x -> BODY end`: `anonymous_function` → `stab_clause`
+            // → `body`/`right` field.
+            .or_else(|| {
+                first_named_child_of_kind(&lambda, "stab_clause").and_then(|sc| {
+                    sc.child_by_field_name("body")
+                        .or_else(|| sc.child_by_field_name("right"))
+                })
+            })
+            // Expression-bodied lambdas with no wrapper node (Scala
+            // `(x) => sink(x)`, Rust `|x| expr`): the body is the last
+            // named child that isn't a parameter / type annotation.
+            .or_else(|| lambda_expression_body_child(&lambda));
+        let syntax_broken =
+            lowering.file_has_syntax_errors && callable_has_syntax_error(&lambda, body_node.as_ref());
+        let implicit_return_node =
+            body_node.and_then(|body| implicit_return_expression_node(&body, lowering.handler));
+        let body_implicit_returns = implicit_return_node.is_some();
+        let mut flow_events = if let Some(body) = body_node {
+            let mut events = walk_flow_events(
+                body,
+                lowering.file,
+                lowering.src,
+                lowering.handler,
+                lowering.class_names,
+            );
+            if let Some(return_node) = implicit_return_node {
+                append_expression_body_return(&mut events, &return_node, lowering.file, lowering.src);
+            } else if lowering.handler.tail_expression_returns {
+                append_tail_expression_return(
+                    &mut events,
+                    &body,
+                    lowering.file,
+                    lowering.src,
+                    lowering.handler,
+                );
+            }
+            events
+        } else {
+            Vec::new()
+        };
+        if syntax_broken {
+            retain_flow_events_outside_errors(&mut flow_events, lowering.error_spans);
+        }
+        annotate_tuple_call_result_bindings(&mut flow_events, lowering.tree, lowering.src);
+        if params.is_empty() && flow_events.is_empty() {
+            continue;
+        }
+        let symbol = bonsai_common::SymbolId::new(*next);
+        *next += 1;
+        defs.push(crate::Decl {
+            symbol,
+            kind: crate::DeclKind::Function,
+            name,
+            qualified_name: None,
+            module_path: crate::ModulePath::default(),
+            span,
+            name_span: binding_name.map_or(span, |name_node| span_of(lowering.file, &name_node)),
+            visibility: crate::Visibility::Public,
+            parent: None,
+            body_span: body_node.map(|body| span_of(lowering.file, &body)),
+            flow_events,
+            has_implicit_returns: lowering.handler.tail_expression_returns || body_implicit_returns,
+            params,
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: Vec::new(),
+            receiver_state_sources: Vec::new(),
+            return_type: None,
+            is_variadic: false,
+        });
+    }
+}
+
+/// Lower class nodes and connect methods to their nearest syntactic owner.
+fn lower_class_declarations(
+    lowering: &CallableLowering<'_>,
+    class_nodes: &[Node<'_>],
+    function_parent_spans: &[(bonsai_common::SymbolId, Span)],
+    defs: &mut Vec<crate::Decl>,
+    next: &mut u32,
+) {
+    let mut class_infos = Vec::new();
+    for class_node in class_nodes {
+        // For C / C++ `typedef struct { ... } UserInfo;` the
+        // struct_specifier itself is anonymous — the name lives on a
+        // sibling type_identifier in the enclosing type_definition.
+        let name_node = class_node
+            .child_by_field_name("name")
+            .or_else(|| first_identifier_like_child(class_node))
+            .or_else(|| anonymous_struct_typedef_name(class_node));
+        let Some(name_node) = name_node else {
+            continue;
+        };
+        let name = node_text(&name_node, lowering.src);
+        if name.is_empty() {
+            continue;
+        }
+        let symbol = bonsai_common::SymbolId::new(*next);
+        *next += 1;
+        let class_span = span_of(lowering.file, class_node);
+        class_infos.push((symbol, class_span));
+        defs.push(crate::Decl {
+            symbol,
+            kind: crate::DeclKind::Class,
+            name: name.to_string(),
+            qualified_name: None,
+            module_path: crate::ModulePath::default(),
+            span: class_span,
+            name_span: span_of(lowering.file, &name_node),
+            visibility: crate::Visibility::Public,
+            parent: None,
+            body_span: Some(class_span),
+            flow_events: Vec::new(),
+            has_implicit_returns: false,
+            params: Vec::new(),
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: Vec::new(),
+            receiver_state_sources: Vec::new(),
+            return_type: None,
+            is_variadic: false,
+        });
+    }
+
+    for (function_symbol, parent_span) in function_parent_spans {
+        let Some((class_symbol, _)) = class_infos
+            .iter()
+            .find(|(_, class_span)| *class_span == *parent_span)
+        else {
+            continue;
+        };
+        if let Some(decl) = defs.iter_mut().find(|decl| decl.symbol == *function_symbol) {
+            decl.parent = Some(*class_symbol);
+        }
+    }
+}
+
+/// Lower executable file-scope syntax into a synthetic declaration so scripts
+/// and module initializers participate in the same flow IR as callables.
+fn lower_module_declaration(lowering: &CallableLowering<'_>, defs: &mut Vec<crate::Decl>, next: &mut u32) {
+    let module_syntax_broken = lowering.error_spans.iter().any(|error| {
+        !defs
+            .iter()
+            .any(|decl| decl.span.start <= error.start && error.end <= decl.span.end)
+    });
+    let mut root_events = walk_flow_events(
+        lowering.tree.root_node(),
+        lowering.file,
+        lowering.src,
+        lowering.handler,
+        lowering.class_names,
+    );
+    if module_syntax_broken {
+        retain_flow_events_outside_errors(&mut root_events, lowering.error_spans);
+    }
+    let has_actionable_event = root_events.iter().any(|event| {
+        matches!(
+            event,
+            crate::FlowEvent::Call { .. }
+                | crate::FlowEvent::Assign { .. }
+                | crate::FlowEvent::Yield { .. }
+                | crate::FlowEvent::Await { .. }
+        )
+    });
+    if !has_actionable_event {
+        return;
+    }
+
+    let symbol = bonsai_common::SymbolId::new(*next);
+    *next += 1;
+    let module_span = span_of(lowering.file, &lowering.tree.root_node());
+    defs.push(crate::Decl {
+        symbol,
+        kind: crate::DeclKind::Function,
+        name: "__module__".to_string(),
+        qualified_name: None,
+        module_path: crate::ModulePath::default(),
+        span: module_span,
+        name_span: module_span,
+        visibility: crate::Visibility::Public,
+        parent: None,
+        body_span: Some(module_span),
+        flow_events: root_events,
+        has_implicit_returns: false,
+        params: Vec::new(),
+        param_annotations: Vec::new(),
+        type_aliases: Vec::new(),
+        bases: Vec::new(),
+        receiver_param_index: None,
+        receiver_field_writes: Vec::new(),
+        implicit_receiver_names: Vec::new(),
+        receiver_state_sources: Vec::new(),
+        return_type: None,
+        is_variadic: false,
+    });
+}
+
 /// Full adapter pipeline: parse with `pack_name`, scan for declarations,
 /// populate each function's `flow_events` via [`walk_flow_events`], and
 /// collect top-level call refs for legacy consumers.
@@ -4750,189 +5025,26 @@ pub fn decl_index_with_handler(
     }
 
     // Pass 2b: anonymous lambda / arrow-function / closure declarations.
-    // Needed so HOF chains (`xs.forEach(x => sink(x))`, `list.map(|i|
-    // ...)`) produce a decl whose body the taint engine can walk —
-    // otherwise the lambda body is invisible and calls inside it
-    // (`sink(x)`) never reach any analysis. Lambdas get a synthetic
-    // name `<lambda@{line}:{col}>` so they're distinguishable in
-    // diagnostics but never clash with a real function name.
-    let lambda_nodes = collect_kinds(&tree, handler.lambda_kinds);
-    for lambda in lambda_nodes {
-        // Some adapters promote expression-bodied callables to normal
-        // declarations because their grammar exposes enough structure
-        // to name and walk them directly. Do not index the same syntax
-        // again as a lambda; duplicate FuncIds split call resolution
-        // from matcher attribution for a single semantic function.
-        if handler.fn_kinds.contains(&lambda.kind()) {
-            continue;
-        }
-        // Skip lambdas that are passed directly as call arguments.
-        // `walk_into` inlines those bodies into the enclosing call's
-        // owner via `walk_lambda_body`; emitting a second synthetic
-        // decl for the same source events creates duplicate source
-        // starts and duplicate findings with different chain roots.
-        // Keep non-call-argument lambdas, including local or top-level
-        // assignments, because their bodies are not otherwise inlined.
-        if lambda_is_inlined_call_argument(&lambda, handler) {
-            continue;
-        }
-        let span = span_of(file, &lambda);
-        let binding_name = binding_name_node(&lambda, src);
-        let name = binding_name.map_or_else(
-            || {
-                format!(
-                    "<lambda@{}:{}>",
-                    lambda.start_position().row + 1,
-                    lambda.start_position().column + 1
-                )
-            },
-            |name_node| callable_binding_name_from_node(&name_node, src),
-        );
-        if name.is_empty() {
-            continue;
-        }
-        // Params: lambdas surface them via `parameters` field, or
-        // inline tokens (Rust `|x|`, Elixir `fn x ->`). Use the
-        // generic param-names extractor.
-        let params = extract_param_names(&lambda, src);
-        // Body: `body` field, `block` child, or the lambda itself
-        // as a single-expression body.
-        let body_node = lambda
-            .child_by_field_name("body")
-            .or_else(|| lambda.child_by_field_name("block"))
-            .or_else(|| first_named_child_of_kind(&lambda, "block"))
-            .or_else(|| first_named_child_of_kind(&lambda, "compound_statement"))
-            .or_else(|| first_named_child_of_kind(&lambda, "statement_block"))
-            // Kotlin `lambda_literal` and Swift closure bodies nest their
-            // statements under a `statements` node (after the params).
-            .or_else(|| first_named_child_of_kind(&lambda, "statements"))
-            // Erlang `F = fun() -> Body end` (H17): the fun body nests under
-            // `clause_body` (directly, or via a `fun_clause` wrapper), the
-            // same field the main function-decl path handles.
-            .or_else(|| first_named_child_of_kind(&lambda, "clause_body"))
-            .or_else(|| {
-                first_named_child_of_kind(&lambda, "fun_clause")
-                    .and_then(|fc| first_named_child_of_kind(&fc, "clause_body"))
-            })
-            // Elixir `fn x -> BODY end`: `anonymous_function` → `stab_clause`
-            // → `body`/`right` field.
-            .or_else(|| {
-                first_named_child_of_kind(&lambda, "stab_clause").and_then(|sc| {
-                    sc.child_by_field_name("body")
-                        .or_else(|| sc.child_by_field_name("right"))
-                })
-            })
-            // Expression-bodied lambdas with no wrapper node (Scala
-            // `(x) => sink(x)`, Rust `|x| expr`): the body is the last
-            // named child that isn't a parameter / type annotation.
-            .or_else(|| lambda_expression_body_child(&lambda));
-        let syntax_broken = file_has_syntax_errors && callable_has_syntax_error(&lambda, body_node.as_ref());
-        let implicit_return_node = body_node.and_then(|b| implicit_return_expression_node(&b, handler));
-        let body_implicit_returns = implicit_return_node.is_some();
-        let mut flow_events = if let Some(b) = body_node {
-            let mut events = walk_flow_events(b, file, src, handler, &class_names);
-            if let Some(return_node) = implicit_return_node {
-                append_expression_body_return(&mut events, &return_node, file, src);
-            } else if handler.tail_expression_returns {
-                append_tail_expression_return(&mut events, &b, file, src, handler);
-            }
-            events
-        } else {
-            Vec::new()
-        };
-        if syntax_broken {
-            retain_flow_events_outside_errors(&mut flow_events, &error_spans);
-        }
-        annotate_tuple_call_result_bindings(&mut flow_events, &tree, src);
-        if params.is_empty() && flow_events.is_empty() {
-            continue;
-        }
-        let symbol = bonsai_common::SymbolId::new(next);
-        next += 1;
-        defs.push(crate::Decl {
-            symbol,
-            kind: crate::DeclKind::Function,
-            name,
-            qualified_name: None,
-            module_path: crate::ModulePath::default(),
-            span,
-            name_span: binding_name.map_or(span, |name_node| span_of(file, &name_node)),
-            visibility: crate::Visibility::Public,
-            parent: None,
-            body_span: body_node.map(|b| span_of(file, &b)),
-            flow_events,
-            has_implicit_returns: handler.tail_expression_returns || body_implicit_returns,
-            params,
-            param_annotations: Vec::new(),
-            type_aliases: Vec::new(),
-            bases: Vec::new(),
-            receiver_param_index: None,
-            receiver_field_writes: Vec::new(),
-            implicit_receiver_names: Vec::new(),
-            receiver_state_sources: Vec::new(),
-            return_type: None,
-            is_variadic: false,
-        });
-    }
-    // Pass 3: class declarations (recorded as Class decls so the tracer can
-    // route Constructor calls through them).
-    let mut class_infos: Vec<(String, bonsai_common::SymbolId, bonsai_common::Span)> = Vec::new();
-    for cnode in &class_nodes {
-        // For C / C++ `typedef struct { ... } UserInfo;` the
-        // struct_specifier itself is anonymous — the name lives on a
-        // sibling type_identifier in the enclosing type_definition. So
-        // if the direct child lookup fails, walk up one level and look
-        // for a type_identifier at the parent level.
-        let name_node = cnode
-            .child_by_field_name("name")
-            .or_else(|| first_identifier_like_child(cnode))
-            .or_else(|| anonymous_struct_typedef_name(cnode));
-        let Some(name_node) = name_node else { continue };
-        let name = node_text(&name_node, src);
-        if name.is_empty() {
-            continue;
-        }
-        let symbol = bonsai_common::SymbolId::new(next);
-        next += 1;
-        let class_span = span_of(file, cnode);
-        class_infos.push((name.to_string(), symbol, class_span));
-        defs.push(crate::Decl {
-            symbol,
-            kind: crate::DeclKind::Class,
-            name: name.to_string(),
-            qualified_name: None,
-            module_path: crate::ModulePath::default(),
-            span: class_span,
-            name_span: span_of(file, &name_node),
-            visibility: crate::Visibility::Public,
-            parent: None,
-            body_span: Some(span_of(file, cnode)),
-            flow_events: Vec::new(),
-            has_implicit_returns: false,
-            params: Vec::new(),
-            param_annotations: Vec::new(),
-            type_aliases: Vec::new(),
-            bases: Vec::new(),
-            receiver_param_index: None,
-            receiver_field_writes: Vec::new(),
-            implicit_receiver_names: Vec::new(),
-            receiver_state_sources: Vec::new(),
-            return_type: None,
-            is_variadic: false,
-        });
-    }
-
-    for (function_symbol, parent_span) in function_parent_spans {
-        let Some((_, class_symbol, _)) = class_infos
-            .iter()
-            .find(|(_, _, class_span)| *class_span == parent_span)
-        else {
-            continue;
-        };
-        if let Some(decl) = defs.iter_mut().find(|decl| decl.symbol == function_symbol) {
-            decl.parent = Some(*class_symbol);
-        }
-    }
+    // This is a distinct compiler pass because lambda ownership differs from
+    // named callable ownership in higher-order calls.
+    let lowering = CallableLowering {
+        tree: &tree,
+        file,
+        src,
+        handler,
+        class_names: &class_names,
+        error_spans: &error_spans,
+        file_has_syntax_errors,
+    };
+    lower_lambda_declarations(&lowering, &mut defs, &mut next);
+    // Pass 3: class declarations and syntactic method ownership.
+    lower_class_declarations(
+        &lowering,
+        &class_nodes,
+        &function_parent_spans,
+        &mut defs,
+        &mut next,
+    );
 
     // Pass 4: top-level / module-scope code. PHP request handlers,
     // Python single-file scripts, Ruby Sinatra DSL apps, and Node
@@ -4948,54 +5060,7 @@ pub fn decl_index_with_handler(
     // did not parse cleanly, so the synthetic `__module__` decl emits
     // no flow events. Errors INSIDE a broken callable are already
     // handled by that callable's own gate above.
-    let module_syntax_broken = error_spans.iter().any(|err| {
-        !defs
-            .iter()
-            .any(|decl| decl.span.start <= err.start && err.end <= decl.span.end)
-    });
-    let mut root_events = walk_flow_events(tree.root_node(), file, src, handler, &class_names);
-    if module_syntax_broken {
-        // Top-level code didn't parse cleanly: keep the module-scope
-        // statements outside the error spans, drop only those inside.
-        retain_flow_events_outside_errors(&mut root_events, &error_spans);
-    }
-    let has_actionable_event = root_events.iter().any(|ev| {
-        matches!(
-            ev,
-            crate::FlowEvent::Call { .. }
-                | crate::FlowEvent::Assign { .. }
-                | crate::FlowEvent::Yield { .. }
-                | crate::FlowEvent::Await { .. }
-        )
-    });
-    if has_actionable_event {
-        let symbol = bonsai_common::SymbolId::new(next);
-        let module_span = span_of(file, &tree.root_node());
-        defs.push(crate::Decl {
-            symbol,
-            kind: crate::DeclKind::Function,
-            name: "__module__".to_string(),
-            qualified_name: None,
-            module_path: crate::ModulePath::default(),
-            span: module_span,
-            name_span: module_span,
-            visibility: crate::Visibility::Public,
-            parent: None,
-            body_span: Some(module_span),
-            flow_events: root_events,
-            has_implicit_returns: false,
-            params: Vec::new(),
-            param_annotations: Vec::new(),
-            type_aliases: Vec::new(),
-            bases: Vec::new(),
-            receiver_param_index: None,
-            receiver_field_writes: Vec::new(),
-            implicit_receiver_names: Vec::new(),
-            receiver_state_sources: Vec::new(),
-            return_type: None,
-            is_variadic: false,
-        });
-    }
+    lower_module_declaration(&lowering, &mut defs, &mut next);
 
     let mut refs = extract_call_refs(&tree, file, src);
     refs.extend(extract_decorators(&tree, file, src));
