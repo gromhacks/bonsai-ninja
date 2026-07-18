@@ -22,3 +22,166 @@
           c.execute(user_input)
     expect_match_text: [conn.cursor]
   description: "DB-API `.cursor()` returns a cursor object; type the local so a factory-returned cursor (`c = conn.cursor()`) matches the receiver-typed cursor.execute sink that an explicitly-named `cursor` var already matched. Typing-only — never a finding."
+
+- id: python.typing.ldap3_connection
+  enabled: true
+  language: python
+  returns_type: Connection
+  match:
+    kind: call
+    callee:
+      attribute: [ldap3, Connection]
+  match_examples:
+  - name: ldap3 constructor returns a Connection
+    code: |
+      import ldap3
+      def example(user_input):
+          connection = ldap3.Connection("ldap://example")
+          return connection.search("dc=example,dc=com", user_input)
+    expect_match_text: [ldap3.Connection]
+  description: "The external `ldap3.Connection(...)` constructor returns a `Connection`; type assigned locals so receiver-typed LDAP sink rules use library metadata instead of variable-name conventions. Typing-only — never a finding."
+
+- id: python.typing.werkzeug_headers
+  enabled: true
+  language: python
+  returns_type: Headers
+  match:
+    kind: call
+    callee:
+      attribute: [werkzeug, Headers]
+  match_examples:
+  - name: werkzeug constructor returns Headers
+    code: |
+      import werkzeug
+      def example(user_input):
+          headers = werkzeug.Headers()
+          headers.set("X-Trace", user_input)
+          return headers
+    expect_match_text: [werkzeug.Headers]
+  description: "The external `werkzeug.Headers()` constructor returns `Headers`; type assigned locals so receiver-typed header rules are driven by library metadata. Typing-only — never a finding."
+
+- id: python.typing.zipfile_zip_file
+  enabled: true
+  language: python
+  returns_type: ZipFile
+  match:
+    kind: call
+    callee:
+      attribute: [zipfile, ZipFile]
+  match_examples:
+  - name: zipfile constructor returns ZipFile
+    code: |
+      import zipfile
+      def example(path, dest):
+          archive = zipfile.ZipFile(path)
+          archive.extractall(dest)
+    expect_match_text: [zipfile.ZipFile]
+  description: "`zipfile.ZipFile(...)` returns `ZipFile`; type assigned archive handles for receiver-typed extraction rules. Typing-only — never a finding."
+
+- id: python.typing.tarfile_tar_file
+  enabled: true
+  language: python
+  returns_type: TarFile
+  match:
+    kind: call
+    callee:
+      attribute: [tarfile, TarFile]
+  match_examples:
+  - name: tarfile constructor returns TarFile
+    code: |
+      import tarfile
+      def example(path, dest):
+          archive = tarfile.TarFile(path)
+          archive.extractall(dest)
+    expect_match_text: [tarfile.TarFile]
+  description: "`tarfile.TarFile(...)` returns `TarFile`; type assigned archive handles for receiver-typed extraction rules. Typing-only — never a finding."
+
+- id: python.typing.pathlib_pure_path
+  enabled: true
+  language: python
+  returns_type: PurePath
+  match:
+    kind: call
+    callee:
+      attribute: [pathlib, PurePath]
+  match_examples:
+  - name: pathlib constructor returns PurePath
+    code: |
+      from pathlib import PurePath
+      def example(raw, root):
+          candidate = PurePath(raw)
+          return candidate.relative_to(root)
+    expect_match_text: [PurePath]
+  description: "`pathlib.PurePath(...)` returns `PurePath`; imported member aliases are resolved through the compiler import index. Typing-only — never a finding."
+
+- id: python.typing.sqlite3_connection
+  enabled: true
+  language: python
+  returns_type: Connection
+  match:
+    kind: call
+    callee:
+      attribute: [sqlite3, Connection]
+  match_examples:
+  - name: sqlite3 constructor returns Connection
+    code: |
+      from sqlite3 import Connection
+      def example(user_id):
+          connection = Connection("db.sqlite")
+          return connection.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    expect_match_text: [Connection]
+  description: "`sqlite3.Connection(...)` returns `Connection`; imported member aliases are resolved through the compiler import index. Typing-only — never a finding."
+
+- id: python.typing.asyncpg_connection
+  enabled: true
+  language: python
+  returns_type: Connection
+  match:
+    kind: call
+    callee:
+      attribute: [asyncpg, Connection]
+  match_examples:
+  - name: asyncpg constructor returns Connection
+    code: |
+      from asyncpg import Connection
+      async def example(user_id):
+          connection = Connection()
+          return await connection.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+    expect_match_text: [Connection]
+  description: "`asyncpg.Connection(...)` returns `Connection`; the package-qualified rule keeps the shared class name scoped. Typing-only — never a finding."
+
+- id: python.typing.itsdangerous_signer
+  enabled: true
+  language: python
+  returns_type: Signer
+  match:
+    kind: call
+    callee:
+      attribute: [itsdangerous, Signer]
+  match_examples:
+  - name: itsdangerous constructor returns Signer
+    code: |
+      from itsdangerous import Signer
+      def example(value):
+          signer = Signer("secret")
+          return signer.unsign(value)
+    expect_match_text: [Signer]
+  description: "`itsdangerous.Signer(...)` returns `Signer`; imported member aliases are resolved from syntax facts. Typing-only — never a finding."
+
+- id: python.typing.itsdangerous_url_safe_serializer
+  enabled: true
+  language: python
+  returns_type: URLSafeSerializer
+  match:
+    kind: call
+    callee:
+      attribute: [itsdangerous, URLSafeSerializer]
+  match_examples:
+  - name: itsdangerous constructor returns URLSafeSerializer
+    code: |
+      from itsdangerous import URLSafeSerializer
+      def example(value):
+          serializer = URLSafeSerializer("secret")
+          return serializer.loads(value)
+    expect_match_text: [URLSafeSerializer]
+  description: "`itsdangerous.URLSafeSerializer(...)` returns its declared serializer type; imported member aliases are resolved from syntax facts. Typing-only — never a finding."

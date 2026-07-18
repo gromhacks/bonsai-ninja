@@ -336,6 +336,38 @@ pub fn match_rules_against_facts(ws: &Workspace, rules: &[&Rule]) -> Vec<RuleMat
     match_rules_against_facts_with_progress(ws, rules, || {})
 }
 
+/// Match rules with rulepack-compiled factory return types available to
+/// receiver typing. Validation and inventory paths use this so they observe
+/// the same external-library type facts as taint analysis.
+pub(crate) fn match_rules_against_facts_with_factory(
+    ws: &Workspace,
+    rules: &[&Rule],
+    factory: &Arc<FactoryReturns>,
+) -> Vec<RuleMatch> {
+    let mut on_file_done = || {};
+    match_rules_against_facts_with_progress_and_mode(
+        ws,
+        rules,
+        &mut on_file_done,
+        MatchRunConfig {
+            mode: ConstraintMode::Strict,
+            taint_view: None,
+            scan_files: None,
+            factory,
+            dedup_file_matches: false,
+            retention: FactRetention::Transient,
+        },
+    )
+}
+
+pub(crate) fn match_rule_against_facts_with_factory(
+    ws: &Workspace,
+    rule: &Rule,
+    factory: &Arc<FactoryReturns>,
+) -> Vec<RuleMatch> {
+    match_rules_against_facts_with_factory(ws, &[rule], factory)
+}
+
 /// Batch matcher with a per-file progress callback.
 pub fn match_rules_against_facts_with_progress<F>(
     ws: &Workspace,
@@ -367,6 +399,7 @@ pub(crate) fn match_rules_against_facts_with_progress_on_files<F>(
     ws: &Workspace,
     rules: &[&Rule],
     files: &[FileId],
+    factory: &Arc<FactoryReturns>,
     mut on_file_done: F,
 ) -> Vec<RuleMatch>
 where
@@ -380,7 +413,7 @@ where
             mode: ConstraintMode::Strict,
             taint_view: None,
             scan_files: Some(files),
-            factory: &empty_factory_returns(),
+            factory,
             dedup_file_matches: false,
             retention: FactRetention::Transient,
         },
@@ -391,6 +424,7 @@ pub(crate) fn match_rules_against_facts_for_taint_support_with_progress_on_files
     ws: &Workspace,
     rules: &[&Rule],
     files: &[FileId],
+    factory: &Arc<FactoryReturns>,
     mut on_file_done: F,
 ) -> Vec<RuleMatch>
 where
@@ -404,7 +438,7 @@ where
             mode: ConstraintMode::Strict,
             taint_view: None,
             scan_files: Some(files),
-            factory: &empty_factory_returns(),
+            factory,
             dedup_file_matches: false,
             retention: FactRetention::Transient,
         },
@@ -415,6 +449,7 @@ pub(crate) fn match_rules_against_facts_for_inventory_with_progress_on_files<F>(
     ws: &Workspace,
     rules: &[&Rule],
     files: &[FileId],
+    factory: &Arc<FactoryReturns>,
     mut on_file_done: F,
 ) -> Vec<RuleMatch>
 where
@@ -428,7 +463,7 @@ where
             mode: ConstraintMode::Strict,
             taint_view: None,
             scan_files: Some(files),
-            factory: &empty_factory_returns(),
+            factory,
             dedup_file_matches: true,
             retention: FactRetention::Transient,
         },
@@ -815,6 +850,7 @@ pub(crate) fn match_rules_against_facts_for_sink_inventory_with_progress_on_file
     ws: &Workspace,
     rules: &[&Rule],
     files: &[FileId],
+    factory: &Arc<FactoryReturns>,
     mut on_file_done: F,
 ) -> Vec<RuleMatch>
 where
@@ -828,7 +864,7 @@ where
             mode: ConstraintMode::SinkInventory,
             taint_view: None,
             scan_files: Some(files),
-            factory: &empty_factory_returns(),
+            factory,
             dedup_file_matches: true,
             retention: FactRetention::Transient,
         },
@@ -3046,20 +3082,27 @@ fn call_candidate_keys(
 ) -> Vec<String> {
     let mut out = Vec::new();
     collect_call_candidate_keys(callee, &mut out);
-    if !alias_map.is_empty() {
-        if let Some(bare) = callee.split(&['.', ':'][..]).next() {
-            if let Some(target) = alias_map.get(bare) {
-                let tail = &callee[bare.len()..];
-                let expanded = match target {
-                    AliasTarget::Member { module, member } => format!("{module}.{member}{tail}"),
-                    AliasTarget::Namespace { module } => format!("{module}{tail}"),
-                    AliasTarget::Type { type_name } => format!("{type_name}{tail}"),
-                };
-                collect_call_candidate_keys(&expanded, &mut out);
-            }
-        }
+    if let Some(expanded) = expand_callee_alias(callee, alias_map) {
+        collect_call_candidate_keys(&expanded, &mut out);
     }
     out
+}
+
+/// Expand the first compiler alias in a callee while preserving its remaining
+/// member path. This is the canonical import/type rewrite shared by matcher
+/// candidate lookup and rulepack factory-return typing.
+fn expand_callee_alias(
+    callee: &str,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+) -> Option<String> {
+    let bare = callee.split(&['.', ':'][..]).next()?;
+    let target = alias_map.get(bare)?;
+    let tail = &callee[bare.len()..];
+    Some(match target {
+        AliasTarget::Member { module, member } => format!("{module}.{member}{tail}"),
+        AliasTarget::Namespace { module } => format!("{module}{tail}"),
+        AliasTarget::Type { type_name } => format!("{type_name}{tail}"),
+    })
 }
 
 fn collect_call_candidate_keys(callee: &str, out: &mut Vec<String>) {
@@ -4009,6 +4052,9 @@ pub(crate) fn empty_factory_returns() -> Arc<FactoryReturns> {
 pub(crate) fn build_factory_returns(rules: &[&Rule]) -> Arc<FactoryReturns> {
     let mut by_language: AHashMap<String, Vec<FactoryReturnSpec>> = AHashMap::new();
     for rule in rules {
+        if !rule.enabled {
+            continue;
+        }
         let Some(ty) = rule.returns_type.as_deref() else {
             continue;
         };
@@ -4092,10 +4138,14 @@ fn factory_spec_matches_call(call_name: &str, call_receiver: Option<&str>, spec:
     if spec.receiver_path.is_empty() {
         return true;
     }
-    let Some(receiver) = call_receiver else {
-        return false;
-    };
-    let segments = factory_path_segments(receiver);
+    let segments = call_receiver.map_or_else(
+        || {
+            let mut segments = factory_path_segments(call_name);
+            segments.pop();
+            segments
+        },
+        factory_path_segments,
+    );
     if segments.len() < spec.receiver_path.len() {
         return false;
     }
@@ -4111,6 +4161,7 @@ fn synth_factory_type_aliases(
     assignment_values: &[bonsai_lang_api::AssignmentValueFact],
     factory: &FactoryReturns,
     language: &str,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
 ) -> Vec<TypeAliasBinding> {
     let Some(specs) = factory.specs_for(language) else {
         return Vec::new();
@@ -4120,6 +4171,7 @@ fn synth_factory_type_aliases(
         events: &[FlowEvent],
         assignment_values: &[bonsai_lang_api::AssignmentValueFact],
         specs: &[FactoryReturnSpec],
+        alias_map: &std::collections::HashMap<String, AliasTarget>,
         out: &mut Vec<TypeAliasBinding>,
     ) {
         for event in events {
@@ -4133,8 +4185,13 @@ fn synth_factory_type_aliases(
                     let Some(call_name) = fact.direct_call_name.as_deref() else {
                         continue;
                     };
+                    let expanded = expand_callee_alias(call_name, alias_map);
                     for spec in specs {
-                        if !factory_spec_matches_call(call_name, fact.direct_call_receiver.as_deref(), spec) {
+                        if !factory_spec_matches_call(call_name, fact.direct_call_receiver.as_deref(), spec)
+                            && !expanded
+                                .as_deref()
+                                .is_some_and(|expanded| factory_spec_matches_call(expanded, None, spec))
+                        {
                             continue;
                         }
                         let binding = TypeAliasBinding {
@@ -4151,13 +4208,13 @@ fn synth_factory_type_aliases(
                     else_events,
                     ..
                 } => {
-                    walk(then_events, assignment_values, specs, out);
-                    walk(else_events, assignment_values, specs, out);
+                    walk(then_events, assignment_values, specs, alias_map, out);
+                    walk(else_events, assignment_values, specs, alias_map, out);
                 }
                 FlowEvent::Loop { body, .. }
                 | FlowEvent::Defer { body, .. }
                 | FlowEvent::Using { body, .. } => {
-                    walk(body, assignment_values, specs, out);
+                    walk(body, assignment_values, specs, alias_map, out);
                 }
                 FlowEvent::Try {
                     body,
@@ -4165,15 +4222,15 @@ fn synth_factory_type_aliases(
                     finally_events,
                     ..
                 } => {
-                    walk(body, assignment_values, specs, out);
-                    walk(catch_events, assignment_values, specs, out);
-                    walk(finally_events, assignment_values, specs, out);
+                    walk(body, assignment_values, specs, alias_map, out);
+                    walk(catch_events, assignment_values, specs, alias_map, out);
+                    walk(finally_events, assignment_values, specs, alias_map, out);
                 }
                 _ => {}
             }
         }
     }
-    walk(events, assignment_values, specs, &mut out);
+    walk(events, assignment_values, specs, alias_map, &mut out);
     out
 }
 
@@ -4267,7 +4324,13 @@ fn build_decl_match_facts_bundle(
         let factory_type_aliases = file_language
             .as_deref()
             .map(|lang| {
-                synth_factory_type_aliases(&decl.flow_events, &file_index.assignment_values, factory, lang)
+                synth_factory_type_aliases(
+                    &decl.flow_events,
+                    &file_index.assignment_values,
+                    factory,
+                    lang,
+                    &alias_map,
+                )
             })
             .unwrap_or_default();
         let mut calls = collect_calls(&decl.flow_events);
@@ -4411,28 +4474,7 @@ fn callee_or_alias_matches(
     let bare = callee.split(&['.', ':'][..]).next()?;
     let target = alias_map.get(bare)?;
     let tail = &callee[bare.len()..];
-    let expanded = match target {
-        AliasTarget::Member { module, member } => {
-            // `exec(x)` + member=exec → `child_process.exec(x)`.
-            // `exec.sub(x)` + member=exec → `child_process.exec.sub(x)`.
-            format!("{module}.{member}{tail}")
-        }
-        AliasTarget::Namespace { module } => {
-            // `cp.exec(x)` + module=child_process → `child_process.exec(x)`.
-            // `cp(x)` (bare module call) + module=child_process →
-            // `child_process(x)` — unusual but valid.
-            format!("{module}{tail}")
-        }
-        AliasTarget::Type { type_name } => {
-            // `f.readBytes()` + type=File → `File.readBytes()`.
-            // Receiver-type resolution: instance variables bound to
-            // a constructor call surface here so attribute-chain
-            // rules like `[File, readText]` / `[Logger, info]` /
-            // `[HttpClient, GetStringAsync]` match the real-world
-            // call shape `<recv>.<method>(...)`.
-            format!("{type_name}{tail}")
-        }
-    };
+    let expanded = expand_callee_alias(callee, alias_map)?;
     if callee_matches_with_receiver_types(&expanded, receiver_types, name, attribute, regex) {
         return Some(expanded);
     }

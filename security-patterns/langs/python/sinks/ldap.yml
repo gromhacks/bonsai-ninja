@@ -19,56 +19,20 @@
     code: |
       import ldap3
       def example(user_input):
+          connection = ldap3.Connection("ldap://example")
           filt = "(uid=" + user_input + ")"
-          return Connection.search("dc=example,dc=com", filt)
-    expect_match_text: [Connection.search]
+          return connection.search("dc=example,dc=com", filt)
+    expect_match_text: [connection.search]
   - name: ldap3 search literal negative
     code: |
       import ldap3
 
       def example(user_input):
+          connection = ldap3.Connection("ldap://example")
           filt = '(uid=' + user_input + ')'
-          return Connection.search('dc=example,dc=com', 'safe')
+          return connection.search('dc=example,dc=com', 'safe')
     expect_no_match: true
   description: "ldap3 Connection.search(search_base, search_filter) - the second argument is an LDAP filter; string interpolation is injectable."
-
-- id: python.ldap.ldap3_connection_search_method
-  enabled: true
-  language: python
-  tag: ldap-injection
-  severity: high
-  packages: [ldap3]
-  imports: [ldap3]
-  cwe: [CWE-90]
-  match:
-    kind: call
-    callee:
-      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.search$"
-      base_name_in:
-      - conn
-      - connection
-      - c
-      - ldap
-      - server
-      - ld
-  constraints:
-  - arg_tainted:
-      index: 1
-  match_examples:
-  - name: ldap3 variable connection search filter
-    code: |
-      import ldap3
-      def example(conn, user_input):
-          filt = "(uid=" + user_input + ")"
-          return conn.search("dc=example,dc=com", filt)
-    expect_match_text: [conn.search]
-  - name: ldap3 variable connection search literal negative
-    code: |
-      import ldap3
-      def example(conn):
-          return conn.search("dc=example,dc=com", "(uid=safe)")
-    expect_no_match: true
-  description: "ldap3 variable receiver .search(search_base, search_filter) - the second argument is an LDAP filter."
 
 - id: python.ldap.ldap3_modify
   enabled: true

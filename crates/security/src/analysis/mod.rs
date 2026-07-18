@@ -923,6 +923,7 @@ where
     filter_rules_to_workspace_languages(ws, &mut sinks);
     filter_rules_to_workspace_languages(ws, &mut sanitizers);
     let selected_sink_rule_count = sinks.len();
+    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
 
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, options.exclude_tests);
     let total_files = scan_files.len() as u64;
@@ -946,6 +947,7 @@ where
         "matching source rules",
         &scan_files,
         total_files,
+        &factory_returns,
         &mut on_progress,
     );
     // Inferred per-function entry-point sources are opt-in (was: emitted
@@ -1042,7 +1044,6 @@ where
     // Empty (and dormant) unless the pack ships such rules; threaded
     // into both the sink scan and the finding-time constraint re-check
     // so a `receiver_type_in` sink resolves on a factory-typed local.
-    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
     let mut sink_hits = match_rules_against_facts_for_taint_with_progress_on_files(
         ws,
         &sinks,
@@ -1059,6 +1060,7 @@ where
         "matching sanitizer rules",
         &endpoint_scan_files,
         endpoint_total_files,
+        &factory_returns,
         &mut on_progress,
     );
     filter_by_path(ws, &mut sink_hits, &options.files, &options.exclude_files);
@@ -1082,6 +1084,7 @@ where
             "matching pattern sink rules",
             &endpoint_scan_files,
             endpoint_total_files,
+            &factory_returns,
             &mut on_progress,
         )
     };
@@ -1350,6 +1353,7 @@ where
         )
     })?;
     filter_rules_to_workspace_languages(ws, &mut sources);
+    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
 
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, options.exclude_tests);
     let total_files = scan_files.len() as u64;
@@ -1371,6 +1375,7 @@ where
         "matching source rules",
         &scan_files,
         total_files,
+        &factory_returns,
         &mut on_progress,
     );
     // Opt-in synthetic per-function entry-point sources (see TaintAnalysisOptions).
@@ -2038,12 +2043,14 @@ where
     filter_rules_to_workspace_languages(ws, &mut selected);
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, false);
     let total_files = scan_files.len() as u64;
+    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
     let mut matches = gather_inventory_matches_phased(
         ws,
         &selected,
         "matching source rules",
         &scan_files,
         total_files,
+        &factory_returns,
         &mut on_progress,
     );
     on_progress(AnalysisProgress::PhaseStarted {
@@ -2099,6 +2106,7 @@ where
     )?;
     filter_rules_to_workspace_languages(ws, &mut selected);
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, false);
+    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
     on_progress(AnalysisProgress::PhaseStarted {
         label: "matching sink rules",
         total: scan_files.len() as u64,
@@ -2107,6 +2115,7 @@ where
         ws,
         &selected,
         &scan_files,
+        &factory_returns,
         || on_progress(AnalysisProgress::PhaseTicked),
     );
     on_progress(AnalysisProgress::PhaseFinished);
@@ -2164,12 +2173,14 @@ where
     filter_rules_to_workspace_languages(ws, &mut selected);
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, false);
     let total_files = scan_files.len() as u64;
+    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
     let mut matches = gather_inventory_matches_phased(
         ws,
         &selected,
         "matching sanitizer rules",
         &scan_files,
         total_files,
+        &factory_returns,
         &mut on_progress,
     );
     on_progress(AnalysisProgress::PhaseStarted {
@@ -2442,6 +2453,7 @@ fn gather_matches_phased<F>(
     label: &'static str,
     scan_files: &[FileId],
     total_files: u64,
+    factory: &Arc<crate::matcher::FactoryReturns>,
     on_progress: &mut F,
 ) -> Vec<RuleMatch>
 where
@@ -2451,7 +2463,7 @@ where
         label,
         total: total_files,
     });
-    let matches = match_rules_against_facts_with_progress_on_files(ws, rules, scan_files, || {
+    let matches = match_rules_against_facts_with_progress_on_files(ws, rules, scan_files, factory, || {
         on_progress(AnalysisProgress::PhaseTicked);
     });
     on_progress(AnalysisProgress::PhaseFinished);
@@ -2464,6 +2476,7 @@ fn gather_taint_support_matches_phased<F>(
     label: &'static str,
     scan_files: &[FileId],
     total_files: u64,
+    factory: &Arc<crate::matcher::FactoryReturns>,
     on_progress: &mut F,
 ) -> Vec<RuleMatch>
 where
@@ -2473,10 +2486,15 @@ where
         label,
         total: total_files,
     });
-    let matches =
-        match_rules_against_facts_for_taint_support_with_progress_on_files(ws, rules, scan_files, || {
+    let matches = match_rules_against_facts_for_taint_support_with_progress_on_files(
+        ws,
+        rules,
+        scan_files,
+        factory,
+        || {
             on_progress(AnalysisProgress::PhaseTicked);
-        });
+        },
+    );
     on_progress(AnalysisProgress::PhaseFinished);
     matches
 }
@@ -2487,6 +2505,7 @@ fn gather_inventory_matches_phased<F>(
     label: &'static str,
     scan_files: &[FileId],
     total_files: u64,
+    factory: &Arc<crate::matcher::FactoryReturns>,
     on_progress: &mut F,
 ) -> Vec<RuleMatch>
 where
@@ -2496,10 +2515,15 @@ where
         label,
         total: total_files,
     });
-    let matches =
-        match_rules_against_facts_for_inventory_with_progress_on_files(ws, rules, scan_files, || {
+    let matches = match_rules_against_facts_for_inventory_with_progress_on_files(
+        ws,
+        rules,
+        scan_files,
+        factory,
+        || {
             on_progress(AnalysisProgress::PhaseTicked);
-        });
+        },
+    );
     on_progress(AnalysisProgress::PhaseFinished);
     matches
 }
