@@ -27,6 +27,7 @@ fn path_step(
 
 fn sink_match(file: &str, line: u32, column: u32, text: &str, enclosing_fn: &str) -> RuleMatch {
     RuleMatch {
+        origin: MatchOrigin::Rulepack,
         rule_id: "typescript.test.sink".to_string(),
         language: "typescript".to_string(),
         file: file.to_string(),

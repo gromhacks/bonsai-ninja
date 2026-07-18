@@ -3,6 +3,8 @@
   language: php
   tag: cli-input
   trust: local
+  analysis_semantics:
+    flow_classes: [process-input]
   match:
     kind: read
     target:
@@ -69,6 +71,8 @@
   tag: env-input
   trust: local
   payload_types: [text]
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:
@@ -84,6 +88,8 @@
   tag: env-input
   trust: local
   payload_types: [text]
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: read
     target:
@@ -98,6 +104,8 @@
   language: php
   tag: cli-input
   trust: local
+  analysis_semantics:
+    flow_classes: [process-input]
   match:
     kind: call
     callee:

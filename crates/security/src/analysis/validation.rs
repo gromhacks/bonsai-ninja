@@ -730,9 +730,71 @@ fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
     validate_rule_regexes(rule, issues);
     validate_no_hardcoded_receiver_regex(rule, issues);
     validate_receiver_agnostic_regex_has_package_gate(rule, issues);
+    validate_analysis_semantics(rule, issues);
     validate_taint_semantics(rule, issues);
     validate_packages_not_maven_artifacts(rule, issues);
     validate_yaml_language_field(rule, issues);
+}
+
+fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
+    let Some(semantics) = rule.analysis_semantics.as_ref() else {
+        return;
+    };
+    for class in &semantics.flow_classes {
+        let valid_kind = match class {
+            FlowClass::ProcessInput | FlowClass::HttpInput | FlowClass::EnvironmentInput => {
+                rule.kind == RuleKind::Source
+            }
+            FlowClass::ProcessExecution | FlowClass::BrowserOutput => rule.kind == RuleKind::Sink,
+        };
+        if !valid_kind {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "analysis_semantics.flow_classes contains a class incompatible with the rule kind",
+            );
+        }
+    }
+    if (semantics.source_specificity_rank.is_some() || semantics.source_reporting_rank.is_some())
+        && rule.kind != RuleKind::Source
+    {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "analysis_semantics source ranks are only valid on source rules",
+        );
+    }
+    if (semantics.guard_profile.is_some()
+        || semantics.context_flow.is_some()
+        || semantics.post_sink_policy.is_some())
+        && rule.kind != RuleKind::Sink
+    {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "guard_profile, context_flow, and post_sink_policy are only valid on sink rules",
+        );
+    }
+    if let Some(context) = semantics.context_flow.as_ref() {
+        if context.channel.trim().is_empty()
+            || context.value_label.trim().is_empty()
+            || context.parameter_name.trim().is_empty()
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "analysis_semantics.context_flow requires non-empty channel, value_label, and parameter_name",
+            );
+        }
+    }
 }
 
 fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
@@ -904,6 +966,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             | crate::rule::ConstraintKind::ArgGe { .. }
             | crate::rule::ConstraintKind::RequiresRuntimeType { .. }
             | crate::rule::ConstraintKind::EnclosingDecoratorIn { .. }
+            | crate::rule::ConstraintKind::EnclosingModifierIn { .. }
             | crate::rule::ConstraintKind::SinkTagIn { .. }
             | crate::rule::ConstraintKind::MustAlias { .. }
             | crate::rule::ConstraintKind::RequiresState { .. } => None,

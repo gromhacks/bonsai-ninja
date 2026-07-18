@@ -12,9 +12,9 @@ use bonsai_lang_api::FlowEvent;
 use bonsai_security::loader::LanguagePack;
 use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
 use bonsai_security::{
-    run_taint_analysis, run_taint_analysis_with_phase_progress, ConstraintKind, FindingStatus, MatchKind,
-    MatchSpec, Rule, RuleConstraint, RuleKind, RuleTarget, Rulepack, SourceAnalysisOptions,
-    SourceLineageLimits, TaintAnalysisOptions, TrustClass,
+    run_taint_analysis, run_taint_analysis_with_phase_progress, AnalysisSemantics, ConstraintKind,
+    FindingStatus, FlowClass, GuardProfile, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind, RuleTarget,
+    Rulepack, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions, TrustClass,
 };
 use bonsai_taint::{compose_idg_seed_nodes, ensure_idg_service, IdgSeedRequest, TokenSet};
 use bonsai_workspace::Workspace;
@@ -525,6 +525,7 @@ fn return_sink_rulepack(lang: &str) -> Rulepack {
             }),
             search_depth: 0,
         },
+        analysis_semantics: None,
         taint_semantics: None,
         returns_type: None,
         constraints: RuleConstraint::default(),
@@ -666,6 +667,7 @@ fn rule(
             target: None,
             search_depth: 0,
         },
+        analysis_semantics: None,
         taint_semantics: None,
         returns_type: None,
         constraints: RuleConstraint::default(),
@@ -2238,6 +2240,7 @@ fn sanitizer_wrapping_source_attaches_to_same_function_flow() {
             target: None,
             search_depth: 0,
         },
+        analysis_semantics: None,
         taint_semantics: None,
         returns_type: None,
         constraints: RuleConstraint::default(),
@@ -2310,6 +2313,7 @@ fn nested_fully_qualified_esapi_sanitizer_inside_sink_arg_attaches() {
             target: None,
             search_depth: 0,
         },
+        analysis_semantics: None,
         taint_semantics: Some(TaintSemantics {
             clean_output_overwrite: None,
             source_output_args: Vec::new(),
@@ -2391,6 +2395,7 @@ fn sanitizer_in_helper_return_attaches_after_chain_display_collapse() {
             target: None,
             search_depth: 0,
         },
+        analysis_semantics: None,
         taint_semantics: Some(TaintSemantics {
             clean_output_overwrite: None,
             source_output_args: Vec::new(),
@@ -2470,6 +2475,7 @@ fn sanitized_flows_are_hidden_by_default_and_visible_on_request() {
             target: None,
             search_depth: 0,
         },
+        analysis_semantics: None,
         taint_semantics: None,
         returns_type: None,
         constraints: RuleConstraint::default(),
@@ -2680,6 +2686,10 @@ fn java_url_constructor_guarded_by_scheme_host_and_private_ip_is_sanitized() {
     let java_pack = pack.packs.get_mut("java").expect("java pack");
     java_pack.sinks[0].id = "java.ssrf.url_ctor".to_string();
     java_pack.sinks[0].tag = Some("ssrf".to_string());
+    java_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        guard_profile: Some(GuardProfile::JavaUrlSsrfGuard),
+        ..AnalysisSemantics::default()
+    });
     java_pack.sinks[0].match_spec.kind = MatchKind::New;
     java_pack.sinks[0].constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
         arg_tainted: ArgTaintedSpec {
@@ -3248,6 +3258,10 @@ fn local_environment_source_to_log_injection_is_low_signal() {
     go_pack.sources[0].id = "go.os.getenv".to_string();
     go_pack.sources[0].trust = Some(TrustClass::Local);
     go_pack.sources[0].category = Some("local-input".to_string());
+    go_pack.sources[0].analysis_semantics = Some(AnalysisSemantics {
+        flow_classes: vec![FlowClass::EnvironmentInput],
+        ..AnalysisSemantics::default()
+    });
     go_pack.sinks[0].id = "go.log_injection.log_printf_tainted_value".to_string();
     go_pack.sinks[0].tag = Some("log-injection".to_string());
 
@@ -3505,6 +3519,10 @@ fn go_jwt_parse_inline_keyfunc_with_algorithm_pin_is_sanitized() {
     let go_pack = pack.packs.get_mut("go").expect("go pack");
     go_pack.sinks[0].id = "go.jwt.golang_jwt_parse_tainted_token".to_string();
     go_pack.sinks[0].tag = Some("jwt".to_string());
+    go_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        guard_profile: Some(GuardProfile::GoJwtInlineKeyfuncAlgorithm),
+        ..AnalysisSemantics::default()
+    });
 
     let ws = workspace(&[(
         "/app/main.go",
@@ -3687,6 +3705,10 @@ fn go_xml_decoder_with_strict_and_allowlisted_charset_reader_is_sanitized() {
     let go_pack = pack.packs.get_mut("go").expect("go pack");
     go_pack.sinks[0].id = "go.xxe.xml_newdecoder".to_string();
     go_pack.sinks[0].tag = Some("xxe".to_string());
+    go_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        guard_profile: Some(GuardProfile::GoXmlDecoderHardening),
+        ..AnalysisSemantics::default()
+    });
 
     let ws = workspace(&[(
         "/app/parse.go",

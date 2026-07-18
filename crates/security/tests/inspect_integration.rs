@@ -140,6 +140,7 @@ fn compile_rule_produces_non_empty_inspect_args_for_sink() {
             target: None,
             search_depth: 0,
         },
+        analysis_semantics: None,
         taint_semantics: None,
         returns_type: None,
         constraints: RuleConstraint::default(),

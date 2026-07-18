@@ -357,6 +357,8 @@
   imports:
   - dart_frog/dart_frog.dart
 - id: dart.dart_frog.request_json
+  analysis_semantics:
+    source_specificity_rank: 5
   enabled: true
   language: dart
   trust: remote

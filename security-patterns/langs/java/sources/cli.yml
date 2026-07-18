@@ -9,6 +9,8 @@
     target:
       name: args
       in_method: [main]
+  constraints:
+    - enclosing_modifier_in: [static]
   match_examples:
     - name: Java main args
       code: |
@@ -17,6 +19,13 @@
           }
         }
       expect_match_text: [args]
+    - name: instance method named main is not the process entry point
+      code: |
+        class App {
+          public void main(String[] args) {
+          }
+        }
+      expect_no_match: true
   description: "String[] args on Java main(...) - command-line arguments supplied by the local invoker."
 
 - id: java.source.system_getenv
@@ -24,6 +33,8 @@
   language: java
   trust: config
   tag: config-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   match:
     kind: call
     callee:

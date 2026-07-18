@@ -5,6 +5,8 @@
   severity: medium
   cwe:
   - CWE-918
+  analysis_semantics:
+    guard_profile: java-url-ssrf-guard
   match:
     kind: new
     callee:
@@ -31,6 +33,8 @@
   severity: low
   cwe:
   - CWE-918
+  analysis_semantics:
+    guard_profile: java-url-ssrf-guard
   match:
     kind: new
     callee:

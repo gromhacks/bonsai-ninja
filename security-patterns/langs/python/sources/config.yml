@@ -8,6 +8,8 @@
   language: python
   trust: config
   tag: config-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   imports: [os]
   match:
     kind: call
@@ -26,6 +28,8 @@
   language: python
   trust: config
   tag: config-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   imports: [os]
   match:
     kind: call
@@ -44,6 +48,8 @@
   language: python
   trust: config
   tag: config-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   imports: [os]
   match:
     kind: read

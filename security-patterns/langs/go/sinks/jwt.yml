@@ -213,6 +213,8 @@
   severity: critical
   packages: [github.com/golang-jwt/jwt, github.com/dgrijalva/jwt-go]
   cwe: [CWE-347, CWE-327]
+  analysis_semantics:
+    guard_profile: go-jwt-inline-keyfunc-algorithm
   match:
     kind: call
     callee:

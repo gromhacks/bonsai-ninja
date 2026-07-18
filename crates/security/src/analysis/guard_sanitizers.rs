@@ -11,27 +11,26 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-pub(super) fn source_sink_pair_is_low_signal(source: &FindingMatch, sink_rule: &Rule) -> bool {
+pub(super) fn source_sink_pair_is_low_signal(
+    source: &FindingMatch,
+    source_rule: Option<&Rule>,
+    sink_rule: &Rule,
+) -> bool {
     // Inferred entry parameters are untrusted inputs, not confidential
     // values. A precise flow from such an input to an event/log/response
     // can be useful lineage, but it is not evidence of information
     // exposure. Concrete secret/identity source rules remain eligible.
-    if sink_rule.tag.as_deref() == Some("information-exposure")
-        && source.category.as_deref() == Some("inferred")
-    {
+    if sink_rule.tag.as_deref() == Some("information-exposure") && source.origin != MatchOrigin::Rulepack {
         return true;
     }
     if sink_rule.tag.as_deref() != Some("log-injection") || source.trust.as_deref() != Some("local") {
         return false;
     }
-    let token = format!(
-        "{} {} {}",
-        source.rule_id,
-        source.text,
-        source.category.as_deref().unwrap_or("")
-    )
-    .to_ascii_lowercase();
-    token.contains("getenv") || token.contains("environ")
+    source_rule.is_some_and(|rule| {
+        rule.analysis_semantics
+            .as_ref()
+            .is_some_and(|semantics| semantics.flow_classes.contains(&FlowClass::EnvironmentInput))
+    })
 }
 
 pub(super) fn dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMatch) -> Option<FindingMatch> {
@@ -510,10 +509,12 @@ pub(super) fn java_url_ssrf_guard_sanitizer(
     snk: &RuleMatch,
     sink_rule: &Rule,
 ) -> Option<FindingMatch> {
-    if snk.language != "java" || sink_rule.tag.as_deref() != Some("ssrf") {
-        return None;
-    }
-    if !matches!(snk.rule_id.as_str(), "java.ssrf.url_ctor" | "java.ssrf.uri_ctor") {
+    if sink_rule
+        .analysis_semantics
+        .as_ref()
+        .and_then(|semantics| semantics.guard_profile)
+        != Some(GuardProfile::JavaUrlSsrfGuard)
+    {
         return None;
     }
     let global = ws.db().global_index();
@@ -601,9 +602,11 @@ pub(super) fn go_jwt_inline_keyfunc_algorithm_guard_sanitizer(
     snk: &RuleMatch,
     sink_rule: &Rule,
 ) -> Option<FindingMatch> {
-    if snk.language != "go"
-        || snk.rule_id != "go.jwt.golang_jwt_parse_tainted_token"
-        || sink_rule.tag.as_deref() != Some("jwt")
+    if sink_rule
+        .analysis_semantics
+        .as_ref()
+        .and_then(|semantics| semantics.guard_profile)
+        != Some(GuardProfile::GoJwtInlineKeyfuncAlgorithm)
     {
         return None;
     }
@@ -931,6 +934,7 @@ pub(super) fn java_local_html_escape_helper_return_sanitizer(
             .trim()
             .to_string();
         return Some(FindingMatch {
+            origin: MatchOrigin::EngineSanitizer,
             rule_id: "engine.sanitizer.java_local_html_escape_helper_return".to_string(),
             file: snk.file.clone(),
             line: location.line,
@@ -1120,9 +1124,11 @@ pub(super) fn go_xml_decoder_hardening_sanitizer(
     snk: &RuleMatch,
     sink_rule: &Rule,
 ) -> Option<FindingMatch> {
-    if snk.language != "go"
-        || snk.rule_id != "go.xxe.xml_newdecoder"
-        || sink_rule.tag.as_deref() != Some("xxe")
+    if sink_rule
+        .analysis_semantics
+        .as_ref()
+        .and_then(|semantics| semantics.guard_profile)
+        != Some(GuardProfile::GoXmlDecoderHardening)
     {
         return None;
     }
@@ -1215,6 +1221,7 @@ pub(super) fn nosql_eq_filter_wrapper_sanitizer(
         return None;
     }
     Some(FindingMatch {
+        origin: MatchOrigin::EngineSanitizer,
         rule_id: "engine.sanitizer.nosql_eq_filter_wrapper".to_string(),
         file: snk.file.clone(),
         line: snk.line,
@@ -1664,6 +1671,7 @@ fn finding_for_guard_span(
         .trim()
         .to_string();
     Some(FindingMatch {
+        origin: MatchOrigin::EngineSanitizer,
         rule_id: rule_id.to_string(),
         file: hit.file.clone(),
         line: location.line,
@@ -2002,6 +2010,7 @@ pub(super) fn go_same_origin_redirect_helper_guard_sanitizer(
     }
     let (file, line, column) = resolve_span_location(ws, guard.span);
     Some(FindingMatch {
+        origin: MatchOrigin::EngineSanitizer,
         rule_id: "engine.sanitizer.go_same_origin_redirect_helper_guard".to_string(),
         file,
         line,
@@ -2502,6 +2511,7 @@ pub(super) fn finite_literal_map_lookup_allowlist_sanitizer(
                 .trim()
                 .to_string();
             return Some(FindingMatch {
+                origin: MatchOrigin::EngineSanitizer,
                 rule_id: "engine.sanitizer.literal_map_key_allowlist".to_string(),
                 file: sink.file.clone(),
                 line: location.line,
@@ -2554,6 +2564,7 @@ pub(super) fn guarded_char_append_allowlist_sanitizer(
         };
         let (file, line, column) = resolve_span_location(ws, span);
         return Some(FindingMatch {
+            origin: MatchOrigin::EngineSanitizer,
             rule_id: "engine.sanitizer.go_guarded_char_append_allowlist".to_string(),
             file,
             line,

@@ -517,6 +517,8 @@
   severity: medium
   packages: ["path/filepath"]
   cwe: [CWE-22]
+  analysis_semantics:
+    post_sink_policy: path-construction-containment
   match:
     kind: call
     callee:
@@ -619,6 +621,8 @@
   severity: high
   packages: [path]
   cwe: [CWE-22]
+  analysis_semantics:
+    post_sink_policy: path-construction-containment
   match:
     kind: call
     callee:

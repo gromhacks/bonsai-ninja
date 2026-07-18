@@ -1292,6 +1292,8 @@
   trust: service
   tag: caller-input
   payload_types: [binary]
+  analysis_semantics:
+    source_reporting_rank: 10
   match:
     kind: param
     target:

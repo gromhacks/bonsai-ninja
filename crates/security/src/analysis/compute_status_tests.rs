@@ -10,6 +10,7 @@ use bonsai_taint::TaintedCallKind;
 
 fn sanitizer(tag: Option<&str>) -> FindingMatch {
     FindingMatch {
+        origin: MatchOrigin::Rulepack,
         rule_id: "test.san.x".to_string(),
         file: "test.py".to_string(),
         line: 1,
@@ -896,6 +897,7 @@ fn rule_match_with_span(start: u32, end: u32) -> RuleMatch {
 
 fn rule_match_with_text_and_span(match_text: &str, start: u32, end: u32) -> RuleMatch {
     RuleMatch {
+        origin: MatchOrigin::Rulepack,
         rule_id: "python.test.sink".to_string(),
         language: "python".to_string(),
         file: "app.py".to_string(),
@@ -1212,6 +1214,7 @@ fn group_id_hashes_shared_tail_not_full_flow_chain() {
 
 fn finding_match_for_grouping(rule_id: &str, line: u32, text: &str) -> FindingMatch {
     FindingMatch {
+        origin: MatchOrigin::Rulepack,
         rule_id: rule_id.to_string(),
         file: "app.py".to_string(),
         line,
@@ -1293,10 +1296,14 @@ fn finding_with_flow_for_grouping(
 
 #[test]
 fn combined_findings_do_not_merge_distinct_representative_flows() {
-    let groups = combine_findings_by_source_flow(vec![
-        finding_with_flow_for_grouping("S:token", 11, "token", "F:token-flow"),
-        finding_with_flow_for_grouping("S:action", 12, "action", "F:action-flow"),
-    ]);
+    let pack = Rulepack::default();
+    let groups = combine_findings_by_source_flow(
+        vec![
+            finding_with_flow_for_grouping("S:token", 11, "token", "F:token-flow"),
+            finding_with_flow_for_grouping("S:action", 12, "action", "F:action-flow"),
+        ],
+        &pack,
+    );
 
     assert_eq!(
         groups.len(),

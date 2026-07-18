@@ -67,7 +67,8 @@ pub use report::{
     SecurityReport,
 };
 pub use rule::{
-    ArgTaintedSpec, ConstraintKind, MatchKind, MatchSpec, MustAliasSpec, PayloadType, RequiresStateSpec,
-    Rule, RuleConstraint, RuleKind, RuleTarget, RuntimeTypeSpec, Severity, TrustClass,
+    AnalysisSemantics, ArgTaintedSpec, ConstraintKind, ContextFlowRole, ContextFlowSemantics, FlowClass,
+    GuardProfile, MatchKind, MatchOrigin, MatchSpec, MustAliasSpec, PayloadType, PostSinkPolicy,
+    RequiresStateSpec, Rule, RuleConstraint, RuleKind, RuleTarget, RuntimeTypeSpec, Severity, TrustClass,
 };
 pub use sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};

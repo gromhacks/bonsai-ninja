@@ -342,6 +342,12 @@
   - CWE-117
   - CWE-943
   - CWE-94
+  analysis_semantics:
+    context_flow:
+      channel: logging.mdc
+      role: producer
+      value_label: MDC context
+      parameter_name: mdc
   match:
     kind: call
     callee:
@@ -397,6 +403,12 @@
   imports:
   - org.slf4j
   - org.apache.logging.log4j
+  analysis_semantics:
+    context_flow:
+      channel: logging.mdc
+      role: consumer
+      value_label: MDC context
+      parameter_name: mdc
   match:
     kind: call
     callee:

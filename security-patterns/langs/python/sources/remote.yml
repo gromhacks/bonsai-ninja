@@ -269,6 +269,8 @@
   description: FastAPI / Starlette / DRF request.query_params.
 
 - id: python.fastapi.request_json
+  analysis_semantics:
+    source_specificity_rank: 5
   enabled: false
   disabled_reason:
     code: subsumed
@@ -486,6 +488,8 @@
     expect_match_text: [req.args.get]
   description: "Flask-style short handler variable `req.args.get(...)` - common in internal helpers and tests where the request object is passed as `req`. Subsumed by python.flask.request_args_get through the shared explicit receiver regex."
 - id: python.flask.request_json
+  analysis_semantics:
+    source_specificity_rank: 5
   enabled: false
   disabled_reason:
     code: requires-constraint

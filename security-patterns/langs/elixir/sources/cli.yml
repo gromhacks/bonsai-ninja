@@ -109,6 +109,8 @@
   language: elixir
   trust: config
   tag: config-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   payload_types: [text]
   match:
     kind: call
@@ -129,6 +131,8 @@
   language: elixir
   trust: config
   tag: config-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   payload_types: [text]
   match:
     kind: call
@@ -149,6 +153,8 @@
   language: elixir
   trust: config
   tag: config-input
+  analysis_semantics:
+    flow_classes: [environment-input]
   payload_types: [text]
   match:
     kind: call
