@@ -3,7 +3,337 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+#[derive(Default)]
+struct SourceGroupMetrics {
+    graph_nanos: u128,
+    attribution_nanos: u128,
+    graph_builds: usize,
+    group_graph_hits: usize,
+    workspace_graph_hits: usize,
+    empty_graphs: usize,
+    tainted_calls_seen: usize,
+    sink_candidate_checks: usize,
+    sink_matches: usize,
+    lineage_misses: usize,
+}
+
+struct GroupTaintTargets {
+    nodes: Option<Vec<bonsai_idg::WsNodeId>>,
+    unresolved_sink_funcs: Option<AHashSet<FuncId>>,
+}
+
+impl GroupTaintTargets {
+    fn sink_funcs<'a>(&'a self, group: &'a ScheduledSourceGroup) -> Option<&'a AHashSet<FuncId>> {
+        if self.nodes.is_some() {
+            self.unresolved_sink_funcs.as_ref()
+        } else {
+            Some(&group.corridor.terminal_sinks)
+        }
+    }
+}
+
 impl SourceGroupExecutor<'_> {
+    fn plan_group_targets(
+        &self,
+        group: &ScheduledSourceGroup,
+        idg: &bonsai_idg::IdgQueryService,
+    ) -> GroupTaintTargets {
+        let nodes = self.sink_target_nodes_for_graph.and_then(|global_targets| {
+            if !group.corridor.target_nodes.is_empty() {
+                return Some(group.corridor.target_nodes.clone());
+            }
+            let mut nodes: Vec<_> = global_targets
+                .iter()
+                .copied()
+                .filter(|node| {
+                    idg.resolve_point(*node)
+                        .is_some_and(|point| group.corridor.terminal_sinks.contains(&point.func))
+                })
+                .collect();
+            nodes.sort();
+            nodes.dedup();
+            (!nodes.is_empty()).then_some(nodes)
+        });
+        let unresolved_sink_funcs = nodes.as_ref().and_then(|_| {
+            self.sink_target_nodes.and_then(|targets| {
+                let funcs: AHashSet<_> = group
+                    .corridor
+                    .terminal_sinks
+                    .intersection(&targets.unresolved_funcs)
+                    .copied()
+                    .collect();
+                (!funcs.is_empty()).then_some(funcs)
+            })
+        });
+        GroupTaintTargets {
+            nodes,
+            unresolved_sink_funcs,
+        }
+    }
+
+    fn log_group_lineage(&self, group: &ScheduledSourceGroup) {
+        if !self.debug_taint_phase {
+            return;
+        }
+        let mut names: Vec<_> = group
+            .corridor
+            .lineage_funcs
+            .iter()
+            .filter_map(|func| {
+                self.global
+                    .decl_of(SymbolId::new(func.raw()))
+                    .map(|decl| format!("{}({})", decl.name, func.raw()))
+            })
+            .collect();
+        names.sort();
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "group func={} lineage_funcs={:?}",
+            group.src_func_id.raw(),
+            names
+        );
+    }
+
+    fn compile_source_graph(
+        &self,
+        group: &ScheduledSourceGroup,
+        targets: &GroupTaintTargets,
+        source_item: &SourceWorkItem<'_>,
+        idg: &bonsai_idg::IdgQueryService,
+        group_graphs: &mut AHashMap<Vec<String>, Arc<EntryTaintGraph>>,
+        metrics: &mut SourceGroupMetrics,
+    ) -> Arc<EntryTaintGraph> {
+        let source_func = group.src_func_id;
+        let source = source_item.source;
+        let output_arg_names = self
+            .global
+            .decl_of(SymbolId::new(source_func.raw()))
+            .map(|decl| output_arg_names_for_match(self.pack, source, decl))
+            .unwrap_or_default();
+        let anchor = source_anchor_for_rule_match(self.pack, source);
+        let mut seed_key = effective_source_seed_key(
+            source_func,
+            &source_item.seeds,
+            anchor,
+            &output_arg_names,
+            self.global.as_ref(),
+            idg,
+        );
+        let sink_funcs = targets.sink_funcs(group);
+        let lineage_funcs = Some(&group.corridor.lineage_funcs);
+        append_taint_target_key(&mut seed_key, "target_funcs", sink_funcs);
+        append_taint_target_key(&mut seed_key, "lineage_funcs", lineage_funcs);
+        append_taint_target_node_key(&mut seed_key, "target_nodes", targets.nodes.as_deref());
+
+        let started = self.debug_taint_phase.then(Instant::now);
+        let graph = if let Some(hit) = group_graphs.get(&seed_key) {
+            metrics.group_graph_hits = metrics.group_graph_hits.saturating_add(1);
+            Arc::clone(hit)
+        } else {
+            let workspace_hit = if self.use_partitioned_scoped_idg {
+                None
+            } else {
+                self.workspace_taint_index.get(source_func, &seed_key)
+            };
+            if let Some(hit) = workspace_hit {
+                metrics.workspace_graph_hits = metrics.workspace_graph_hits.saturating_add(1);
+                group_graphs.insert(seed_key, Arc::clone(&hit));
+                hit
+            } else {
+                metrics.graph_builds = metrics.graph_builds.saturating_add(1);
+                let graph = Arc::new(bonsai_taint::entry_taint_graph_from_idg_query(
+                    bonsai_taint::IdgTaintQuery::semantic(
+                        bonsai_taint::IdgTaintSource::rule_match(
+                            source_func,
+                            &source_item.seeds,
+                            anchor,
+                            &output_arg_names,
+                        ),
+                        self.ws.db(),
+                        idg,
+                    )
+                    .with_transfers(bonsai_taint::IdgTaintTransfers {
+                        call_result_passthroughs: &self.config.call_result_passthroughs,
+                        call_results_materialized: true,
+                        ..bonsai_taint::IdgTaintTransfers::none()
+                    })
+                    .with_targets(bonsai_taint::IdgTaintTargets {
+                        nodes: targets.nodes.as_deref(),
+                        funcs: sink_funcs,
+                        lineage_funcs,
+                    })
+                    .with_max_precision(self.config.max_edge_precision)
+                    .with_caches(self.taint_caches),
+                ));
+                let graph = if self.use_partitioned_scoped_idg {
+                    graph
+                } else {
+                    self.workspace_taint_index
+                        .insert_if_absent(source_func, seed_key.clone(), graph)
+                };
+                group_graphs.insert(seed_key, Arc::clone(&graph));
+                graph
+            }
+        };
+        if let Some(started) = started {
+            metrics.graph_nanos = metrics.graph_nanos.saturating_add(started.elapsed().as_nanos());
+        }
+        graph
+    }
+
+    fn sink_candidate_is_valid(
+        &self,
+        source_func: FuncId,
+        source: &RuleMatch,
+        call: &bonsai_taint::TaintedCall,
+        sink: &RuleMatch,
+        trace_index: &AHashMap<u64, &TaintedCallEdge>,
+        metrics: &mut SourceGroupMetrics,
+    ) -> bool {
+        if !source_can_precede_sink(self.ws, self.pack, source, source_func, sink, call.caller) {
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "sink_match_rejected_order source_rule={} sink_rule={} src_func={} sink_func={} caller={} call={} source_span={:?} sink_span={:?} call_span={:?}",
+                source.rule_id,
+                sink.rule_id,
+                source_func.raw(),
+                func_id_for_match(self.ws, sink).map(|func| func.raw()).unwrap_or_default(),
+                call.caller.raw(),
+                call.name,
+                source.span,
+                sink.span,
+                call.call_span
+            );
+            return false;
+        }
+        if same_function_clean_overwrite_kills_sink_arg(
+            self.clean_overwrite_policy,
+            source_func,
+            call.caller,
+            source.span,
+            sink.span,
+            &call.tainted_args,
+            call.tainted_receiver.as_deref(),
+        ) {
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "sink_match_rejected_same_func_clean_overwrite source_rule={} sink_rule={} caller={} call={} span={:?} tainted_args={:?} receiver={:?}",
+                source.rule_id,
+                sink.rule_id,
+                call.caller.raw(),
+                call.name,
+                call.call_span,
+                call.tainted_args,
+                call.tainted_receiver
+            );
+            return false;
+        }
+        if interprocedural_clean_overwrite_kills_lineage_arg(
+            self.clean_overwrite_policy,
+            source_func,
+            source.span,
+            trace_index,
+            call,
+        ) {
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "sink_match_rejected_inter_clean_overwrite source_rule={} sink_rule={} caller={} call={} span={:?} tainted_args={:?} receiver={:?}",
+                source.rule_id,
+                sink.rule_id,
+                call.caller.raw(),
+                call.name,
+                call.call_span,
+                call.tainted_args,
+                call.tainted_receiver
+            );
+            return false;
+        }
+        metrics.sink_matches = metrics.sink_matches.saturating_add(1);
+
+        let synthetic_evidence = matches!(
+            call.kind,
+            bonsai_taint::TaintedCallKind::Return | bonsai_taint::TaintedCallKind::Write
+        );
+        if !synthetic_evidence && call.tainted_args.is_empty() && call.tainted_receiver.is_none() {
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "sink_match_dropped_empty_evidence source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?}",
+                source.rule_id,
+                sink.rule_id,
+                call.caller.raw(),
+                call.name,
+                call.call_span,
+                call.kind
+            );
+            return false;
+        }
+        let Some(sink_rule) = self.pack.find_rule_by_id(&sink.rule_id) else {
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "sink_match_missing_rule source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?} tainted_args={:?} receiver={:?}",
+                source.rule_id,
+                sink.rule_id,
+                call.caller.raw(),
+                call.name,
+                call.call_span,
+                call.kind,
+                call.tainted_args,
+                call.tainted_receiver
+            );
+            return false;
+        };
+        if !source_rule_allows_sink_tag(self.pack, &source.rule_id, sink_rule) {
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "sink_match_rejected_source_sink_tag source_rule={} sink_rule={} sink_tag={:?}",
+                source.rule_id,
+                sink.rule_id,
+                sink_rule.tag
+            );
+            return false;
+        }
+        if prototype_pollution_sink_is_guarded(self.ws, sink_rule, sink) {
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "sink_match_guarded source_rule={} sink_rule={} caller={} call={} span={:?}",
+                source.rule_id,
+                sink.rule_id,
+                call.caller.raw(),
+                call.name,
+                call.call_span
+            );
+            return false;
+        }
+        if !sink_rule.constraints.is_empty() {
+            let current_call_view = std::slice::from_ref(call);
+            let current_call_taint_view = InterTaintView::new(current_call_view);
+            if !rule_match_passes_constraints_with_taint_view(
+                self.ws,
+                sink_rule,
+                sink,
+                &current_call_taint_view,
+                self.factory_returns,
+                self.receiver_base_map_cell,
+            ) {
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "sink_match_constraint_failed source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?} tainted_args={:?} receiver={:?} constraints={:?}",
+                    source.rule_id,
+                    sink.rule_id,
+                    call.caller.raw(),
+                    call.name,
+                    call.call_span,
+                    call.kind,
+                    call.tainted_args,
+                    call.tainted_receiver,
+                    sink_rule.constraints
+                );
+                return false;
+            }
+        }
+        true
+    }
+
     pub(super) fn execute(
         &self,
         group: &ScheduledSourceGroup,
@@ -13,88 +343,18 @@ impl SourceGroupExecutor<'_> {
         let global = self.global;
         let source_work = self.source_work;
         let pack = self.pack;
-        let config = self.config;
         let chain_call_graph = self.chain_call_graph;
-        let use_partitioned_scoped_idg = self.use_partitioned_scoped_idg;
-        let workspace_taint_index = self.workspace_taint_index;
-        let taint_caches = self.taint_caches;
         let sink_by_func = self.sink_by_func;
         let san_by_func = self.san_by_func;
-        let clean_overwrite_policy = self.clean_overwrite_policy;
-        let factory_returns = self.factory_returns;
-        let receiver_base_map_cell = self.receiver_base_map_cell;
-        let sink_target_nodes = self.sink_target_nodes;
-        let sink_target_nodes_for_graph = self.sink_target_nodes_for_graph;
         let workspace_callable_cache = self.workspace_callable_cache;
         let debug_taint_phase = self.debug_taint_phase;
         let src_func_id = group.src_func_id;
         let indices = group.indices.as_ref();
         let group_started = debug_taint_phase.then(Instant::now);
-        let mut graph_nanos = 0u128;
-        let mut attribution_nanos = 0u128;
-        let mut graph_builds = 0usize;
-        let mut group_graph_hits = 0usize;
-        let mut workspace_graph_hits = 0usize;
-        let mut empty_graphs = 0usize;
-        let mut tainted_calls_seen = 0usize;
-        let mut sink_candidate_checks = 0usize;
-        let mut sink_matches = 0usize;
-        let mut lineage_misses = 0usize;
+        let mut metrics = SourceGroupMetrics::default();
         let mut group_out: Vec<FindingWithChain> = Vec::new();
-        let group_target_nodes_owned: Option<Vec<bonsai_idg::WsNodeId>> = sink_target_nodes_for_graph
-            .and_then(|global_targets| {
-                if !group.corridor.target_nodes.is_empty() {
-                    return Some(group.corridor.target_nodes.clone());
-                }
-                let mut nodes: Vec<bonsai_idg::WsNodeId> = global_targets
-                    .iter()
-                    .copied()
-                    .filter(|node| {
-                        idg.resolve_point(*node)
-                            .is_some_and(|point| group.corridor.terminal_sinks.contains(&point.func))
-                    })
-                    .collect();
-                nodes.sort();
-                nodes.dedup();
-                (!nodes.is_empty()).then_some(nodes)
-            });
-        let group_target_nodes = group_target_nodes_owned.as_deref();
-        let unresolved_sink_func_targets: Option<AHashSet<FuncId>> = group_target_nodes.and_then(|_| {
-            sink_target_nodes.as_ref().and_then(|targets| {
-                let unresolved: AHashSet<FuncId> = group
-                    .corridor
-                    .terminal_sinks
-                    .intersection(&targets.unresolved_funcs)
-                    .copied()
-                    .collect();
-                (!unresolved.is_empty()).then_some(unresolved)
-            })
-        });
-        let group_sink_func_targets = if group_target_nodes.is_some() {
-            unresolved_sink_func_targets.as_ref()
-        } else {
-            Some(&group.corridor.terminal_sinks)
-        };
-        let group_lineage_func_targets = Some(&group.corridor.lineage_funcs);
-        if debug_taint_phase {
-            let mut names: Vec<String> = group
-                .corridor
-                .lineage_funcs
-                .iter()
-                .filter_map(|func| {
-                    global
-                        .decl_of(SymbolId::new(func.raw()))
-                        .map(|decl| format!("{}({})", decl.name, func.raw()))
-                })
-                .collect();
-            names.sort();
-            bonsai_diagnostics::debug_log!(
-                "security-taint",
-                "group func={} lineage_funcs={:?}",
-                src_func_id.raw(),
-                names
-            );
-        }
+        let targets = self.plan_group_targets(group, idg);
+        self.log_group_lineage(group);
         let mut emitted_for_source_sink_flow: AHashSet<(usize, String, u32, u64, u64, Option<u64>)> =
             AHashSet::new();
         // Bounded L1 for this one source function. Several
@@ -106,89 +366,15 @@ impl SourceGroupExecutor<'_> {
         for &idx in indices {
             let source_item = &source_work[idx];
             let src = source_item.source;
-            let seeds = &source_item.seeds;
-            let output_arg_names = global
-                .decl_of(SymbolId::new(src_func_id.raw()))
-                .map(|d| output_arg_names_for_match(pack, src, d))
-                .unwrap_or_default();
-            let anchor = source_anchor_for_rule_match(pack, src);
-            let mut seed_key = effective_source_seed_key(
-                src_func_id,
-                seeds,
-                anchor,
-                &output_arg_names,
-                global.as_ref(),
-                idg,
-            );
-            append_taint_target_key(&mut seed_key, "target_funcs", group_sink_func_targets);
-            append_taint_target_key(&mut seed_key, "lineage_funcs", group_lineage_func_targets);
-            append_taint_target_node_key(&mut seed_key, "target_nodes", group_target_nodes);
-            let graph_key = (src_func_id, seed_key);
-            // Compute the per-`(source_func, seed_shape)` graph
-            // exactly. The per-group cache removes duplicate work
-            // inside this source function; the workspace cache gives
-            // repeat SDK calls bounded reuse across invocations.
-            let graph_started = debug_taint_phase.then(Instant::now);
-            let graph = if let Some(hit) = group_graphs.get(&graph_key.1) {
-                group_graph_hits = group_graph_hits.saturating_add(1);
-                hit.clone()
-            } else {
-                let workspace_hit = if use_partitioned_scoped_idg {
-                    None
-                } else {
-                    workspace_taint_index.get(src_func_id, &graph_key.1)
-                };
-                if let Some(hit) = workspace_hit {
-                    workspace_graph_hits = workspace_graph_hits.saturating_add(1);
-                    group_graphs.insert(graph_key.1.clone(), hit.clone());
-                    hit
-                } else {
-                    graph_builds = graph_builds.saturating_add(1);
-                    // The shared IDG already contains Tree-sitter-lowered
-                    // callback bindings and the rulepack transfer summaries
-                    // materialized once per call site. This query only selects
-                    // the source seed, semantic target corridor, and caches.
-                    let graph = Arc::new(bonsai_taint::entry_taint_graph_from_idg_query(
-                        bonsai_taint::IdgTaintQuery::semantic(
-                            bonsai_taint::IdgTaintSource::rule_match(
-                                src_func_id,
-                                seeds,
-                                anchor,
-                                &output_arg_names,
-                            ),
-                            ws.db(),
-                            idg,
-                        )
-                        .with_transfers(bonsai_taint::IdgTaintTransfers {
-                            call_result_passthroughs: &config.call_result_passthroughs,
-                            call_results_materialized: true,
-                            ..bonsai_taint::IdgTaintTransfers::none()
-                        })
-                        .with_targets(bonsai_taint::IdgTaintTargets {
-                            nodes: group_target_nodes,
-                            funcs: group_sink_func_targets,
-                            lineage_funcs: group_lineage_func_targets,
-                        })
-                        .with_max_precision(config.max_edge_precision)
-                        .with_caches(taint_caches),
-                    ));
-                    let graph = if use_partitioned_scoped_idg {
-                        graph
-                    } else {
-                        workspace_taint_index.insert_if_absent(src_func_id, graph_key.1.clone(), graph)
-                    };
-                    group_graphs.insert(graph_key.1.clone(), graph.clone());
-                    graph
-                }
-            };
-            if let Some(started) = graph_started {
-                graph_nanos = graph_nanos.saturating_add(started.elapsed().as_nanos());
-            }
+            let graph =
+                self.compile_source_graph(group, &targets, source_item, idg, &mut group_graphs, &mut metrics);
             if graph.tainted_calls.is_empty() {
-                empty_graphs = empty_graphs.saturating_add(1);
+                metrics.empty_graphs = metrics.empty_graphs.saturating_add(1);
                 continue;
             }
-            tainted_calls_seen = tainted_calls_seen.saturating_add(graph.tainted_calls.len());
+            metrics.tainted_calls_seen = metrics
+                .tainted_calls_seen
+                .saturating_add(graph.tainted_calls.len());
             if debug_taint_phase
                 && sink_by_func
                     .keys()
@@ -246,7 +432,9 @@ impl SourceGroupExecutor<'_> {
                     continue;
                 };
                 let mut cached_evidence: Option<Option<CallEvidence>> = None;
-                sink_candidate_checks = sink_candidate_checks.saturating_add(candidate_sinks.len());
+                metrics.sink_candidate_checks = metrics
+                    .sink_candidate_checks
+                    .saturating_add(candidate_sinks.len());
                 // Multi-sink attribution: when several sinks live in
                 // the same function, prefer span-equality over text
                 // overlap. If ANY candidate sink shares a span with
@@ -278,158 +466,9 @@ impl SourceGroupExecutor<'_> {
                     } else if !tainted_call_matches_sink(call, snk) {
                         continue;
                     }
-                    if !source_can_precede_sink(ws, pack, src, src_func_id, snk, call.caller) {
-                        bonsai_diagnostics::debug_log!(
-                            "security-taint",
-                            "sink_match_rejected_order source_rule={} sink_rule={} src_func={} sink_func={} caller={} call={} source_span={:?} sink_span={:?} call_span={:?}",
-                            src.rule_id,
-                            snk.rule_id,
-                            src_func_id.raw(),
-                            func_id_for_match(ws, snk).map(|func| func.raw()).unwrap_or_default(),
-                            call.caller.raw(),
-                            call.name,
-                            src.span,
-                            snk.span,
-                            call.call_span
-                        );
-                        continue;
-                    }
-                    if same_function_clean_overwrite_kills_sink_arg(
-                        clean_overwrite_policy,
-                        src_func_id,
-                        call.caller,
-                        src.span,
-                        snk.span,
-                        &call.tainted_args,
-                        call.tainted_receiver.as_deref(),
-                    ) {
-                        bonsai_diagnostics::debug_log!(
-                            "security-taint",
-                            "sink_match_rejected_same_func_clean_overwrite source_rule={} sink_rule={} caller={} call={} span={:?} tainted_args={:?} receiver={:?}",
-                            src.rule_id,
-                            snk.rule_id,
-                            call.caller.raw(),
-                            call.name,
-                            call.call_span,
-                            call.tainted_args,
-                            call.tainted_receiver
-                        );
-                        continue;
-                    }
-                    if interprocedural_clean_overwrite_kills_lineage_arg(
-                        clean_overwrite_policy,
-                        src_func_id,
-                        src.span,
-                        &trace_index,
-                        call,
-                    ) {
-                        bonsai_diagnostics::debug_log!(
-                            "security-taint",
-                            "sink_match_rejected_inter_clean_overwrite source_rule={} sink_rule={} caller={} call={} span={:?} tainted_args={:?} receiver={:?}",
-                            src.rule_id,
-                            snk.rule_id,
-                            call.caller.raw(),
-                            call.name,
-                            call.call_span,
-                            call.tainted_args,
-                            call.tainted_receiver
-                        );
-                        continue;
-                    }
-                    sink_matches = sink_matches.saturating_add(1);
-                    // Return / Write tainted-call rows are emitted
-                    // as evidence that *the function's return slot
-                    // / write target* received tainted data — they
-                    // don't carry tainted_args because there is no
-                    // "argument" to flag, the dataflow happened on
-                    // the return expression itself. Skip the
-                    // empty-args/receiver guard for those kinds so
-                    // a `MatchKind::Return` sink rule (or
-                    // `MatchKind::Write`) can still fire on the
-                    // span the IDG closure proved tainted.
-                    let kind_emits_synthetic_evidence = matches!(
-                        call.kind,
-                        bonsai_taint::TaintedCallKind::Return | bonsai_taint::TaintedCallKind::Write
-                    );
-                    if !kind_emits_synthetic_evidence
-                        && call.tainted_args.is_empty()
-                        && call.tainted_receiver.is_none()
+                    if !self.sink_candidate_is_valid(src_func_id, src, call, snk, &trace_index, &mut metrics)
                     {
-                        bonsai_diagnostics::debug_log!(
-                            "security-taint",
-                            "sink_match_dropped_empty_evidence source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?}",
-                            src.rule_id,
-                            snk.rule_id,
-                            call.caller.raw(),
-                            call.name,
-                            call.call_span,
-                            call.kind
-                        );
                         continue;
-                    }
-                    let Some(sink_rule) = pack.find_rule_by_id(&snk.rule_id) else {
-                        bonsai_diagnostics::debug_log!(
-                            "security-taint",
-                            "sink_match_missing_rule source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?} tainted_args={:?} receiver={:?}",
-                            src.rule_id,
-                            snk.rule_id,
-                            call.caller.raw(),
-                            call.name,
-                            call.call_span,
-                            call.kind,
-                            call.tainted_args,
-                            call.tainted_receiver
-                        );
-                        continue;
-                    };
-                    if !source_rule_allows_sink_tag(pack, &src.rule_id, sink_rule) {
-                        bonsai_diagnostics::debug_log!(
-                            "security-taint",
-                            "sink_match_rejected_source_sink_tag source_rule={} sink_rule={} sink_tag={:?}",
-                            src.rule_id,
-                            snk.rule_id,
-                            sink_rule.tag
-                        );
-                        continue;
-                    }
-                    if prototype_pollution_sink_is_guarded(ws, sink_rule, snk) {
-                        bonsai_diagnostics::debug_log!(
-                            "security-taint",
-                            "sink_match_guarded source_rule={} sink_rule={} caller={} call={} span={:?}",
-                            src.rule_id,
-                            snk.rule_id,
-                            call.caller.raw(),
-                            call.name,
-                            call.call_span
-                        );
-                        continue;
-                    }
-                    if !sink_rule.constraints.is_empty() {
-                        let current_call_view = std::slice::from_ref(call);
-                        let current_call_taint_view = InterTaintView::new(current_call_view);
-                        if !rule_match_passes_constraints_with_taint_view(
-                            ws,
-                            sink_rule,
-                            snk,
-                            &current_call_taint_view,
-                            factory_returns,
-                            receiver_base_map_cell,
-                        ) {
-                            bonsai_diagnostics::debug_log!(
-                                "security-taint",
-                                "sink_match_constraint_failed source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?} tainted_args={:?} receiver={:?} constraints={:?}",
-                                src.rule_id,
-                                snk.rule_id,
-                                call.caller.raw(),
-                                call.name,
-                                call.call_span,
-                                call.kind,
-                                call.tainted_args,
-                                call.tainted_receiver,
-                                sink_rule.constraints
-                            );
-                            continue;
-                        }
                     }
                     if !emitted_for_source_sink_flow.insert(source_sink_flow_emission_key(idx, snk, call)) {
                         bonsai_diagnostics::debug_log!(
@@ -447,7 +486,7 @@ impl SourceGroupExecutor<'_> {
                         build_call_evidence(ws, &trace_index, &canonical_chain_index, src_func_id, call)
                     });
                     let Some(evidence) = evidence.as_ref() else {
-                        lineage_misses = lineage_misses.saturating_add(1);
+                        metrics.lineage_misses = metrics.lineage_misses.saturating_add(1);
                         if debug_taint_phase {
                             let records = graph
                                 .call_records
@@ -526,7 +565,9 @@ impl SourceGroupExecutor<'_> {
                 }
             }
             if let Some(started) = attribution_started {
-                attribution_nanos = attribution_nanos.saturating_add(started.elapsed().as_nanos());
+                metrics.attribution_nanos = metrics
+                    .attribution_nanos
+                    .saturating_add(started.elapsed().as_nanos());
             }
         }
         if debug_taint_phase {
@@ -543,17 +584,17 @@ impl SourceGroupExecutor<'_> {
                     name,
                     src_func_id.raw(),
                     indices.len(),
-                    graph_builds,
-                    group_graph_hits,
-                    workspace_graph_hits,
-                    empty_graphs,
-                    tainted_calls_seen,
-                    sink_candidate_checks,
-                    sink_matches,
-                    lineage_misses,
+                    metrics.graph_builds,
+                    metrics.group_graph_hits,
+                    metrics.workspace_graph_hits,
+                    metrics.empty_graphs,
+                    metrics.tainted_calls_seen,
+                    metrics.sink_candidate_checks,
+                    metrics.sink_matches,
+                    metrics.lineage_misses,
                     group_out.len(),
-                    graph_nanos as f64 / 1_000_000_000.0,
-                    attribution_nanos as f64 / 1_000_000_000.0,
+                    metrics.graph_nanos as f64 / 1_000_000_000.0,
+                    metrics.attribution_nanos as f64 / 1_000_000_000.0,
                     total_secs
                 );
         }
