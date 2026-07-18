@@ -57,7 +57,8 @@ for crate_dir in "$ROOT_DIR"/crates/*/; do
 
     crate_tier="$(tier_of "$crate_name")"
     if [[ "$crate_tier" == "-1" ]]; then
-        echo "WARN: crate '$crate_name' is not classified in audit-layering.sh"
+        echo "UNCLASSIFIED CRATE: '$crate_name' must be assigned an architecture tier"
+        VIOLATIONS=$((VIOLATIONS + 1))
         continue
     fi
 
