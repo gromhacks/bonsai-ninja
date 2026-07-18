@@ -16,9 +16,12 @@ bonsai_testkit = { workspace = true }
 [dev-dependencies]
 bonsai_adapters = { workspace = true }
 serde_yaml = "0.9"
+tree-sitter = { workspace = true }
 
 [lints]
 workspace = true
 
 [package.metadata.cargo-machete]
-ignored = ["bonsai_common"]
+# `tree-sitter` is referenced by the public macro's compiled doctest; machete
+# does not inspect doctest source. `bonsai_common` is expanded through macros.
+ignored = ["bonsai_common", "tree-sitter"]
