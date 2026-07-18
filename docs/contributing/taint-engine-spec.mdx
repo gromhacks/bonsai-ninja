@@ -525,6 +525,12 @@ rulepack/config transfer semantics.
 - `saturated` is false and `continuation` is `None`; IDG queries run to
   completion rather than exposing scheduler chunks.
 
+The closure kernel is a sparse monotone stack over numeric CSR edges. It has
+no breadth-first name search, depth bound, iteration limit, or result cap and
+runs until the reachable fixed point is exhausted. Hop/path budgets exist only
+on explicit neighbourhood and path-rendering diagnostics; they never feed the
+semantic taint result.
+
 ## Read-side semantic checks
 
 Read propagation is graph-based. Adapters lower identifier, projection,
