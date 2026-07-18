@@ -1085,25 +1085,7 @@ fn export_files_in_path_order(ws: &Workspace) -> Vec<(FileId, String)> {
 }
 
 fn export_import_specs(ws: &Workspace, file: FileId) -> Vec<bonsai_lang_api::ImportSpec> {
-    ws.db()
-        .import_index(file)
-        .map(|index| index.imports.clone())
-        .filter(|imports| !imports.is_empty())
-        .unwrap_or_else(|| {
-            ws.db()
-                .parse(file)
-                .ok()
-                .and_then(|parsed| {
-                    ws.vfs().snapshot(file).ok().map(|snapshot| {
-                        bonsai_lang_api::kit::extract_generic_imports(
-                            &parsed.tree,
-                            file,
-                            snapshot.text.as_bytes(),
-                        )
-                    })
-                })
-                .unwrap_or_default()
-        })
+    ws.db().imports_for(file)
 }
 
 struct ExportFilesStreaming<'a> {

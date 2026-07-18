@@ -932,7 +932,7 @@ where
         Vec::new()
     };
     let constructor_names = if needs_constructor_names {
-        collect_constructor_names_for_files(ws, &constructor_files)
+        collect_constructor_names_in_files(global_file_indexes.as_ref(), &constructor_files)
     } else {
         AHashSet::new()
     };
@@ -957,6 +957,7 @@ where
         return files
             .iter()
             .flat_map(|&file| {
+                let _syntax_release = TransientSyntaxRelease::new(ws, file, retention);
                 let mut file_out: Vec<RuleMatch> = Vec::new();
                 if let Some(adapter) = ws.db().adapter_for(file) {
                     let language = adapter.language_id();
@@ -1016,6 +1017,7 @@ where
                     files
                         .par_iter()
                         .flat_map_iter(|&file| {
+                            let _syntax_release = TransientSyntaxRelease::new(ws, file, retention);
                             let mut file_out: Vec<RuleMatch> = Vec::new();
                             if let Some(adapter) = ws.db().adapter_for(file) {
                                 let language = adapter.language_id();
@@ -1185,6 +1187,34 @@ enum ConstraintMode {
 enum FactRetention {
     Cached,
     Transient,
+}
+
+/// File-scan guard that gives broad security passes compiler-phase syntax
+/// ownership. Lowered match facts survive the scan; the concrete Tree-sitter
+/// tree is evicted on every exit path and will be rebuilt exactly if a later
+/// query needs it.
+struct TransientSyntaxRelease<'a> {
+    ws: &'a Workspace,
+    file: FileId,
+    enabled: bool,
+}
+
+impl<'a> TransientSyntaxRelease<'a> {
+    fn new(ws: &'a Workspace, file: FileId, retention: FactRetention) -> Self {
+        Self {
+            ws,
+            file,
+            enabled: retention == FactRetention::Transient,
+        }
+    }
+}
+
+impl Drop for TransientSyntaxRelease<'_> {
+    fn drop(&mut self) {
+        if self.enabled {
+            self.ws.db().release_syntax(self.file);
+        }
+    }
 }
 
 enum ScanDeclIndex<'a> {
@@ -7010,40 +7040,19 @@ fn collect_constructor_names(global: &bonsai_index::GlobalIndex) -> AHashSet<Str
     names
 }
 
-fn collect_constructor_names_for_files(ws: &Workspace, files: &[FileId]) -> AHashSet<String> {
-    let collect_for_file = |file: FileId| -> Vec<String> {
-        let Some(index) = ws.db().decl_index_uncached(file) else {
-            return Vec::new();
-        };
-        index
-            .defs
-            .iter()
-            .filter(|decl| matches!(decl.kind, DeclKind::Constructor))
-            .map(|decl| decl.name.clone())
-            .collect()
-    };
-    let workers = matcher_worker_count();
-    if workers > 1 && files.len() > 1 {
-        let collect = || {
-            use rayon::prelude::*;
-            let names = files
-                .par_iter()
-                .flat_map_iter(|&file| collect_for_file(file))
-                .collect::<Vec<_>>();
-            names.into_iter().collect::<AHashSet<_>>()
-        };
-        if let Ok(pool) = rayon::ThreadPoolBuilder::new()
-            .num_threads(workers)
-            .stack_size(matcher_worker_stack_bytes())
-            .build()
-        {
-            return pool.install(collect);
-        }
-        return collect();
-    }
+fn collect_constructor_names_in_files(
+    global: &bonsai_index::GlobalIndex,
+    files: &[FileId],
+) -> AHashSet<String> {
     let mut names = AHashSet::new();
     for &file in files {
-        names.extend(collect_for_file(file));
+        names.extend(
+            global
+                .decls_in(file)
+                .iter()
+                .filter(|decl| matches!(decl.kind, DeclKind::Constructor))
+                .map(|decl| decl.name.clone()),
+        );
     }
     names
 }

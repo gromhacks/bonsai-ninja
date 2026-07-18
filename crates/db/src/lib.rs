@@ -316,6 +316,17 @@ impl AnalyzerDb {
             .parse_snapshot(&snapshot, &adapter, &self.inner.vfs)
     }
 
+    /// Release the cached Tree-sitter CST for `file` after a compiler phase
+    /// has lowered every fact it needs into durable IR.
+    ///
+    /// This is cache eviction, not an analysis limit: a later syntax query
+    /// reparses the exact VFS snapshot. Broad workspace passes use it to keep
+    /// resident memory proportional to concurrently lowered files instead of
+    /// retaining one concrete syntax tree for the lifetime of the database.
+    pub fn release_syntax(&self, file: FileId) {
+        self.inner.parser.invalidate(file);
+    }
+
     /// Declaration index for `file`, computed once per `(file,
     /// version)` pair. `None` when no adapter handles the file.
     pub fn decl_index(&self, file: FileId) -> Option<Arc<DeclIndex>> {
@@ -408,7 +419,18 @@ impl AnalyzerDb {
     /// when they only need file-local facts and would otherwise retain
     /// one `DeclIndex` per workspace file.
     pub fn decl_index_uncached(&self, file: FileId) -> Option<DeclIndex> {
-        self.build_decl_index_uncached(file)
+        let index = self.build_decl_index_uncached(file);
+        self.release_syntax(file);
+        index
+    }
+
+    /// Populate/reuse the cached declaration IR, then release its phase-local
+    /// Tree-sitter CST. Eager compiler frontends use this rather than keeping
+    /// both representations resident for every workspace file.
+    pub fn decl_index_releasing_syntax(&self, file: FileId) -> Option<Arc<DeclIndex>> {
+        let index = self.decl_index(file);
+        self.release_syntax(file);
+        index
     }
 
     /// Import index for `file`, computed once per `(file, version)`.
@@ -442,7 +464,9 @@ impl AnalyzerDb {
     /// process cache. Broad rule scans use this streaming path when
     /// import aliases are only needed while scanning the current file.
     pub fn import_index_uncached(&self, file: FileId) -> Option<ImportIndex> {
-        self.build_import_index_uncached(file)
+        let index = self.build_import_index_uncached(file);
+        self.release_syntax(file);
+        index
     }
 
     /// Single source of truth for "the imports of `file`". Reads the
@@ -462,12 +486,22 @@ impl AnalyzerDb {
     #[must_use]
     pub fn imports_for(&self, file: FileId) -> Vec<ImportSpec> {
         if let Some(idx) = self.import_index(file) {
-            return idx.imports.clone();
+            let imports = idx.imports.clone();
+            drop(idx);
+            self.release_syntax(file);
+            return imports;
         }
         let Ok(parsed) = self.parse(file) else {
             return Vec::new();
         };
-        bonsai_lang_api::kit::extract_generic_imports(&parsed.tree, file, parsed.source_text().as_bytes())
+        let imports = bonsai_lang_api::kit::extract_generic_imports(
+            &parsed.tree,
+            file,
+            parsed.source_text().as_bytes(),
+        );
+        drop(parsed);
+        self.release_syntax(file);
+        imports
     }
 
     /// Workspace-wide global declaration index. Built lazily on first
@@ -563,10 +597,13 @@ impl AnalyzerDb {
     fn take_decl_index_for_global(&self, file: FileId) -> Option<DeclIndex> {
         let snap = self.inner.vfs.snapshot(file).ok()?;
         let key = (file, snap.version);
-        if let Some(cached) = self.inner.cache.write().decl_index.remove(&key) {
-            return Some(unwrap_or_clone_decl_index(cached));
-        }
-        self.build_decl_index_uncached(file)
+        let index = if let Some(cached) = self.inner.cache.write().decl_index.remove(&key) {
+            Some(unwrap_or_clone_decl_index(cached))
+        } else {
+            self.build_decl_index_uncached(file)
+        };
+        self.release_syntax(file);
+        index
     }
 
     /// Build the CFG of a function from its extracted flow events.

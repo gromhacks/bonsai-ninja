@@ -2433,6 +2433,8 @@ impl Workspace {
         for file in self.inner.vfs.all_files() {
             if let Ok(parsed) = self.inner.db.parse(file) {
                 diagnostics.extend(parsed.diagnostics.iter().cloned());
+                drop(parsed);
+                self.inner.db.release_syntax(file);
             }
         }
         diagnostics.extend(self.inner.db.diagnostics());
@@ -2471,6 +2473,8 @@ impl Workspace {
                     for diagnostic in &parsed.diagnostics {
                         record_diagnostic(diagnostic);
                     }
+                    drop(parsed);
+                    self.inner.db.release_syntax(file);
                 }
                 Err(_) => {
                     parse_failed_files.insert(file);
@@ -2900,7 +2904,7 @@ where
     let workers = workspace_parse_worker_count();
     if workers <= 1 || files.len() <= 1 {
         for &file in files {
-            let _ = ws.db().decl_index(file);
+            let _ = ws.db().decl_index_releasing_syntax(file);
             on_event(WorkspaceOpenEvent::ParseFileIndexed);
         }
         return;
@@ -2915,14 +2919,14 @@ where
             pool.install(|| {
                 use rayon::prelude::*;
                 files.par_iter().for_each(|file| {
-                    let _ = ws.db().decl_index(*file);
+                    let _ = ws.db().decl_index_releasing_syntax(*file);
                     on_event(WorkspaceOpenEvent::ParseFileIndexed);
                 });
             });
         }
         Err(_) => {
             for &file in files {
-                let _ = ws.db().decl_index(file);
+                let _ = ws.db().decl_index_releasing_syntax(file);
                 on_event(WorkspaceOpenEvent::ParseFileIndexed);
             }
         }

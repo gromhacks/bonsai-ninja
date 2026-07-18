@@ -172,6 +172,32 @@ fn declaration_and_import_adapter_passes_share_the_canonical_tree_arc() {
 }
 
 #[test]
+fn transient_lowering_releases_cst_and_reparses_the_exact_snapshot() {
+    let vfs = Arc::new(Vfs::new());
+    let file = vfs.write("fixture.py", "def exact():\n    return 1\n");
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+    let db = AnalyzerDb::new(vfs, registry);
+
+    let parsed = db.parse(file).expect("initial parse");
+    let old_tree = Arc::downgrade(&parsed.tree);
+    drop(parsed);
+
+    db.decl_index_releasing_syntax(file)
+        .expect("lowered declaration IR");
+    assert!(
+        old_tree.upgrade().is_none(),
+        "phase-local Tree-sitter CST must not remain resident after lowering"
+    );
+
+    let reparsed = db.parse(file).expect("exact reparse after cache eviction");
+    assert_eq!(
+        first_node_text(&reparsed.tree, reparsed.source_text(), "identifier").as_deref(),
+        Some("exact")
+    );
+}
+
+#[test]
 fn global_index_concurrent_callers_lower_each_file_once() {
     use std::sync::{atomic::AtomicUsize, Barrier};
 
