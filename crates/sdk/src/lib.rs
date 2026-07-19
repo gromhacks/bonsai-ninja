@@ -1759,13 +1759,20 @@ impl Cache<'_> {
     pub fn warm_structural_sidecars(&self) -> Result<()> {
         let cache = self.workspace_cache();
         let workspace = &self.project.workspace;
-        if !workspace.load_callgraph_sidecar(&self.project.root) {
+        let callgraph_is_current = workspace.callgraph_sidecar_is_current(&self.project.root);
+        if !callgraph_is_current {
             let _ = workspace.cached_resolved_call_graph();
             workspace.save_callgraph_sidecar(&self.project.root)?;
         }
-        match workspace.load_idg_sidecar(&self.project.root) {
+        match workspace.validate_idg_sidecar_layout(&self.project.root) {
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => {
+                // A current callgraph was deliberately validated without
+                // retaining its graph. Hydrate it only when an IDG rebuild
+                // actually needs those edges.
+                if callgraph_is_current {
+                    let _ = workspace.load_callgraph_sidecar(&self.project.root);
+                }
                 let _ = workspace.build_and_seed_persisted_idg_service();
             }
         }

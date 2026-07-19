@@ -179,6 +179,14 @@ impl FactStoreReader {
         self.header.index_count == 0
     }
 
+    /// Return whether `key` is present in the validated on-disk index without
+    /// reading or allocating its payload. Useful for cheap sidecar layout
+    /// validation before a command decides whether it needs to hydrate facts.
+    #[must_use]
+    pub fn contains_key(&self, key: u64) -> bool {
+        binary_search_index(&self.index_bytes, self.header.index_count as usize, key).is_some()
+    }
+
     /// Borrow the string pool. Free after open; cheap to call
     /// repeatedly. The view borrows from the resident bookkeeping
     /// buffers so its lifetime is tied to the reader.

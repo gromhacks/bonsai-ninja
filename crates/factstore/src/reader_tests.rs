@@ -47,6 +47,12 @@ fn get_returns_none_for_missing_key() {
     let path = dir.path().join("v.bin");
     write_test_store(&path, 0, 0, &[(1, 0, b"a"), (3, 0, b"c"), (5, 0, b"e")]);
     let r = FactStoreReader::open(&path, 0, 0).expect("open");
+    assert!(r.contains_key(1));
+    assert!(r.contains_key(3));
+    assert!(r.contains_key(5));
+    assert!(!r.contains_key(0));
+    assert!(!r.contains_key(2));
+    assert!(!r.contains_key(6));
     assert!(r.get(0).expect("ok").is_none());
     assert!(r.get(2).expect("ok").is_none());
     assert!(r.get(4).expect("ok").is_none());

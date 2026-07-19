@@ -1001,6 +1001,16 @@ impl Workspace {
         }
     }
 
+    /// Check whether the conventional callgraph sidecar exactly matches this
+    /// workspace without retaining its graph. Used by compiler warm-up paths
+    /// that only need to ensure the artifact exists; query paths continue to
+    /// call [`Self::load_callgraph_sidecar`] before consuming edges.
+    #[must_use]
+    pub fn callgraph_sidecar_is_current(&self, root: &Path) -> bool {
+        let path = callgraph_sidecar::callgraph_sidecar_path(root);
+        callgraph_sidecar::validate_callgraph_sidecar_for_db(&path, &self.inner.db).is_ok()
+    }
+
     /// Persist the current resolved call graph to the conventional
     /// sidecar path for `root`. Builds the graph on-demand if it
     /// hasn't been built yet.
@@ -1040,6 +1050,19 @@ impl Workspace {
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global));
         self.inner.db.set_idg_service(service);
         Ok(Some(segment_count))
+    }
+
+    /// Validate the conventional IDG sidecar's exact compiler pipeline and
+    /// complete factstore layout without hydrating its graph. Query consumers
+    /// still use [`Self::load_idg_sidecar`], which decodes every payload.
+    pub fn validate_idg_sidecar_layout(&self, root: &Path) -> bonsai_idg::IdgResult<Option<usize>> {
+        let sidecar = bonsai_idg::workspace::idg_sidecar_path(root);
+        if !sidecar.exists() {
+            return Ok(None);
+        }
+        let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, Some(root));
+        bonsai_idg::workspace::IdgWorkspace::validate_sidecar_layout_with_pipeline(&sidecar, pipeline_hash)
+            .map(Some)
     }
 
     pub fn cached_resolved_call_graph(&self) -> Arc<bonsai_callgraph::ResolvedCallGraph> {

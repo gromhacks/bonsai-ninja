@@ -14,7 +14,6 @@
 //! file removed, file added) drops the sidecar.
 
 use crate::cache_fingerprint::dependency_metadata_fingerprint_for_sidecar;
-use ahash::AHashMap;
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::{wire, workspace_bonsai_dir, write_atomic_bytes, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
@@ -64,23 +63,10 @@ pub(crate) fn save_callgraph_sidecar(
     db: &AnalyzerDb,
     graph: &ResolvedCallGraph,
 ) -> std::io::Result<()> {
-    let mut files: Vec<(String, u64)> = Vec::new();
-    for file in db.vfs().all_files() {
-        let Ok(snapshot) = db.vfs().snapshot(file) else {
-            continue;
-        };
-        let Ok(path) = db.vfs().path(file) else {
-            continue;
-        };
-        let path_string = path.to_string_lossy().into_owned();
-        let hash = fnv1a_bytes64(snapshot.text.as_bytes());
-        files.push((path_string, hash));
-    }
-    files.sort();
     let snap = CallgraphSnapshot {
         version: CALLGRAPH_CACHE_VERSION,
         matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
-        files,
+        files: current_source_fingerprints(db),
         dependency_metadata_fingerprint: dependency_metadata_fingerprint_for_sidecar(path),
         build_fingerprint: crate::build_fingerprint_hash(),
         graph: graph.clone(),
@@ -111,32 +97,46 @@ pub(crate) fn load_callgraph_sidecar(path: &Path, db: &AnalyzerDb) -> Option<Res
     if snap.build_fingerprint != crate::build_fingerprint_hash() {
         return None;
     }
-    // Build the current `(path, hash)` set so we can match it
-    // against the snapshot. Any mismatch drops the sidecar — the
-    // call graph would otherwise reference stale FuncIds.
-    let mut current: AHashMap<String, u64> = AHashMap::new();
-    for file in db.vfs().all_files() {
-        let Ok(snapshot) = db.vfs().snapshot(file) else {
-            continue;
-        };
-        let Ok(p) = db.vfs().path(file) else {
-            continue;
-        };
-        current.insert(
-            p.to_string_lossy().into_owned(),
-            fnv1a_bytes64(snapshot.text.as_bytes()),
-        );
-    }
-    if current.len() != snap.files.len() {
+    if current_source_fingerprints(db) != snap.files {
         return None;
     }
-    for (path_string, hash) in &snap.files {
-        match current.get(path_string) {
-            Some(current_hash) if current_hash == hash => continue,
-            _ => return None,
-        }
-    }
     Some(snap.graph)
+}
+
+/// Validate an exact workspace callgraph sidecar while discarding the graph
+/// payload as it is streamed from disk. This proves source/build/dependency
+/// freshness and MessagePack readability without materializing millions of
+/// edges merely to decide that no rebuild is needed.
+pub(crate) fn validate_callgraph_sidecar_for_db(path: &Path, db: &AnalyzerDb) -> std::io::Result<()> {
+    #[derive(Deserialize)]
+    struct ValidationSnapshot {
+        version: u32,
+        matcher_policy_fingerprint: u128,
+        files: Vec<(String, u64)>,
+        dependency_metadata_fingerprint: u64,
+        #[serde(default)]
+        build_fingerprint: u64,
+        graph: serde::de::IgnoredAny,
+    }
+
+    let reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let snapshot: ValidationSnapshot = wire::decode_from_reader(reader)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    let _ = snapshot.graph;
+    validate_snapshot_metadata_fields(
+        path,
+        snapshot.version,
+        snapshot.matcher_policy_fingerprint,
+        snapshot.dependency_metadata_fingerprint,
+        snapshot.build_fingerprint,
+    )?;
+    if current_source_fingerprints(db) != snapshot.files {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "callgraph sidecar source fingerprint mismatch",
+        ));
+    }
+    Ok(())
 }
 
 /// Validate that a callgraph sidecar is structurally readable and was
@@ -183,32 +183,66 @@ where
 }
 
 fn validate_snapshot_metadata(path: &Path, snap: &CallgraphSnapshot) -> std::io::Result<()> {
-    if snap.version != CALLGRAPH_CACHE_VERSION {
+    validate_snapshot_metadata_fields(
+        path,
+        snap.version,
+        snap.matcher_policy_fingerprint,
+        snap.dependency_metadata_fingerprint,
+        snap.build_fingerprint,
+    )
+}
+
+fn validate_snapshot_metadata_fields(
+    path: &Path,
+    version: u32,
+    matcher_policy_fingerprint: u128,
+    dependency_metadata_fingerprint: u64,
+    build_fingerprint: u64,
+) -> std::io::Result<()> {
+    if version != CALLGRAPH_CACHE_VERSION {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
                 "callgraph sidecar version mismatch: file={} expected={}",
-                snap.version, CALLGRAPH_CACHE_VERSION
+                version, CALLGRAPH_CACHE_VERSION
             ),
         ));
     }
-    if snap.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {
+    if matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "callgraph sidecar matcher policy fingerprint mismatch",
         ));
     }
-    if snap.dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path) {
+    if dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "callgraph sidecar dependency metadata fingerprint mismatch",
         ));
     }
-    if snap.build_fingerprint != crate::build_fingerprint_hash() {
+    if build_fingerprint != crate::build_fingerprint_hash() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "callgraph sidecar build fingerprint mismatch",
         ));
     }
     Ok(())
+}
+
+fn current_source_fingerprints(db: &AnalyzerDb) -> Vec<(String, u64)> {
+    let mut files = Vec::new();
+    for file in db.vfs().all_files() {
+        let Ok(snapshot) = db.vfs().snapshot(file) else {
+            continue;
+        };
+        let Ok(path) = db.vfs().path(file) else {
+            continue;
+        };
+        files.push((
+            path.to_string_lossy().into_owned(),
+            fnv1a_bytes64(snapshot.text.as_bytes()),
+        ));
+    }
+    files.sort();
+    files
 }
