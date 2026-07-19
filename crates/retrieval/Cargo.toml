@@ -11,10 +11,12 @@ description = "Fact-backed candidate retrieval sidecar for bonsai-ninja."
 bonsai_common = { workspace = true }
 bonsai_factstore = { workspace = true }
 bonsai_hash = { workspace = true }
+bonsai_index = { workspace = true }
 bonsai_lang_api = { workspace = true }
 bonsai_workspace = { workspace = true }
 ahash = { workspace = true }
 regex = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 zstd = { workspace = true }
 
