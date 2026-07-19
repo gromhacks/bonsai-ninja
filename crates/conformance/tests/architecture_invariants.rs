@@ -2899,15 +2899,23 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
         "taint graph config fingerprint must include enabled rulepack content, not just rule ids"
     );
 
+    // Metadata validation is shared by warm freshness probes and full graph
+    // loads. Inspect both boundaries so this invariant continues to prove the
+    // complete contract without requiring validation logic to be duplicated
+    // inside `load_callgraph_sidecar`.
+    let callgraph_load_body = function_body(&callgraph_sidecar, "load_callgraph_sidecar");
+    let callgraph_validation_body = function_body(&callgraph_sidecar, "validate_metadata");
     assert!(
         callgraph_sidecar.contains("matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT")
             && callgraph_sidecar.contains("dependency_metadata_fingerprint_for_sidecar(path)")
             && callgraph_sidecar.contains("fnv1a_bytes64(snapshot.text.as_bytes())")
-            && function_body(&callgraph_sidecar, "load_callgraph_sidecar")
-                .contains("snap.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT")
-            && function_body(&callgraph_sidecar, "load_callgraph_sidecar")
-                .contains("snap.dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path)")
-            && function_body(&callgraph_sidecar, "load_callgraph_sidecar").contains("current.len() != snap.files.len()"),
+            && callgraph_load_body.contains("validate_metadata(path, &metadata)")
+            && callgraph_validation_body
+                .contains("metadata.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT")
+            && callgraph_validation_body.contains(
+                "metadata.dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path)",
+            )
+            && callgraph_load_body.contains("current_source_fingerprints(db) != metadata.files"),
         "callgraph sidecar must validate matcher policy, dependency metadata, and the complete source file set"
     );
 
