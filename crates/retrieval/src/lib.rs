@@ -764,37 +764,41 @@ fn build_edge_candidate_groups(
     ws: &Workspace,
     global: &bonsai_index::GlobalIndex,
 ) -> AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>> {
-    let mut edge_groups: AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>> =
-        AHashMap::default();
-    for edge in &ws.cached_resolved_call_graph().inner().edges {
-        if !edge.precision.is_semantic() {
-            continue;
-        }
-        let Some(caller) = global.decl_of(SymbolId::new(edge.from.raw())) else {
-            continue;
-        };
-        let Some(callee) = global.decl_of(SymbolId::new(edge.to.raw())) else {
-            continue;
-        };
-        let groups = edge_groups.entry(edge.span.file).or_default();
-        let edges = candidate_terms(groups, "edge");
-        edges.add(&caller.name);
-        edges.add(&callee.name);
-        edges.add(&format!("{} -> {}", caller.name, callee.name));
-        let file_path = ws
-            .vfs()
-            .path(edge.span.file)
-            .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
-        let (span, _) = span_doc_fields(ws, edge.span);
-        edges.add_stable_id(edge_id_for_parts(
-            &caller.name,
-            &callee.name,
-            &file_path,
-            span.line,
-            span.column,
-        ));
-    }
-    edge_groups
+    let call_graph = ws.cached_resolved_call_graph();
+    call_graph
+        .inner()
+        .edges
+        .par_iter()
+        .fold(AHashMap::default, |mut edge_groups, edge| {
+            if !edge.precision.is_semantic() {
+                return edge_groups;
+            }
+            let Some(caller) = global.decl_of(SymbolId::new(edge.from.raw())) else {
+                return edge_groups;
+            };
+            let Some(callee) = global.decl_of(SymbolId::new(edge.to.raw())) else {
+                return edge_groups;
+            };
+            let groups = edge_groups.entry(edge.span.file).or_default();
+            let edges = candidate_terms(groups, "edge");
+            edges.add(&caller.name);
+            edges.add(&callee.name);
+            edges.add(&format!("{} -> {}", caller.name, callee.name));
+            let file_path = ws
+                .vfs()
+                .path(edge.span.file)
+                .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
+            let (span, _) = span_doc_fields(ws, edge.span);
+            edges.add_stable_id(edge_id_for_parts(
+                &caller.name,
+                &callee.name,
+                &file_path,
+                span.line,
+                span.column,
+            ));
+            edge_groups
+        })
+        .reduce(AHashMap::default, merge_edge_candidate_group_maps)
 }
 
 fn merge_candidate_groups(
@@ -806,6 +810,16 @@ fn merge_candidate_groups(
         target.terms.extend(source.terms);
         target.stable_ids.extend(source.stable_ids);
     }
+}
+
+fn merge_edge_candidate_group_maps(
+    mut target: AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>>,
+    source: AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>>,
+) -> AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>> {
+    for (file, groups) in source {
+        merge_candidate_groups(target.entry(file).or_default(), groups);
+    }
+    target
 }
 
 fn collect_decl_candidate_terms(groups: &mut AHashMap<String, FileCandidateTerms>, decl: &Decl) {
