@@ -73,10 +73,11 @@ fn sidecar_validation_open_ingests_without_parsing() {
     .expect("validation-only open");
 
     assert_eq!(workspace.stats().files, 1);
+    let _ = workspace.db().complete_field_place_languages();
     assert_eq!(
         workspace.stats().cached_decl_indexes,
         0,
-        "freshness probes must not lower or retain syntax IR"
+        "freshness and adapter-capability probes must not lower or retain syntax IR"
     );
 }
 

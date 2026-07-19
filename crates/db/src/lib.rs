@@ -259,9 +259,15 @@ impl AnalyzerDb {
     /// prevents export, security, and taint facades from independently
     /// rebuilding or hard-coding language lists.
     pub fn complete_field_place_languages(&self) -> Vec<String> {
-        let global = self.global_index();
-        let mut languages: Vec<String> = global
+        // This is a frontend capability query, not a declaration query. Using
+        // `global_index()` here forced a full Tree-sitter lowering pass merely
+        // to validate an IDG sidecar fingerprint and omitted languages whose
+        // files happened to contain no declarations.
+        let mut languages: Vec<String> = self
+            .inner
+            .vfs
             .all_files()
+            .into_iter()
             .filter_map(|file| self.adapter_for(file))
             .filter(|adapter| adapter.capabilities().field_places_complete)
             .map(|adapter| adapter.language_id().as_str().to_string())
