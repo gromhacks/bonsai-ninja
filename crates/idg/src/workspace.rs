@@ -715,6 +715,53 @@ impl IdgWorkspace {
         };
         Ok(workspace.segment_count())
     }
+
+    /// Validate the cheap-to-read sidecar contract for an exact pipeline
+    /// without hydrating the complete graph. This checks the factstore header,
+    /// section/index bounds, metadata schema, and the complete expected key
+    /// layout. Query consumers still call [`Self::load_from_disk`], which
+    /// decodes and validates every segment and relation payload before use.
+    pub fn validate_sidecar_layout_with_pipeline(
+        path: &std::path::Path,
+        pipeline_hash: u64,
+    ) -> crate::IdgResult<usize> {
+        let reader = bonsai_factstore::FactStoreReader::open(path, IDG_WORKSPACE_TABLE_ID, pipeline_hash)?;
+        let metadata_hit = reader.get(0)?.ok_or_else(|| {
+            crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "workspace IDG sidecar is missing metadata",
+            ))
+        })?;
+        if metadata_hit.body_hash != IDG_WORKSPACE_VERSION as u64 {
+            return Err(crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "workspace IDG metadata version mismatch",
+            )));
+        }
+        let metadata: IdgWorkspaceMetadataOwned = wire::decode(&metadata_hit.payload)
+            .map_err(|err| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
+        if metadata.version != IDG_WORKSPACE_VERSION {
+            return Err(crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "workspace IDG metadata payload version mismatch",
+            )));
+        }
+        let expected_entries = 1_u64
+            .saturating_add(u64::from(metadata.segment_count))
+            .saturating_add(u64::from(metadata.cross_file_chunk_count))
+            .saturating_add(u64::from(metadata.field_flow_chunk_count))
+            .saturating_add(1)
+            .saturating_add(u64::from(metadata.symbolic_transform_chunk_count));
+        if reader.len() as u64 != expected_entries
+            || (0..expected_entries).any(|key| !reader.contains_key(key))
+        {
+            return Err(crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "workspace IDG sidecar entry layout mismatch",
+            )));
+        }
+        Ok(metadata.segment_count as usize)
+    }
 }
 
 /// Per-workspace metadata written at entry 0 of the streamed IDG

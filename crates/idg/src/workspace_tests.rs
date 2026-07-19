@@ -243,6 +243,15 @@ fn parallel_workspace_save_is_byte_deterministic() {
     workspace.save_to_disk(&second, 0xCAFE).expect("second save");
 
     assert_eq!(
+        IdgWorkspace::validate_sidecar_layout_with_pipeline(&first, 0xCAFE).expect("current layout"),
+        16
+    );
+    assert!(
+        IdgWorkspace::validate_sidecar_layout_with_pipeline(&first, 0xDEAD).is_err(),
+        "layout validation must reject another compiler pipeline"
+    );
+
+    assert_eq!(
         std::fs::read(first).expect("read first sidecar"),
         std::fs::read(second).expect("read second sidecar"),
         "parallel segment encoding must preserve canonical sidecar bytes"
