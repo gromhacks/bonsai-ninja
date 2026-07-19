@@ -769,6 +769,27 @@ impl WorkspaceOpenOptions {
         }
     }
 
+    /// Ingest source snapshots for content-addressed sidecar validation
+    /// without parsing or hydrating any semantic artifact. A frontend can use
+    /// this cheap probe to decide whether it needs a cold compiler prewarm.
+    #[must_use]
+    pub const fn sidecar_validation_only() -> Self {
+        Self {
+            load_callgraph_sidecar: false,
+            load_dataflow_sidecar: false,
+            prewarm_dataflow: false,
+            save_dataflow_sidecar: false,
+            load_value_flow_sidecar: false,
+            prewarm_value_flow: false,
+            save_value_flow_sidecar: false,
+            prewarm_flow_ids: false,
+            load_idg_sidecar: false,
+            eager_decl_index: false,
+            retain_eager_syntax_ir: false,
+            parse_timeout_ms: None,
+        }
+    }
+
     /// Explicit full-prewarm mode. Parses and indexes the workspace,
     /// loads still-fresh sidecars, computes reusable dataflow/flow-id entries,
     /// and persists the canonical workspace IDG.

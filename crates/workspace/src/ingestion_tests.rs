@@ -61,6 +61,26 @@ fn streaming_ingest_parses_delimiter_text_in_strings_and_comments() {
 }
 
 #[test]
+fn sidecar_validation_open_ingests_without_parsing() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::write(root.path().join("app.py"), "def main():\n    return 1\n").expect("write source");
+
+    let workspace = Workspace::open_with_options(
+        root.path(),
+        python_registry(),
+        WorkspaceOpenOptions::sidecar_validation_only(),
+    )
+    .expect("validation-only open");
+
+    assert_eq!(workspace.stats().files, 1);
+    assert_eq!(
+        workspace.stats().cached_decl_indexes,
+        0,
+        "freshness probes must not lower or retain syntax IR"
+    );
+}
+
+#[test]
 fn invalid_utf8_supported_source_is_a_visible_open_error() {
     let root = tempfile::tempdir().expect("workspace tempdir");
     std::fs::write(root.path().join("invalid.py"), [0xff, 0xfe, b'\n']).expect("write invalid UTF-8 fixture");

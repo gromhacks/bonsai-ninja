@@ -286,6 +286,13 @@ fn facade_index_semantic_writes_structural_sidecars_and_query_hydrates_idg() {
         stats.validation.semantic_ready,
         "fresh semantic index should report validated semantic readiness: {stats:#?}"
     );
+    assert!(
+        indexed
+            .cache()
+            .structural_sidecars_are_current()
+            .expect("validate structural sidecars"),
+        "the metadata-only compiler probe should accept freshly written structural artifacts"
+    );
     let manifest = indexed
         .cache()
         .read_manifest()

@@ -96,11 +96,22 @@ pub(crate) fn open_project_dataflow_prewarm(root: &std::path::Path) -> Result<(P
 }
 
 pub(crate) fn open_project_semantic_prewarm(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
-    // This CLI process exits after writing the semantic artifacts. Keep the
-    // compact Tree-sitter-lowered declaration/import IR required by callgraph
-    // and IDG construction, but release each file's CST and local lowering IR
-    // at the completed frontend phase boundary.
-    let (project, footer) = open_project_with_options(root, bonsai_sdk::OpenOptions::streaming_parse_only())?;
+    let probe = build_project_with_bonsai_and_options(
+        root,
+        bonsai_for_cli(),
+        bonsai_sdk::OpenOptions::sidecar_validation_only(),
+    )?;
+    if probe.cache().structural_sidecars_are_current()? {
+        probe.cache().warm_structural_sidecars()?;
+        return Ok((probe, WorkspaceFooter::new()));
+    }
+    drop(probe);
+
+    // A cold semantic build reuses the eagerly lowered declaration/import IR
+    // across callgraph, IDG, and retrieval phases. The global index consumes
+    // declarations at its phase boundary; imports remain available to the
+    // resolver without reparsing every source unit.
+    let (project, footer) = open_project_with_options(root, bonsai_sdk::OpenOptions::parse_only())?;
     project.cache().warm_structural_sidecars()?;
     Ok((project, footer))
 }
@@ -206,13 +217,22 @@ fn open_project_with_bonsai_and_options(
     bonsai: bonsai_sdk::Bonsai,
     options: bonsai_sdk::OpenOptions,
 ) -> Result<(Project, WorkspaceFooter)> {
+    let project = build_project_with_bonsai_and_options(root, bonsai, options)?;
+    let footer = WorkspaceFooter::new();
+    Ok((project, footer))
+}
+
+fn build_project_with_bonsai_and_options(
+    root: &std::path::Path,
+    bonsai: bonsai_sdk::Bonsai,
+    options: bonsai_sdk::OpenOptions,
+) -> Result<Project> {
     let progress = workspace_open_progress();
     let project = bonsai
         .open_with_options_and_progress(root, options, progress)?
         .with_auto_refresh(false);
     crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
-    let footer = WorkspaceFooter::new();
-    Ok((project, footer))
+    Ok(project)
 }
 
 fn bonsai_with_rulepack(
