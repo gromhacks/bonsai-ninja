@@ -64,6 +64,13 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+fn security_analysis_source(root: &Path) -> String {
+    let mut source = read(&root.join("crates/security/src/analysis/mod.rs"));
+    source.push('\n');
+    source.push_str(&read(&root.join("crates/security/src/analysis/execution.rs")));
+    source
+}
+
 fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
     let needle = format!("fn {name}");
     let start = source
@@ -1533,6 +1540,16 @@ fn flow_surfaces_do_not_reintroduce_loose_resolution_or_fabricated_paths() {
             ][..],
         ),
         (
+            "crates/security/src/analysis/execution.rs",
+            &[
+                "enumerate_tainted_source_paths",
+                "tainted_call_adjacency",
+                "indexed_tainted_path_between",
+                "taint_path_for_chain",
+                "chain_precision(",
+            ][..],
+        ),
+        (
             "crates/taint/src/idg_api.rs",
             &["candidates.first().map(|c| c.func)"][..],
         ),
@@ -2218,7 +2235,7 @@ fn public_idg_query_defaults_are_semantic_by_default() {
 fn source_and_debug_flow_surfaces_are_semantic_only() {
     let root = repo_root();
 
-    let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
+    let security_analysis = security_analysis_source(&root);
     let browse_taint = read(&root.join("crates/browse/src/taint.rs"));
     let taint_idg_api = read(&root.join("crates/taint/src/idg_api.rs"));
     let taint_value_flow = read(&root.join("crates/taint/src/value_flow.rs"));
@@ -2557,6 +2574,7 @@ fn production_taint_command_paths_use_filtered_semantic_idg_apis() {
     let root = repo_root();
     let checked_files = [
         "crates/security/src/analysis/mod.rs",
+        "crates/security/src/analysis/execution.rs",
         "crates/cli/src/commands/security.rs",
         "crates/cli/src/commands/inspect.rs",
         "crates/cli/src/commands/export.rs",
@@ -2840,7 +2858,7 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
     let taint_index = read(&root.join("crates/workspace/src/taint_index.rs"));
     let workspace_build = read(&root.join("crates/workspace/build.rs"));
     let callgraph_sidecar = read(&root.join("crates/workspace/src/callgraph_sidecar.rs"));
-    let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
+    let security_analysis = security_analysis_source(&root);
     let taint_cache = read(&root.join("crates/security/src/analysis/taint_cache.rs"));
     let sdk = read(&root.join("crates/sdk/src/lib.rs"));
     let page_cache = read(&root.join("crates/cli/src/page_cache.rs"));
@@ -3229,7 +3247,7 @@ fn syntax_index_parallelism_is_not_project_size_capped() {
     let workspace = read(&root.join("crates/workspace/src/lib.rs"));
     let database = read(&root.join("crates/db/src/lib.rs"));
     let security_matcher = read(&root.join("crates/security/src/matcher/mod.rs"));
-    let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
+    let security_analysis = security_analysis_source(&root);
 
     for (source, function) in [
         (&workspace, "workspace_parse_worker_count"),
@@ -3319,7 +3337,7 @@ fn security_matcher_uses_compiler_expression_facts() {
 #[test]
 fn structured_security_guards_are_rulepack_driven() {
     let root = repo_root();
-    let analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
+    let analysis = security_analysis_source(&root);
     let guards = read(&root.join("crates/security/src/analysis/guard_sanitizers.rs"));
     let rules = read(&root.join("crates/security/src/rule.rs"));
     let path_pack = read(&root.join("security-patterns/langs/python/sinks/path.yml"));
