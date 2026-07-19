@@ -2963,9 +2963,8 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
             && index_body.contains("else if options.semantic")
             && index_body.contains("open_project_semantic_prewarm(root)?")
             && index_body.contains("open_project_parse_only(root)?")
-            && index_body.contains("if options.prewarm_dataflow || options.semantic")
-            && index_body.contains("write_manifest()"),
-        "cmd_index must keep default/structural-only runs parse-only and publish manifests only for explicit warmed modes"
+            && commands_mod.contains("warm_structural_sidecars()?"),
+        "cmd_index must keep default/structural-only runs parse-only and route explicit semantic warming through the cache facade"
     );
     assert!(
         main.contains("structural_only,")

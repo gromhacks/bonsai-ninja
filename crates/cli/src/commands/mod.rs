@@ -97,7 +97,7 @@ pub(crate) fn open_project_dataflow_prewarm(root: &std::path::Path) -> Result<(P
 
 pub(crate) fn open_project_semantic_prewarm(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
     let (project, footer) = open_project_with_options(root, bonsai_sdk::OpenOptions::parse_only())?;
-    let _ = project.cache().warm_structural()?;
+    project.cache().warm_structural_sidecars()?;
     Ok((project, footer))
 }
 
