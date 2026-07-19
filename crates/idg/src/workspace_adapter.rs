@@ -2207,24 +2207,6 @@ where
         maps.file_to_language.len()
     ));
     let phase_started = Instant::now();
-    let outputs =
-        run_transfer_in_parallel_for_files(global, transfer_options, included_files, included_funcs);
-    if idg_build_enabled() {
-        let places: usize = outputs.iter().map(|out| out.places.len()).sum();
-        let nodes: usize = outputs.iter().map(|out| out.nodes.len()).sum();
-        let edges: usize = outputs.iter().map(|out| out.edges.len()).sum();
-        let calls: usize = outputs.iter().map(|out| out.call_sites.len()).sum();
-        idg_build_log(format_args!(
-            "transfer: {:.3}s funcs={} places={} nodes={} edges={} call_sites={}",
-            phase_started.elapsed().as_secs_f64(),
-            outputs.len(),
-            places,
-            nodes,
-            edges,
-            calls
-        ));
-    }
-    let phase_started = Instant::now();
     // Build `func_to_call_names`: every textual name a func can be
     // called as. Decl name plus every alias declared in any file
     // that imports the func by a renamed identifier. We invert the
@@ -2333,8 +2315,8 @@ where
         class_method_count
     ));
     let phase_started = Instant::now();
-    let included_funcs: AHashSet<FuncId> = maps.func_to_seg.keys().copied().collect();
-    let call_edges_by_site = call_edges_by_site_for_funcs(call_graph, global, Some(&included_funcs));
+    let resolver_funcs: AHashSet<FuncId> = maps.func_to_seg.keys().copied().collect();
+    let call_edges_by_site = call_edges_by_site_for_funcs(call_graph, global, Some(&resolver_funcs));
     let call_edge_site_count: usize = call_edges_by_site.values().map(Vec::len).sum();
     idg_build_log(format_args!(
         "call-edge site index: {:.3}s sites={} edges={}",
@@ -2372,7 +2354,6 @@ where
     let f2s = WorkspaceFuncToSegment {
         func_to_seg: &maps.func_to_seg,
     };
-    let phase_started = Instant::now();
     let symbolic_languages: AHashSet<&str> = transfer_options
         .symbolic_field_languages
         .iter()
@@ -2385,6 +2366,29 @@ where
                 .filter_map(|(func, language)| symbolic_languages.contains(language).then_some(*func))
                 .collect::<AHashSet<_>>()
         });
+    // Transfer outputs are the largest transient compiler IR in this build.
+    // Construct every resolver index first so their creation cannot overlap
+    // the complete workspace's places, nodes, edges, and local string pools.
+    // The outputs now flow directly into stitching, which consumes them.
+    let phase_started = Instant::now();
+    let outputs =
+        run_transfer_in_parallel_for_files(global, transfer_options, included_files, included_funcs);
+    if idg_build_enabled() {
+        let places: usize = outputs.iter().map(|out| out.places.len()).sum();
+        let nodes: usize = outputs.iter().map(|out| out.nodes.len()).sum();
+        let edges: usize = outputs.iter().map(|out| out.edges.len()).sum();
+        let calls: usize = outputs.iter().map(|out| out.call_sites.len()).sum();
+        idg_build_log(format_args!(
+            "transfer: {:.3}s funcs={} places={} nodes={} edges={} call_sites={}",
+            phase_started.elapsed().as_secs_f64(),
+            outputs.len(),
+            places,
+            nodes,
+            edges,
+            calls
+        ));
+    }
+    let phase_started = Instant::now();
     let mut ws = stitch_idg_with_selective_field_forwarding_mode(
         outputs,
         &resolver,
