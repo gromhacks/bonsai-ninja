@@ -96,7 +96,11 @@ pub(crate) fn open_project_dataflow_prewarm(root: &std::path::Path) -> Result<(P
 }
 
 pub(crate) fn open_project_semantic_prewarm(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
-    let (project, footer) = open_project_with_options(root, bonsai_sdk::OpenOptions::parse_only())?;
+    // This CLI process exits after writing the semantic artifacts. Keep the
+    // compact Tree-sitter-lowered declaration/import IR required by callgraph
+    // and IDG construction, but release each file's CST and local lowering IR
+    // at the completed frontend phase boundary.
+    let (project, footer) = open_project_with_options(root, bonsai_sdk::OpenOptions::streaming_parse_only())?;
     project.cache().warm_structural_sidecars()?;
     Ok((project, footer))
 }
