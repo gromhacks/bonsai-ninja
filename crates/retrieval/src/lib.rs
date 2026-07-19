@@ -14,6 +14,7 @@ use bonsai_lang_api::{
     operations_from_flow_events, Decl, DeclKind, FlowEvent, ImportSpec, Operation, RefKind,
 };
 use bonsai_workspace::Workspace;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -606,8 +607,8 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
 
 #[derive(Default)]
 struct FileCandidateTerms {
-    terms: BTreeSet<String>,
-    stable_ids: BTreeSet<String>,
+    terms: AHashSet<String>,
+    stable_ids: AHashSet<String>,
 }
 
 impl FileCandidateTerms {
@@ -730,7 +731,11 @@ fn finish_file_candidate_groups(
     let mut groups: Vec<_> = groups.into_iter().collect();
     groups.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     for (kind, group) in groups {
-        let normalized_search_text = group.terms.into_iter().collect::<Vec<_>>().join(" ");
+        let mut terms: Vec<_> = group.terms.into_iter().collect();
+        terms.sort_unstable();
+        let mut stable_ids: Vec<_> = group.stable_ids.into_iter().collect();
+        stable_ids.sort_unstable();
+        let normalized_search_text = terms.join(" ");
         docs.push(FactDoc {
             fact_id: fact_id_for_parts(&kind, file_path, span.line, span.column, "file-candidates"),
             kind,
@@ -741,7 +746,7 @@ fn finish_file_candidate_groups(
             qualified_name: None,
             enclosing_function: None,
             enclosing_class: None,
-            stable_ids: group.stable_ids.into_iter().collect(),
+            stable_ids,
             resolver_precision: None,
             resolver_stage: None,
             provenance: Some("file-candidate-index".to_string()),
@@ -755,141 +760,10 @@ fn finish_file_candidate_groups(
     }
 }
 
-/// Build the persisted candidate-only projection used to narrow files before
-/// canonical hydration. One record per `(file, fact-kind)` retains the same
-/// lexical terms without serializing overlapping operation/event/ref rows.
-fn build_persisted_candidate_docs(ws: &Workspace) -> Vec<FactDoc> {
-    let pipeline = pipeline_hash_for_workspace(ws);
-    let global = ws.db().global_index();
-    let mut docs = Vec::new();
-    for file in global.all_files() {
-        let file_path = ws
-            .vfs()
-            .path(file)
-            .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
-        let language = ws
-            .db()
-            .adapter_for(file)
-            .map(|adapter| adapter.language_id().as_str().to_string());
-        let (file_span, content_fingerprint) = ws.vfs().snapshot(file).map_or_else(
-            |_| {
-                (
-                    FactSpan {
-                        line: 1,
-                        column: 1,
-                        ..FactSpan::default()
-                    },
-                    0,
-                )
-            },
-            |snapshot| {
-                (
-                    FactSpan {
-                        line: 1,
-                        column: 1,
-                        start: 0,
-                        end: snapshot.text.len() as u64,
-                    },
-                    fnv1a_bytes64(snapshot.text.as_bytes()),
-                )
-            },
-        );
-        let mut groups = AHashMap::default();
-        let file_name = Path::new(&file_path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&file_path);
-        let files = candidate_terms(&mut groups, "file");
-        files.add(&file_path);
-        files.add(file_name);
-        if let Some(language) = language.as_deref() {
-            files.add(language);
-        }
-
-        for decl in global.decls_in(file) {
-            let kind = format!("{:?}", decl.kind).to_lowercase();
-            let declarations = candidate_terms(&mut groups, &kind);
-            declarations.add(&decl.name);
-            if let Some(qualified) = decl.qualified_name.as_deref() {
-                declarations.add(qualified);
-            }
-            for param in &decl.params {
-                declarations.add(param);
-            }
-            for op in operations_from_flow_events(&decl.flow_events) {
-                let operations = candidate_terms(&mut groups, "operation");
-                operations.add(op.kind.as_str());
-                operations.add(&decl.name);
-                if let Some(target) = op.target.as_deref() {
-                    operations.add(target);
-                }
-                if let Some(detail) = op.detail.as_deref() {
-                    operations.add(detail);
-                }
-                for operand in op.operands {
-                    operations.add(&operand.name);
-                    operations.add(operand.role.as_str());
-                    operations.add(&format!("{}:{}", operand.role.as_str(), operand.name));
-                }
-            }
-            collect_flow_candidate_terms(&mut groups, &decl.flow_events, &decl.name);
-        }
-        for import in import_specs_for_retrieval(ws, file) {
-            let kind = if import.alias.is_some() {
-                "import-alias"
-            } else {
-                "import"
-            };
-            let imports = candidate_terms(&mut groups, kind);
-            imports.add(&import.module);
-            if let Some(alias) = import.alias.as_deref() {
-                imports.add(alias);
-            }
-            if let Some(original) = import.original_name.as_deref() {
-                imports.add(original);
-            }
-        }
-        if let Some(index) = global.file_index(file) {
-            for reference in &index.refs {
-                let kind = match reference.kind {
-                    RefKind::Read => "ref-read",
-                    RefKind::Write => "ref-write",
-                    RefKind::Call => "ref-call",
-                    RefKind::Decorator => "ref-decorator",
-                    _ => "ref",
-                };
-                candidate_terms(&mut groups, kind).add(&reference.name);
-            }
-            for string in &index.strings {
-                let enclosing_function = enclosing_function_for_span(ws, string.span);
-                let strings = candidate_terms(&mut groups, "string");
-                strings.add(&string.text);
-                strings.add(&format!("{:?}", string.category).to_lowercase());
-                if let Some(function) = enclosing_function.as_deref() {
-                    strings.add(function);
-                }
-            }
-            for comment in &index.comments {
-                let enclosing_function = enclosing_function_for_span(ws, comment.span);
-                let comments = candidate_terms(&mut groups, "comment");
-                comments.add(&comment.text);
-                comments.add(&format!("{:?}", comment.kind).to_lowercase());
-                if let Some(function) = enclosing_function.as_deref() {
-                    comments.add(function);
-                }
-            }
-        }
-        finish_file_candidate_groups(
-            &mut docs,
-            &file_path,
-            language.as_deref(),
-            file_span,
-            content_fingerprint,
-            pipeline,
-            groups,
-        );
-    }
-
+fn build_edge_candidate_groups(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+) -> AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>> {
     let mut edge_groups: AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>> =
         AHashMap::default();
     for edge in &ws.cached_resolved_call_graph().inner().edges {
@@ -920,58 +794,223 @@ fn build_persisted_candidate_docs(ws: &Workspace) -> Vec<FactDoc> {
             span.column,
         ));
     }
-    for (file, groups) in edge_groups {
-        let file_path = ws
-            .vfs()
-            .path(file)
-            .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
-        let language = ws
-            .db()
-            .adapter_for(file)
-            .map(|adapter| adapter.language_id().as_str().to_string());
-        let (span, content) = ws.vfs().snapshot(file).map_or_else(
-            |_| (FactSpan::default(), 0),
-            |snapshot| {
-                (
-                    FactSpan {
-                        line: 1,
-                        column: 1,
-                        start: 0,
-                        end: snapshot.text.len() as u64,
-                    },
-                    fnv1a_bytes64(snapshot.text.as_bytes()),
-                )
-            },
-        );
-        finish_file_candidate_groups(
-            &mut docs,
-            &file_path,
-            language.as_deref(),
-            span,
-            content,
-            pipeline,
-            groups,
-        );
+    edge_groups
+}
+
+fn merge_candidate_groups(
+    target: &mut AHashMap<String, FileCandidateTerms>,
+    source: AHashMap<String, FileCandidateTerms>,
+) {
+    for (kind, source) in source {
+        let target = target.entry(kind).or_default();
+        target.terms.extend(source.terms);
+        target.stable_ids.extend(source.stable_ids);
     }
-    docs.sort_unstable_by(|left, right| {
-        left.file_path
-            .cmp(&right.file_path)
-            .then_with(|| left.kind.cmp(&right.kind))
-    });
+}
+
+fn collect_decl_candidate_terms(groups: &mut AHashMap<String, FileCandidateTerms>, decl: &Decl) {
+    let kind = format!("{:?}", decl.kind).to_lowercase();
+    let declarations = candidate_terms(groups, &kind);
+    declarations.add(&decl.name);
+    if let Some(qualified) = decl.qualified_name.as_deref() {
+        declarations.add(qualified);
+    }
+    for param in &decl.params {
+        declarations.add(param);
+    }
+    for op in operations_from_flow_events(&decl.flow_events) {
+        let operations = candidate_terms(groups, "operation");
+        operations.add(op.kind.as_str());
+        operations.add(&decl.name);
+        if let Some(target) = op.target.as_deref() {
+            operations.add(target);
+        }
+        if let Some(detail) = op.detail.as_deref() {
+            operations.add(detail);
+        }
+        for operand in op.operands {
+            operations.add(&operand.name);
+            operations.add(operand.role.as_str());
+            operations.add(&format!("{}:{}", operand.role.as_str(), operand.name));
+        }
+    }
+    collect_flow_candidate_terms(groups, &decl.flow_events, &decl.name);
+}
+
+fn collect_import_candidate_terms(groups: &mut AHashMap<String, FileCandidateTerms>, import: &ImportSpec) {
+    let kind = if import.alias.is_some() {
+        "import-alias"
+    } else {
+        "import"
+    };
+    let imports = candidate_terms(groups, kind);
+    imports.add(&import.module);
+    if let Some(alias) = import.alias.as_deref() {
+        imports.add(alias);
+    }
+    if let Some(original) = import.original_name.as_deref() {
+        imports.add(original);
+    }
+}
+
+fn collect_index_candidate_terms(
+    ws: &Workspace,
+    groups: &mut AHashMap<String, FileCandidateTerms>,
+    index: &bonsai_lang_api::DeclIndex,
+) {
+    for reference in &index.refs {
+        let kind = match reference.kind {
+            RefKind::Read => "ref-read",
+            RefKind::Write => "ref-write",
+            RefKind::Call => "ref-call",
+            RefKind::Decorator => "ref-decorator",
+            _ => "ref",
+        };
+        candidate_terms(groups, kind).add(&reference.name);
+    }
+    for string in &index.strings {
+        let enclosing_function = enclosing_function_for_span(ws, string.span);
+        let strings = candidate_terms(groups, "string");
+        strings.add(&string.text);
+        strings.add(&format!("{:?}", string.category).to_lowercase());
+        if let Some(function) = enclosing_function.as_deref() {
+            strings.add(function);
+        }
+    }
+    for comment in &index.comments {
+        let enclosing_function = enclosing_function_for_span(ws, comment.span);
+        let comments = candidate_terms(groups, "comment");
+        comments.add(&comment.text);
+        comments.add(&format!("{:?}", comment.kind).to_lowercase());
+        if let Some(function) = enclosing_function.as_deref() {
+            comments.add(function);
+        }
+    }
+}
+
+fn build_file_candidate_docs(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+    file: bonsai_common::FileId,
+    file_path: &str,
+    pipeline: u64,
+    edge_groups: Option<AHashMap<String, FileCandidateTerms>>,
+) -> Vec<FactDoc> {
+    let language = ws
+        .db()
+        .adapter_for(file)
+        .map(|adapter| adapter.language_id().as_str().to_string());
+    let (file_span, content_fingerprint) = ws.vfs().snapshot(file).map_or_else(
+        |_| {
+            (
+                FactSpan {
+                    line: 1,
+                    column: 1,
+                    ..FactSpan::default()
+                },
+                0,
+            )
+        },
+        |snapshot| {
+            (
+                FactSpan {
+                    line: 1,
+                    column: 1,
+                    start: 0,
+                    end: snapshot.text.len() as u64,
+                },
+                fnv1a_bytes64(snapshot.text.as_bytes()),
+            )
+        },
+    );
+    let mut groups = AHashMap::default();
+    let file_name = Path::new(file_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(file_path);
+    let files = candidate_terms(&mut groups, "file");
+    files.add(file_path);
+    files.add(file_name);
+    if let Some(language) = language.as_deref() {
+        files.add(language);
+    }
+
+    for decl in global.decls_in(file) {
+        collect_decl_candidate_terms(&mut groups, decl);
+    }
+    for import in import_specs_for_retrieval(ws, file) {
+        collect_import_candidate_terms(&mut groups, &import);
+    }
+    if let Some(index) = global.file_index(file) {
+        collect_index_candidate_terms(ws, &mut groups, index);
+    }
+    if let Some(edge_groups) = edge_groups {
+        merge_candidate_groups(&mut groups, edge_groups);
+    }
+    let mut docs = Vec::with_capacity(groups.len());
+    finish_file_candidate_groups(
+        &mut docs,
+        file_path,
+        language.as_deref(),
+        file_span,
+        content_fingerprint,
+        pipeline,
+        groups,
+    );
     docs
+}
+
+/// Build the persisted candidate-only projection used to narrow files before
+/// canonical hydration. File-local lowering is parallel, while each completed
+/// compiler batch is interned immediately so transient documents never grow
+/// with workspace size. The batch width follows the active Rayon pool rather
+/// than imposing a project or semantic limit.
+fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
+    let pipeline = pipeline_hash_for_workspace(ws);
+    let global = ws.db().global_index();
+    let mut edge_groups = build_edge_candidate_groups(ws, &global);
+    let mut file_ids: Vec<_> = global.all_files().collect();
+    file_ids.extend(edge_groups.keys().copied());
+    file_ids.sort_unstable_by_key(|file| file.raw());
+    file_ids.dedup();
+    let mut files: Vec<_> = file_ids
+        .into_iter()
+        .map(|file| {
+            let path = ws
+                .vfs()
+                .path(file)
+                .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
+            (path, file)
+        })
+        .collect();
+    files.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+    let mut builder = CompactFactSnapshotBuilder::new(RETRIEVAL_SCHEMA_VERSION, pipeline);
+    let batch_width = rayon::current_num_threads().max(1);
+    for batch in files.chunks(batch_width) {
+        let inputs: Vec<_> = batch
+            .iter()
+            .map(|(path, file)| (*file, path.as_str(), edge_groups.remove(file)))
+            .collect();
+        let lowered: Vec<Vec<FactDoc>> = inputs
+            .into_par_iter()
+            .map(|(file, path, edges)| build_file_candidate_docs(ws, &global, file, path, pipeline, edges))
+            .collect();
+        for docs in lowered {
+            for doc in docs {
+                builder.push(doc);
+            }
+        }
+    }
+
+    builder.finish()
 }
 
 /// Save a retrieval sidecar for `ws` under `workspace_root`.
 pub fn save_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<usize> {
     require_complete_workspace(ws)?;
     let path = retrieval_sidecar_path(workspace_root);
-    let docs = build_persisted_candidate_docs(ws);
-    save_docs_snapshot(
-        RETRIEVAL_SCHEMA_VERSION,
-        pipeline_hash_for_workspace(ws),
-        docs,
-        &path,
-    )
+    save_compact_snapshot(build_persisted_candidate_snapshot(ws), &path)
 }
 
 /// Validate an existing retrieval sidecar or build it when stale/missing.
@@ -1100,6 +1139,13 @@ struct PersistedStringInterner {
     ids: AHashMap<String, u32>,
 }
 
+struct CompactFactSnapshotBuilder {
+    schema_version: u32,
+    pipeline_fingerprint: u64,
+    strings: PersistedStringInterner,
+    docs: Vec<CompactFactDoc>,
+}
+
 impl PersistedStringInterner {
     fn intern(&mut self, value: String) -> u32 {
         if let Some(id) = self.ids.get(value.as_str()).copied() {
@@ -1127,39 +1173,57 @@ impl PersistedStringInterner {
     }
 }
 
-impl CompactFactSnapshot {
-    fn from_docs(schema_version: u32, pipeline_fingerprint: u64, docs: Vec<FactDoc>) -> Self {
-        let mut strings = PersistedStringInterner::default();
-        let docs = docs
-            .into_iter()
-            .map(|doc| CompactFactDoc {
-                fact_id: strings.intern(doc.fact_id),
-                kind: strings.intern(doc.kind),
-                language: strings.intern_option(doc.language),
-                file_path: strings.intern(doc.file_path),
-                span: doc.span,
-                symbol_name: strings.intern_option(doc.symbol_name),
-                qualified_name: strings.intern_option(doc.qualified_name),
-                enclosing_function: strings.intern_option(doc.enclosing_function),
-                enclosing_class: strings.intern_option(doc.enclosing_class),
-                stable_ids: strings.intern_many(doc.stable_ids),
-                resolver_precision: strings.intern_option(doc.resolver_precision),
-                resolver_stage: strings.intern_option(doc.resolver_stage),
-                provenance: strings.intern_option(doc.provenance),
-                confidence: doc.confidence,
-                static_limits: strings.intern_many(doc.static_limits),
-                incomplete_reasons: strings.intern_many(doc.incomplete_reasons),
-                normalized_search_text: strings.intern(doc.normalized_search_text),
-                content_fingerprint: doc.content_fingerprint,
-                pipeline_fingerprint: doc.pipeline_fingerprint,
-            })
-            .collect();
+impl CompactFactSnapshotBuilder {
+    fn new(schema_version: u32, pipeline_fingerprint: u64) -> Self {
         Self {
             schema_version,
             pipeline_fingerprint,
-            strings: strings.finish(),
-            docs,
+            strings: PersistedStringInterner::default(),
+            docs: Vec::new(),
         }
+    }
+
+    fn push(&mut self, doc: FactDoc) {
+        self.docs.push(CompactFactDoc {
+            fact_id: self.strings.intern(doc.fact_id),
+            kind: self.strings.intern(doc.kind),
+            language: self.strings.intern_option(doc.language),
+            file_path: self.strings.intern(doc.file_path),
+            span: doc.span,
+            symbol_name: self.strings.intern_option(doc.symbol_name),
+            qualified_name: self.strings.intern_option(doc.qualified_name),
+            enclosing_function: self.strings.intern_option(doc.enclosing_function),
+            enclosing_class: self.strings.intern_option(doc.enclosing_class),
+            stable_ids: self.strings.intern_many(doc.stable_ids),
+            resolver_precision: self.strings.intern_option(doc.resolver_precision),
+            resolver_stage: self.strings.intern_option(doc.resolver_stage),
+            provenance: self.strings.intern_option(doc.provenance),
+            confidence: doc.confidence,
+            static_limits: self.strings.intern_many(doc.static_limits),
+            incomplete_reasons: self.strings.intern_many(doc.incomplete_reasons),
+            normalized_search_text: self.strings.intern(doc.normalized_search_text),
+            content_fingerprint: doc.content_fingerprint,
+            pipeline_fingerprint: doc.pipeline_fingerprint,
+        });
+    }
+
+    fn finish(self) -> CompactFactSnapshot {
+        CompactFactSnapshot {
+            schema_version: self.schema_version,
+            pipeline_fingerprint: self.pipeline_fingerprint,
+            strings: self.strings.finish(),
+            docs: self.docs,
+        }
+    }
+}
+
+impl CompactFactSnapshot {
+    fn from_docs(schema_version: u32, pipeline_fingerprint: u64, docs: Vec<FactDoc>) -> Self {
+        let mut builder = CompactFactSnapshotBuilder::new(schema_version, pipeline_fingerprint);
+        for doc in docs {
+            builder.push(doc);
+        }
+        builder.finish()
     }
 
     fn expand(self) -> std::io::Result<FactSnapshot> {
@@ -1267,8 +1331,13 @@ fn save_docs_snapshot(
     docs: Vec<FactDoc>,
     path: &Path,
 ) -> std::io::Result<usize> {
-    let doc_count = docs.len();
     let snapshot = CompactFactSnapshot::from_docs(schema_version, pipeline, docs);
+    save_compact_snapshot(snapshot, path)
+}
+
+fn save_compact_snapshot(snapshot: CompactFactSnapshot, path: &Path) -> std::io::Result<usize> {
+    let doc_count = snapshot.docs.len();
+    let pipeline = snapshot.pipeline_fingerprint;
     let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1)?;
     wire::encode_to_writer(&mut encoder, &snapshot).map_err(invalid_data)?;
     let bytes = encoder.finish()?;
@@ -2830,6 +2899,52 @@ mod tests {
             .expect("query candidate sidecar");
         assert_eq!(hits.len(), 1);
         assert!(hits[0].file_path.ends_with("app.py"));
+    }
+
+    #[test]
+    fn persisted_compiler_is_deterministic_and_keeps_semantic_edges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("z.py"),
+            "def caller(value):\n    return callee(value)\n\ndef callee(value):\n    return value\n",
+        )
+        .expect("write calling source");
+        std::fs::write(dir.path().join("a.py"), "def alpha(value):\n    return value\n")
+            .expect("write alphabetic source");
+        let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+        ws.ingest_dir(dir.path()).expect("ingest");
+
+        let first_docs = save_sidecar(&ws, dir.path()).expect("first candidate sidecar");
+        let path = retrieval_sidecar_path(dir.path());
+        let first_bytes = std::fs::read(&path).expect("read first sidecar");
+        let second_docs = save_sidecar(&ws, dir.path()).expect("second candidate sidecar");
+        let second_bytes = std::fs::read(&path).expect("read second sidecar");
+        assert_eq!(first_docs, second_docs);
+        assert_eq!(
+            first_bytes, second_bytes,
+            "parallel file lowering must preserve deterministic path/kind ordering"
+        );
+
+        let index = load_sidecar(&ws, dir.path()).expect("load candidate sidecar");
+        let edge_docs: Vec<_> = index.docs().iter().filter(|doc| doc.kind == "edge").collect();
+        assert_eq!(
+            edge_docs.len(),
+            1,
+            "resolved edge groups must be retained in the compact snapshot: {edge_docs:#?}"
+        );
+        let edges = index
+            .query(&RetrievalQuery {
+                text: "caller",
+                kind: Some("edge"),
+                workspace_root: Some(dir.path()),
+                ..RetrievalQuery::default()
+            })
+            .expect("query semantic edge candidates");
+        assert_eq!(
+            edges.len(),
+            1,
+            "edge groups must merge into their source file batch"
+        );
     }
 
     #[test]
