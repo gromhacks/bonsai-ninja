@@ -1751,6 +1751,28 @@ impl Cache<'_> {
         Ok(self.workspace_cache().stats()?)
     }
 
+    /// Return whether every structural artifact required by semantic query
+    /// commands is fresh for the exact source/dependency/analyzer pipeline.
+    /// This performs no parsing and does not hydrate callgraph or IDG facts.
+    pub fn structural_sidecars_are_current(&self) -> Result<bool> {
+        let workspace = &self.project.workspace;
+        if !workspace.callgraph_sidecar_is_current(&self.project.root) {
+            return Ok(false);
+        }
+        if !matches!(
+            workspace.validate_idg_sidecar_layout(&self.project.root),
+            Ok(Some(_))
+        ) {
+            return Ok(false);
+        }
+        let pipeline = bonsai_retrieval::pipeline_hash_for_workspace(workspace);
+        Ok(bonsai_retrieval::validate_sidecar_file_with_pipeline(
+            &bonsai_retrieval::retrieval_sidecar_path(&self.project.root),
+            pipeline,
+        )
+        .is_ok())
+    }
+
     /// Warm and validate the structural semantic sidecars without immediately
     /// reopening and fully auditing the payloads just produced. Each load or
     /// build below already validates its exact pipeline contract; callers that
