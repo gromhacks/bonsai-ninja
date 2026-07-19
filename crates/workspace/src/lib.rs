@@ -3269,7 +3269,11 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // from synthetic allocation-insensitive field-state links.
     // v41 (2026-07-15): symbolic call provenance retains AST argument and
     // formal slots without materializing access-path edges.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 41;
+    // v42 (2026-07-19): whole-aggregate consumption has explicit edge
+    // provenance. Unresolved/external consumers retain scalar argument
+    // evidence, while resolved local boundaries render only exact projected
+    // field stitching instead of promoting sibling fields.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 42;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 

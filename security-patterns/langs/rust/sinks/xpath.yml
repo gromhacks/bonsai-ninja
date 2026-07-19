@@ -9,7 +9,8 @@
   match:
     kind: call
     callee:
-      attribute: [Factory, build]
+      regex: "\\.build$"
+      receiver_type_in: [Factory]
   constraints:
   - arg_tainted:
       index: 0
@@ -31,4 +32,4 @@
         let _ = factory.build("//safe");
       }
     expect_no_match: true
-  description: "sxd_xpath Factory::build - compile XPath from user-supplied string; later evaluation injects."
+  description: "sxd_xpath Factory::build - compile XPath from user-supplied string; the compiler-owned Factory::new return type distinguishes this receiver from unrelated build methods."

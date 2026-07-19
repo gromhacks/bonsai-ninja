@@ -167,6 +167,12 @@ struct UnifiedAddressSpace {
 
 type CrossCallsByFrom = AHashMap<WsNodeId, Vec<CrossCallEdge>>;
 
+#[derive(Default)]
+struct SegmentCallArgEvidence {
+    resolved: AHashSet<NodeId>,
+    aggregate_inputs: AHashMap<NodeId, smallvec::SmallVec<[NodeId; 4]>>,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct SymbolicNodeFact {
     base: u32,
@@ -879,6 +885,23 @@ impl IdgQueryService {
         Some(self.build_point_ref(idg_node.func, place))
     }
 
+    /// Return the compiler identity of a call-argument node.
+    ///
+    /// Unlike [`Self::resolve_point`], this preserves the positional index as
+    /// structured data. Target-cut consumers use it to compare exact sink
+    /// argument nodes without parsing a rendered place name.
+    #[must_use]
+    pub fn call_arg_identity(&self, ws_node: WsNodeId) -> Option<(FuncId, Span, u32)> {
+        let unified = self.ensure_unified();
+        let &(seg_id, local_node) = unified.reverse.get(ws_node.0 as usize)?;
+        let segment = self.workspace.segment(seg_id)?;
+        let node = segment.nodes.get(local_node)?;
+        let Place::CallArg { site, idx } = segment.places.get(node.place)? else {
+            return None;
+        };
+        Some((node.func, site.0, *idx))
+    }
+
     /// Owning compiler function for one workspace-global IDG node.
     #[must_use]
     pub fn func_of_node(&self, ws_node: WsNodeId) -> Option<FuncId> {
@@ -1074,7 +1097,7 @@ impl IdgQueryService {
         }
         let targets: AHashSet<WsNodeId> = target_nodes.iter().copied().collect();
         let closure = self.forward_closure_with_max_precision(seeds, max_precision);
-        if closure.iter().any(|node| targets.contains(node)) {
+        if self.closure_reaches_target_nodes(&closure, &targets) {
             closure
         } else {
             Vec::new()
@@ -1097,17 +1120,41 @@ impl IdgQueryService {
         let targets: AHashSet<WsNodeId> = target_nodes.iter().copied().collect();
         let closure = self.forward_closure_with_max_precision(seeds, max_precision);
         let reaches_target = closure.iter().any(|node| {
-            targets.contains(node)
-                || unified
-                    .node_funcs
-                    .get(node.0 as usize)
-                    .is_some_and(|func| target_funcs.contains(func))
-        });
+            unified
+                .node_funcs
+                .get(node.0 as usize)
+                .is_some_and(|func| target_funcs.contains(func))
+        }) || self.closure_reaches_target_nodes(&closure, &targets);
         if reaches_target {
             closure
         } else {
             Vec::new()
         }
+    }
+
+    /// Whether a closure reaches a requested scalar node or supplies exact
+    /// aggregate-consumption evidence for a requested call-argument node.
+    ///
+    /// `IntraAggregateConsume` is intentionally not a traversable scalar
+    /// edge: making it one would widen a tainted field into its siblings when
+    /// a local callee reads a different field. An unresolved/external call
+    /// still observes the complete argument value, however, so its exact
+    /// call-argument identity satisfies a target cut without inserting that
+    /// argument into the scalar closure.
+    fn closure_reaches_target_nodes(&self, closure: &[WsNodeId], targets: &AHashSet<WsNodeId>) -> bool {
+        if closure.iter().any(|node| targets.contains(node)) {
+            return true;
+        }
+        let target_args: AHashSet<(FuncId, Span, u32)> = targets
+            .iter()
+            .filter_map(|node| self.call_arg_identity(*node))
+            .collect();
+        if target_args.is_empty() {
+            return false;
+        }
+        self.tainted_call_args_in_reachable_nodes(closure)
+            .into_iter()
+            .any(|identity| target_args.contains(&identity))
     }
 
     /// Backward closure: which nodes flow *into* `targets`?
@@ -1623,6 +1670,43 @@ impl IdgQueryService {
         target_funcs: Option<&AHashSet<FuncId>>,
     ) -> Vec<(FuncId, Span, u32)> {
         let unified = self.ensure_unified();
+        let mut reachable = NodeBitSet::zeros(unified.reverse.len());
+        let mut touched_segments = AHashSet::new();
+        for ws_node in closure {
+            reachable.set(NodeId(ws_node.0));
+            if let Some(&(segment, _)) = unified.reverse.get(ws_node.0 as usize) {
+                touched_segments.insert(segment);
+            }
+        }
+        // Aggregate-consumption markers are deliberately absent from the
+        // reachability graph: they describe an unresolved/external call-site
+        // observation, not scalar value flow. Index them once per segment
+        // touched by the closure so rendering remains O(reachable nodes +
+        // touched edges), rather than rescanning edges per call argument.
+        let mut evidence_by_segment: AHashMap<SegmentId, SegmentCallArgEvidence> = AHashMap::new();
+        for seg_id in touched_segments {
+            let Some(segment) = self.workspace.segment(seg_id) else {
+                continue;
+            };
+            let mut evidence = SegmentCallArgEvidence::default();
+            for edge in &segment.edges {
+                if edge.meta.kind == IdgEdgeKind::InterCallArg {
+                    evidence.resolved.insert(edge.from);
+                } else if edge.meta.kind == IdgEdgeKind::IntraAggregateConsume {
+                    evidence
+                        .aggregate_inputs
+                        .entry(edge.to)
+                        .or_default()
+                        .push(edge.from);
+                }
+            }
+            for cross in self.workspace.cross_file().outgoing_from_segment(seg_id) {
+                if cross.edge.meta.kind == IdgEdgeKind::InterCallArg {
+                    evidence.resolved.insert(cross.edge.from);
+                }
+            }
+            evidence_by_segment.insert(seg_id, evidence);
+        }
         let mut out = Vec::new();
         for ws_node in closure {
             let Some(&(seg_id, local)) = unified.reverse.get(ws_node.0 as usize) else {
@@ -1641,6 +1725,37 @@ impl IdgQueryService {
                 if target_funcs.is_some_and(|targets| !targets.contains(&node.func)) {
                     continue;
                 }
+                out.push((node.func, site.0, *idx));
+            }
+        }
+        // A whole aggregate passed to an unresolved/external call consumes
+        // its currently known fields even though that observation is not a
+        // traversable scalar edge. Resolver-proven local calls instead use
+        // exact InterFieldCallArg edges, preserving sibling-field precision.
+        for (seg_id, evidence) in evidence_by_segment {
+            let Some(segment) = self.workspace.segment(seg_id) else {
+                continue;
+            };
+            for (arg_node, aggregate_inputs) in evidence.aggregate_inputs {
+                if evidence.resolved.contains(&arg_node) {
+                    continue;
+                }
+                let aggregate_reachable = aggregate_inputs.into_iter().any(|from| {
+                    Self::ws_node_for(&unified, seg_id, from)
+                        .is_some_and(|from_ws| reachable.contains(NodeId(from_ws.0)))
+                });
+                if !aggregate_reachable {
+                    continue;
+                }
+                let Some(node) = segment.nodes.get(arg_node) else {
+                    continue;
+                };
+                if target_funcs.is_some_and(|targets| !targets.contains(&node.func)) {
+                    continue;
+                }
+                let Some(Place::CallArg { site, idx }) = segment.places.get(node.place) else {
+                    continue;
+                };
                 out.push((node.func, site.0, *idx));
             }
         }
@@ -3069,6 +3184,9 @@ impl IdgQueryService {
             let seg_id = SegmentId(seg_id.0);
             for edge in &segment.edges {
                 if max_precision.is_some_and(|max| edge.meta.precision > max) {
+                    continue;
+                }
+                if edge.meta.kind == IdgEdgeKind::IntraAggregateConsume {
                     continue;
                 }
                 let Some(from_ws) = Self::ws_node_for(unified, seg_id, edge.from) else {

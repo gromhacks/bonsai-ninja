@@ -658,15 +658,16 @@
 - id: perl.sanitizer.hash_exists_allowlist
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: requires-constraint
   language: perl
   tag: allowlist-validate
   match:
     kind: call
     callee:
       name: exists
-  description: "Disabled - Perl `exists $allowed{$value}` is the desired hash allowlist shape, but the current adapter does
-    not emit `exists` as a call/read fact."
+  description: "Disabled - `exists $allowed{$value}` validates `$value` only on the successful control-flow branch and only
+    when the hash is a trusted finite allowlist. Re-enable when the rule vocabulary can prove both collection provenance and
+    guard dominance; a bare `exists` call/read fact is not sufficient sanitizer evidence."
 
 - id: perl.sanitizer.regex_full_string_shape
   enabled: true

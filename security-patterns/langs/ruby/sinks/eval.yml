@@ -113,9 +113,7 @@
       name: __send__
   description: "Disabled - same as send, ubiquitous."
 - id: ruby.eval.active_support_constantize
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: ruby
   tag: code-injection
   severity: high
@@ -128,6 +126,8 @@
     kind: call
     callee:
       name: constantize
+  constraints:
+  - receiver_tainted: true
   match_examples:
   - name: ruby.eval.active_support_constantize example
     code: |
@@ -137,11 +137,16 @@
       end
     expect_match_text:
     - input.constantize
-  description: "Disabled - constantize resolves the receiver string; needs receiver-taint tracking for the class name."
+  - name: ruby.eval.active_support_constantize literal negative
+    code: |
+      require "activesupport"
+      def example(input)
+        "User".constantize()
+      end
+    expect_no_match: true
+  description: "ActiveSupport String#constantize resolves a tainted receiver as a runtime constant name."
 - id: ruby.eval.active_support_safe_constantize
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: ruby
   tag: code-injection
   severity: high
@@ -154,6 +159,8 @@
     kind: call
     callee:
       name: safe_constantize
+  constraints:
+  - receiver_tainted: true
   match_examples:
   - name: ruby.eval.active_support_safe_constantize example
     code: |
@@ -163,7 +170,14 @@
       end
     expect_match_text:
     - input.safe_constantize
-  description: "Disabled - safe_constantize resolves the receiver string; needs receiver-taint tracking for the class name."
+  - name: ruby.eval.active_support_safe_constantize literal negative
+    code: |
+      require "activesupport"
+      def example(input)
+        "User".safe_constantize()
+      end
+    expect_no_match: true
+  description: "ActiveSupport String#safe_constantize resolves a tainted receiver as a runtime constant name; returning nil on lookup failure does not remove the dynamic constant-resolution risk."
 - id: ruby.eval.module_const_get
   enabled: true
   language: ruby

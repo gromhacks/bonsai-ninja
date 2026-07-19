@@ -15,10 +15,10 @@
 //!   language construct, not a function call).
 //! - **Ruby backticks** — `` `cmd` `` parses as `subshell` → synthetic
 //!   `` `(cmd)`` `` for the rulepack to anchor on.
-//! - **Scala infix expressions** — `obj op arg`. Symbolic `+` →
-//!   synthetic `+` call for the rulepack's string-concat XSS shape;
-//!   any alphabetic-named infix method (`obj method arg`) → a real
-//!   method `Call { receiver: obj, name: method, args: [arg] }`.
+//! - **Scala infix expressions** — `obj op arg`. Tree-sitter symbolic
+//!   operators become syntax-level operator calls with both operands;
+//!   alphabetic infix methods (`obj method arg`) become real method
+//!   calls with `obj` as their receiver.
 //!
 //! Each lowering preserves the source span so downstream consumers
 //! can still tie the synthesized call back to its original syntax.
@@ -54,8 +54,8 @@ pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Op
     }
     // Scala general infix method call (`obj method arg`). Lower it to a
     // real method Call so infix-applied sinks/transfers ride the call
-    // model. Gated on an alphabetic-named operator; symbolic `+` falls
-    // through to its dedicated string-concat arm below.
+    // model. Gated on an alphabetic-named operator; symbolic operators
+    // fall through to the AST-operator arm below.
     if node.kind() == "infix_expression" {
         if let Some(call) = infix_method_call_event(node, file, src) {
             return Some(call);
@@ -94,9 +94,16 @@ pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Op
         "echo_statement" => (String::from("echo"), named_child_args(node, file, src)),
         // Ruby backticks parse as `subshell`.
         "subshell" => (String::from("`"), named_child_args(node, file, src)),
-        // Scala string concatenation is an infix operator expression.
-        "infix_expression" if infix_operator_text(node, src).as_deref() == Some("+") => {
-            (String::from("+"), infix_expression_args(node, file, src))
+        // Scala symbolic infix expressions are syntax operators. Derive the
+        // spelling from Tree-sitter's declared `operator` field so this is a
+        // grammar classification, not a list of special values.
+        "infix_expression" => {
+            let operator = infix_operator_text(node, src)?;
+            if operator.is_empty() || looks_like_bare_identifier(&operator) {
+                return None;
+            }
+            semantic_call_kind = CallKind::Operator;
+            (operator, infix_expression_args(node, file, src))
         }
         _ => return None,
     };
@@ -217,29 +224,21 @@ fn named_child_args(node: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallArg> {
 }
 
 /// Pull infix expression operands into a CallArg list, skipping the
-/// operator marker / keyword child. Used to lower Scala `a + b` shapes
-/// into a synthetic `+`-call so XSS rules can anchor on string concat.
+/// operator marker / keyword child. Used to lower Scala symbolic operator
+/// syntax into an AST-classified operator call.
 fn infix_expression_args(node: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallArg> {
-    let mut call_args = Vec::new();
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        let child_kind = child.kind();
-        // Skip the operator itself — we already recorded it as the call name.
-        if child_kind == "operator" || child_kind.ends_with("_keyword") {
-            continue;
-        }
-        if let Some(argument) = call_arg_from_node(child, file, src, None) {
-            call_args.push(argument);
-        }
-    }
-    call_args
+    ["left", "right"]
+        .into_iter()
+        .filter_map(|field| node.child_by_field_name(field))
+        .filter_map(|operand| call_arg_from_node(operand, file, src, None))
+        .collect()
 }
 
 /// Lower a Scala general infix method call (`receiver method arg`) into a
 /// method `Call`. Scala applies any single-arg method infix, parsed as
 /// `infix_expression` with `left` / `operator` / `right` fields. Gated on an
 /// alphabetic-identifier operator so symbolic/comparison operators (`+`,
-/// `==`, `::`) stay out — `+` keeps its dedicated string-concat lowering.
+/// `==`, `::`) stay on the syntax-operator path.
 fn infix_method_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
     let (left, name) = infix_method_receiver(node, src)?;
     let right = node.child_by_field_name("right")?;
@@ -261,7 +260,8 @@ fn infix_method_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<
 pub(super) fn infix_method_receiver<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<(Node<'tree>, String)> {
     let operator = node.child_by_field_name("operator")?;
     let name = node_text(&operator, src).trim().to_string();
-    // Only method-name operators; symbolic operators are not method calls.
+    // Only method-name operators; symbolic operators use the syntax-level
+    // operator lowering so they cannot be mistaken for workspace symbols.
     if !looks_like_bare_identifier(&name) {
         return None;
     }
@@ -307,8 +307,7 @@ mod tests {
 
     #[test]
     fn scala_alphabetic_infix_method_lowered_to_method_call() {
-        // `payload concat suffix` is `payload.concat(suffix)` applied
-        // infix; only `+` was lowered before, so this produced no Call.
+        // `payload concat suffix` is `payload.concat(suffix)` applied infix.
         let src = "object A { val r = payload concat suffix }";
         let language = language_from_pack("scala").expect("scala pack available");
         let mut parser = Parser::new();
@@ -333,6 +332,35 @@ mod tests {
         assert_eq!(receiver.as_deref(), Some("payload"));
         assert_eq!(args.len(), 1);
         assert_eq!(args[0].value_text, "suffix");
+    }
+
+    #[test]
+    fn scala_symbolic_infix_is_ast_operator_without_spelling_allowlist() {
+        let src = "object A { val r = head :: tail }";
+        let language = language_from_pack("scala").expect("scala pack available");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("set language");
+        let tree = parser.parse(src, None).expect("parse succeeded");
+        let infix = find_kind(tree.root_node(), "infix_expression").expect("infix node");
+
+        let event = pseudo_call_event(&infix, FileId::INVALID, src.as_bytes())
+            .expect("symbolic infix lowered to an operator event");
+        let FlowEvent::Call {
+            name,
+            receiver,
+            call_kind,
+            args,
+            ..
+        } = event
+        else {
+            panic!("expected a Call event, got {event:?}");
+        };
+        assert_eq!(name, "::");
+        assert_eq!(call_kind, CallKind::Operator);
+        assert_eq!(receiver, None);
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].value_text, "head");
+        assert_eq!(args[1].value_text, "tail");
     }
 
     #[test]

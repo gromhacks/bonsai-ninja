@@ -180,9 +180,7 @@
   imports:
   - protobuf/protobuf.dart
 - id: dart.deser.protobuf_any_unpack
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   tag: insecure-deserialization
   severity: high
@@ -191,17 +189,26 @@
   match:
     kind: call
     callee:
-      attribute: [Any, unpackInto]
+      regex: "(?:^|\\.)unpackInto$"
+  constraints:
+  - receiver_type_in: [Any]
+  - receiver_tainted: true
   match_examples:
-  - name: declared shape
+  - name: tainted protobuf Any receiver
     code: |
       import 'package:protobuf/protobuf.dart';
+      void test(Any input, GeneratedMessage target) {
+        input.unpackInto(target);
+      }
+    expect_match_text: [input.unpackInto]
+  - name: clean protobuf Any receiver
+    code: |
       import 'package:protobuf/protobuf.dart';
-      import 'package:protobuf/protobuf.dart';
-      import 'package:protobuf/protobuf.dart';
-      import 'package:protobuf/protobuf.dart';
-      void test() { var input = "x"; var amount = 1; Any.unpackInto(input); }
-  description: "Disabled until receiver-taint tracking exists - the hazardous value is the protobuf Any receiver, not the unpackInto(target) argument."
+      void test(GeneratedMessage target) {
+        Any().unpackInto(target);
+      }
+    expect_no_match: true
+  description: "protobuf Any.unpackInto(target) dispatches a runtime-selected embedded message type. The Any receiver, rather than the destination argument, is the attacker-controlled deserialization payload."
 
   imports:
   - protobuf/protobuf.dart

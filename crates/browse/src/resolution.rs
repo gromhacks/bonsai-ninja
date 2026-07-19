@@ -326,14 +326,15 @@ fn collect_decl_call_sites(
                 }
                 row.call_sites += 1;
                 let resolved_counts = resolved_sites.get(&key);
-                let known_external = resolved_counts.is_none()
-                    && known_external_call_site(
-                        name,
-                        receiver.as_deref(),
-                        alias_targets,
-                        workspace_module_tails,
-                        external_receivers,
-                    );
+                let known_external = matches!(call_kind, CallKind::Operator)
+                    || (resolved_counts.is_none()
+                        && known_external_call_site(
+                            name,
+                            receiver.as_deref(),
+                            alias_targets,
+                            workspace_module_tails,
+                            external_receivers,
+                        ));
                 if matches!(call_kind, CallKind::Indirect) {
                     row.dynamic_call_sites += 1;
                 }

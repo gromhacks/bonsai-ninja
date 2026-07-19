@@ -1,7 +1,5 @@
 - id: ruby.xss.html_safe
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: ruby
   tag: xss
   severity: high
@@ -13,14 +11,24 @@
     kind: call
     callee:
       name: html_safe
+  constraints:
+  - receiver_tainted: true
   match_examples:
   - name: ruby.xss.html_safe example
     code: |
       require "actionview"
       def example(input, url, id, payload, request, params)
-        html_safe(input)
+        input.html_safe()
       end
-  description: "Disabled - html_safe marks the receiver string safe; needs receiver-taint tracking."
+    expect_match_text: [input.html_safe]
+  - name: ruby.xss.html_safe literal negative
+    code: |
+      require "actionview"
+      def example(input)
+        "<p>Hello</p>".html_safe()
+      end
+    expect_no_match: true
+  description: "ActiveSupport String#html_safe bypasses output escaping when its receiver contains attacker-controlled markup."
 - id: ruby.xss.raw
   enabled: true
   language: ruby

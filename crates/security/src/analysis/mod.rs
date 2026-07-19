@@ -1233,7 +1233,7 @@ where
         // same parameter (e.g. Go's `unreferenced_entry.param_1` for `r`
         // duplicates the concrete `r.URL.Query().Get(...)` source). Drop
         // the inferred param so the precise source is the sole evidence.
-        let concrete_param_bases = concrete_source_param_bases(&source_hits);
+        let concrete_param_bases = concrete_source_param_bases(pack, &source_hits);
         on_progress(AnalysisProgress::PhaseStarted {
             label: "inferring entry-point sources",
             total: total_files,
@@ -2006,7 +2006,7 @@ where
         // concrete `r.URL.Query().Get(...)` query-value source on the same
         // request param. Drop the inferred param in that case so the
         // precise source is the sole evidence for the flow.
-        let concrete_param_bases = concrete_source_param_bases(&source_hits);
+        let concrete_param_bases = concrete_source_param_bases(pack, &source_hits);
         on_progress(AnalysisProgress::PhaseStarted {
             label: "inferring entry-point sources",
             total: total_files,
@@ -2804,10 +2804,26 @@ fn filter_source_hits_by_metadata(
 /// (non-inferred) rulepack source match is rooted at in that function.
 /// Used to drop redundant inferred entry-point param sources that only
 /// re-describe a flow a precise source already covers.
-fn concrete_source_param_bases(hits: &[RuleMatch]) -> AHashMap<(String, String), AHashSet<String>> {
+fn concrete_source_param_bases(
+    pack: &Rulepack,
+    hits: &[RuleMatch],
+) -> AHashMap<(String, String), AHashSet<String>> {
     let mut out: AHashMap<(String, String), AHashSet<String>> = AHashMap::default();
     for hit in hits {
         if hit.origin != MatchOrigin::Rulepack {
+            continue;
+        }
+        // A sink-restricted concrete source is precise only for those sink
+        // classes. It cannot subsume the broad inferred parameter for every
+        // other class: a `payload` source restricted to deserialization must
+        // not erase a real `payload -> Mongo.find` flow during source
+        // discovery. Keep both here; finding-time compatibility and grouping
+        // retain the concrete source wherever it is actually applicable.
+        if pack.find_rule_by_id(&hit.rule_id).is_some_and(|rule| {
+            rule.constraints
+                .iter()
+                .any(|constraint| matches!(constraint, ConstraintKind::SinkTagIn { .. }))
+        }) {
             continue;
         }
         let Some(fn_name) = hit.enclosing_fn.clone() else {

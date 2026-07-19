@@ -97,6 +97,38 @@ const NONFIRING: &str = r#"- id: python.test.tainted_system
   description: os.system whose positive example is not actually tainted.
 "#;
 
+/// A field-sensitive object literal passed as one whole external-call
+/// argument. The exact field writers are evidence for `arg_tainted`, but the
+/// object must not become a scalar bridge that would taint sibling fields in
+/// a resolved local callee.
+const JAVASCRIPT_AGGREGATE_FIRES: &str = r#"- id: javascript.test.send_mail
+  enabled: true
+  language: javascript
+  tag: smtp-injection
+  severity: medium
+  packages: [nodemailer]
+  imports: [nodemailer]
+  cwe: [CWE-93]
+  match:
+    kind: call
+    callee:
+      attribute: [transporter, sendMail]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted object field
+    code: |
+      const nodemailer = require("nodemailer");
+      function handle(input) {
+        const transporter = nodemailer.createTransport({});
+        const opts = {from: "a@x", to: input, subject: input};
+        return transporter.sendMail(opts);
+      }
+    expect_match_text: [transporter.sendMail]
+  description: external whole-object consumer observes exact tainted fields.
+"#;
+
 #[test]
 fn taint_replay_accepts_firing_example() {
     let tmp = TempDir::new("replay-fires");
@@ -118,6 +150,21 @@ fn taint_replay_flags_nonfiring_example() {
         taint_miss_ids(&report).contains(&"python.test.tainted_system".to_string()),
         "a taint-dependent rule whose own positive example cannot fire must be reported \
          as match-example-taint-miss: {:#?}",
+        report.issues
+    );
+}
+
+#[test]
+fn taint_replay_accepts_tainted_field_in_whole_external_argument() {
+    let tmp = TempDir::new("replay-javascript-aggregate");
+    write(
+        &tmp.path().join("langs/javascript/sinks/smtp.yml"),
+        JAVASCRIPT_AGGREGATE_FIRES,
+    );
+    let report = validate(tmp.path(), true);
+    assert!(
+        !taint_miss_ids(&report).contains(&"javascript.test.send_mail".to_string()),
+        "an exact tainted field consumed by a whole external argument must satisfy replay: {:#?}",
         report.issues
     );
 }

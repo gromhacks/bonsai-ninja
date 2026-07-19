@@ -180,7 +180,18 @@
     expect_match_text:
     - ldap.NewSearchRequest
   - name: beego input into ldap search filter
-    code: "package main\nimport (\n  \"fmt\"\n  \"github.com/go-ldap/ldap/v3\"\n)\ntype Controller struct{}\nfunc (c *Controller) GetString(name string) string { return \"\" }\nfunc handler(c *Controller) {\n  user := c.GetString(\"user\")\n  filter := fmt.Sprintf(\"(uid=%s)\", user)\n  _ = ldap.NewSearchRequest(\"dc=example,dc=com\", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false, filter, []string{\"cn\", \"mail\"}, nil)\n}\n"
+    code: |
+      package main
+      import (
+        "fmt"
+        "github.com/beego/beego/v2/server/web"
+        "github.com/go-ldap/ldap/v3"
+      )
+      func handler(c *web.Controller) {
+        user := c.GetString("user")
+        filter := fmt.Sprintf("(uid=%s)", user)
+        _ = ldap.NewSearchRequest("dc=example,dc=com", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false, filter, []string{"cn", "mail"}, nil)
+      }
     expect_match_text:
     - ldap.NewSearchRequest
   - name: literal ldap search filter negative

@@ -1287,6 +1287,11 @@ fn add_call_event_edges(
     else {
         return;
     };
+    // Operator applications are compiler-known expression flow, not
+    // workspace call targets. Their operand -> result edges live in the IDG.
+    if matches!(call_kind, CallKind::Operator) {
+        return;
+    }
     // Callback arguments are independent callgraph facts. Resolve
     // them before the outer callee pipeline so an ambiguous or
     // unresolved external API cannot suppress a compiler-resolved

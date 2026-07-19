@@ -665,6 +665,10 @@ pub enum CallKind {
     Method,
     Constructor,
     Macro,
+    /// Syntax-level operator application lowered from an AST operator node.
+    /// Its result is data-dependent on its operands and it never resolves as
+    /// a workspace callable merely because the operator has a text spelling.
+    Operator,
     Indirect,
     /// Language-level channel send lowered from a dedicated AST node.
     ChannelSend,
@@ -678,6 +682,7 @@ impl CallKind {
             CallKind::Method => "method",
             CallKind::Constructor => "constructor",
             CallKind::Macro => "macro",
+            CallKind::Operator => "operator",
             CallKind::Indirect => "indirect",
             CallKind::ChannelSend => "channel_send",
         }

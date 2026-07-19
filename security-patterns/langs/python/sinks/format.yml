@@ -7,16 +7,11 @@
 # pulling out attribute/dict access via `{0.__class__}` /
 # `{user.private_field}`. The matcher needs to detect calls with a
 # tainted FORMAT STRING (not tainted arguments).
-# Python format-string injection is hard to express as a generic
-# `template.format()` rule because the receiver name is arbitrary.
-# This rule is disabled until either:
-#   - a constraint type that checks "receiver expression is tainted"
-#     (rather than an argument) is added, or
-#   - rule authors enumerate per-template-variable receivers.
+# Receiver taint is the security boundary: attacker-controlled replacement
+# values are ordinary data, while an attacker-controlled template can traverse
+# attributes and mapping keys during formatting.
 - id: python.format.str_format_tainted_template
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: python
   tag: format-string
   severity: medium
@@ -24,5 +19,18 @@
   match:
     kind: call
     callee:
-      attribute: [template, format]
-  description: "Tainted template `.format(**fields)` - disabled pending receiver-tainted constraint support."
+      regex: "(?:^|\\.)format$"
+  constraints:
+  - receiver_tainted: true
+  match_examples:
+  - name: tainted Python format template
+    code: |
+      def render(input, user):
+          return input.format(user=user)
+    expect_match_text: [input.format]
+  - name: literal Python format template
+    code: |
+      def render(input, user):
+          return "Hello, {user}".format(user=user)
+    expect_no_match: true
+  description: "Python str.format on a tainted receiver lets an attacker-controlled template traverse supplied objects and mappings."
