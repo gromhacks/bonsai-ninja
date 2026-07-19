@@ -7,6 +7,7 @@
 pub mod capabilities;
 pub mod kit;
 pub mod registry;
+mod storage;
 pub mod taxonomy;
 pub mod types;
 

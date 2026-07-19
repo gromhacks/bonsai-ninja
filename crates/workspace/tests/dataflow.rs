@@ -501,6 +501,7 @@ fn factstore_sidecar_rejects_dependency_metadata_change() {
         prewarm_flow_ids: false,
         load_idg_sidecar: false,
         eager_decl_index: true,
+        retain_eager_syntax_ir: true,
         parse_timeout_ms: None,
     };
     let _indexed = Workspace::open_with_options(&root, registry.clone(), options).expect("index workspace");

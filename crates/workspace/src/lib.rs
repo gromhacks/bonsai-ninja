@@ -683,6 +683,12 @@ pub struct WorkspaceOpenOptions {
     /// then build the global syntax graph by consuming each per-file
     /// IR immediately instead of caching all local and global copies.
     pub eager_decl_index: bool,
+    /// Retain eager file-local declaration/import IR after the frontend pass.
+    /// Long-lived SDK projects keep this enabled. One-shot compiler checks can
+    /// stream each completed unit and release it immediately while still
+    /// parsing and lowering every supported file.
+    #[serde(default = "default_retain_eager_syntax_ir")]
+    pub retain_eager_syntax_ir: bool,
     /// Optional per-file tree-sitter parse timeout in milliseconds.
     /// `None` uses `BONSAI_PARSE_TIMEOUT_MS` when set and otherwise
     /// parses to completion; `Some(0)` explicitly selects uncapped parsing.
@@ -694,6 +700,10 @@ const fn default_load_idg_sidecar() -> bool {
 }
 
 const fn default_load_callgraph_sidecar() -> bool {
+    true
+}
+
+const fn default_retain_eager_syntax_ir() -> bool {
     true
 }
 
@@ -721,6 +731,7 @@ impl WorkspaceOpenOptions {
             prewarm_flow_ids: false,
             load_idg_sidecar: true,
             eager_decl_index: false,
+            retain_eager_syntax_ir: false,
             parse_timeout_ms: None,
         }
     }
@@ -741,7 +752,20 @@ impl WorkspaceOpenOptions {
             prewarm_flow_ids: false,
             load_idg_sidecar: false,
             eager_decl_index: true,
+            retain_eager_syntax_ir: true,
             parse_timeout_ms: None,
+        }
+    }
+
+    /// Parse and lower every supported file, but release each file-local IR
+    /// after the compiler has validated it. This is the one-shot `index`
+    /// lifecycle: facts are complete, uncapped, and AST-derived, but are not
+    /// retained by a process that will only print statistics and exit.
+    #[must_use]
+    pub const fn streaming_parse_only() -> Self {
+        Self {
+            retain_eager_syntax_ir: false,
+            ..Self::parse_only()
         }
     }
 
@@ -768,6 +792,7 @@ impl WorkspaceOpenOptions {
             prewarm_flow_ids: true,
             load_idg_sidecar: true,
             eager_decl_index: true,
+            retain_eager_syntax_ir: true,
             parse_timeout_ms: None,
         }
     }
@@ -1773,7 +1798,7 @@ impl Workspace {
         on_event(WorkspaceOpenEvent::IngestFinished { files: file_count });
         let files = ws.vfs().all_files();
         on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
-        index_workspace_files_in_parallel(&ws, &files, on_event);
+        index_workspace_files_in_parallel(&ws, &files, options.retain_eager_syntax_ir, on_event);
         on_event(WorkspaceOpenEvent::ParseFinished);
         Ok(ws)
     }
@@ -1859,7 +1884,7 @@ impl Workspace {
         if options.eager_decl_index {
             let files = ws.vfs().all_files();
             on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
-            index_workspace_files_in_parallel(&ws, &files, on_event);
+            index_workspace_files_in_parallel(&ws, &files, options.retain_eager_syntax_ir, on_event);
             on_event(WorkspaceOpenEvent::ParseFinished);
         }
         Ok(ws)
@@ -1964,7 +1989,7 @@ impl Workspace {
             // a compiler frontend would. Repository size must not silently
             // change the scheduler or impose a project-shaped ceiling.
             on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
-            index_workspace_files_in_parallel(&ws, &files, on_event);
+            index_workspace_files_in_parallel(&ws, &files, options.retain_eager_syntax_ir, on_event);
             on_event(WorkspaceOpenEvent::ParseFinished);
         }
         // Optional sidecar load / explicit workspace-wide prewarm.
@@ -2897,14 +2922,25 @@ impl Workspace {
     }
 }
 
-fn index_workspace_files_in_parallel<F>(ws: &Workspace, files: &[FileId], on_event: &F)
-where
+fn index_workspace_files_in_parallel<F>(
+    ws: &Workspace,
+    files: &[FileId],
+    retain_syntax_ir: bool,
+    on_event: &F,
+) where
     F: Fn(WorkspaceOpenEvent) + Sync,
 {
+    let index_file = |file| {
+        if retain_syntax_ir {
+            let _ = ws.db().syntax_indexes_releasing_cst(file);
+        } else {
+            let _ = ws.db().syntax_indexes_uncached(file);
+        }
+    };
     let workers = workspace_parse_worker_count();
     if workers <= 1 || files.len() <= 1 {
         for &file in files {
-            let _ = ws.db().decl_index_releasing_syntax(file);
+            index_file(file);
             on_event(WorkspaceOpenEvent::ParseFileIndexed);
         }
         return;
@@ -2919,14 +2955,14 @@ where
             pool.install(|| {
                 use rayon::prelude::*;
                 files.par_iter().for_each(|file| {
-                    let _ = ws.db().decl_index_releasing_syntax(*file);
+                    index_file(*file);
                     on_event(WorkspaceOpenEvent::ParseFileIndexed);
                 });
             });
         }
         Err(_) => {
             for &file in files {
-                let _ = ws.db().decl_index_releasing_syntax(file);
+                index_file(file);
                 on_event(WorkspaceOpenEvent::ParseFileIndexed);
             }
         }

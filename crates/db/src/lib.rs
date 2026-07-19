@@ -413,6 +413,7 @@ impl AnalyzerDb {
                 &mut index,
                 adapter.capabilities().effective_super_receiver_tokens(),
             );
+            index.compact_storage();
             index
         }))
     }
@@ -434,6 +435,29 @@ impl AnalyzerDb {
         let index = self.decl_index(file);
         self.release_syntax(file);
         index
+    }
+
+    /// Build and retain both file-local syntax indexes from one canonical
+    /// Tree-sitter CST, then release that phase-local CST.
+    pub fn syntax_indexes_releasing_cst(
+        &self,
+        file: FileId,
+    ) -> (Option<Arc<DeclIndex>>, Option<Arc<ImportIndex>>) {
+        let declarations = self.decl_index(file);
+        let imports = self.import_index(file);
+        self.release_syntax(file);
+        (declarations, imports)
+    }
+
+    /// Build declaration and import IR from one canonical Tree-sitter CST
+    /// without retaining either index. One-shot workspace compiler passes use
+    /// this streaming lifecycle so resident memory tracks active workers, not
+    /// project file count.
+    pub fn syntax_indexes_uncached(&self, file: FileId) -> (Option<DeclIndex>, Option<ImportIndex>) {
+        let declarations = self.build_decl_index_uncached(file);
+        let imports = self.build_import_index_uncached(file);
+        self.release_syntax(file);
+        (declarations, imports)
     }
 
     /// Import index for `file`, computed once per `(file, version)`.
