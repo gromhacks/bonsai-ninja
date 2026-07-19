@@ -303,7 +303,7 @@ impl Bonsai {
     /// derived from the IDG on demand.
     pub fn index_semantic(&self, root: impl AsRef<Path>) -> Result<Project> {
         let project = self.open_with_options(root, WorkspaceOpenOptions::parse_only())?;
-        let _ = project.cache().warm_structural()?;
+        project.cache().warm_structural_sidecars()?;
         Ok(project)
     }
 
@@ -315,7 +315,7 @@ impl Bonsai {
     {
         let project =
             self.open_with_options_and_progress(root, WorkspaceOpenOptions::parse_only(), on_event)?;
-        let _ = project.cache().warm_structural()?;
+        project.cache().warm_structural_sidecars()?;
         Ok(project)
     }
 
@@ -725,7 +725,7 @@ fn persist_manifest_for_explicit_prewarm(project: &Project) -> Result<()> {
         || (options.prewarm_value_flow && options.save_value_flow_sidecar)
         || options.prewarm_flow_ids;
     if writes_analysis_sidecars {
-        let _ = project.cache().warm_structural()?;
+        project.cache().warm_structural_sidecars()?;
     }
     Ok(())
 }
@@ -1747,6 +1747,16 @@ impl Cache<'_> {
     /// for this workspace size, and refresh the manifest. It does not
     /// run the legacy all-entry dataflow prewarm.
     pub fn warm_structural(&self) -> Result<CacheStats> {
+        self.warm_structural_sidecars()?;
+        Ok(self.workspace_cache().stats()?)
+    }
+
+    /// Warm and validate the structural semantic sidecars without immediately
+    /// reopening and fully auditing the payloads just produced. Each load or
+    /// build below already validates its exact pipeline contract; callers that
+    /// explicitly need an independent cache audit can subsequently call
+    /// [`Self::stats`].
+    pub fn warm_structural_sidecars(&self) -> Result<()> {
         let cache = self.workspace_cache();
         let workspace = &self.project.workspace;
         if !workspace.load_callgraph_sidecar(&self.project.root) {
@@ -1761,7 +1771,7 @@ impl Cache<'_> {
         }
         let _ = bonsai_retrieval::ensure_sidecar(workspace, &self.project.root)?;
         let _ = cache.write_manifest()?;
-        Ok(cache.stats()?)
+        Ok(())
     }
 
     /// Same as [`Self::rebuild_structural`], with optional default

@@ -977,8 +977,9 @@ pub fn save_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<us
 /// Validate an existing retrieval sidecar or build it when stale/missing.
 pub fn ensure_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<RetrievalSidecarStatus> {
     require_complete_workspace(ws)?;
-    match load_sidecar(ws, workspace_root) {
-        Ok(index) => Ok(RetrievalSidecarStatus::Reused { docs: index.len() }),
+    let pipeline = pipeline_hash_for_workspace(ws);
+    match validate_sidecar_file_with_pipeline(&retrieval_sidecar_path(workspace_root), pipeline) {
+        Ok(docs) => Ok(RetrievalSidecarStatus::Reused { docs }),
         Err(_) => save_sidecar(ws, workspace_root).map(|docs| RetrievalSidecarStatus::Rebuilt { docs }),
     }
 }
@@ -1027,7 +1028,7 @@ pub fn validate_sidecar_file(path: &Path) -> std::io::Result<usize> {
         .get(SNAPSHOT_KEY)
         .map_err(map_factstore_io)?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "retrieval snapshot missing"))?;
-    let snapshot = decode_snapshot_hit(hit, reader.header().pipeline_hash)?;
+    let snapshot = decode_compact_snapshot_hit(hit, reader.header().pipeline_hash)?;
     Ok(snapshot.docs.len())
 }
 
@@ -1039,7 +1040,7 @@ pub fn validate_sidecar_file_with_pipeline(path: &Path, pipeline: u64) -> std::i
         .get(SNAPSHOT_KEY)
         .map_err(map_factstore_io)?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "retrieval snapshot missing"))?;
-    let snapshot = decode_snapshot_hit(hit, pipeline)?;
+    let snapshot = decode_compact_snapshot_hit(hit, pipeline)?;
     Ok(snapshot.docs.len())
 }
 
@@ -1215,6 +1216,49 @@ impl CompactFactSnapshot {
             docs,
         })
     }
+
+    fn validate(&self, pipeline: u64) -> std::io::Result<()> {
+        validate_snapshot_version(self.schema_version, self.pipeline_fingerprint, pipeline)?;
+        let string_count = self.strings.len();
+        let validate_id = |id: u32| {
+            ((id as usize) < string_count).then_some(()).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("retrieval string id out of range: {id}"),
+                )
+            })
+        };
+        for doc in &self.docs {
+            validate_id(doc.fact_id)?;
+            validate_id(doc.kind)?;
+            validate_id(doc.file_path)?;
+            validate_id(doc.normalized_search_text)?;
+            for id in [
+                doc.language,
+                doc.symbol_name,
+                doc.qualified_name,
+                doc.enclosing_function,
+                doc.enclosing_class,
+                doc.resolver_precision,
+                doc.resolver_stage,
+                doc.provenance,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                validate_id(id)?;
+            }
+            for &id in doc
+                .stable_ids
+                .iter()
+                .chain(&doc.static_limits)
+                .chain(&doc.incomplete_reasons)
+            {
+                validate_id(id)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn save_docs_snapshot(
@@ -1247,6 +1291,10 @@ fn save_snapshot(snapshot: &FactSnapshot, path: &Path) -> std::io::Result<usize>
 }
 
 fn decode_snapshot_hit(hit: LookupHit, pipeline: u64) -> std::io::Result<FactSnapshot> {
+    decode_compact_snapshot_hit(hit, pipeline)?.expand()
+}
+
+fn decode_compact_snapshot_hit(hit: LookupHit, pipeline: u64) -> std::io::Result<CompactFactSnapshot> {
     let actual_hash = fnv1a_bytes64(&hit.payload);
     if hit.body_hash != actual_hash {
         return Err(std::io::Error::new(
@@ -1259,19 +1307,27 @@ fn decode_snapshot_hit(hit: LookupHit, pipeline: u64) -> std::io::Result<FactSna
     }
     let decoder = zstd::stream::Decoder::new(std::io::Cursor::new(&hit.payload))?;
     let compact: CompactFactSnapshot = wire::decode_from_reader(decoder).map_err(invalid_data)?;
-    let snapshot = compact.expand()?;
-    validate_snapshot(&snapshot, pipeline)?;
-    Ok(snapshot)
+    compact.validate(pipeline)?;
+    Ok(compact)
 }
 
+#[cfg(test)]
 fn validate_snapshot(snapshot: &FactSnapshot, pipeline: u64) -> std::io::Result<()> {
-    if snapshot.schema_version != RETRIEVAL_SCHEMA_VERSION {
+    validate_snapshot_version(snapshot.schema_version, snapshot.pipeline_fingerprint, pipeline)
+}
+
+fn validate_snapshot_version(
+    schema_version: u32,
+    pipeline_fingerprint: u64,
+    pipeline: u64,
+) -> std::io::Result<()> {
+    if schema_version != RETRIEVAL_SCHEMA_VERSION {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "retrieval schema version mismatch",
         ));
     }
-    if snapshot.pipeline_fingerprint != pipeline {
+    if pipeline_fingerprint != pipeline {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "retrieval pipeline fingerprint mismatch",
@@ -2899,6 +2955,31 @@ mod tests {
         assert!(
             validate_sidecar_file(&path).is_err(),
             "relaxed retrieval validation still decodes the snapshot and must reject old schemas"
+        );
+    }
+
+    #[test]
+    fn compact_sidecar_validation_rejects_invalid_string_references() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("retrieval.factstore");
+        let mut compact = CompactFactSnapshot::from_docs(
+            RETRIEVAL_SCHEMA_VERSION,
+            101,
+            vec![sample_doc("handle_request", "function", 1)],
+        );
+        compact.docs[0].fact_id = u32::MAX;
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1).expect("zstd encoder");
+        wire::encode_to_writer(&mut encoder, &compact).expect("encode compact snapshot");
+        let bytes = encoder.finish().expect("finish compact snapshot");
+        let writer = FactStoreWriter::create(&path, RETRIEVAL_TABLE_ID, 101).expect("create factstore");
+        writer
+            .add(SNAPSHOT_KEY, fnv1a_bytes64(&bytes), &bytes)
+            .expect("write compact snapshot");
+        writer.finish().expect("finish factstore");
+
+        assert!(
+            validate_sidecar_file_with_pipeline(&path, 101).is_err(),
+            "compact validation must prove every interned string reference before reuse"
         );
     }
 

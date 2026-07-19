@@ -39,9 +39,6 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
         open_project_streaming_parse_only(root)?
     };
     let stage = progress::ScopedSpinner::new("collecting index stats");
-    if options.prewarm_dataflow || options.semantic {
-        let _manifest = project.cache().write_manifest()?;
-    }
     let stats = project.stats();
     stage.finish();
     cli_println!("{}", serde_json::to_string_pretty(&stats)?);
