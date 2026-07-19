@@ -372,6 +372,7 @@ impl IdgWorkspace {
     /// invalidated together) naturally rejects a stale sidecar.
     pub fn save_to_disk(&self, path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<()> {
         use bonsai_factstore::FactStoreWriter;
+        use rayon::prelude::*;
         let cross_file_chunk_count = chunk_count(self.cross_file.edges.len(), IDG_WORKSPACE_EDGE_CHUNK_LEN);
         let field_flow_chunk_count = chunk_count(self.field_flow.len(), IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN);
         let symbolic_transform_chunk_count = chunk_count(
@@ -407,10 +408,29 @@ impl IdgWorkspace {
         let meta_bytes = wire::encode(&metadata)
             .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         writer.add_owned(0, IDG_WORKSPACE_VERSION as u64, meta_bytes)?;
-        for (idx, segment) in self.segments.iter().enumerate() {
-            let segment_bytes = wire::encode(segment)
-                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-            writer.add_owned((idx + 1) as u64, IDG_WORKSPACE_VERSION as u64, segment_bytes)?;
+        // Segments are independent compiler artifacts. Encode one worker-width
+        // batch in parallel, then enqueue it in stable SegmentId order. This
+        // overlaps CPU encoding with the factstore writer without retaining a
+        // second whole-workspace byte image or making output order depend on
+        // worker scheduling.
+        let encoding_width = rayon::current_num_threads().max(1);
+        for (batch_idx, segments) in self.segments.chunks(encoding_width).enumerate() {
+            let encoded = segments
+                .par_iter()
+                .map(|segment| {
+                    wire::encode(segment).map_err(|e| {
+                        crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                    })
+                })
+                .collect::<Vec<_>>();
+            let first_segment_idx = batch_idx * encoding_width;
+            for (offset, segment_bytes) in encoded.into_iter().enumerate() {
+                writer.add_owned(
+                    (first_segment_idx + offset + 1) as u64,
+                    IDG_WORKSPACE_VERSION as u64,
+                    segment_bytes?,
+                )?;
+            }
         }
         let cross_base = first_cross_file_chunk_key(self.segments.len() as u32);
         for (idx, chunk) in self

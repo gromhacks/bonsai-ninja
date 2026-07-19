@@ -228,6 +228,28 @@ fn save_load_round_trip_preserves_segments_and_indexes() {
 }
 
 #[test]
+fn parallel_workspace_save_is_byte_deterministic() {
+    let mut workspace = IdgWorkspace::new();
+    for raw in 1..=16 {
+        let mut segment = IdgSegment::new();
+        populate_segment(&mut segment, FuncId::new(raw));
+        workspace.register_segment(segment);
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first = dir.path().join("first.factstore");
+    let second = dir.path().join("second.factstore");
+    workspace.save_to_disk(&first, 0xCAFE).expect("first save");
+    workspace.save_to_disk(&second, 0xCAFE).expect("second save");
+
+    assert_eq!(
+        std::fs::read(first).expect("read first sidecar"),
+        std::fs::read(second).expect("read second sidecar"),
+        "parallel segment encoding must preserve canonical sidecar bytes"
+    );
+}
+
+#[test]
 fn save_load_round_trip_preserves_chunked_cross_file_and_field_flow() {
     let mut w = IdgWorkspace::new();
     let mut seg_a = IdgSegment::new();
