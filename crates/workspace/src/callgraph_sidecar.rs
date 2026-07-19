@@ -66,7 +66,38 @@ pub(crate) fn save_callgraph_sidecar(
         .add_owned(GRAPH_KEY, CALLGRAPH_CACHE_VERSION as u64, graph_bytes)
         .map_err(factstore_io)?;
     writer.finish().map_err(factstore_io)?;
+    // The current artifact is durable before cleanup starts. Cache migration
+    // is best-effort: an inability to remove an obsolete file must not turn a
+    // successfully persisted compiler graph into an analysis failure.
+    let _ = prune_obsolete_callgraph_sidecars(path);
     Ok(())
+}
+
+fn prune_obsolete_callgraph_sidecars(current_path: &Path) -> std::io::Result<()> {
+    let Some(cache_dir) = current_path.parent() else {
+        return Ok(());
+    };
+    for entry in std::fs::read_dir(cache_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() || entry.path() == current_path {
+            continue;
+        }
+        let Some(version) = callgraph_sidecar_version(&entry.file_name()) else {
+            continue;
+        };
+        if version < CALLGRAPH_CACHE_VERSION {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn callgraph_sidecar_version(file_name: &std::ffi::OsStr) -> Option<u32> {
+    let file_name = file_name.to_str()?;
+    let version_and_extension = file_name.strip_prefix("callgraph.v")?;
+    let (version, extension) = version_and_extension.split_once('.')?;
+    (!extension.is_empty()).then_some(())?;
+    version.parse().ok()
 }
 
 /// Load the exact current graph, returning `None` for missing, stale, or
@@ -256,5 +287,53 @@ fn factstore_io(error: bonsai_factstore::FactStoreError) -> std::io::Error {
     match error {
         bonsai_factstore::FactStoreError::Io(error) => error,
         other => std::io::Error::new(std::io::ErrorKind::InvalidData, other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successful_schema_migration_prunes_only_older_callgraph_sidecars() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache_dir = root.path().join(".bonsai");
+        std::fs::create_dir(&cache_dir).expect("create cache dir");
+        let current = cache_dir.join(format!("callgraph.v{CALLGRAPH_CACHE_VERSION}.factstore"));
+        let older_factstore = cache_dir.join(format!("callgraph.v{}.factstore", CALLGRAPH_CACHE_VERSION - 1));
+        let older_wire = cache_dir.join(format!("callgraph.v{}.msgpack", CALLGRAPH_CACHE_VERSION - 2));
+        let newer = cache_dir.join(format!("callgraph.v{}.factstore", CALLGRAPH_CACHE_VERSION + 1));
+        let unrelated = cache_dir.join("idg.v11.factstore");
+        for path in [&current, &older_factstore, &older_wire, &newer, &unrelated] {
+            std::fs::write(path, b"fixture").expect("write fixture");
+        }
+
+        prune_obsolete_callgraph_sidecars(&current).expect("prune obsolete sidecars");
+
+        assert!(current.is_file());
+        assert!(!older_factstore.exists());
+        assert!(!older_wire.exists());
+        assert!(newer.is_file(), "a newer binary may still need its artifact");
+        assert!(unrelated.is_file());
+    }
+
+    #[test]
+    fn sidecar_version_parser_rejects_unversioned_and_extensionless_names() {
+        assert_eq!(
+            callgraph_sidecar_version(std::ffi::OsStr::new("callgraph.v12.msgpack")),
+            Some(12)
+        );
+        assert_eq!(
+            callgraph_sidecar_version(std::ffi::OsStr::new("callgraph.msgpack")),
+            None
+        );
+        assert_eq!(
+            callgraph_sidecar_version(std::ffi::OsStr::new("callgraph.v12")),
+            None
+        );
+        assert_eq!(
+            callgraph_sidecar_version(std::ffi::OsStr::new("idg.v12.factstore")),
+            None
+        );
     }
 }
