@@ -1084,8 +1084,8 @@ fn scan_occurrence_facts(
     ws: &Workspace,
     chain_cache: &ChainCache<'_>,
     options: OccurrenceScan<'_>,
-    mut hits: &mut Vec<HitOut>,
-    mut push_hit: &mut impl FnMut(
+    hits: &mut Vec<HitOut>,
+    push_hit: &mut impl FnMut(
         &str,
         String,
         bonsai_common::Span,
@@ -1148,12 +1148,12 @@ fn scan_occurrence_facts(
                     &d.name,
                     FlowHitWalkContext {
                         workspace: Some(ws),
-                        matcher: &occurrence_matcher,
+                        matcher: occurrence_matcher,
                         endpoint_kind_filter: filter_only_occurrence_kind,
                         kinds: &kind_selection.requested,
                     },
-                    &mut hits,
-                    &mut push_hit,
+                    hits,
+                    push_hit,
                 );
             }
 
@@ -1162,7 +1162,7 @@ fn scan_occurrence_facts(
                 for s in &idx.strings {
                     if occurrence_matcher.is_match(&s.text) {
                         let enclosing = chain_cache.enclosing_func(file, &decls_in_file, s.span);
-                        push_hit("string", s.text.clone(), s.span, enclosing, false, &mut hits);
+                        push_hit("string", s.text.clone(), s.span, enclosing, false, hits);
                     }
                 }
             }
@@ -1200,7 +1200,7 @@ fn scan_occurrence_facts(
                     }
                     if occurrence_matcher.is_match(&r.name) {
                         let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
-                        push_hit(kind_tag, r.name.clone(), r.span, enclosing, false, &mut hits);
+                        push_hit(kind_tag, r.name.clone(), r.span, enclosing, false, hits);
                     }
                 }
             }
@@ -1218,7 +1218,7 @@ fn scan_occurrence_facts(
                         .as_deref()
                         .is_some_and(|original| occurrence_matcher.is_match(original));
                     if occurrence_matcher.is_match(&imp.module) || alias_match || original_match {
-                        push_hit("import", import_hit_text(imp), imp.span, None, false, &mut hits);
+                        push_hit("import", import_hit_text(imp), imp.span, None, false, hits);
                     }
                 }
             }
@@ -1465,7 +1465,7 @@ fn collect_occurrence_hits<'workspace>(
         if extend_downstream {
             for chain in working_chains_r.iter().take(max_flows) {
                 let (paths, path_truncation) = edge_resolver.enumerate_call_paths_from_with_truncation(
-                    &chain_cache,
+                    chain_cache,
                     &chain.funcs,
                     downstream_max_extra,
                     downstream_max_paths,

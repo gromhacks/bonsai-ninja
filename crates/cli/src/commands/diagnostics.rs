@@ -14,7 +14,8 @@ use crate::progress;
 
 use super::{
     not_found_with_suggestions, open_project_dataflow_prewarm, open_project_index_only,
-    open_project_parse_only, open_project_semantic_prewarm, open_workspace_syntax_only,
+    open_project_parse_only, open_project_semantic_prewarm, open_project_streaming_parse_only,
+    open_workspace_syntax_only,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -32,8 +33,10 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
         open_project_dataflow_prewarm(root)?
     } else if options.semantic {
         open_project_semantic_prewarm(root)?
-    } else {
+    } else if options.watch {
         open_project_parse_only(root)?
+    } else {
+        open_project_streaming_parse_only(root)?
     };
     let stage = progress::ScopedSpinner::new("collecting index stats");
     if options.prewarm_dataflow || options.semantic {

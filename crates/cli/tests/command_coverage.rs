@@ -243,13 +243,13 @@ fn export_output_path_streams_native_json() {
 // -------- index --------
 
 #[test]
-fn index_reports_4_files() {
+fn one_shot_index_reports_every_file_without_retaining_local_ir() {
     let ws = ws();
     let Some(out) = run(&["index", ws.to_str().unwrap()]) else {
         return;
     };
     assert_contains(&out, "\"files\": 4", "index");
-    assert_contains(&out, "\"cached_decl_indexes\": 4", "index");
+    assert_contains(&out, "\"cached_decl_indexes\": 0", "index");
 }
 
 // -------- diagnostics --------

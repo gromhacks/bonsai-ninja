@@ -161,6 +161,10 @@ impl GlobalIndex {
             for decl in &mut index.defs {
                 enrich_receiver_types_in_events(&mut decl.flow_events, &bases_by_type);
             }
+            // Cross-file ancestry may append receiver types after the
+            // frontend's file-local packing pass. Restore the canonical
+            // steady-state shape before publishing the global index.
+            index.compact_storage();
         }
     }
 

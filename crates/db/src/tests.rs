@@ -229,6 +229,49 @@ fn declaration_and_import_adapter_passes_share_the_canonical_tree_arc() {
 }
 
 #[test]
+fn streaming_syntax_compiler_shares_then_releases_the_canonical_tree() {
+    let vfs = Arc::new(Vfs::new());
+    let file = vfs.write(
+        "fixture.py",
+        "import os\n\ndef shared():\n    return os.getcwd()\n",
+    );
+    let trees = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(RecordingPythonAdapter {
+        trees: Arc::clone(&trees),
+    }));
+    let db = AnalyzerDb::new(vfs, registry);
+
+    let (declarations, imports) = db.syntax_indexes_uncached(file);
+    assert!(declarations.is_some());
+    assert!(imports.is_some());
+    let lowered_tree = {
+        let trees = trees.lock();
+        assert_eq!(trees.len(), 2);
+        assert!(
+            Arc::ptr_eq(&trees[0], &trees[1]),
+            "declaration and import lowering must consume one exact CST"
+        );
+        Arc::downgrade(&trees[0])
+    };
+    drop(declarations);
+    drop(imports);
+    trees.lock().clear();
+    assert!(
+        lowered_tree.upgrade().is_none(),
+        "one-shot syntax lowering must not retain its Tree-sitter CST"
+    );
+    assert_eq!(db.stats().cached_decl_indexes, 0);
+
+    let reparsed = db.parse(file).expect("syntax remains available on demand");
+    assert!(lowered_tree.upgrade().is_none());
+    assert_eq!(
+        first_node_text(&reparsed.tree, reparsed.source_text(), "identifier").as_deref(),
+        Some("getcwd")
+    );
+}
+
+#[test]
 fn transient_lowering_releases_cst_and_reparses_the_exact_snapshot() {
     let vfs = Arc::new(Vfs::new());
     let file = vfs.write("fixture.py", "def exact():\n    return 1\n");

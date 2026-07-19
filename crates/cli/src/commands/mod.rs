@@ -176,6 +176,12 @@ pub(crate) fn open_project_parse_only(root: &std::path::Path) -> Result<(Project
     open_project_with_options(root, bonsai_sdk::OpenOptions::parse_only())
 }
 
+pub(crate) fn open_project_streaming_parse_only(
+    root: &std::path::Path,
+) -> Result<(Project, WorkspaceFooter)> {
+    open_project_with_options(root, bonsai_sdk::OpenOptions::streaming_parse_only())
+}
+
 pub(crate) fn open_project_index_only_with_rulepack(
     root: &std::path::Path,
     rules_dir: Option<&std::path::Path>,
