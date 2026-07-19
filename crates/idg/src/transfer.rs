@@ -898,6 +898,7 @@ pub fn transfer_function_for_with_options_and_syntax_facts(
         out: &mut out,
         options,
         last_writer: ahash::AHashMap::new(),
+        descendant_writer_ids_by_base: ahash::AHashMap::new(),
         catch_projection_receivers: ahash::AHashSet::default(),
         emitted_edges: ahash::AHashSet::default(),
         field_precise_container_assigns: collect_field_precise_container_assigns(&decl.flow_events),
@@ -1398,6 +1399,18 @@ fn bridge_compound_expression_calls(ctx: &mut TransferCtx<'_>) {
                 Some(n) => *n,
                 None => continue,
             };
+            // Some adapters lower selector syntax (for example a map lookup)
+            // to an exact projected compiler place on the outer argument.
+            // That place already feeds the argument through bridge_read. A
+            // second, generic CallRet edge would discard the projection and
+            // promote the selector's whole aggregate input to the result.
+            if outer
+                .call_arg_places
+                .get(arg_idx)
+                .is_some_and(|place| field_base_name(place).is_some())
+            {
+                continue;
+            }
             for inner in &sites {
                 if std::ptr::eq(outer, inner) {
                     continue;
@@ -1485,6 +1498,12 @@ struct TransferCtx<'a> {
     /// way a clean overwrite later in the function "kills" the
     /// earlier writer's bridge into subsequent reads.
     last_writer: ahash::AHashMap<StrId, smallvec::SmallVec<[NodeId; 4]>>,
+    /// Monotonic index from a canonical aggregate base to compiler place ids
+    /// ever written below it. Entries can outlive a clean overwrite; callers
+    /// confirm presence in `last_writer` before using them. This makes whole
+    /// aggregate consumption and descendant invalidation proportional to the
+    /// fields of that aggregate rather than every local in the function.
+    descendant_writer_ids_by_base: ahash::AHashMap<String, ahash::AHashSet<StrId>>,
     /// Catch parameters whose member projections should be treated as
     /// exception-value reads while walking the active catch body.
     catch_projection_receivers: ahash::AHashSet<StrId>,
@@ -1610,6 +1629,43 @@ impl<'a> TransferCtx<'a> {
         }
     }
 
+    /// Emit edges from the current writers of every concrete field below
+    /// `base` into a consumer of the whole aggregate. Passing `record` as a
+    /// call argument evaluates the complete object, so a prior write to
+    /// `record.header` or `record.body` is part of that argument's value. The
+    /// inverse is intentionally not true: consuming `record.header` never pulls
+    /// in sibling fields.
+    fn bridge_descendant_reads(&mut self, base: &str, consumer: NodeId, meta: crate::edge::EdgeMeta) {
+        let base = base.trim().trim_start_matches(['$', '@', '%', '&']);
+        if !is_bare_identifier(base) {
+            return;
+        }
+        let mut writers: smallvec::SmallVec<[NodeId; 8]> = smallvec::SmallVec::new();
+        if let Some(descendants) = self.descendant_writer_ids_by_base.get(base) {
+            for name_id in descendants {
+                let Some(current) = self.last_writer.get(name_id) else {
+                    continue;
+                };
+                for writer in current {
+                    if !writers.contains(writer) {
+                        writers.push(*writer);
+                    }
+                }
+            }
+        }
+        let meta = crate::edge::EdgeMeta {
+            kind: IdgEdgeKind::IntraAggregateConsume,
+            ..meta
+        };
+        for writer in writers {
+            self.emit(IdgEdge {
+                from: writer,
+                to: consumer,
+                meta,
+            });
+        }
+    }
+
     /// Look up or intern a `Place::Write` node for `name` at `span`.
     /// Each distinct `span` yields a distinct node so CFG-narrowing
     /// can kill earlier writes when later ones overwrite. Does NOT
@@ -1630,12 +1686,39 @@ impl<'a> TransferCtx<'a> {
     /// variable, and without alias-aware committing the bare-form
     /// last_writer would retain the original tainted value.
     fn commit_writer(&mut self, name: &str, node: NodeId) {
+        // Replacing an aggregate (or one of its fields) kills every older
+        // reaching definition below that exact place. This keeps a later
+        // `record = {}` from reviving stale `record.header` taint when the whole
+        // object is passed to a call, while preserving sibling fields for a
+        // narrower `record.header = value` write.
+        let canonical = name.trim().trim_start_matches(['$', '@', '%', '&']);
+        if !canonical.is_empty() {
+            if let Some(stale) = self.descendant_writer_ids_by_base.get(canonical) {
+                for name_id in stale {
+                    self.last_writer.remove(name_id);
+                }
+            }
+        }
         let sid = self.intern_name(name);
         self.last_writer.insert(sid, smallvec::smallvec![node]);
+        self.index_descendant_writer(canonical, sid);
         let stripped = name.trim_start_matches(['$', '@', '%', '&']);
         if !stripped.is_empty() && stripped != name {
             let alias_sid = self.intern_name(stripped);
             self.last_writer.insert(alias_sid, smallvec::smallvec![node]);
+            self.index_descendant_writer(canonical, alias_sid);
+        }
+    }
+
+    fn index_descendant_writer(&mut self, canonical: &str, name_id: StrId) {
+        for (separator, _) in canonical.match_indices(['.', '[']) {
+            let base = canonical[..separator].trim();
+            if !base.is_empty() {
+                self.descendant_writer_ids_by_base
+                    .entry(base.to_string())
+                    .or_default()
+                    .insert(name_id);
+            }
         }
     }
 
@@ -1644,11 +1727,13 @@ impl<'a> TransferCtx<'a> {
     /// whose read semantics can observe any previously written value
     /// rather than a scalar overwrite.
     fn append_writer(&mut self, name: &str, node: NodeId) {
+        let canonical = name.trim().trim_start_matches(['$', '@', '%', '&']);
         let sid = self.intern_name(name);
         let writers = self.last_writer.entry(sid).or_default();
         if !writers.contains(&node) {
             writers.push(node);
         }
+        self.index_descendant_writer(canonical, sid);
         let stripped = name.trim_start_matches(['$', '@', '%', '&']);
         if !stripped.is_empty() && stripped != name {
             let alias_sid = self.intern_name(stripped);
@@ -1656,6 +1741,7 @@ impl<'a> TransferCtx<'a> {
             if !alias_writers.contains(&node) {
                 alias_writers.push(node);
             }
+            self.index_descendant_writer(canonical, alias_sid);
         }
     }
 
@@ -3219,6 +3305,7 @@ fn walk_call(
                     // tree-sitter argument node by the adapter layer.
                     ctx.bridge_read(place, arg_node, arg_meta);
                 }
+                ctx.bridge_descendant_reads(place, arg_node, arg_meta);
             }
         }
         for source in &arg.source_names {
@@ -3257,6 +3344,26 @@ fn walk_call(
         }
     }
     let ret_node = ctx.intern_node(Place::CallRet { site });
+
+    // An AST operator expression computes its result from its operands; it
+    // is not an unresolved user function whose return must be guessed. Keep
+    // that syntax semantics explicit in the IDG so assignments, nesting, and
+    // sink arguments all share the same operand -> result dataflow.
+    if matches!(call_kind, CallKind::Operator) {
+        let meta = crate::edge::EdgeMeta {
+            precision: Precision::Exact,
+            kind: IdgEdgeKind::IntraAssign,
+            call_kind: bonsai_callgraph::EdgeKind::Direct,
+            via_span: span,
+        };
+        for arg_node in &arg_nodes {
+            ctx.emit(IdgEdge {
+                from: *arg_node,
+                to: ret_node,
+                meta,
+            });
+        }
+    }
 
     // Receiver: for method calls, the receiver expression's value
     // flows implicitly into the call (the callee can read from the

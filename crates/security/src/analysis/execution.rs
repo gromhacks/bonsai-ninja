@@ -2278,6 +2278,16 @@ pub(super) fn source_can_precede_sink(
     if src.origin != MatchOrigin::Rulepack || rule_match_kind_is_param(pack, &src.rule_id) {
         return true;
     }
+    // A call's result (or an output parameter it mutates) becomes
+    // available only after that call has consumed its inputs.  When one
+    // API is intentionally modeled as both a source and a sink, an exact
+    // source/sink span therefore cannot prove that the returned value
+    // flowed backwards into the same invocation's arguments.  Nested
+    // `sink(source())` remains valid because the two AST call spans are
+    // distinct and `source_is_sink_call_argument` handles their ordering.
+    if src.span == snk.span {
+        return false;
+    }
     if src.line < snk.line || (src.line == snk.line && src.column <= snk.column) {
         return true;
     }

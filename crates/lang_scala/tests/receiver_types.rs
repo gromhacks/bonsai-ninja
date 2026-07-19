@@ -1,5 +1,5 @@
 use bonsai_db::AnalyzerDb;
-use bonsai_lang_api::{DeclKind, FlowEvent, LanguageRegistry};
+use bonsai_lang_api::{CallKind, DeclKind, FlowEvent, LanguageRegistry};
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
 
@@ -148,6 +148,53 @@ class Child(env: Envelope) extends Parent(value = env.command)
         arg.source_names.iter().any(|source| source == "env.command"),
         "compound constructor arg must carry AST member place: {arg:?}"
     );
+}
+
+#[test]
+fn infix_value_is_not_rewritten_as_named_argument() {
+    let db = db_with(
+        r#"
+object App {
+  def handle(input: String): Unit = {
+    Logger.error(input + "x")
+    Logger.info(message = input)
+  }
+}
+"#,
+    );
+    let global = db.global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration");
+    let error_arg = handle.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call { name, args, .. } if name == "Logger.error" => args.first(),
+        _ => None,
+    });
+    let error_arg = error_arg.unwrap_or_else(|| panic!("Logger.error call: {:?}", handle.flow_events));
+    assert_eq!(error_arg.name, None);
+    assert_eq!(error_arg.value_text, "input + \"x\"");
+    assert!(error_arg.source_names.iter().any(|source| source == "input"));
+
+    let named_arg = handle.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call { name, args, .. } if name == "Logger.info" => args.first(),
+        _ => None,
+    });
+    let named_arg = named_arg.unwrap_or_else(|| panic!("Logger.info call: {:?}", handle.flow_events));
+    assert_eq!(named_arg.name.as_deref(), Some("message"));
+    assert_eq!(named_arg.place.as_deref(), Some("input"));
+
+    assert!(handle.flow_events.iter().any(|event| {
+        matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                call_kind: CallKind::Operator,
+                ..
+            } if name == "+"
+        )
+    }));
 }
 
 #[test]

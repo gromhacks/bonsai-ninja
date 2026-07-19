@@ -47,6 +47,7 @@ fn sentinel_argument_uses_ast_receiver_but_return_does_not() {
         args_place: Vec::new(),
         args_source_names: Vec::new(),
         receiver: Some("repo".to_string()),
+        receiver_source_names: vec!["repo".to_string()],
         receiver_types: vec!["Repository".to_string()],
     };
     let mut edge = bonsai_idg::CrossCallEdge {
@@ -1013,6 +1014,7 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
         args_place: vec![None],
         args_source_names: vec![vec!["cmd".to_string()]],
         receiver: None,
+        receiver_source_names: Vec::new(),
         receiver_types: Vec::new(),
     };
     let passthroughs = vec![crate::idg_api::CallResultPassthrough {
@@ -1034,6 +1036,7 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
                 args_place: vec![Some("cmd".to_string())],
                 args_source_names: vec![vec!["cmd".to_string()]],
                 receiver: Some("String".to_string()),
+                receiver_source_names: vec!["String".to_string()],
                 receiver_types: Vec::new(),
             },
         )]),
@@ -1077,6 +1080,7 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
         args_place: vec![None],
         args_source_names: vec![vec!["cmd".to_string()]],
         receiver: None,
+        receiver_source_names: Vec::new(),
         receiver_types: Vec::new(),
     };
     let mut call_summary_cache = call_summary_cache_for(
@@ -1091,6 +1095,7 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
                 args_place: vec![Some("cmd".to_string())],
                 args_source_names: vec![vec!["cmd".to_string()]],
                 receiver: None,
+                receiver_source_names: Vec::new(),
                 receiver_types: Vec::new(),
             },
         )]),
@@ -1119,6 +1124,62 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
 }
 
 #[test]
+fn clean_nested_call_does_not_prune_independent_compound_operand() {
+    let db = empty_db();
+    let global = db.global_index();
+    let idg = service_from_segment(IdgSegment::new());
+    let outer_call_span = Span::new(FileId::new(0), 0, 4);
+    let outer_arg_span = Span::new(FileId::new(0), 5, 45);
+    let nested_call_span = Span::new(FileId::new(0), 5, 18);
+    let call_summary = CallEventSummary {
+        call_kind: bonsai_lang_api::CallKind::Function,
+        name: "sink".to_string(),
+        args_value_text: vec!["PurePath(\"/srv\") / user_input".to_string()],
+        args_span: vec![outer_arg_span],
+        args_place: vec![None],
+        args_source_names: vec![vec!["PurePath".to_string(), "user_input".to_string()]],
+        receiver: None,
+        receiver_source_names: Vec::new(),
+        receiver_types: Vec::new(),
+    };
+    let mut call_summary_cache = call_summary_cache_for(
+        FuncId::new(0),
+        AHashMap::from_iter([(
+            nested_call_span,
+            CallEventSummary {
+                name: "PurePath".to_string(),
+                call_kind: bonsai_lang_api::CallKind::Function,
+                args_value_text: vec!["\"/srv\"".to_string()],
+                args_span: vec![Span::new(FileId::new(0), 19, 25)],
+                args_place: vec![None],
+                args_source_names: vec![Vec::new()],
+                receiver: None,
+                receiver_source_names: Vec::new(),
+                receiver_types: Vec::new(),
+            },
+        )]),
+    );
+
+    assert!(
+        !tainted_arg_is_clean_nested_call_return(
+            FuncId::new(0),
+            outer_call_span,
+            0,
+            &call_summary,
+            &CrossCallTransitIndex::default(),
+            &idg,
+            global.as_ref(),
+            &mut call_summary_cache,
+            &mut AHashMap::default(),
+            &[],
+            &mut CalleeNameCache::default(),
+            &ahash::AHashSet::default(),
+        ),
+        "a clean nested result cannot erase taint from a separate AST operand"
+    );
+}
+
+#[test]
 fn ast_lowered_nested_projection_place_is_not_pruned_as_unknown_return() {
     let db = empty_db();
     let global = db.global_index();
@@ -1131,6 +1192,7 @@ fn ast_lowered_nested_projection_place_is_not_pruned_as_unknown_return() {
         args_place: vec![Some("C.cmd".to_string())],
         args_source_names: vec![vec!["C.cmd".to_string()]],
         receiver: None,
+        receiver_source_names: Vec::new(),
         receiver_types: Vec::new(),
     };
 
@@ -1167,6 +1229,7 @@ fn semantic_argument_covering_its_call_is_not_treated_as_a_nested_return() {
         args_place: vec![None],
         args_source_names: vec![vec!["value".to_string()]],
         receiver: None,
+        receiver_source_names: Vec::new(),
         receiver_types: Vec::new(),
     };
     let mut summaries = AHashMap::default();
@@ -1192,14 +1255,10 @@ fn semantic_argument_covering_its_call_is_not_treated_as_a_nested_return() {
     );
 }
 
-// audit re-apply: RED before / GREEN after for M2. `collect_tainted_writes_req
-
 #[test]
-fn collect_tainted_writes_requires_identifier_token_match() {
-    // Tainted local is the short name `id`. The Assign RHS textually
-    // CONTAINS `id` as a substring of `uuid`, but never reads the bare
-    // `id` token. The substring matcher fabricated a Write row here;
-    // the token matcher must not.
+fn collect_tainted_writes_requires_structured_carrier_match() {
+    // Tainted local is the short name `id`. Neither structured AST carrier
+    // reads it; rendered fallback argument text must not manufacture a read.
     let mut tainted_names = AHashSet::default();
     tainted_names.insert("id".to_string());
 
@@ -1208,7 +1267,7 @@ fn collect_tainted_writes_requires_identifier_token_match() {
         target: "row".to_string(),
         source_name: Some("uuid".to_string()),
         source_call: None,
-        source_call_args: vec!["sizeof(uuid)".to_string()],
+        source_call_args: vec!["id".to_string()],
         source_names: vec!["valid".to_string(), "hidden".to_string()],
         declares_new_binding: false,
         value_kind: None,
@@ -1218,15 +1277,14 @@ fn collect_tainted_writes_requires_identifier_token_match() {
     collect_tainted_writes(&events, FuncId::new(0), &tainted_names, None, &mut out);
     assert!(
         out.is_empty(),
-        "substring of a tainted name (`id` in `uuid`/`valid`/`hidden`) must not fabricate a Write row; got {out:#?}"
+        "rendered text and substrings (`id` in `uuid`/`valid`/`hidden`) must not fabricate a Write row; got {out:#?}"
     );
 }
 
 #[test]
 fn collect_tainted_writes_keeps_whole_identifier_and_dotted_member() {
-    // Positive guard so the M2 tightening does not drop real Write
-    // rows (the pinned mega_flow `.cmd` pipeline relies on the bare
-    // tainted token `cmd` matching inside the member access `data.cmd`).
+    // Positive guard: the structured member carrier `data.cmd` includes
+    // the tainted terminal component `cmd`.
     let mut tainted_names = AHashSet::default();
     tainted_names.insert("cmd".to_string());
 

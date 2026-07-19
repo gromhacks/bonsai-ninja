@@ -502,6 +502,61 @@ fn forward_closure_with_max_precision_prunes_worse_edges() {
 }
 
 #[test]
+fn target_node_cut_accepts_exact_unresolved_aggregate_argument_evidence() {
+    let func = FuncId::new(8);
+    let call_span = span(0, 40, 55);
+    let mut segment = crate::segment::IdgSegment::new();
+    let opts = segment.strings.intern("opts");
+    let to = segment.strings.intern("to");
+    let param_place = segment.intern_place(Place::Param { idx: 0 });
+    let field_write_place = segment.intern_place(Place::Write {
+        name: opts,
+        path: smallvec::smallvec![to],
+        span: span(0, 20, 30),
+    });
+    let call_arg_place = segment.intern_place(Place::CallArg {
+        site: crate::place::CallSiteId(call_span),
+        idx: 0,
+    });
+    let param = segment.intern_node(func, param_place);
+    let field_write = segment.intern_node(func, field_write_place);
+    let call_arg = segment.intern_node(func, call_arg_place);
+    segment.add_edge(IdgEdge::intra_assign(param, field_write, span(0, 20, 30)));
+    segment.add_edge(IdgEdge::new(
+        field_write,
+        call_arg,
+        crate::edge::EdgeMeta {
+            precision: Precision::Exact,
+            kind: crate::edge::IdgEdgeKind::IntraAggregateConsume,
+            call_kind: EdgeKind::Direct,
+            via_span: call_span,
+        },
+    ));
+    segment.record_func(func);
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+
+    let seeds = service.param_nodes_of(func);
+    let target_nodes = service.nodes_at_span(func, call_span);
+    let scalar = service.forward_closure(&seeds);
+    assert!(
+        target_nodes.iter().all(|target| !scalar.contains(target)),
+        "aggregate-consumption evidence must not become scalar reachability"
+    );
+    let cut =
+        service.forward_target_nodes_cut_with_max_precision(&seeds, &target_nodes, Some(Precision::Narrowed));
+    assert_eq!(
+        cut, scalar,
+        "the exact argument evidence must satisfy the target cut"
+    );
+    assert_eq!(
+        service.tainted_call_args_in_reachable_nodes(&cut),
+        vec![(func, call_span, 0)]
+    );
+}
+
+#[test]
 fn within_function_closure_excludes_reachable_callee_nodes() {
     let caller = FuncId::new(7);
     let callee = FuncId::new(8);
@@ -1751,6 +1806,58 @@ fn sibling_field_taint_does_not_promote_container_argument_to_sink() {
             .iter()
             .any(|(_, call_span, idx)| *call_span == span(0, 90, 100) && *idx == 0),
         "user field must not promote the whole env argument: {user_calls:?}"
+    );
+}
+
+#[test]
+fn unresolved_whole_aggregate_call_reports_reachable_field_without_scalar_flow() {
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["input".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "opts.to".to_string(),
+            source_name: Some("input".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["input".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(0, 30, 40),
+            name: "external_send".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
+                span: span(0, 34, 38),
+                name: None,
+                value_text: "opts".to_string(),
+                place: Some("opts".to_string()),
+                source_names: vec!["opts".to_string()],
+            }],
+        },
+    ];
+
+    let (idx, ws) = build(vec![entry]);
+    let entry_id = func_id(&idx, "entry");
+    let svc = IdgQueryService::new(ws, Arc::clone(&idx));
+    let seeds = svc.param_nodes_for_names(entry_id, &["input".to_string()], &idx);
+    let closure = svc.forward_closure(&seeds);
+    assert!(
+        !closure.iter().any(|node| {
+            svc.resolve_point(*node).is_some_and(|point| {
+                point.kind == crate::service::PointKind::CallArg && point.span == span(0, 30, 40)
+            })
+        }),
+        "aggregate-consumption evidence must not enter scalar reachability"
+    );
+    assert_eq!(
+        svc.tainted_call_args_in_reachable_nodes(&closure),
+        vec![(entry_id, span(0, 30, 40), 0)],
+        "an unresolved whole-object consumer still observes current fields"
     );
 }
 

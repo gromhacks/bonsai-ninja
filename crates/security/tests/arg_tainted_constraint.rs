@@ -126,6 +126,150 @@ def handler(user_input):
 }
 
 #[test]
+fn dual_role_call_result_cannot_taint_its_own_input() {
+    let tmp = TempDir::new("dual-role-call");
+    write(
+        &tmp.path().join("langs/python/sources/dual.yml"),
+        r#"- id: python.test.dual_role_source
+  enabled: true
+  language: python
+  trust: local
+  tag: local-input
+  match:
+    kind: call
+    callee:
+      attribute: [io, read]
+  match_examples:
+  - name: source shape
+    code: |
+      import io
+      def handler():
+          return io.read("safe.txt")
+  description: The call result is input data.
+"#,
+    );
+    write(
+        &tmp.path().join("langs/python/sinks/dual.yml"),
+        r#"- id: python.test.dual_role_sink
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [io, read]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted path
+    code: |
+      import io
+      def handler(path):
+          return io.read(path)
+  description: The call consumes a filesystem path.
+"#,
+    );
+    let pack = load_rulepack(tmp.path()).expect("rulepack loads");
+    let literal = python_ws(
+        r#"
+import io
+def handler():
+    return io.read("safe.txt")
+"#,
+    );
+    let report = run_taint_analysis(
+        &literal,
+        &pack,
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert!(
+        report.findings.is_empty(),
+        "a call result cannot flow backwards into its own already-evaluated argument: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn sink_restricted_concrete_source_does_not_erase_inferred_param_for_other_sinks() {
+    let tmp = TempDir::new("sink-restricted-source");
+    write(
+        &tmp.path().join("langs/python/sources/blob.yml"),
+        r#"- id: python.test.deserialization_blob
+  enabled: true
+  language: python
+  trust: remote
+  tag: caller-input
+  match:
+    kind: param
+    target:
+      name: payload
+  constraints:
+  - sink_tag_in: [insecure-deserialization]
+  match_examples:
+  - name: payload parameter
+    code: |
+      def handler(payload):
+          return payload
+  description: Generic blob source restricted to deserialization sinks.
+"#,
+    );
+    write(
+        &tmp.path().join("langs/python/sinks/nosql.yml"),
+        r#"- id: python.test.nosql
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: dangerous
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted payload
+    code: |
+      def handler(payload):
+          dangerous(payload)
+  description: NoSQL sink consuming a caller-controlled payload.
+"#,
+    );
+    let pack = load_rulepack(tmp.path()).expect("rulepack loads");
+    let ws = python_ws(
+        r#"
+def handler(payload):
+    dangerous(payload)
+"#,
+    );
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert!(
+        report.findings.iter().any(|finding| {
+            finding.finding.sink.rule_id == "python.test.nosql"
+                && finding.finding.source.rule_id.starts_with("entry-point.")
+        }),
+        "a source restricted to another sink tag must not suppress the compatible inferred source: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
 fn arg_tainted_kw_resolves_named_call_arg() {
     let tmp = TempDir::new("kw");
     write(

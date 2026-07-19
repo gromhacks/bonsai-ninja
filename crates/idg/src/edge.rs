@@ -71,6 +71,12 @@ pub enum IdgEdgeKind {
     /// state. It participates in interprocedural reachability but is not a
     /// scalar `Return → CallRet` boundary.
     InterFieldReturn = 12,
+    /// A concrete descendant field is consumed by a call argument that
+    /// evaluates the whole aggregate. This is non-traversable call-site
+    /// evidence: unresolved/external consumers report it directly, while
+    /// resolved local calls propagate exact fields through
+    /// [`Self::InterFieldCallArg`].
+    IntraAggregateConsume = 13,
 }
 
 impl IdgEdgeKind {
@@ -171,6 +177,12 @@ impl IdgEdgeKind {
                 FlowEdgeKind::InterFile,
                 FlowEdgeKind::InterPackage,
             ],
+            Self::IntraAggregateConsume => &[
+                FlowEdgeKind::ExprPropagation,
+                FlowEdgeKind::HeapLoad,
+                FlowEdgeKind::ContainerLoad,
+                FlowEdgeKind::Sink,
+            ],
         }
     }
 
@@ -220,6 +232,7 @@ impl IdgEdgeKind {
             10 => Some(Self::IntraAwait),
             11 => Some(Self::InterFieldCallArg),
             12 => Some(Self::InterFieldReturn),
+            13 => Some(Self::IntraAggregateConsume),
             _ => None,
         }
     }

@@ -1884,7 +1884,6 @@ struct TaintedCallCompilationContext<'a> {
 fn materialize_direct_tainted_calls(
     context: &TaintedCallCompilationContext<'_>,
     call_summary_cache: &mut CallEventSummaryCache<'_>,
-    tainted_names_by_caller: &mut ahash::AHashMap<FuncId, AHashSet<String>>,
 ) -> Vec<crate::idg_api::TaintedCall> {
     let tainted_args_by_site = context
         .idg
@@ -1947,15 +1946,15 @@ fn materialize_direct_tainted_calls(
             .collect();
         tainted_args.sort_by_key(|arg| arg.index);
         tainted_args.dedup_by_key(|arg| arg.index);
-        let tainted_receiver = call_summary.receiver.as_ref().and_then(|receiver| {
-            let names = tainted_names_by_caller.entry(caller).or_insert_with(|| {
-                tainted_local_names_in_caller(caller, context.global, context.idg, context.closure_set)
-            });
-            tokenise_identifiers_outside_strings(receiver)
-                .into_iter()
-                .any(|token| names.contains(&token))
-                .then(|| receiver.clone())
-        });
+        // `walk_call` represents a method receiver as the synthetic
+        // `CallArg(site, u32::MAX)` compiler node. Its membership in the
+        // closure is the exact receiver-taint proof—including compound
+        // receivers whose value comes from a nested call. Do not reconstruct
+        // that proof by comparing or tokenizing rendered receiver text.
+        let tainted_receiver = call_summary
+            .receiver
+            .as_ref()
+            .and_then(|receiver| arg_indices.contains(&u32::MAX).then(|| receiver.clone()));
         if tainted_args.is_empty() && tainted_receiver.is_none() {
             continue;
         }
@@ -2349,11 +2348,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         global: global.as_ref(),
         idg,
     };
-    let mut tainted_calls = materialize_direct_tainted_calls(
-        &tainted_call_context,
-        &mut call_summary_cache,
-        &mut tainted_names_by_caller,
-    );
+    let mut tainted_calls = materialize_direct_tainted_calls(&tainted_call_context, &mut call_summary_cache);
     tainted_calls.extend(materialize_synthetic_tainted_calls(
         &tainted_call_context,
         &mut tainted_names_by_caller,
@@ -2473,8 +2468,6 @@ fn collect_tainted_writes(
                 target,
                 source_name,
                 source_names,
-                source_call_args,
-                source_call,
                 span,
                 ..
             } => {
@@ -2486,18 +2479,10 @@ fn collect_tainted_writes(
                     if value.is_empty() {
                         return;
                     }
-                    // Token-level membership (mirrors the receiver path
-                    // at the tainted-call site): a tainted local only
-                    // taints this Write when it appears as a whole
-                    // identifier in the RHS, not as a substring. A short
-                    // tainted name like `id` must not match inside
-                    // `uuid` / `valid` / `hidden`, which would fabricate
-                    // a Write row attributed to an assignment that never
-                    // read the tainted value.
-                    if !tokenise_identifiers_outside_strings(value)
-                        .iter()
-                        .any(|t| tainted_names.contains(t))
-                    {
+                    // `source_name` and `source_names` are Tree-sitter
+                    // carrier facts. Compare their normalized storage
+                    // components; never re-lex rendered RHS text here.
+                    if !structured_storage_fact_matches_tainted(value, tainted_names) {
                         return;
                     }
                     if args.iter().any(|a| a.value_text == value) {
@@ -2514,19 +2499,6 @@ fn collect_tainted_writes(
                 }
                 for n in source_names {
                     push_if_tainted(n, &mut tainted_args);
-                }
-                // For `target = callee(args...)`, the arguments are inputs to the
-                // callee, not direct inputs to the target write. Configured
-                // passthroughs and resolved return summaries add the legitimate
-                // `CallRet -> target` flow; treating args as direct write evidence
-                // makes arbitrary split/map helpers look like value passthroughs.
-                if source_call.is_none() {
-                    for n in source_call_args {
-                        push_if_tainted(n, &mut tainted_args);
-                    }
-                }
-                if let Some(call_name) = source_call {
-                    push_if_tainted(call_name, &mut tainted_args);
                 }
                 if tainted_args.is_empty() {
                     continue;
@@ -2634,11 +2606,26 @@ fn closure_evidence_with_targets(
     }
     let target_node_set: ahash::AHashSet<bonsai_idg::WsNodeId> =
         target_nodes.into_iter().flatten().copied().collect();
-    let reached = evidence.nodes.iter().any(|node| {
+    let mut reached = evidence.nodes.iter().any(|node| {
         target_node_set.contains(node)
             || target_funcs
                 .is_some_and(|funcs| idg.func_of_node(*node).is_some_and(|func| funcs.contains(&func)))
     });
+    if !reached && !target_node_set.is_empty() {
+        // Whole-aggregate consumption by an unresolved/external call is
+        // evidence-only and therefore deliberately absent from scalar
+        // reachability. It can still satisfy an exact sink-argument target;
+        // compare compiler identities rather than forcing the marker into the
+        // closure (which would promote sibling fields through local calls).
+        let tainted_args: ahash::AHashSet<(FuncId, bonsai_common::Span, u32)> = idg
+            .tainted_call_args_in_reachable_nodes(&evidence.nodes)
+            .into_iter()
+            .collect();
+        reached = target_node_set
+            .iter()
+            .filter_map(|node| idg.call_arg_identity(*node))
+            .any(|identity| tainted_args.contains(&identity));
+    }
     if !reached {
         evidence.nodes.clear();
         evidence.symbolic_cross_calls.clear();
@@ -3688,49 +3675,6 @@ fn walk_collect_names(events: &[bonsai_lang_api::FlowEvent], out: &mut ahash::AH
     }
 }
 
-fn tokenise_identifiers_outside_strings(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for c in text.chars() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(c, '\'' | '"' | '`') {
-            push_id_token(&mut tokens, &mut current);
-            quote = Some(c);
-            continue;
-        }
-        if c == '_' || c.is_ascii_alphanumeric() {
-            current.push(c);
-        } else {
-            push_id_token(&mut tokens, &mut current);
-        }
-    }
-    push_id_token(&mut tokens, &mut current);
-    tokens
-}
-
-fn push_id_token(tokens: &mut Vec<String>, current: &mut String) {
-    if current
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_alphabetic() || c == '_')
-    {
-        tokens.push(std::mem::take(current));
-    } else {
-        current.clear();
-    }
-}
-
 #[derive(Clone, Debug)]
 struct CallEventSummary {
     name: String,
@@ -3740,6 +3684,10 @@ struct CallEventSummary {
     args_place: Vec<Option<String>>,
     args_source_names: Vec<Vec<String>>,
     receiver: Option<String>,
+    /// Value carriers extracted from the Tree-sitter receiver expression.
+    /// Nested-expression attribution uses these compiler facts instead of
+    /// re-tokenizing a rendered receiver string.
+    receiver_source_names: Vec<String>,
     receiver_types: Vec<String>,
 }
 
@@ -3963,12 +3911,11 @@ fn promote_nested_tainted_call_args(
         else {
             continue;
         };
-        let tainted_values = nested_arg_indices
+        let tainted_carriers = nested_arg_indices
             .iter()
-            .filter_map(|idx| nested_summary.args_value_text.get(*idx as usize))
-            .cloned()
-            .collect::<Vec<_>>();
-        if tainted_values.is_empty() {
+            .flat_map(|idx| call_arg_structured_carriers(&nested_summary, *idx as usize))
+            .collect::<ahash::AHashSet<_>>();
+        if tainted_carriers.is_empty() {
             continue;
         }
         let Some(summaries) = cached_call_event_summaries_for_func(caller, global, call_summary_cache) else {
@@ -3982,13 +3929,24 @@ fn promote_nested_tainted_call_args(
                 if !span_contains_or_equals(*outer_arg_span, nested_span) {
                     continue;
                 }
-                let Some(outer_value) = outer_summary.args_value_text.get(outer_idx) else {
-                    continue;
-                };
-                if !tainted_values
-                    .iter()
-                    .any(|tainted| expression_mentions_tainted_value(outer_value, tainted))
+                // An adapter-provided place is the compiler's value for the
+                // complete outer expression (for example a normalized map
+                // selector). Do not replace that exact projection with the
+                // broader inputs of a syntactically nested helper call.
+                if outer_summary
+                    .args_place
+                    .get(outer_idx)
+                    .and_then(Option::as_deref)
+                    .is_some_and(|place| !place.trim().is_empty())
                 {
+                    continue;
+                }
+                let outer_carriers = call_arg_structured_carriers(outer_summary, outer_idx);
+                if !outer_carriers.iter().any(|outer| {
+                    tainted_carriers
+                        .iter()
+                        .any(|tainted| structured_storage_names_overlap(outer, tainted))
+                }) {
                     continue;
                 }
                 let Ok(outer_idx) = u32::try_from(outer_idx) else {
@@ -4003,21 +3961,42 @@ fn promote_nested_tainted_call_args(
     }
 }
 
-fn expression_mentions_tainted_value(expression: &str, tainted_value: &str) -> bool {
-    let expression = expression.trim();
-    let tainted_value = tainted_value.trim();
-    if expression.is_empty() || tainted_value.is_empty() {
-        return false;
+fn call_arg_structured_carriers(summary: &CallEventSummary, index: usize) -> Vec<String> {
+    let mut carriers = TokenSet::default();
+    if let Some(place) = summary.args_place.get(index).and_then(Option::as_deref) {
+        let normalized = normalize_storage_text(place);
+        if !normalized.is_empty() {
+            carriers.insert(normalized);
+        }
     }
-    if expression == tainted_value {
+    if let Some(sources) = summary.args_source_names.get(index) {
+        for source in sources {
+            let normalized = normalize_storage_text(source);
+            if !normalized.is_empty() {
+                carriers.insert(normalized);
+            }
+        }
+    }
+    carriers.into_iter().collect()
+}
+
+fn structured_storage_fact_matches_tainted(value: &str, tainted_names: &ahash::AHashSet<String>) -> bool {
+    let value = normalize_storage_text(value);
+    !value.is_empty()
+        && tainted_names.iter().any(|tainted| {
+            let tainted = normalize_storage_text(tainted);
+            !tainted.is_empty() && structured_storage_names_overlap(&value, &tainted)
+        })
+}
+
+fn structured_storage_names_overlap(left: &str, right: &str) -> bool {
+    if left == right {
         return true;
     }
-    if is_bare_identifier(tainted_value) {
-        return tokenise_identifiers_outside_strings(expression)
-            .iter()
-            .any(|token| token == tainted_value);
-    }
-    expression.contains(tainted_value)
+    let left_bare = is_bare_identifier(left);
+    let right_bare = is_bare_identifier(right);
+    (left_bare && right.split('.').any(|component| component == left))
+        || (right_bare && left.split('.').any(|component| component == right))
 }
 
 // Caller, arg, the two summaries, db/global, and two reuse caches — each is
@@ -4124,6 +4103,57 @@ fn tainted_arg_is_clean_nested_call_return(
     let Some((nested_span, nested_summary)) = nested else {
         return false;
     };
+    if matches!(nested_summary.call_kind, bonsai_lang_api::CallKind::Operator) {
+        return false;
+    }
+    // A compound argument may contain both a nested call and an independent
+    // tainted operand: `sink(clean_helper("base") / user_input)`. The clean
+    // nested-return guard is allowed to remove only evidence attributable to
+    // that nested result; it must not erase compiler-extracted source names
+    // that do not occur in the nested call's receiver or arguments.
+    let mut nested_inputs: ahash::AHashSet<String> = ahash::AHashSet::default();
+    let normalized_callee = normalize_storage_text(&nested_summary.name);
+    if !normalized_callee.is_empty() {
+        nested_inputs.insert(normalized_callee.clone());
+        let tail = normalize_storage_text(short_qualified_tail(&normalized_callee));
+        if !tail.is_empty() {
+            nested_inputs.insert(tail);
+        }
+    }
+    for name in nested_summary.args_source_names.iter().flatten() {
+        let normalized = normalize_storage_text(name);
+        if !normalized.is_empty() {
+            nested_inputs.insert(normalized);
+        }
+    }
+    for place in nested_summary.args_place.iter().flatten() {
+        let normalized = normalize_storage_text(place);
+        if !normalized.is_empty() {
+            nested_inputs.insert(normalized);
+        }
+    }
+    for source in &nested_summary.receiver_source_names {
+        let normalized = normalize_storage_text(source);
+        if !normalized.is_empty() {
+            nested_inputs.insert(normalized);
+        }
+    }
+    if nested_summary.receiver_source_names.is_empty() {
+        if let Some(receiver) = nested_summary.receiver.as_deref() {
+            let normalized = normalize_storage_text(receiver);
+            if !normalized.is_empty() {
+                nested_inputs.insert(normalized);
+            }
+        }
+    }
+    if call_summary.args_source_names.get(idx).is_some_and(|sources| {
+        sources.iter().any(|source| {
+            let normalized = normalize_storage_text(source);
+            !normalized.is_empty() && !nested_inputs.contains(&normalized)
+        })
+    }) {
+        return false;
+    }
     if matches!(nested_summary.call_kind, bonsai_lang_api::CallKind::Constructor) {
         return false;
     }
@@ -4263,7 +4293,11 @@ fn cached_call_event_summaries_for_func<'a>(
             let mut by_span: ahash::AHashMap<bonsai_common::Span, CallEventSummary> =
                 ahash::AHashMap::default();
             if let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) {
-                collect_call_event_summaries(&decl.flow_events, &mut by_span);
+                let receiver_facts = global
+                    .file_index(decl.span.file)
+                    .map(|index| index.call_receivers.as_slice())
+                    .unwrap_or_default();
+                collect_call_event_summaries(&decl.flow_events, receiver_facts, &mut by_span);
             }
             let mut spans = by_span.keys().copied().collect::<Vec<_>>();
             spans.sort_by_key(|span| (span.file.raw(), span.start, std::cmp::Reverse(span.end)));
@@ -4308,6 +4342,7 @@ fn cached_nested_call_event_summary(
 
 fn collect_call_event_summaries(
     events: &[bonsai_lang_api::FlowEvent],
+    receiver_facts: &[bonsai_lang_api::CallReceiverFact],
     out: &mut ahash::AHashMap<bonsai_common::Span, CallEventSummary>,
 ) {
     use bonsai_lang_api::FlowEvent;
@@ -4321,6 +4356,12 @@ fn collect_call_event_summaries(
                 receiver,
                 receiver_types,
             } => {
+                let mut receiver_source_names = TokenSet::default();
+                if let Some(fact) = bonsai_lang_api::call_receiver_fact_for_span(receiver_facts, *span) {
+                    collect_expression_flow_seed_tokens(&fact.value_flow, &mut receiver_source_names);
+                }
+                let mut receiver_source_names: Vec<String> = receiver_source_names.into_iter().collect();
+                receiver_source_names.sort();
                 out.insert(
                     *span,
                     CallEventSummary {
@@ -4331,6 +4372,7 @@ fn collect_call_event_summaries(
                         args_place: args.iter().map(|arg| arg.place.clone()).collect(),
                         args_source_names: args.iter().map(|arg| arg.source_names.clone()).collect(),
                         receiver: receiver.clone(),
+                        receiver_source_names,
                         receiver_types: receiver_types.clone(),
                     },
                 );
@@ -4361,6 +4403,7 @@ fn collect_call_event_summaries(
                         })
                         .collect(),
                     receiver: None,
+                    receiver_source_names: Vec::new(),
                     receiver_types: Vec::new(),
                 });
             }
@@ -4369,8 +4412,8 @@ fn collect_call_event_summaries(
                 else_events,
                 ..
             } => {
-                collect_call_event_summaries(then_events, out);
-                collect_call_event_summaries(else_events, out);
+                collect_call_event_summaries(then_events, receiver_facts, out);
+                collect_call_event_summaries(else_events, receiver_facts, out);
             }
             FlowEvent::Try {
                 body,
@@ -4378,12 +4421,12 @@ fn collect_call_event_summaries(
                 finally_events,
                 ..
             } => {
-                collect_call_event_summaries(body, out);
-                collect_call_event_summaries(catch_events, out);
-                collect_call_event_summaries(finally_events, out);
+                collect_call_event_summaries(body, receiver_facts, out);
+                collect_call_event_summaries(catch_events, receiver_facts, out);
+                collect_call_event_summaries(finally_events, receiver_facts, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_call_event_summaries(body, out);
+                collect_call_event_summaries(body, receiver_facts, out);
             }
             _ => {}
         }

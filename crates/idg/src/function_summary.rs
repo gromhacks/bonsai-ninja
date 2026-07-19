@@ -177,6 +177,12 @@ fn record_summary_edge(
     if !edge_is_within_precision(edge, max_precision) {
         return;
     }
+    // Whole-aggregate consumption is call-site evidence for unresolved or
+    // external callees. It must not participate in scalar function summaries;
+    // resolved calls carry projected state through InterFieldCallArg edges.
+    if edge.meta.kind == IdgEdgeKind::IntraAggregateConsume {
+        return;
+    }
     let Some(from) = address_of(addresses, from_segment, edge.from) else {
         return;
     };

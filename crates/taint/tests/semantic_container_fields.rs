@@ -84,6 +84,67 @@ fn javascript_db(src: &str) -> AnalyzerDb {
     build_db(adapter, &[("app.js", src)])
 }
 
+#[test]
+fn javascript_unresolved_whole_aggregate_call_observes_tainted_fields() {
+    let src = r#"
+const nodemailer = require("nodemailer");
+function handle(input) {
+  const transporter = nodemailer.createTransport({});
+  const opts = {from: "a@x", to: input, subject: input, text: "hi"};
+  return transporter.sendMail(opts);
+}
+"#;
+    let db = javascript_db(src);
+    let transfer_options = TransferOptions::compiler_semantics(db.complete_field_place_languages());
+    let (ws, global) = build_idg_workspace_on(&db, &transfer_options);
+    let idg = Arc::new(IdgQueryService::new(ws, global));
+    db.set_idg_service(Arc::clone(&idg));
+    let entry = func_id_or_none(&db, "handle").expect("handle should index");
+    let result = interprocedural_taint(entry, &seed(&["input"]), &cfg(), &db);
+
+    assert!(
+        result.tainted_calls.iter().any(|call| {
+            call.name.ends_with("sendMail") && call.tainted_args.iter().any(|arg| arg.index == 0)
+        }),
+        "an unresolved external whole-object consumer must observe current tainted fields: {:?}",
+        result.tainted_calls
+    );
+
+    let global = db.global_index();
+    let sink_span = global
+        .decl_of(bonsai_common::SymbolId::new(entry.raw()))
+        .and_then(|decl| {
+            decl.flow_events.iter().find_map(|event| match event {
+                bonsai_lang_api::FlowEvent::Call { span, name, .. } if name.ends_with("sendMail") => {
+                    Some(*span)
+                }
+                _ => None,
+            })
+        })
+        .expect("sendMail call should lower");
+    let target_nodes = idg.nodes_at_span(entry, sink_span);
+    let input = ["input".to_string()].into_iter().collect::<TokenSet>();
+    let targeted = entry_taint_graph_from_idg_query(
+        IdgTaintQuery::semantic(
+            IdgTaintSource::rule_match(entry, &input, None, &[]),
+            &db,
+            idg.as_ref(),
+        )
+        .with_targets(IdgTaintTargets {
+            nodes: Some(&target_nodes),
+            funcs: None,
+            lineage_funcs: None,
+        }),
+    );
+    assert!(
+        targeted.tainted_calls.iter().any(|call| {
+            call.name.ends_with("sendMail") && call.tainted_args.iter().any(|arg| arg.index == 0)
+        }),
+        "exact sink-node cuts must retain aggregate call-site evidence: {:?}",
+        targeted.tainted_calls
+    );
+}
+
 fn objc_db(src: &str) -> AnalyzerDb {
     let adapter: AdapterArc = Arc::new(ObjCAdapter::new());
     build_db(adapter, &[("app.m", src)])

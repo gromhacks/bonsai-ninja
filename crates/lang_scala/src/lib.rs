@@ -669,6 +669,14 @@ fn annotate_scala_named_call_args(events: &mut [FlowEvent], root: Node<'_>, file
                     let Some(argument_node) = node_at_span(root, arg.span, &["assignment_expression"]) else {
                         continue;
                     };
+                    // `node_at_span` deliberately falls back to an exact node
+                    // of another kind when no requested kind exists. Named
+                    // arguments require an actual assignment-expression AST;
+                    // an infix `input + "x"` also has left/right fields but is
+                    // value syntax, not `name = value`.
+                    if argument_node.kind() != "assignment_expression" {
+                        continue;
+                    }
                     let Some(label_node) = argument_node.child_by_field_name("left") else {
                         continue;
                     };

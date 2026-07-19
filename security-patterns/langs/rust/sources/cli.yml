@@ -137,7 +137,7 @@
   match:
     kind: call
     callee:
-      name: read_to_string
+      regex: "\\.read_to_string$"
   constraints:
   - min_args: 1
   taint_semantics:
@@ -156,7 +156,7 @@
           reader.read_to_string();
       }
     expect_no_match: true
-  description: "std::io::Read::read_to_string(&mut String) - fills the destination string from stdin/file/socket reader; local trust source unless narrowed by a remote framework rule."
+  description: "std::io::Read::read_to_string(&mut String) - fills the destination string from stdin/file/socket reader; the method-call shape excludes std::fs::read_to_string(path). Local trust source unless narrowed by a remote framework rule."
 - id: rust.cli.read_to_end
   enabled: true
   language: rust

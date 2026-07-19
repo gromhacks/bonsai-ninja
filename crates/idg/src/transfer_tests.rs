@@ -863,6 +863,152 @@ fn qualified_call_args_do_not_bridge_structural_base_to_arg_slot() {
 }
 
 #[test]
+fn whole_container_call_arg_consumes_current_field_writers() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["input".to_string()];
+    let field_span = span(20, 30);
+    let call_span = span(40, 55);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: field_span,
+            target: "opts.to".to_string(),
+            source_name: Some("input".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["input".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: call_span,
+            name: "send".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(45, 49),
+                name: None,
+                value_text: "opts".to_string(),
+                place: Some("opts".to_string()),
+                source_names: vec!["opts".to_string()],
+            }],
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "opts.to"
+                && rendered_place_name(&out, edge.to).starts_with("CallArg")
+                && edge.meta.kind == IdgEdgeKind::IntraAggregateConsume
+        }),
+        "passing a whole aggregate must consume its AST-known field values: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn projected_call_arg_does_not_consume_sibling_field_writers() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["input".to_string()];
+    let call_span = span(40, 60);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(20, 30),
+            target: "$obj['value']".to_string(),
+            source_name: Some("input".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["input".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: call_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(45, 58),
+                name: None,
+                value_text: "$obj['other']".to_string(),
+                place: Some("$obj['other']".to_string()),
+                source_names: vec!["$obj".to_string(), "$obj['other']".to_string()],
+            }],
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        !out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "$obj['value']"
+                && rendered_place_name(&out, edge.to).starts_with("CallArg")
+        }),
+        "reading one projected field must not consume a sibling: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn whole_container_overwrite_kills_prior_field_writers() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["input".to_string()];
+    let field_span = span(20, 30);
+    let clean_span = span(31, 39);
+    let call_span = span(40, 55);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: field_span,
+            target: "opts.to".to_string(),
+            source_name: Some("input".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["input".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: clean_span,
+            target: "opts".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Literal),
+        },
+        FlowEvent::Call {
+            span: call_span,
+            name: "send".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(45, 49),
+                name: None,
+                value_text: "opts".to_string(),
+                place: Some("opts".to_string()),
+                source_names: vec!["opts".to_string()],
+            }],
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        !out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "opts.to"
+                && rendered_place_name(&out, edge.to).starts_with("CallArg")
+        }),
+        "a whole-container overwrite must kill older descendant values: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
 fn indexed_call_element_write_does_not_overwrite_whole_buffer() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["value".to_string()];
@@ -1943,6 +2089,49 @@ fn standalone_call_records_site_with_arg_nodes() {
     assert!(
         site.receiver_arg_node.is_some(),
         "method receiver should be recorded separately from positional args"
+    );
+}
+
+#[test]
+fn syntax_operator_flows_operands_to_result() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["input".to_string()];
+    let operator_span = span(20, 31);
+    decl.flow_events = vec![FlowEvent::Call {
+        span: operator_span,
+        name: "+".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Operator,
+        args: vec![
+            CallArg {
+                passing_mode: Default::default(),
+                span: span(20, 25),
+                name: None,
+                value_text: "input".to_string(),
+                place: Some("input".to_string()),
+                source_names: vec!["input".to_string()],
+            },
+            CallArg {
+                passing_mode: Default::default(),
+                span: span(28, 31),
+                name: None,
+                value_text: "\"x\"".to_string(),
+                place: None,
+                source_names: Vec::new(),
+            },
+        ],
+    }];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == format!("CallArg({operator_span:?},0)")
+                && rendered_place_name(&out, edge.to) == format!("CallRet({operator_span:?})")
+                && edge.meta.precision == Precision::Exact
+        }),
+        "an AST operator result must depend exactly on its operand: {:#?}",
+        out.edges
     );
 }
 

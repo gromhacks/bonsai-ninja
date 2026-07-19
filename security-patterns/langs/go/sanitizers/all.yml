@@ -888,7 +888,7 @@
 - id: go.sanitizer.map_enum_allowlist_lookup
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: requires-constraint
   language: go
   tag: allowlist-validate
   packages: []
@@ -896,9 +896,9 @@
     kind: read
     target:
       regex: "^(allowed|allowlist|allowedSet|allowedHosts|allowedRoles|allowedValues)\\[[^\\]]+\\]$"
-  description: "Disabled - Go adapter currently surfaces `allowedRoles[role]` as a read of `allowedRoles`, not the indexed
-    lookup expression; enabling this would clear the allowlist map variable rather than the checked input. Use slices.Contains/set
-    Contains rules until indexed-read facts are available."
+  description: "Disabled - a map lookup only validates the key when its truthy result controls the path to the sensitive use.
+    Enabling a read-shaped sanitizer would clear the lookup result, not prove that the checked input is guard-dominated. Re-enable
+    when the rule vocabulary can join an AST index key to the successful branch of the membership guard."
 
 - id: go.sanitizer.named_regex_matchstring
   enabled: false

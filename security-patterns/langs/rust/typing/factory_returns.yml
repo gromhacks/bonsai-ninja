@@ -1,0 +1,20 @@
+- id: rust.typing.sxd_xpath_factory
+  enabled: true
+  language: rust
+  packages: [sxd_xpath]
+  imports: [sxd_xpath]
+  returns_type: Factory
+  match:
+    kind: call
+    callee:
+      attribute: [Factory, new]
+  match_examples:
+  - name: sxd xpath constructor returns Factory
+    code: |
+      use sxd_xpath::Factory;
+      fn example() {
+          let factory = Factory::new();
+          let _ = factory.build("//safe");
+      }
+    expect_match_text: [Factory::new]
+  description: "`sxd_xpath::Factory::new()` returns `Factory`; typing-only metadata lets receiver-typed XPath rules resolve local bindings without hardcoded API knowledge in the engine."

@@ -242,7 +242,7 @@
 - id: solidity.sanitizer.openzeppelin_address_is_contract
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: requires-constraint
   language: solidity
   tag: validation
   packages: ["@openzeppelin/contracts"]
