@@ -406,6 +406,79 @@ impl CallContexts {
     }
 }
 
+/// Monotone state for one symbolic/contextual closure compilation.
+///
+/// Nodes and symbolic facts have independent cursors because processing one
+/// relation may discover work in the other. Both relations deduplicate on
+/// insertion, so recursive call components converge without a depth or
+/// iteration cap.
+struct SymbolicClosureWorklist {
+    nodes: Vec<ClosureNodeState>,
+    node_cursor: usize,
+    reached: ClosureVisited,
+    facts: AHashSet<SymbolicNodeFact>,
+    pending_facts: Vec<SymbolicNodeFact>,
+    fact_cursor: usize,
+    contexts: CallContexts,
+}
+
+impl SymbolicClosureWorklist {
+    fn new(node_count: usize, seed_count: usize) -> Self {
+        Self {
+            nodes: Vec::with_capacity(seed_count),
+            node_cursor: 0,
+            reached: ClosureVisited::new(node_count, seed_count),
+            facts: AHashSet::default(),
+            pending_facts: Vec::new(),
+            fact_cursor: 0,
+            contexts: CallContexts::new(),
+        }
+    }
+
+    fn enqueue_node(&mut self, node: NodeId, context: u32) {
+        if self.reached.insert(node, context) {
+            self.nodes.push(ClosureNodeState { node, context });
+        }
+    }
+
+    fn enqueue_fact(&mut self, fact: SymbolicNodeFact) {
+        if self.facts.insert(fact) {
+            self.pending_facts.push(fact);
+        }
+    }
+
+    fn next_node(&mut self) -> Option<ClosureNodeState> {
+        let state = self.nodes.get(self.node_cursor).copied()?;
+        self.node_cursor += 1;
+        Some(state)
+    }
+
+    fn next_fact(&mut self) -> Option<SymbolicNodeFact> {
+        let fact = self.pending_facts.get(self.fact_cursor).copied()?;
+        self.fact_cursor += 1;
+        Some(fact)
+    }
+
+    fn has_pending(&self) -> bool {
+        self.node_cursor < self.nodes.len() || self.fact_cursor < self.pending_facts.len()
+    }
+}
+
+struct SymbolicTransformContexts {
+    next: Vec<u32>,
+    completed: Option<u32>,
+}
+
+fn symbolic_node_allowed(
+    unified: &UnifiedAddressSpace,
+    allowed_funcs: Option<&AHashSet<FuncId>>,
+    node: NodeId,
+) -> bool {
+    allowed_funcs.is_none_or(|allowed| {
+        IdgQueryService::ws_node_func(unified, node).is_some_and(|func| allowed.contains(&func))
+    })
+}
+
 impl SymbolicRuntimeIndex {
     fn intern_field(&mut self, field: &str) -> u32 {
         if let Some(id) = self.field_ids.get(field).copied() {
@@ -2458,300 +2531,342 @@ impl IdgQueryService {
         let runtime = unified
             .symbolic_runtime
             .get_or_init(|| Arc::new(self.build_symbolic_runtime_index(unified)));
-        let mut ordinary = Vec::with_capacity(seeds.len());
-        let mut reached = ClosureVisited::new(unified.reverse.len(), seeds.len());
+        let mut worklist = SymbolicClosureWorklist::new(unified.reverse.len(), seeds.len());
         for seed in seeds.iter().copied() {
             if (seed.0 as usize) < unified.reverse.len()
-                && allowed_funcs.is_none_or(|allowed| {
-                    Self::ws_node_func(unified, seed).is_some_and(|func| allowed.contains(&func))
-                })
-                && reached.insert(seed, 0)
+                && symbolic_node_allowed(unified, allowed_funcs, seed)
             {
-                ordinary.push(ClosureNodeState {
-                    node: seed,
-                    context: 0,
-                });
+                worklist.enqueue_node(seed, 0);
             }
         }
-        let mut facts = AHashSet::default();
-        let mut pending_facts = Vec::new();
-        let mut node_cursor = 0usize;
-        let mut fact_cursor = 0usize;
-        let mut contexts = CallContexts::new();
-
-        while node_cursor < ordinary.len() || fact_cursor < pending_facts.len() {
-            while node_cursor < ordinary.len() {
-                let state = ordinary[node_cursor];
-                node_cursor += 1;
-                if let Some(node_facts) = runtime.facts_by_node.get(&WsNodeId(state.node.0)) {
-                    for mut fact in node_facts.iter().copied() {
-                        fact.context = state.context;
-                        if facts.insert(fact) {
-                            pending_facts.push(fact);
-                        }
-                    }
-                }
-                for target in reach.forward_neighbours(state.node) {
-                    let target = NodeId(*target);
-                    if allowed_funcs.is_none_or(|allowed| {
-                        Self::ws_node_func(unified, target).is_some_and(|func| allowed.contains(&func))
-                    }) && reached.insert(target, state.context)
-                    {
-                        ordinary.push(ClosureNodeState {
-                            node: target,
-                            context: state.context,
-                        });
-                    }
-                }
-                if let Some(contextual) = contextual {
-                    if let Some(targets) = contextual.heap_by_from.get(&state.node) {
-                        for &target in targets {
-                            if allowed_funcs.is_none_or(|allowed| {
-                                Self::ws_node_func(unified, target)
-                                    .is_some_and(|func| allowed.contains(&func))
-                            }) && reached.insert(target, 0)
-                            {
-                                ordinary.push(ClosureNodeState {
-                                    node: target,
-                                    context: 0,
-                                });
-                            }
-                        }
-                    }
-                    if let Some(calls) = contextual.calls_by_from.get(&state.node) {
-                        for call in calls {
-                            if allowed_funcs.is_some_and(|allowed| {
-                                Self::ws_node_func(unified, call.target)
-                                    .is_none_or(|func| !allowed.contains(&func))
-                            }) {
-                                continue;
-                            }
-                            let (context, returned_nodes, returned_facts) =
-                                contexts.register_call(state.context, call.key);
-                            for target in returned_nodes {
-                                if allowed_funcs.is_none_or(|allowed| {
-                                    Self::ws_node_func(unified, target)
-                                        .is_some_and(|func| allowed.contains(&func))
-                                }) && reached.insert(target, state.context)
-                                {
-                                    ordinary.push(ClosureNodeState {
-                                        node: target,
-                                        context: state.context,
-                                    });
-                                }
-                            }
-                            for mut returned_fact in returned_facts {
-                                returned_fact.context = state.context;
-                                if facts.insert(returned_fact) {
-                                    pending_facts.push(returned_fact);
-                                }
-                            }
-                            if reached.insert(call.target, context) {
-                                ordinary.push(ClosureNodeState {
-                                    node: call.target,
-                                    context,
-                                });
-                            }
-                        }
-                    }
-                    if let Some(returns) = contextual.returns_by_from.get(&state.node) {
-                        for returned in returns {
-                            if allowed_funcs.is_some_and(|allowed| {
-                                Self::ws_node_func(unified, returned.target)
-                                    .is_none_or(|func| !allowed.contains(&func))
-                            }) {
-                                continue;
-                            }
-                            if contexts.matches(state.context, returned.key) {
-                                for context in contexts.complete_node_return(state.context, returned.target) {
-                                    if reached.insert(returned.target, context) {
-                                        ordinary.push(ClosureNodeState {
-                                            node: returned.target,
-                                            context,
-                                        });
-                                    }
-                                }
-                            } else if activate_seed_callers
-                                && state.context == 0
-                                && reached.insert(returned.target, 0)
-                            {
-                                ordinary.push(ClosureNodeState {
-                                    node: returned.target,
-                                    context: 0,
-                                });
-                            }
-                        }
-                    }
-                }
+        while worklist.has_pending() {
+            while let Some(state) = worklist.next_node() {
+                Self::propagate_symbolic_closure_node(
+                    unified,
+                    reach,
+                    runtime,
+                    contextual,
+                    allowed_funcs,
+                    activate_seed_callers,
+                    state,
+                    &mut worklist,
+                );
             }
-
-            while fact_cursor < pending_facts.len() {
-                let fact = pending_facts[fact_cursor];
-                fact_cursor += 1;
-                Self::seed_symbolic_fact_consumers(
+            while let Some(fact) = worklist.next_fact() {
+                Self::propagate_symbolic_closure_fact(
                     unified,
                     runtime,
-                    fact,
+                    symbolic,
+                    max_precision,
                     allowed_funcs,
-                    &mut ordinary,
-                    &mut reached,
+                    contextual.is_some(),
+                    activate_seed_callers,
+                    fact,
+                    symbolic_cross_calls.as_deref_mut(),
+                    &mut worklist,
                 );
-                let outgoing = symbolic.outgoing_transform_indices(fact.base);
-                for transform_index in outgoing {
-                    let Some(transform) = symbolic.transforms().get(*transform_index as usize) else {
-                        continue;
-                    };
-                    if max_precision.is_some_and(|max| transform.precision > max) {
-                        continue;
-                    }
-                    if !transform.allow_out_of_order_source
-                        && !fact.interprocedural
-                        && fact.span.is_some_and(|span| {
-                            span.file == transform.call_span.file && span.start > transform.call_span.start
-                        })
-                    {
-                        continue;
-                    }
-                    let mut next_contexts = vec![fact.context];
-                    let mut completed_context = None;
-                    if contextual.is_some() {
-                        if let Some((boundary, enters)) = symbolic_transform_boundary(symbolic, transform) {
-                            if enters {
-                                let (context, returned_nodes, returned_facts) =
-                                    contexts.register_call(fact.context, boundary);
-                                for node in returned_nodes {
-                                    if allowed_funcs.is_none_or(|allowed| {
-                                        Self::ws_node_func(unified, node)
-                                            .is_some_and(|func| allowed.contains(&func))
-                                    }) && reached.insert(node, fact.context)
-                                    {
-                                        ordinary.push(ClosureNodeState {
-                                            node,
-                                            context: fact.context,
-                                        });
-                                    }
-                                }
-                                for mut returned_fact in returned_facts {
-                                    returned_fact.context = fact.context;
-                                    if facts.insert(returned_fact) {
-                                        pending_facts.push(returned_fact);
-                                    }
-                                }
-                                next_contexts.clear();
-                                next_contexts.push(context);
-                            } else if contexts.matches(fact.context, boundary) {
-                                completed_context = Some(fact.context);
-                                next_contexts.clear();
-                            } else if activate_seed_callers && fact.context == 0 {
-                                next_contexts.clear();
-                                next_contexts.push(0);
-                            } else {
-                                continue;
-                            }
-                        }
-                    }
-                    if transform.kind == SymbolicFieldTransformKind::ScalarReturn {
-                        let exact_matches = transform.exact_field != NO_SYMBOLIC_STRING
-                            && symbolic
-                                .string(transform.exact_field)
-                                .zip(runtime.field(fact.field))
-                                .is_some_and(|(expected, actual)| expected == actual);
-                        if exact_matches {
-                            if let Some(nodes) = runtime
-                                .scalar_writes
-                                .get(&(transform.target, transform.write_span))
-                            {
-                                if !nodes.is_empty() {
-                                    record_symbolic_cross_call(
-                                        symbolic,
-                                        transform,
-                                        runtime,
-                                        *transform_index,
-                                        symbolic_cross_calls.as_deref_mut(),
-                                    );
-                                }
-                                for node in nodes {
-                                    let node = NodeId(node.0);
-                                    if allowed_funcs.is_some_and(|allowed| {
-                                        Self::ws_node_func(unified, node)
-                                            .is_none_or(|func| !allowed.contains(&func))
-                                    }) {
-                                        continue;
-                                    }
-                                    if let Some(context) = completed_context {
-                                        for caller_context in contexts.complete_node_return(context, node) {
-                                            if reached.insert(node, caller_context) {
-                                                ordinary.push(ClosureNodeState {
-                                                    node,
-                                                    context: caller_context,
-                                                });
-                                            }
-                                        }
-                                    } else {
-                                        for &context in &next_contexts {
-                                            if reached.insert(node, context) {
-                                                ordinary.push(ClosureNodeState { node, context });
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    if allowed_funcs.is_some_and(|allowed| {
-                        symbolic
-                            .bases()
-                            .get(transform.target as usize)
-                            .is_none_or(|base| !allowed.contains(&base.func))
-                    }) {
-                        continue;
-                    }
-                    record_symbolic_cross_call(
-                        symbolic,
-                        transform,
-                        runtime,
-                        *transform_index,
-                        symbolic_cross_calls.as_deref_mut(),
-                    );
-                    let next = SymbolicNodeFact {
-                        base: transform.target,
-                        field: fact.field,
-                        span: Some(transform.write_span),
-                        interprocedural: transform.kind != SymbolicFieldTransformKind::Copy,
-                        context: 0,
-                    };
-                    if let Some(context) = completed_context {
-                        for caller_context in contexts.complete_fact_return(context, next) {
-                            let mut returned = next;
-                            returned.context = caller_context;
-                            if facts.insert(returned) {
-                                pending_facts.push(returned);
-                            }
-                        }
-                    } else {
-                        for &context in &next_contexts {
-                            let mut next = next;
-                            next.context = context;
-                            if facts.insert(next) {
-                                pending_facts.push(next);
-                            }
-                        }
-                    }
-                }
             }
         }
         bonsai_diagnostics::debug_log!(
             "idg-closure",
             "symbolic closure seeds={} reached={} facts={}",
             seeds.len(),
-            ordinary.len(),
-            facts.len()
+            worklist.nodes.len(),
+            worklist.facts.len()
         );
-        let mut nodes: Vec<NodeId> = ordinary.into_iter().map(|state| state.node).collect();
+        let mut nodes: Vec<NodeId> = worklist.nodes.into_iter().map(|state| state.node).collect();
         nodes.sort_unstable_by_key(|node| node.0);
         nodes.dedup();
         nodes
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn propagate_symbolic_closure_node(
+        unified: &UnifiedAddressSpace,
+        reach: &ReachabilityIndex,
+        runtime: &SymbolicRuntimeIndex,
+        contextual: Option<&ContextualSummaryRuntime>,
+        allowed_funcs: Option<&AHashSet<FuncId>>,
+        activate_seed_callers: bool,
+        state: ClosureNodeState,
+        worklist: &mut SymbolicClosureWorklist,
+    ) {
+        if let Some(node_facts) = runtime.facts_by_node.get(&WsNodeId(state.node.0)) {
+            for mut fact in node_facts.iter().copied() {
+                fact.context = state.context;
+                worklist.enqueue_fact(fact);
+            }
+        }
+        for target in reach.forward_neighbours(state.node) {
+            let target = NodeId(*target);
+            if symbolic_node_allowed(unified, allowed_funcs, target) {
+                worklist.enqueue_node(target, state.context);
+            }
+        }
+        let Some(contextual) = contextual else {
+            return;
+        };
+        if let Some(targets) = contextual.heap_by_from.get(&state.node) {
+            for &target in targets {
+                if symbolic_node_allowed(unified, allowed_funcs, target) {
+                    worklist.enqueue_node(target, 0);
+                }
+            }
+        }
+        if let Some(calls) = contextual.calls_by_from.get(&state.node) {
+            for call in calls {
+                if !symbolic_node_allowed(unified, allowed_funcs, call.target) {
+                    continue;
+                }
+                let (context, returned_nodes, returned_facts) =
+                    worklist.contexts.register_call(state.context, call.key);
+                Self::replay_context_outputs(
+                    unified,
+                    allowed_funcs,
+                    state.context,
+                    returned_nodes,
+                    returned_facts,
+                    worklist,
+                );
+                worklist.enqueue_node(call.target, context);
+            }
+        }
+        if let Some(returns) = contextual.returns_by_from.get(&state.node) {
+            for returned in returns {
+                if !symbolic_node_allowed(unified, allowed_funcs, returned.target) {
+                    continue;
+                }
+                if worklist.contexts.matches(state.context, returned.key) {
+                    let caller_contexts = worklist
+                        .contexts
+                        .complete_node_return(state.context, returned.target);
+                    for context in caller_contexts {
+                        worklist.enqueue_node(returned.target, context);
+                    }
+                } else if activate_seed_callers && state.context == 0 {
+                    worklist.enqueue_node(returned.target, 0);
+                }
+            }
+        }
+    }
+
+    fn replay_context_outputs(
+        unified: &UnifiedAddressSpace,
+        allowed_funcs: Option<&AHashSet<FuncId>>,
+        caller_context: u32,
+        returned_nodes: Vec<NodeId>,
+        returned_facts: Vec<SymbolicNodeFact>,
+        worklist: &mut SymbolicClosureWorklist,
+    ) {
+        for node in returned_nodes {
+            if symbolic_node_allowed(unified, allowed_funcs, node) {
+                worklist.enqueue_node(node, caller_context);
+            }
+        }
+        for mut fact in returned_facts {
+            fact.context = caller_context;
+            worklist.enqueue_fact(fact);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn propagate_symbolic_closure_fact(
+        unified: &UnifiedAddressSpace,
+        runtime: &SymbolicRuntimeIndex,
+        symbolic: &crate::symbolic::SymbolicFieldGraph,
+        max_precision: Option<Precision>,
+        allowed_funcs: Option<&AHashSet<FuncId>>,
+        contextual: bool,
+        activate_seed_callers: bool,
+        fact: SymbolicNodeFact,
+        mut symbolic_cross_calls: Option<&mut Vec<CrossCallEdge>>,
+        worklist: &mut SymbolicClosureWorklist,
+    ) {
+        Self::seed_symbolic_fact_consumers(unified, runtime, fact, allowed_funcs, worklist);
+        for &transform_index in symbolic.outgoing_transform_indices(fact.base) {
+            let Some(transform) = symbolic.transforms().get(transform_index as usize) else {
+                continue;
+            };
+            if max_precision.is_some_and(|max| transform.precision > max)
+                || (!transform.allow_out_of_order_source
+                    && !fact.interprocedural
+                    && fact.span.is_some_and(|span| {
+                        span.file == transform.call_span.file && span.start > transform.call_span.start
+                    }))
+            {
+                continue;
+            }
+            let Some(contexts) = Self::symbolic_transform_contexts(
+                unified,
+                symbolic,
+                transform,
+                fact,
+                allowed_funcs,
+                contextual,
+                activate_seed_callers,
+                worklist,
+            ) else {
+                continue;
+            };
+            if transform.kind == SymbolicFieldTransformKind::ScalarReturn {
+                Self::propagate_scalar_symbolic_return(
+                    unified,
+                    runtime,
+                    symbolic,
+                    transform,
+                    transform_index,
+                    fact,
+                    allowed_funcs,
+                    &contexts,
+                    symbolic_cross_calls.as_deref_mut(),
+                    worklist,
+                );
+                continue;
+            }
+            if allowed_funcs.is_some_and(|allowed| {
+                symbolic
+                    .bases()
+                    .get(transform.target as usize)
+                    .is_none_or(|base| !allowed.contains(&base.func))
+            }) {
+                continue;
+            }
+            record_symbolic_cross_call(
+                symbolic,
+                transform,
+                runtime,
+                transform_index,
+                symbolic_cross_calls.as_deref_mut(),
+            );
+            let next = SymbolicNodeFact {
+                base: transform.target,
+                field: fact.field,
+                span: Some(transform.write_span),
+                interprocedural: transform.kind != SymbolicFieldTransformKind::Copy,
+                context: 0,
+            };
+            if let Some(context) = contexts.completed {
+                let caller_contexts = worklist.contexts.complete_fact_return(context, next);
+                for caller_context in caller_contexts {
+                    let mut returned = next;
+                    returned.context = caller_context;
+                    worklist.enqueue_fact(returned);
+                }
+            } else {
+                for &context in &contexts.next {
+                    let mut next = next;
+                    next.context = context;
+                    worklist.enqueue_fact(next);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn symbolic_transform_contexts(
+        unified: &UnifiedAddressSpace,
+        symbolic: &crate::symbolic::SymbolicFieldGraph,
+        transform: &crate::symbolic::SymbolicFieldTransform,
+        fact: SymbolicNodeFact,
+        allowed_funcs: Option<&AHashSet<FuncId>>,
+        contextual: bool,
+        activate_seed_callers: bool,
+        worklist: &mut SymbolicClosureWorklist,
+    ) -> Option<SymbolicTransformContexts> {
+        if !contextual {
+            return Some(SymbolicTransformContexts {
+                next: vec![fact.context],
+                completed: None,
+            });
+        }
+        let Some((boundary, enters)) = symbolic_transform_boundary(symbolic, transform) else {
+            return Some(SymbolicTransformContexts {
+                next: vec![fact.context],
+                completed: None,
+            });
+        };
+        if enters {
+            let (context, returned_nodes, returned_facts) =
+                worklist.contexts.register_call(fact.context, boundary);
+            Self::replay_context_outputs(
+                unified,
+                allowed_funcs,
+                fact.context,
+                returned_nodes,
+                returned_facts,
+                worklist,
+            );
+            Some(SymbolicTransformContexts {
+                next: vec![context],
+                completed: None,
+            })
+        } else if worklist.contexts.matches(fact.context, boundary) {
+            Some(SymbolicTransformContexts {
+                next: Vec::new(),
+                completed: Some(fact.context),
+            })
+        } else if activate_seed_callers && fact.context == 0 {
+            Some(SymbolicTransformContexts {
+                next: vec![0],
+                completed: None,
+            })
+        } else {
+            None
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn propagate_scalar_symbolic_return(
+        unified: &UnifiedAddressSpace,
+        runtime: &SymbolicRuntimeIndex,
+        symbolic: &crate::symbolic::SymbolicFieldGraph,
+        transform: &crate::symbolic::SymbolicFieldTransform,
+        transform_index: u32,
+        fact: SymbolicNodeFact,
+        allowed_funcs: Option<&AHashSet<FuncId>>,
+        contexts: &SymbolicTransformContexts,
+        symbolic_cross_calls: Option<&mut Vec<CrossCallEdge>>,
+        worklist: &mut SymbolicClosureWorklist,
+    ) {
+        let exact_matches = transform.exact_field != NO_SYMBOLIC_STRING
+            && symbolic
+                .string(transform.exact_field)
+                .zip(runtime.field(fact.field))
+                .is_some_and(|(expected, actual)| expected == actual);
+        if !exact_matches {
+            return;
+        }
+        let Some(nodes) = runtime
+            .scalar_writes
+            .get(&(transform.target, transform.write_span))
+        else {
+            return;
+        };
+        if !nodes.is_empty() {
+            record_symbolic_cross_call(
+                symbolic,
+                transform,
+                runtime,
+                transform_index,
+                symbolic_cross_calls,
+            );
+        }
+        for node in nodes {
+            let node = NodeId(node.0);
+            if !symbolic_node_allowed(unified, allowed_funcs, node) {
+                continue;
+            }
+            if let Some(context) = contexts.completed {
+                let caller_contexts = worklist.contexts.complete_node_return(context, node);
+                for caller_context in caller_contexts {
+                    worklist.enqueue_node(node, caller_context);
+                }
+            } else {
+                for &context in &contexts.next {
+                    worklist.enqueue_node(node, context);
+                }
+            }
+        }
     }
 
     fn seed_symbolic_fact_consumers(
@@ -2759,35 +2874,22 @@ impl IdgQueryService {
         runtime: &SymbolicRuntimeIndex,
         fact: SymbolicNodeFact,
         allowed_funcs: Option<&AHashSet<FuncId>>,
-        ordinary: &mut Vec<ClosureNodeState>,
-        reached: &mut ClosureVisited,
+        worklist: &mut SymbolicClosureWorklist,
     ) {
         let exact_nodes = runtime.exact_reads.get(&symbolic_fact_key(fact.base, fact.field));
         if let Some(nodes) = exact_nodes {
             for node in nodes {
                 let node = NodeId(node.0);
-                if allowed_funcs.is_none_or(|allowed| {
-                    Self::ws_node_func(unified, node).is_some_and(|func| allowed.contains(&func))
-                }) && reached.insert(node, fact.context)
-                {
-                    ordinary.push(ClosureNodeState {
-                        node,
-                        context: fact.context,
-                    });
+                if symbolic_node_allowed(unified, allowed_funcs, node) {
+                    worklist.enqueue_node(node, fact.context);
                 }
             }
         }
         if let Some(nodes) = runtime.bare_reads.get(&fact.base) {
             for node in nodes {
                 let node = NodeId(node.0);
-                if allowed_funcs.is_none_or(|allowed| {
-                    Self::ws_node_func(unified, node).is_some_and(|func| allowed.contains(&func))
-                }) && reached.insert(node, fact.context)
-                {
-                    ordinary.push(ClosureNodeState {
-                        node,
-                        context: fact.context,
-                    });
+                if symbolic_node_allowed(unified, allowed_funcs, node) {
+                    worklist.enqueue_node(node, fact.context);
                 }
             }
         }
