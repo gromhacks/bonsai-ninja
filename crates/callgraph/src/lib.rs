@@ -1248,6 +1248,28 @@ struct CallGraphBuildState<'a> {
     graph: &'a mut CallGraph,
 }
 
+/// Adapter-emitted syntax facts for one call site plus the receiver identity
+/// derived from those facts. Candidate discovery and narrowing consume this
+/// immutable compiler input in separate phases.
+struct CallSiteFacts<'a> {
+    name: &'a str,
+    receiver: Option<&'a str>,
+    receiver_types: &'a [String],
+    call_kind: CallKind,
+    span: Span,
+    args: &'a [CallArg],
+    semantic_receiver: Option<&'a str>,
+    alias_qualified: bool,
+    local_value_shadow: bool,
+    explicit_ancestor_constructor: bool,
+}
+
+struct CallCandidateSet {
+    values: Vec<FuncId>,
+    from_callable_binding: bool,
+    from_dynamic_param_receiver: bool,
+}
+
 fn add_call_event_edges(
     event: &FlowEvent,
     context: &CallResolutionContext<'_>,
@@ -1265,254 +1287,289 @@ fn add_call_event_edges(
     else {
         return;
     };
-    let CallResolutionContext {
-        from,
-        caller_decl,
-        global,
-        aliases,
-        alias_targets,
-        local_bindings,
-        path_for_file,
-        file_path_parts,
-        caller_export_aliases,
-        caller_super_receiver_tokens,
-        caller_language,
-        bare_call_constructor_syntax,
-        language_for_file,
-        alias_index,
-        build_targets,
-        constructor_index,
-    } = *context;
-    let CallGraphBuildState {
-        method_candidate_cache,
-        workspace_module_cache,
-        callable_target_cache,
-        graph: cg,
-    } = state;
-    let constructor_context = ConstructorResolutionContext {
-        global,
-        caller_decl,
-        alias_targets,
-        path_for_file,
-        constructor_index: Some(constructor_index),
-    };
     // Callback arguments are independent callgraph facts. Resolve
     // them before the outer callee pipeline so an ambiguous or
     // unresolved external API cannot suppress a compiler-resolved
     // local callback edge via an early `continue` below.
-    add_callback_arg_edges(args, context, method_candidate_cache, callable_target_cache, cg);
+    add_callback_arg_edges(
+        args,
+        context,
+        state.method_candidate_cache,
+        state.callable_target_cache,
+        state.graph,
+    );
     let short = short_callee(name);
-    let alias_qualified_call = qualified_module_alias_call(name, aliases)
-        || qualified_alias_target_entry_tail(name, alias_targets).is_some();
+    let alias_qualified = qualified_module_alias_call(name, context.aliases)
+        || qualified_alias_target_entry_tail(name, context.alias_targets).is_some();
     let folded_receiver = receiver_name_from_call_name(name).filter(|candidate| {
-        folded_call_name_receiver_is_instance(candidate, caller_decl, caller_super_receiver_tokens)
+        folded_call_name_receiver_is_instance(
+            candidate,
+            context.caller_decl,
+            context.caller_super_receiver_tokens,
+        )
     });
     let semantic_receiver = receiver.as_deref().or(folded_receiver);
-    let explicit_ancestor_constructor = *call_kind == CallKind::Constructor
-        && semantic_receiver
-            .is_some_and(|receiver| is_super_receiver_with_tokens(receiver, caller_super_receiver_tokens));
-    let local_value_shadow = semantic_receiver.is_none()
-        && local_value_binding_shadows_callable(&caller_decl.flow_events, short, *span);
-    let mut candidates =
-        collect_local_callable_binding_targets(local_bindings, name, semantic_receiver, alias_qualified_call);
-    let candidates_from_callable_binding = !candidates.is_empty();
-    let mut candidates_from_dynamic_param_receiver = false;
-    if candidates.is_empty() && semantic_receiver.is_none() && !alias_qualified_call {
-        candidates = collect_nested_local_callable_targets(global, caller_decl, name, *span);
+    let facts = CallSiteFacts {
+        name,
+        receiver: receiver.as_deref(),
+        receiver_types,
+        call_kind: *call_kind,
+        span: *span,
+        args,
+        semantic_receiver,
+        alias_qualified,
+        local_value_shadow: semantic_receiver.is_none()
+            && local_value_binding_shadows_callable(&context.caller_decl.flow_events, short, *span),
+        explicit_ancestor_constructor: *call_kind == CallKind::Constructor
+            && semantic_receiver.is_some_and(|receiver| {
+                is_super_receiver_with_tokens(receiver, context.caller_super_receiver_tokens)
+            }),
+    };
+    resolve_and_emit_call_site(&facts, context, state);
+}
+
+fn collect_ast_bound_call_candidates(
+    facts: &CallSiteFacts<'_>,
+    context: &CallResolutionContext<'_>,
+    state: &mut CallGraphBuildState<'_>,
+) -> CallCandidateSet {
+    let constructor_context = ConstructorResolutionContext {
+        global: context.global,
+        caller_decl: context.caller_decl,
+        alias_targets: context.alias_targets,
+        path_for_file: context.path_for_file,
+        constructor_index: Some(context.constructor_index),
+    };
+    let mut values = collect_local_callable_binding_targets(
+        context.local_bindings,
+        facts.name,
+        facts.semantic_receiver,
+        facts.alias_qualified,
+    );
+    let from_callable_binding = !values.is_empty();
+    if values.is_empty() && facts.semantic_receiver.is_none() && !facts.alias_qualified {
+        values = collect_nested_local_callable_targets(
+            context.global,
+            context.caller_decl,
+            facts.name,
+            facts.span,
+        );
     }
-    if candidates.is_empty() && explicit_ancestor_constructor {
-        // An AST-classified `super(...)` constructor invocation
-        // names the direct parent constructor. Receiver-type
-        // enrichment also carries transitive ancestors for
-        // ordinary virtual dispatch; consulting that entire set
-        // here would incorrectly admit grandparent constructors
-        // with the same arity. Resolve the rewritten direct-base
-        // callee identity before the generic receiver pipeline.
-        candidates = collect_constructor_targets_for_class_call(&constructor_context, name, None, &[], false);
+    if values.is_empty() && facts.explicit_ancestor_constructor {
+        values =
+            collect_constructor_targets_for_class_call(&constructor_context, facts.name, None, &[], false);
     }
-    if candidates.is_empty() && *call_kind == CallKind::Constructor {
-        // Constructor-ness is an AST fact. Resolve the named class
-        // and its declared initializer before ordinary member
-        // lookup, which may otherwise mistake a same-named
-        // companion/member for the constructor and prevent the
-        // exact class edge from being considered.
-        candidates = collect_constructor_targets_for_class_call(
+    if values.is_empty() && facts.call_kind == CallKind::Constructor {
+        values = collect_constructor_targets_for_class_call(
             &constructor_context,
-            name,
-            receiver.as_deref(),
-            receiver_types,
+            facts.name,
+            facts.receiver,
+            facts.receiver_types,
             true,
         );
     }
-    if candidates.is_empty() {
-        candidates = collect_receiver_method_targets(
-            global,
-            caller_decl,
-            alias_targets,
-            path_for_file,
-            semantic_receiver,
-            receiver_types,
-            *call_kind,
-            name,
-            *span,
-            caller_super_receiver_tokens,
-            method_candidate_cache,
+    if values.is_empty() {
+        values = collect_receiver_method_targets(
+            context.global,
+            context.caller_decl,
+            context.alias_targets,
+            context.path_for_file,
+            facts.semantic_receiver,
+            facts.receiver_types,
+            facts.call_kind,
+            facts.name,
+            facts.span,
+            context.caller_super_receiver_tokens,
+            state.method_candidate_cache,
         );
     }
-    if candidates.is_empty() {
-        candidates = collect_type_qualified_method_targets(
-            global,
-            caller_decl,
-            alias_targets,
-            path_for_file,
-            name,
-            method_candidate_cache,
+    if values.is_empty() {
+        values = collect_type_qualified_method_targets(
+            context.global,
+            context.caller_decl,
+            context.alias_targets,
+            context.path_for_file,
+            facts.name,
+            state.method_candidate_cache,
         );
     }
-    if candidates.is_empty() {
-        candidates =
-            collect_dynamic_param_receiver_method_target(global, caller_decl, semantic_receiver, name);
-        candidates_from_dynamic_param_receiver = !candidates.is_empty();
+    let mut from_dynamic_param_receiver = false;
+    if values.is_empty() {
+        values = collect_dynamic_param_receiver_method_target(
+            context.global,
+            context.caller_decl,
+            facts.semantic_receiver,
+            facts.name,
+        );
+        from_dynamic_param_receiver = !values.is_empty();
     }
-    // A bare call binds to a callable declared in the caller's
-    // lexical scope before an imported member of the same name.
-    // Resolve that scope before `collect_qualified_workspace_targets`,
-    // whose import-oriented lookup intentionally follows alias
-    // targets. This matters for Python/Erlang-style imports that
-    // are subsequently shadowed by a local declaration.
-    if candidates.is_empty()
-        && semantic_receiver.is_none()
-        && !local_value_shadow
-        && fast_local_callable_reference_name(name)
+    CallCandidateSet {
+        values,
+        from_callable_binding,
+        from_dynamic_param_receiver,
+    }
+}
+
+fn collect_workspace_call_candidates(
+    mut values: Vec<FuncId>,
+    facts: &CallSiteFacts<'_>,
+    context: &CallResolutionContext<'_>,
+    state: &mut CallGraphBuildState<'_>,
+) -> (Vec<FuncId>, bool) {
+    if values.is_empty()
+        && facts.semantic_receiver.is_none()
+        && !facts.local_value_shadow
+        && fast_local_callable_reference_name(facts.name)
     {
-        candidates = collect_callable_targets_with_context_aliases_paths_and_method_cache(
-            global,
-            name,
-            caller_decl,
-            alias_targets,
-            path_for_file,
-            file_path_parts,
-            callable_target_cache,
-            method_candidate_cache,
+        values = collect_callable_targets_with_context_aliases_paths_and_method_cache(
+            context.global,
+            facts.name,
+            context.caller_decl,
+            context.alias_targets,
+            context.path_for_file,
+            context.file_path_parts,
+            state.callable_target_cache,
+            state.method_candidate_cache,
         );
     }
-    let typed_receiver_method = semantic_receiver.is_some() && !receiver_types.is_empty();
-    if candidates.is_empty() && !typed_receiver_method {
-        candidates = collect_qualified_workspace_targets(
-            global,
-            name,
-            Some(aliases),
-            alias_targets,
-            path_for_file,
-            file_path_parts,
-            caller_export_aliases,
-            caller_decl,
-            workspace_module_cache,
+    let typed_receiver_method = facts.semantic_receiver.is_some() && !facts.receiver_types.is_empty();
+    if values.is_empty() && !typed_receiver_method {
+        values = collect_qualified_workspace_targets(
+            context.global,
+            facts.name,
+            Some(context.aliases),
+            context.alias_targets,
+            context.path_for_file,
+            context.file_path_parts,
+            context.caller_export_aliases,
+            context.caller_decl,
+            state.workspace_module_cache,
         );
     }
-    let unresolved_method_receiver = candidates.is_empty()
-        && *call_kind == CallKind::Method
-        && semantic_receiver.is_some()
-        && !alias_qualified_call;
-    if candidates.is_empty() && !unresolved_method_receiver && !local_value_shadow {
-        candidates = collect_callable_targets_with_context_aliases_paths_and_method_cache(
-            global,
-            name,
-            caller_decl,
-            alias_targets,
-            path_for_file,
-            file_path_parts,
-            callable_target_cache,
-            method_candidate_cache,
+    let unresolved_method_receiver = values.is_empty()
+        && facts.call_kind == CallKind::Method
+        && facts.semantic_receiver.is_some()
+        && !facts.alias_qualified;
+    if values.is_empty() && !unresolved_method_receiver && !facts.local_value_shadow {
+        values = collect_callable_targets_with_context_aliases_paths_and_method_cache(
+            context.global,
+            facts.name,
+            context.caller_decl,
+            context.alias_targets,
+            context.path_for_file,
+            context.file_path_parts,
+            state.callable_target_cache,
+            state.method_candidate_cache,
         );
     }
-    if candidates.is_empty()
-        && c_family_linked_language(caller_language)
-        && semantic_receiver.is_none()
-        && !local_value_shadow
+    if values.is_empty()
+        && c_family_linked_language(context.caller_language)
+        && facts.semantic_receiver.is_none()
+        && !facts.local_value_shadow
     {
-        candidates =
-            collect_c_linked_callable_targets(global, name, caller_decl, alias_targets, build_targets);
+        values = collect_c_linked_callable_targets(
+            context.global,
+            facts.name,
+            context.caller_decl,
+            context.alias_targets,
+            context.build_targets,
+        );
     }
-    if candidates.is_empty() && !unresolved_method_receiver {
-        if let Some((alias_target, alias_tail)) = qualified_alias_target_tail(name, aliases) {
-            candidates = collect_workspace_module_targets(
-                global,
+    if values.is_empty() && !unresolved_method_receiver {
+        if let Some((alias_target, alias_tail)) = qualified_alias_target_tail(facts.name, context.aliases) {
+            values = collect_workspace_module_targets(
+                context.global,
                 alias_target,
                 alias_tail,
-                path_for_file,
-                file_path_parts,
-                caller_export_aliases,
-                caller_decl,
-                alias_targets,
-                workspace_module_cache,
+                context.path_for_file,
+                context.file_path_parts,
+                context.caller_export_aliases,
+                context.caller_decl,
+                context.alias_targets,
+                state.workspace_module_cache,
             );
         }
     }
+    (values, unresolved_method_receiver)
+}
+
+enum QualifiedCallFallback {
+    Candidates(Vec<FuncId>),
+    Stop,
+}
+
+fn collect_qualified_call_fallback(
+    facts: &CallSiteFacts<'_>,
+    context: &CallResolutionContext<'_>,
+    state: &mut CallGraphBuildState<'_>,
+) -> QualifiedCallFallback {
+    if facts.alias_qualified {
+        return QualifiedCallFallback::Stop;
+    }
+    let short = short_callee(facts.name);
+    let qualified_owner_in_workspace = facts.name.find("::").is_none_or(|idx| {
+        let qualifier = &facts.name[..idx];
+        context
+            .alias_targets
+            .get(qualifier)
+            .is_some_and(|target| match target {
+                AliasTarget::Namespace { module } => is_workspace_alias_target(context.alias_index, module),
+                AliasTarget::Member { module, member } => {
+                    is_workspace_alias_target(context.alias_index, module)
+                        || is_workspace_alias_target(context.alias_index, member)
+                }
+                AliasTarget::Type { .. } => true,
+            })
+    });
+    let mut values = Vec::new();
+    if qualified_owner_in_workspace {
+        let resolved_name = context.aliases.get(short).map(String::as_str).unwrap_or(short);
+        if resolved_name != facts.name {
+            values = collect_callable_targets_with_context_aliases_paths_and_method_cache(
+                context.global,
+                resolved_name,
+                context.caller_decl,
+                context.alias_targets,
+                context.path_for_file,
+                context.file_path_parts,
+                state.callable_target_cache,
+                state.method_candidate_cache,
+            );
+        }
+    }
+    if values.is_empty()
+        && (colon_remote_call(facts.name) || qualified_module_alias_call(facts.name, context.aliases))
+    {
+        QualifiedCallFallback::Stop
+    } else {
+        QualifiedCallFallback::Candidates(values)
+    }
+}
+
+fn discover_call_site_candidates(
+    facts: &CallSiteFacts<'_>,
+    context: &CallResolutionContext<'_>,
+    state: &mut CallGraphBuildState<'_>,
+) -> Option<CallCandidateSet> {
+    let CallCandidateSet {
+        values: mut candidates,
+        from_callable_binding: candidates_from_callable_binding,
+        from_dynamic_param_receiver: candidates_from_dynamic_param_receiver,
+    } = collect_ast_bound_call_candidates(facts, context, state);
+    let constructor_context = ConstructorResolutionContext {
+        global: context.global,
+        caller_decl: context.caller_decl,
+        alias_targets: context.alias_targets,
+        path_for_file: context.path_for_file,
+        constructor_index: Some(context.constructor_index),
+    };
+    let (workspace_candidates, unresolved_method_receiver) =
+        collect_workspace_call_candidates(candidates, facts, context, state);
+    candidates = workspace_candidates;
     if candidates.is_empty() && !unresolved_method_receiver {
-        if alias_qualified_call {
-            return;
-        }
-        // Bare-name fallback for qualified syntaxes that
-        // do not carry import/alias evidence. If the head
-        // is a known alias, failing to resolve through
-        // that target means the call is external or
-        // unresolved; retrying the bare tail would invent
-        // a different call edge.
-        //
-        // For Rust-style `Type::method` qualified calls,
-        // allow the bare-tail fallback ONLY when the
-        // qualifier (`Type`) resolves through the
-        // workspace's alias_targets to an in-workspace
-        // class / module. External types
-        // (`Command::new` → `std::process::Command`)
-        // would otherwise collapse onto a user-defined
-        // `Repository::new` that shares the bare suffix,
-        // fabricating cross-call edges.
-        let qualified_owner_in_workspace = if let Some(idx) = name.find("::") {
-            let qualifier = &name[..idx];
-            let qualifier_resolves = alias_targets
-                .get(qualifier)
-                .map(|t| match t {
-                    AliasTarget::Namespace { module } => is_workspace_alias_target(alias_index, module),
-                    AliasTarget::Member { module, member } => {
-                        // For Member-form aliases the local
-                        // name typically rebinds to
-                        // `module::member` (e.g.
-                        // `use crate::storage as store` →
-                        // store → Member { module="crate",
-                        // member="storage" }). Honour both
-                        // segments so `store::persist`
-                        // resolves through the workspace.
-                        is_workspace_alias_target(alias_index, module)
-                            || is_workspace_alias_target(alias_index, member)
-                    }
-                    AliasTarget::Type { .. } => true,
-                })
-                .unwrap_or(false);
-            qualifier_resolves
-        } else {
-            // No `::` — receiver / dotted form. Existing
-            // behaviour applies.
-            true
-        };
-        if qualified_owner_in_workspace {
-            let resolved_name = aliases.get(short).map(String::as_str).unwrap_or(short);
-            if resolved_name != name.as_str() {
-                candidates = collect_callable_targets_with_context_aliases_paths_and_method_cache(
-                    global,
-                    resolved_name,
-                    caller_decl,
-                    alias_targets,
-                    path_for_file,
-                    file_path_parts,
-                    callable_target_cache,
-                    method_candidate_cache,
-                );
-            }
-        }
-        if candidates.is_empty() && (colon_remote_call(name) || qualified_module_alias_call(name, aliases)) {
-            return;
+        match collect_qualified_call_fallback(facts, context, state) {
+            QualifiedCallFallback::Candidates(values) => candidates = values,
+            QualifiedCallFallback::Stop => return None,
         }
     }
     // A capability-declared ambiguous grammar may use a bare
@@ -1521,12 +1578,59 @@ fn add_call_event_edges(
     // class resolution succeeds; spelling and casing are never
     // constructor evidence.
     if candidates.is_empty()
-        && bare_call_constructor_syntax
-        && *call_kind == CallKind::Function
-        && semantic_receiver.is_none()
+        && context.bare_call_constructor_syntax
+        && facts.call_kind == CallKind::Function
+        && facts.semantic_receiver.is_none()
     {
-        candidates = collect_constructor_targets_for_class_call(&constructor_context, name, None, &[], false);
+        candidates =
+            collect_constructor_targets_for_class_call(&constructor_context, facts.name, None, &[], false);
     }
+    Some(CallCandidateSet {
+        values: candidates,
+        from_callable_binding: candidates_from_callable_binding,
+        from_dynamic_param_receiver: candidates_from_dynamic_param_receiver,
+    })
+}
+
+fn resolve_and_emit_call_site(
+    facts: &CallSiteFacts<'_>,
+    context: &CallResolutionContext<'_>,
+    state: &mut CallGraphBuildState<'_>,
+) {
+    let Some(candidate_set) = discover_call_site_candidates(facts, context, state) else {
+        return;
+    };
+    let CallCandidateSet {
+        values: mut candidates,
+        from_callable_binding: candidates_from_callable_binding,
+        from_dynamic_param_receiver: candidates_from_dynamic_param_receiver,
+    } = candidate_set;
+    let CallResolutionContext {
+        caller_decl,
+        global,
+        alias_targets,
+        path_for_file,
+        caller_super_receiver_tokens,
+        caller_language,
+        bare_call_constructor_syntax,
+        language_for_file,
+        build_targets,
+        ..
+    } = *context;
+    let CallSiteFacts {
+        receiver_types,
+        call_kind,
+        span,
+        args,
+        semantic_receiver,
+        alias_qualified: alias_qualified_call,
+        ..
+    } = *facts;
+    let CallGraphBuildState {
+        method_candidate_cache,
+        graph: cg,
+        ..
+    } = state;
     if !candidates.is_empty() {
         retain_same_language_candidates(global, caller_language, language_for_file, &mut candidates);
     }
@@ -1542,7 +1646,7 @@ fn add_call_event_edges(
             caller_decl,
             alias_targets,
             semantic_receiver,
-            *span,
+            span,
             method_candidate_cache,
             &mut candidates,
         );
@@ -1555,8 +1659,8 @@ fn add_call_event_edges(
             alias_targets,
             semantic_receiver,
             receiver_types,
-            *call_kind,
-            *span,
+            call_kind,
+            span,
             alias_qualified_call,
             path_for_file,
             caller_super_receiver_tokens,
@@ -1566,11 +1670,11 @@ fn add_call_event_edges(
     }
     if !candidates.is_empty() {
         let receiver_supplied = !candidates_from_callable_binding
-            && (semantic_receiver.is_some() || *call_kind == CallKind::Method);
+            && (semantic_receiver.is_some() || call_kind == CallKind::Method);
         retain_signature_compatible_candidates(global, caller_decl, &mut candidates, args, receiver_supplied);
     }
     let resolved_call_kind = if bare_call_constructor_syntax
-        && *call_kind == CallKind::Function
+        && call_kind == CallKind::Function
         && !candidates.is_empty()
         && candidates.iter().all(|func| {
             global
@@ -1579,55 +1683,56 @@ fn add_call_event_edges(
         }) {
         CallKind::Constructor
     } else {
-        *call_kind
+        call_kind
     };
     retain_call_kind_compatible_candidates(global, resolved_call_kind, &mut candidates);
     dedup_func_ids(&mut candidates);
     dedup_semantic_candidate_decls(global, &mut candidates);
-    if !candidates.is_empty() {
-        // No fan-out cap. Caps are heuristics, and per
-        // docs/contributing/design-patterns.mdx::Semantic Resolution
-        // Always the engine resolves callees by semantic
-        // identity (Visibility, module_path, receiver
-        // type, alias map). When that pipeline still
-        // produces many candidates, the workspace
-        // genuinely has that many — a cap would silently
-        // drop edges that downstream passes need. If
-        // fan-out is still too wide for a particular
-        // language, the right fix is enriching adapter
-        // facts (typed receivers, accurate module
-        // boundaries) until the resolver narrows
-        // semantically.
-        let semantic_virtual = candidates.len() > 1
-            && *call_kind == CallKind::Method
-            && semantic_receiver.is_some()
-            && !receiver_types.is_empty();
-        let same_decl_family = candidate_set_is_same_decl_family(global, &candidates, caller_language);
-        let Some((kind, precision)) =
-            semantic_edge_shape(candidates.len(), semantic_virtual || same_decl_family)
-        else {
-            return;
-        };
-        let provenance = edge_provenance_for_resolved_call(
+    emit_call_site_candidate_edges(candidates, candidates_from_callable_binding, facts, context, cg);
+}
+
+fn emit_call_site_candidate_edges(
+    candidates: Vec<FuncId>,
+    from_callable_binding: bool,
+    facts: &CallSiteFacts<'_>,
+    context: &CallResolutionContext<'_>,
+    graph: &mut CallGraph,
+) {
+    if candidates.is_empty() {
+        return;
+    }
+    // No fan-out cap: every surviving candidate has semantic identity
+    // evidence. A numeric cap here would silently discard compiler edges;
+    // overly broad sets must instead be narrowed by richer adapter facts.
+    let semantic_virtual = candidates.len() > 1
+        && facts.call_kind == CallKind::Method
+        && facts.semantic_receiver.is_some()
+        && !facts.receiver_types.is_empty();
+    let same_decl_family =
+        candidate_set_is_same_decl_family(context.global, &candidates, context.caller_language);
+    let Some((kind, precision)) = semantic_edge_shape(candidates.len(), semantic_virtual || same_decl_family)
+    else {
+        return;
+    };
+    let provenance = edge_provenance_for_resolved_call(
+        kind,
+        semantic_virtual
+            || (!from_callable_binding
+                && facts.call_kind == CallKind::Method
+                && facts.semantic_receiver.is_some()),
+        same_decl_family,
+        from_callable_binding
+            .then_some("local or receiver-projected callable binding matched call expression"),
+    );
+    for to in candidates {
+        graph.add_edge(CallEdge {
+            from: context.from,
+            to,
+            span: facts.span,
             kind,
-            semantic_virtual
-                || (!candidates_from_callable_binding
-                    && *call_kind == CallKind::Method
-                    && semantic_receiver.is_some()),
-            same_decl_family,
-            candidates_from_callable_binding
-                .then_some("local or receiver-projected callable binding matched call expression"),
-        );
-        for to in candidates {
-            cg.add_edge(CallEdge {
-                from,
-                to,
-                span: *span,
-                kind,
-                precision,
-                provenance: provenance.clone(),
-            });
-        }
+            precision,
+            provenance: provenance.clone(),
+        });
     }
 }
 

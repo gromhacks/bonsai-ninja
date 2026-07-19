@@ -1,5 +1,5 @@
 # Normalized hardcoded-knowledge audit baseline (no source line numbers).
-sha256	961bc1cd96615dd778ee3aa6788b3e02cf0463774499c96bb265b8212a5bfb05
+sha256	551d4644975e1c1a04871b6bfaa44d6be568bb4a201a666bc20fc2f6de705e96
 total	225
 browse	32
 callgraph	24
