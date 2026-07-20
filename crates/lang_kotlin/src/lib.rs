@@ -80,6 +80,9 @@ impl LanguageAdapter for KotlinAdapter {
         // catch syntax (uses `is` checks inside the body for that),
         // so each arm contributes one type.
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &["Any", "Object"],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,

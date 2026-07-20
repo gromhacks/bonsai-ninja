@@ -25,11 +25,12 @@ use bonsai_lang_api::{
 use bonsai_resolve::{
     build_shared_peer_class_index, callee_without_call_args, collect_method_candidates_for_class_cached,
     enclosing_class_for_decl, export_name_variants, extend_alias_targets_with_declared_types,
-    is_super_receiver_with_tokens, module_path_parts, module_target_matches_decl_module_path,
+    is_super_receiver_with_tokens, module_path_parts, module_target_matches_decl_module_path_with_syntax,
     module_target_matches_path, module_target_parts, module_target_parts_match_path_parts,
     namespace_alias_target_tail, prune_receiver_type_names_for_dispatch, push_unique_func,
     push_unique_string, qualified_module_alias_call, resolve_callable_with_context, resolve_class,
-    split_qualified_head_tail, visibility_allows, MethodCandidateCache, PeerClassIndex, ResolveContext,
+    split_qualified_head_tail, strip_module_path_prefix, visibility_allows, MethodCandidateCache,
+    PeerClassIndex, ResolveContext,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -387,6 +388,7 @@ struct CallableLookupSemantics<'a> {
     path_for_file: &'a dyn Fn(FileId) -> Option<String>,
     file_path_parts: &'a AHashMap<FileId, Vec<String>>,
     same_directory_unqualified_calls: bool,
+    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1107,6 +1109,7 @@ impl ResolvedCallGraph {
                         &alias_targets,
                         &context.alias_index,
                         Some(&context.callable_index),
+                        info.capabilities.module_path_syntax,
                     );
                     let resolution = CallResolutionContext {
                         from,
@@ -1222,6 +1225,7 @@ impl<'a> CallResolutionContext<'a> {
             path_for_file: self.path_for_file,
             file_path_parts: self.file_path_parts,
             same_directory_unqualified_calls: self.caller_capabilities.same_directory_unqualified_calls,
+            module_path_syntax: self.caller_capabilities.module_path_syntax,
         }
     }
 }
@@ -1432,7 +1436,7 @@ fn collect_workspace_call_candidates(
             context.alias_targets,
             context.path_for_file,
             context.file_path_parts,
-            context.caller_capabilities.module_export_aliases,
+            context.caller_capabilities,
             context.caller_decl,
             state.workspace_module_cache,
         );
@@ -1472,7 +1476,7 @@ fn collect_workspace_call_candidates(
                 alias_tail,
                 context.path_for_file,
                 context.file_path_parts,
-                context.caller_capabilities.module_export_aliases,
+                context.caller_capabilities,
                 context.caller_decl,
                 context.alias_targets,
                 state.workspace_module_cache,
@@ -1502,10 +1506,21 @@ fn collect_qualified_call_fallback(
             .alias_targets
             .get(qualifier)
             .is_some_and(|target| match target {
-                AliasTarget::Namespace { module } => is_workspace_alias_target(context.alias_index, module),
+                AliasTarget::Namespace { module } => is_workspace_alias_target(
+                    context.alias_index,
+                    module,
+                    context.caller_capabilities.module_path_syntax,
+                ),
                 AliasTarget::Member { module, member } => {
-                    is_workspace_alias_target(context.alias_index, module)
-                        || is_workspace_alias_target(context.alias_index, member)
+                    is_workspace_alias_target(
+                        context.alias_index,
+                        module,
+                        context.caller_capabilities.module_path_syntax,
+                    ) || is_workspace_alias_target(
+                        context.alias_index,
+                        member,
+                        context.caller_capabilities.module_path_syntax,
+                    )
                 }
                 AliasTarget::Type { .. } => true,
             })
@@ -1627,10 +1642,14 @@ fn resolve_and_emit_call_site(
         build_targets.retain_candidates_linked_with(global, caller_decl.name_span.file, &mut candidates);
     }
     if !candidates.is_empty() && !candidates_from_callable_binding {
-        retain_assigned_receiver_method_candidates(
+        let assigned_receiver_context = AssignedReceiverNarrowingContext {
             global,
             caller_decl,
             alias_targets,
+            universal_type_names: caller_capabilities.universal_type_names,
+        };
+        retain_assigned_receiver_method_candidates(
+            &assigned_receiver_context,
             semantic_receiver,
             span,
             method_candidate_cache,
@@ -1650,6 +1669,7 @@ fn resolve_and_emit_call_site(
             alias_qualified_call,
             path_for_file,
             caller_capabilities.effective_super_receiver_tokens(),
+            caller_capabilities.module_path_syntax,
             method_candidate_cache,
             &mut candidates,
         );
@@ -1657,7 +1677,14 @@ fn resolve_and_emit_call_site(
     if !candidates.is_empty() {
         let receiver_supplied = !candidates_from_callable_binding
             && (semantic_receiver.is_some() || call_kind == CallKind::Method);
-        retain_signature_compatible_candidates(global, caller_decl, &mut candidates, args, receiver_supplied);
+        retain_signature_compatible_candidates(
+            global,
+            caller_decl,
+            &mut candidates,
+            args,
+            receiver_supplied,
+            caller_capabilities.universal_type_names,
+        );
     }
     let resolved_call_kind = if caller_capabilities.bare_call_constructor_syntax
         && call_kind == CallKind::Function
@@ -1778,8 +1805,7 @@ fn add_assignment_call_edges(
         local_bindings,
         path_for_file,
         file_path_parts,
-        caller_capabilities.module_export_aliases,
-        caller_capabilities.same_directory_unqualified_calls,
+        caller_capabilities,
         *span,
         method_candidate_cache,
         workspace_module_cache,
@@ -1800,6 +1826,7 @@ fn add_assignment_call_edges(
             caller_decl,
             alias_targets,
             span,
+            caller_capabilities.universal_type_names,
             method_candidate_cache,
             &mut candidates,
         );
@@ -1818,6 +1845,7 @@ fn add_assignment_call_edges(
             alias_qualified_call,
             path_for_file,
             caller_capabilities.effective_super_receiver_tokens(),
+            caller_capabilities.module_path_syntax,
             method_candidate_cache,
             &mut candidates,
         );
@@ -1830,6 +1858,7 @@ fn add_assignment_call_edges(
             &mut candidates,
             source_call_args,
             receiver_supplied,
+            caller_capabilities.universal_type_names,
         );
     }
     candidates.retain(|func| {
@@ -1948,6 +1977,7 @@ fn add_callback_arg_edges(
         caller_language,
         quoted_callable_literals: caller_capabilities.quoted_callable_literals,
         same_directory_unqualified_calls: caller_capabilities.same_directory_unqualified_calls,
+        module_path_syntax: caller_capabilities.module_path_syntax,
         path_for_file,
         file_path_parts,
         method_candidate_cache,
@@ -2024,8 +2054,7 @@ fn collect_assign_source_call_targets(
     local_bindings: &AHashMap<String, FuncId>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     file_path_parts: &AHashMap<FileId, Vec<String>>,
-    caller_export_aliases: &[&'static str],
-    same_directory_unqualified_calls: bool,
+    caller_capabilities: LanguageCapabilities,
     call_span: Span,
     method_candidate_cache: &mut MethodCandidateCache,
     workspace_module_cache: &mut WorkspaceModuleTargetCache,
@@ -2042,7 +2071,8 @@ fn collect_assign_source_call_targets(
         alias_targets,
         path_for_file,
         file_path_parts,
-        same_directory_unqualified_calls,
+        same_directory_unqualified_calls: caller_capabilities.same_directory_unqualified_calls,
+        module_path_syntax: caller_capabilities.module_path_syntax,
     };
     let mut targets = collect_local_callable_binding_targets(local_bindings, trimmed, receiver, false);
     if targets.is_empty() && !member_like {
@@ -2066,7 +2096,7 @@ fn collect_assign_source_call_targets(
                 alias_tail,
                 path_for_file,
                 file_path_parts,
-                caller_export_aliases,
+                caller_capabilities,
                 caller_decl,
                 alias_targets,
                 workspace_module_cache,
@@ -2191,6 +2221,7 @@ fn retain_signature_compatible_candidates(
     candidates: &mut Vec<FuncId>,
     args: &[CallArg],
     receiver_supplied: bool,
+    universal_type_names: &[&str],
 ) {
     if candidates.len() <= 1 {
         return;
@@ -2218,7 +2249,9 @@ fn retain_signature_compatible_candidates(
             if actual_types.is_empty() || expected_types.is_empty() {
                 continue;
             }
-            if let Some(match_score) = type_sets_match_score(&actual_types, &expected_types) {
+            if let Some(match_score) =
+                type_sets_match_score(&actual_types, &expected_types, universal_type_names)
+            {
                 score += match_score;
             } else {
                 incompatible = true;
@@ -2408,6 +2441,7 @@ fn retain_raw_signature_compatible_candidates(
     candidates: &mut Vec<FuncId>,
     arg_texts: &[String],
     receiver_supplied: bool,
+    universal_type_names: &[&str],
 ) {
     if candidates.len() <= 1 {
         return;
@@ -2447,7 +2481,9 @@ fn retain_raw_signature_compatible_candidates(
             if actual_types.is_empty() || expected_types.is_empty() {
                 continue;
             }
-            if let Some(match_score) = type_sets_match_score(&actual_types, &expected_types) {
+            if let Some(match_score) =
+                type_sets_match_score(&actual_types, &expected_types, universal_type_names)
+            {
                 score += match_score;
             } else {
                 incompatible = true;
@@ -2585,26 +2621,30 @@ fn collect_declared_supertypes(
     }
 }
 
-fn type_sets_match_score(actual: &[String], expected: &[String]) -> Option<usize> {
+fn type_sets_match_score(
+    actual: &[String],
+    expected: &[String],
+    universal_type_names: &[&str],
+) -> Option<usize> {
     let best = actual
         .iter()
         .filter_map(|left| {
             expected
                 .iter()
-                .filter_map(|right| type_name_match_score(left, right))
+                .filter_map(|right| type_name_match_score(left, right, universal_type_names))
                 .max()
         })
         .max();
     best
 }
 
-fn type_name_match_score(left: &str, right: &str) -> Option<usize> {
+fn type_name_match_score(left: &str, right: &str, universal_type_names: &[&str]) -> Option<usize> {
     let left = normalize_type_name(left);
     let right = normalize_type_name(right);
-    if is_universal_type_name(&left) {
+    if is_universal_type_name(&left, universal_type_names) {
         return None;
     }
-    if is_universal_type_name(&right) {
+    if is_universal_type_name(&right, universal_type_names) {
         return Some(1);
     }
     if left == right {
@@ -2613,12 +2653,13 @@ fn type_name_match_score(left: &str, right: &str) -> Option<usize> {
     (short_callee(&left) == short_callee(&right)).then_some(2)
 }
 
-fn type_name_matches(left: &str, right: &str) -> bool {
-    type_name_match_score(left, right).is_some()
+fn type_name_matches(left: &str, right: &str, universal_type_names: &[&str]) -> bool {
+    type_name_match_score(left, right, universal_type_names).is_some()
 }
 
-fn is_universal_type_name(name: &str) -> bool {
-    matches!(short_callee(name), "Object" | "Any" | "AnyObject" | "interface{}")
+fn is_universal_type_name(name: &str, universal_type_names: &[&str]) -> bool {
+    let short = short_callee(name);
+    universal_type_names.contains(&name) || universal_type_names.contains(&short)
 }
 
 fn normalize_type_name(name: &str) -> String {
@@ -2640,6 +2681,7 @@ struct CallableArgResolutionContext<'a> {
     caller_language: Option<&'static str>,
     quoted_callable_literals: bool,
     same_directory_unqualified_calls: bool,
+    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
     path_for_file: &'a dyn Fn(FileId) -> Option<String>,
     file_path_parts: &'a AHashMap<FileId, Vec<String>>,
     method_candidate_cache: &'a mut MethodCandidateCache,
@@ -2656,6 +2698,7 @@ impl CallableArgResolutionContext<'_> {
             caller_language: _,
             quoted_callable_literals,
             same_directory_unqualified_calls,
+            module_path_syntax,
             path_for_file,
             file_path_parts,
             method_candidate_cache,
@@ -2678,6 +2721,7 @@ impl CallableArgResolutionContext<'_> {
             path_for_file: *path_for_file,
             file_path_parts,
             same_directory_unqualified_calls: *same_directory_unqualified_calls,
+            module_path_syntax: *module_path_syntax,
         };
         let original_alias_qualified = variants.iter().any(|variant| {
             let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
@@ -2807,6 +2851,7 @@ pub fn collect_local_callable_bindings(
 /// alias-index scans.
 pub fn collect_workspace_local_callable_bindings(
     global: &GlobalIndex,
+    module_path_syntax_for_file: impl Fn(FileId) -> bonsai_lang_api::ModulePathSyntax,
 ) -> AHashMap<FuncId, AHashMap<String, FuncId>> {
     let alias_index = WorkspaceAliasIndex::build(global);
     let callable_index = WorkspaceCallableBindingIndex::build(global);
@@ -2850,6 +2895,7 @@ pub fn collect_workspace_local_callable_bindings(
                 &alias_targets,
                 &alias_index,
                 Some(&callable_index),
+                module_path_syntax_for_file(file),
             );
             if !bindings.is_empty() {
                 out.insert(FuncId::new(decl.symbol.raw()), bindings);
@@ -2995,6 +3041,7 @@ pub fn collect_local_callable_bindings_with_aliases(
         alias_targets,
         None,
         None,
+        bonsai_lang_api::ModulePathSyntax::none(),
         &callable_uses,
         &mut bindings,
     );
@@ -3015,6 +3062,7 @@ fn collect_local_callable_bindings_with_alias_index(
     alias_targets: &AHashMap<String, AliasTarget>,
     alias_index: &WorkspaceAliasIndex,
     callable_index: Option<&WorkspaceCallableBindingIndex>,
+    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
 ) -> AHashMap<String, FuncId> {
     let mut bindings = AHashMap::new();
     let mut callable_uses = AHashSet::new();
@@ -3026,6 +3074,7 @@ fn collect_local_callable_bindings_with_alias_index(
         alias_targets,
         Some(alias_index),
         callable_index,
+        module_path_syntax,
         &callable_uses,
         &mut bindings,
     );
@@ -3109,6 +3158,7 @@ fn collect_local_callable_bindings_into(
     alias_targets: &AHashMap<String, AliasTarget>,
     alias_index: Option<&WorkspaceAliasIndex>,
     callable_index: Option<&WorkspaceCallableBindingIndex>,
+    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
     callable_uses: &AHashSet<String>,
     bindings: &mut AHashMap<String, FuncId>,
 ) {
@@ -3142,6 +3192,7 @@ fn collect_local_callable_bindings_into(
                         alias_targets,
                         alias_index,
                         callable_index,
+                        module_path_syntax,
                     ) {
                         bindings.insert(target.clone(), sym);
                         continue;
@@ -3157,6 +3208,7 @@ fn collect_local_callable_bindings_into(
                         alias_targets,
                         alias_index,
                         callable_index,
+                        module_path_syntax,
                     ) {
                         bindings.insert(target.clone(), sym);
                         continue;
@@ -3184,6 +3236,7 @@ fn collect_local_callable_bindings_into(
                             alias_targets,
                             alias_index,
                             callable_index,
+                            module_path_syntax,
                         )
                     })
                     .or_else(|| {
@@ -3195,6 +3248,7 @@ fn collect_local_callable_bindings_into(
                                 alias_targets,
                                 alias_index,
                                 callable_index,
+                                module_path_syntax,
                             )
                         })
                     })
@@ -3214,6 +3268,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
+                    module_path_syntax,
                     callable_uses,
                     bindings,
                 );
@@ -3224,6 +3279,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
+                    module_path_syntax,
                     callable_uses,
                     bindings,
                 );
@@ -3236,6 +3292,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
+                    module_path_syntax,
                     callable_uses,
                     bindings,
                 );
@@ -3253,6 +3310,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
+                    module_path_syntax,
                     callable_uses,
                     bindings,
                 );
@@ -3263,6 +3321,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
+                    module_path_syntax,
                     callable_uses,
                     bindings,
                 );
@@ -3273,6 +3332,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
+                    module_path_syntax,
                     callable_uses,
                     bindings,
                 );
@@ -3285,6 +3345,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
+                    module_path_syntax,
                     callable_uses,
                     bindings,
                 );
@@ -3389,6 +3450,7 @@ fn resolve_returned_lambda_factory_with_alias_index(
     alias_targets: &AHashMap<String, AliasTarget>,
     alias_index: Option<&WorkspaceAliasIndex>,
     callable_index: Option<&WorkspaceCallableBindingIndex>,
+    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
 ) -> Option<FuncId> {
     let factory = resolve_callable_symbol_with_alias_index(
         global,
@@ -3397,6 +3459,7 @@ fn resolve_returned_lambda_factory_with_alias_index(
         alias_targets,
         alias_index,
         callable_index,
+        module_path_syntax,
     )?;
     let factory_decl = global.decl_of(SymbolId::new(factory.raw()))?;
     if factory_decl.kind != DeclKind::Function {
@@ -3525,6 +3588,7 @@ fn resolve_callable_symbol_with_alias_index(
     alias_targets: &AHashMap<String, AliasTarget>,
     alias_index: Option<&WorkspaceAliasIndex>,
     callable_index: Option<&WorkspaceCallableBindingIndex>,
+    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
 ) -> Option<FuncId> {
     let variants = callable_reference_variants(raw);
     if variants.is_empty() {
@@ -3549,7 +3613,9 @@ fn resolve_callable_symbol_with_alias_index(
             }
         }
     }
-    let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
+    let ctx = ResolveContext::new(caller_file, &caller_module)
+        .with_alias_map(alias_targets)
+        .with_module_path_syntax(module_path_syntax);
     let owned_index;
     let alias_index = match alias_index {
         Some(index) => index,
@@ -3582,10 +3648,12 @@ fn resolve_callable_symbol_with_alias_index(
             alias_targets
                 .get(qualifier)
                 .map(|t| match t {
-                    AliasTarget::Namespace { module } => is_workspace_alias_target(alias_index, module),
+                    AliasTarget::Namespace { module } => {
+                        is_workspace_alias_target(alias_index, module, module_path_syntax)
+                    }
                     AliasTarget::Member { module, member } => {
-                        is_workspace_alias_target(alias_index, module)
-                            || is_workspace_alias_target(alias_index, member)
+                        is_workspace_alias_target(alias_index, module, module_path_syntax)
+                            || is_workspace_alias_target(alias_index, member, module_path_syntax)
                     }
                     AliasTarget::Type { .. } => true,
                 })
@@ -4526,10 +4594,15 @@ fn assigned_receiver_type_names(
     out
 }
 
+struct AssignedReceiverNarrowingContext<'a> {
+    global: &'a GlobalIndex,
+    caller_decl: &'a Decl,
+    alias_targets: &'a AHashMap<String, AliasTarget>,
+    universal_type_names: &'a [&'a str],
+}
+
 fn retain_assigned_receiver_method_candidates(
-    global: &GlobalIndex,
-    caller_decl: &Decl,
-    alias_targets: &AHashMap<String, AliasTarget>,
+    context: &AssignedReceiverNarrowingContext<'_>,
     receiver: Option<&str>,
     call_span: Span,
     method_candidate_cache: &mut MethodCandidateCache,
@@ -4542,9 +4615,9 @@ fn retain_assigned_receiver_method_candidates(
         return;
     };
     let assigned = assigned_receiver_type_names(
-        global,
-        caller_decl,
-        alias_targets,
+        context.global,
+        context.caller_decl,
+        context.alias_targets,
         receiver,
         Some(call_span),
         method_candidate_cache,
@@ -4554,15 +4627,15 @@ fn retain_assigned_receiver_method_candidates(
     }
     let mut narrowed = Vec::new();
     for func in candidates.iter().copied() {
-        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+        let Some(decl) = context.global.decl_of(SymbolId::new(func.raw())) else {
             continue;
         };
-        let Some(class_decl) = enclosing_class_for_decl(global, decl) else {
+        let Some(class_decl) = enclosing_class_for_decl(context.global, decl) else {
             continue;
         };
         if assigned
             .iter()
-            .any(|type_name| type_name_matches(type_name, &class_decl.name))
+            .any(|type_name| type_name_matches(type_name, &class_decl.name, context.universal_type_names))
         {
             narrowed.push(func);
         }
@@ -4584,6 +4657,7 @@ fn retain_semantic_receiver_evidenced_candidates(
     alias_qualified_call: bool,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     super_receiver_tokens: &[&str],
+    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
     method_candidate_cache: &mut MethodCandidateCache,
     candidates: &mut Vec<FuncId>,
 ) {
@@ -4605,7 +4679,8 @@ fn retain_semantic_receiver_evidenced_candidates(
     };
     let ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
         .with_alias_map(alias_targets)
-        .with_file_path_lookup(path_for_file);
+        .with_file_path_lookup(path_for_file)
+        .with_module_path_syntax(module_path_syntax);
     let mut receiver_class_symbols = semantic_receiver_class_symbols(
         global,
         caller_decl,
@@ -4635,7 +4710,7 @@ fn retain_semantic_receiver_evidenced_candidates(
         {
             return true;
         }
-        receiver_matches_decl_module(&receiver, decl, file, path_for_file)
+        receiver_matches_decl_module(&receiver, decl, file, path_for_file, module_path_syntax)
     });
 }
 
@@ -4690,9 +4765,12 @@ fn receiver_matches_decl_module(
     decl: &Decl,
     file: FileId,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
+    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
 ) -> bool {
-    module_target_matches_decl_module_path(receiver, &decl.module_path)
-        || path_for_file(file).is_some_and(|path| module_target_matches_path(receiver, &path))
+    module_target_matches_decl_module_path_with_syntax(receiver, &decl.module_path, module_path_syntax)
+        || path_for_file(file).is_some_and(|path| {
+            module_target_matches_path(strip_module_path_prefix(receiver, module_path_syntax), &path)
+        })
 }
 
 fn receiver_class_ancestors(global: &GlobalIndex, receiver_class: SymbolId) -> AHashSet<SymbolId> {
@@ -4725,6 +4803,7 @@ fn retain_assigned_receiver_constructor_candidates(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     assign_span: &Span,
+    universal_type_names: &[&str],
     method_candidate_cache: &mut MethodCandidateCache,
     candidates: &mut Vec<FuncId>,
 ) {
@@ -4755,7 +4834,7 @@ fn retain_assigned_receiver_constructor_candidates(
         };
         if assigned
             .iter()
-            .any(|type_name| type_name_matches(type_name, &class_decl.name))
+            .any(|type_name| type_name_matches(type_name, &class_decl.name, universal_type_names))
         {
             narrowed.push(func);
         }
@@ -5187,7 +5266,7 @@ fn collect_workspace_module_targets(
     alias_tail: &str,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     file_path_parts: &AHashMap<FileId, Vec<String>>,
-    caller_export_aliases: &[&'static str],
+    caller_capabilities: LanguageCapabilities,
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     workspace_module_cache: &mut WorkspaceModuleTargetCache,
@@ -5203,10 +5282,12 @@ fn collect_workspace_module_targets(
     if let Some(cached) = workspace_module_cache.targets.get(&cache_key) {
         return cached.clone();
     }
-    let caller_ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
+    let caller_ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
+        .with_alias_map(alias_targets)
+        .with_module_path_syntax(caller_capabilities.module_path_syntax);
     let mut seen_spans = AHashSet::new();
     let mut targets = Vec::new();
-    for func in export_name_variants(alias_tail, caller_export_aliases)
+    for func in export_name_variants(alias_tail, caller_capabilities.module_export_aliases)
         .into_iter()
         .flat_map(|name| collect_callable_targets(global, &name))
     {
@@ -5229,9 +5310,14 @@ fn collect_workspace_module_targets(
         // file-path match would silently miss the cross-module
         // edge. The semantic match is always sufficient when
         // adapters populate `module_path`.
-        let semantic_match = module_target_matches_decl_module_path(alias_target, &decl.module_path);
+        let semantic_match = module_target_matches_decl_module_path_with_syntax(
+            alias_target,
+            &decl.module_path,
+            caller_capabilities.module_path_syntax,
+        );
+        let path_target = strip_module_path_prefix(alias_target, caller_capabilities.module_path_syntax);
         let in_target_file = semantic_match
-            || workspace_module_cache.path_matches(alias_target, file, file_path_parts, path_for_file);
+            || workspace_module_cache.path_matches(path_target, file, file_path_parts, path_for_file);
         if !in_target_file {
             continue;
         }
@@ -5250,7 +5336,7 @@ fn collect_workspace_targets_for_alias_entry(
     alias_tail: &str,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     file_path_parts: &AHashMap<FileId, Vec<String>>,
-    caller_export_aliases: &[&'static str],
+    caller_capabilities: LanguageCapabilities,
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     workspace_module_cache: &mut WorkspaceModuleTargetCache,
@@ -5262,7 +5348,7 @@ fn collect_workspace_targets_for_alias_entry(
             alias_tail,
             path_for_file,
             file_path_parts,
-            caller_export_aliases,
+            caller_capabilities,
             caller_decl,
             alias_targets,
             workspace_module_cache,
@@ -5274,7 +5360,7 @@ fn collect_workspace_targets_for_alias_entry(
                 alias_tail,
                 path_for_file,
                 file_path_parts,
-                caller_export_aliases,
+                caller_capabilities,
                 caller_decl,
                 alias_targets,
                 workspace_module_cache,
@@ -5286,7 +5372,7 @@ fn collect_workspace_targets_for_alias_entry(
                     alias_tail,
                     path_for_file,
                     file_path_parts,
-                    caller_export_aliases,
+                    caller_capabilities,
                     caller_decl,
                     alias_targets,
                     workspace_module_cache,
@@ -5306,31 +5392,33 @@ fn collect_qualified_workspace_targets(
     alias_targets: &AHashMap<String, AliasTarget>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     file_path_parts: &AHashMap<FileId, Vec<String>>,
-    caller_export_aliases: &[&'static str],
+    caller_capabilities: LanguageCapabilities,
     caller_decl: &Decl,
     workspace_module_cache: &mut WorkspaceModuleTargetCache,
 ) -> Vec<FuncId> {
     if let Some(alias_target) = alias_targets.get(name) {
-        let alias_tail = match alias_target {
-            AliasTarget::Namespace { .. } => Some("default"),
-            AliasTarget::Member { member, .. } => Some(member.as_str()),
-            AliasTarget::Type { .. } => None,
+        let alias_tails: Vec<&str> = match alias_target {
+            AliasTarget::Namespace { .. } => caller_capabilities.module_default_export_names.to_vec(),
+            AliasTarget::Member { member, .. } => vec![member.as_str()],
+            AliasTarget::Type { .. } => Vec::new(),
         };
-        if let Some(alias_tail) = alias_tail {
-            let candidates = collect_workspace_targets_for_alias_entry(
+        let mut candidates = Vec::new();
+        for alias_tail in alias_tails {
+            candidates.extend(collect_workspace_targets_for_alias_entry(
                 global,
                 alias_target,
                 alias_tail,
                 path_for_file,
                 file_path_parts,
-                caller_export_aliases,
+                caller_capabilities,
                 caller_decl,
                 alias_targets,
                 workspace_module_cache,
-            );
-            if !candidates.is_empty() {
-                return candidates;
-            }
+            ));
+        }
+        dedup_func_ids(&mut candidates);
+        if !candidates.is_empty() {
+            return candidates;
         }
     }
     if let Some((alias_target, alias_tail)) = namespace_alias_target_tail(name, alias_targets) {
@@ -5340,7 +5428,7 @@ fn collect_qualified_workspace_targets(
             alias_tail,
             path_for_file,
             file_path_parts,
-            caller_export_aliases,
+            caller_capabilities,
             caller_decl,
             alias_targets,
             workspace_module_cache,
@@ -5356,7 +5444,7 @@ fn collect_qualified_workspace_targets(
             alias_tail,
             path_for_file,
             file_path_parts,
-            caller_export_aliases,
+            caller_capabilities,
             caller_decl,
             alias_targets,
             workspace_module_cache,
@@ -5374,7 +5462,7 @@ fn collect_qualified_workspace_targets(
             alias_tail,
             path_for_file,
             file_path_parts,
-            caller_export_aliases,
+            caller_capabilities,
             caller_decl,
             alias_targets,
             workspace_module_cache,
@@ -5390,7 +5478,7 @@ fn collect_qualified_workspace_targets(
             module_tail,
             path_for_file,
             file_path_parts,
-            caller_export_aliases,
+            caller_capabilities,
             caller_decl,
             alias_targets,
             workspace_module_cache,
@@ -5421,15 +5509,7 @@ fn collect_qualified_workspace_targets(
 /// every name match by design. Graph-construction paths must use
 /// [`collect_callable_targets_with_context`].
 pub fn collect_callable_targets(global: &GlobalIndex, name: &str) -> Vec<FuncId> {
-    let mut targets = collect_callable_targets_exact(global, name);
-    // Ruby method names ending in `!` are aliases for the bare-name
-    // version on the same receiver; retry without the suffix.
-    if targets.is_empty() {
-        if let Some(no_bang) = name.strip_suffix('!') {
-            targets = collect_callable_targets_exact(global, no_bang);
-        }
-    }
-    targets
+    collect_callable_targets_exact(global, name)
 }
 
 /// Caller-context-aware version of [`collect_callable_targets`]. Use
@@ -5463,6 +5543,7 @@ pub fn collect_callable_targets_with_context_and_aliases(
             path_for_file: &path_for_file,
             file_path_parts: &file_path_parts,
             same_directory_unqualified_calls: false,
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
         },
         &mut callable_target_cache,
     )
@@ -5499,6 +5580,7 @@ fn collect_callable_targets_with_context_aliases_paths_and_method_cache(
         path_for_file,
         file_path_parts,
         same_directory_unqualified_calls,
+        module_path_syntax,
     } = semantics;
     let mut targets = collect_implicit_receiver_method_targets(
         global,
@@ -5529,13 +5611,9 @@ fn collect_callable_targets_with_context_aliases_paths_and_method_cache(
             .with_alias_map(alias_targets)
             .with_file_path_lookup(path_for_file)
             .with_same_directory_unqualified_calls(same_directory_unqualified_calls)
+            .with_module_path_syntax(module_path_syntax)
             .with_file_path_match_lookup(&path_matches);
         targets = resolve_callable_with_context(global, name, &ctx);
-        if targets.is_empty() {
-            if let Some(no_bang) = name.strip_suffix('!') {
-                targets = resolve_callable_with_context(global, no_bang, &ctx);
-            }
-        }
     }
     callable_target_cache.targets.insert(key, targets.clone());
     targets
@@ -5670,7 +5748,7 @@ pub fn collect_call_event_targets_with_context_and_aliases(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
-    caller_export_aliases: &[&'static str],
+    caller_export_aliases: &'static [&'static str],
 ) -> Vec<FuncId> {
     collect_call_event_targets_with_context_aliases_and_super_tokens(
         global,
@@ -5684,6 +5762,7 @@ pub fn collect_call_event_targets_with_context_and_aliases(
         alias_targets,
         path_for_file,
         caller_export_aliases,
+        &[],
         &[],
     )
 }
@@ -5700,9 +5779,16 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
-    caller_export_aliases: &[&'static str],
-    caller_super_receiver_tokens: &[&'static str],
+    caller_export_aliases: &'static [&'static str],
+    caller_default_export_names: &'static [&'static str],
+    caller_super_receiver_tokens: &'static [&'static str],
 ) -> Vec<FuncId> {
+    let caller_capabilities = LanguageCapabilities {
+        module_export_aliases: caller_export_aliases,
+        module_default_export_names: caller_default_export_names,
+        super_receiver_tokens: caller_super_receiver_tokens,
+        ..LanguageCapabilities::unsupported()
+    };
     let folded_receiver = receiver_name_from_call_name(name).filter(|candidate| {
         folded_call_name_receiver_is_instance(candidate, caller_decl, caller_super_receiver_tokens)
     });
@@ -5726,6 +5812,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         path_for_file,
         file_path_parts: &file_path_parts,
         same_directory_unqualified_calls: false,
+        module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
     };
     let constructor_context = ConstructorResolutionContext {
         global,
@@ -5793,7 +5880,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             alias_targets,
             path_for_file,
             &file_path_parts,
-            caller_export_aliases,
+            caller_capabilities,
             caller_decl,
             &mut workspace_module_cache,
         );
@@ -5827,12 +5914,21 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             alias_targets
                 .get(qualifier)
                 .map(|t| match t {
-                    AliasTarget::Namespace { module } => {
-                        is_workspace_alias_target(&local_alias_index, module)
-                    }
+                    AliasTarget::Namespace { module } => is_workspace_alias_target(
+                        &local_alias_index,
+                        module,
+                        caller_capabilities.module_path_syntax,
+                    ),
                     AliasTarget::Member { module, member } => {
-                        is_workspace_alias_target(&local_alias_index, module)
-                            || is_workspace_alias_target(&local_alias_index, member)
+                        is_workspace_alias_target(
+                            &local_alias_index,
+                            module,
+                            caller_capabilities.module_path_syntax,
+                        ) || is_workspace_alias_target(
+                            &local_alias_index,
+                            member,
+                            caller_capabilities.module_path_syntax,
+                        )
                     }
                     AliasTarget::Type { .. } => true,
                 })
@@ -5851,17 +5947,28 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         }
     }
     if !targets.is_empty() {
-        retain_assigned_receiver_method_candidates(
+        let assigned_receiver_context = AssignedReceiverNarrowingContext {
             global,
             caller_decl,
             alias_targets,
+            universal_type_names: &[],
+        };
+        retain_assigned_receiver_method_candidates(
+            &assigned_receiver_context,
             semantic_receiver,
             call_span,
             &mut method_candidate_cache,
             &mut targets,
         );
         let receiver_supplied = semantic_receiver.is_some() || call_kind == CallKind::Method;
-        retain_signature_compatible_candidates(global, caller_decl, &mut targets, args, receiver_supplied);
+        retain_signature_compatible_candidates(
+            global,
+            caller_decl,
+            &mut targets,
+            args,
+            receiver_supplied,
+            &[],
+        );
     }
     retain_call_kind_compatible_candidates(global, call_kind, &mut targets);
     dedup_func_ids(&mut targets);
@@ -5956,7 +6063,7 @@ impl WorkspaceAliasIndex {
         }
     }
 
-    fn contains(&self, module: &str) -> bool {
+    fn contains(&self, module: &str, syntax: bonsai_lang_api::ModulePathSyntax) -> bool {
         let trimmed = module.trim();
         if trimmed.is_empty() {
             return false;
@@ -5964,7 +6071,7 @@ impl WorkspaceAliasIndex {
         if self.class_names.contains(trimmed) {
             return true;
         }
-        let stripped = trimmed.trim_start_matches("crate::").trim_start_matches("crate.");
+        let stripped = strip_module_path_prefix(trimmed, syntax);
         self.module_names.contains(trimmed) || self.module_names.contains(stripped)
     }
 }
@@ -5974,8 +6081,12 @@ impl WorkspaceAliasIndex {
 /// Memoised against a precomputed [`WorkspaceAliasIndex`] so the
 /// short-tail gate is O(1) per call instead of O(decls). See the
 /// index's docs for the rationale.
-fn is_workspace_alias_target(idx: &WorkspaceAliasIndex, module: &str) -> bool {
-    idx.contains(module)
+fn is_workspace_alias_target(
+    idx: &WorkspaceAliasIndex,
+    module: &str,
+    syntax: bonsai_lang_api::ModulePathSyntax,
+) -> bool {
+    idx.contains(module, syntax)
 }
 
 /// True when `call_name` resolves to `target_func` from `caller_decl`'s

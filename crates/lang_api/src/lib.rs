@@ -13,7 +13,7 @@ pub mod taxonomy;
 pub mod types;
 
 pub use capabilities::{
-    CallTextPrefilter, CallableDeclarationFamily, CapabilityLevel, LanguageCapabilities,
+    CallTextPrefilter, CallableDeclarationFamily, CapabilityLevel, LanguageCapabilities, ModulePathSyntax,
     NO_CONSTRUCTOR_METHOD_NAMES,
 };
 pub use kit::{

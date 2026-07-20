@@ -87,6 +87,9 @@ impl LanguageAdapter for SwiftAdapter {
         // chains so the engine forks state per arm. Same approach as
         // the Scala adapter.
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &["Any", "AnyObject"],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             pattern_matching: bonsai_lang_api::CapabilityLevel::Exact,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: &["init"],

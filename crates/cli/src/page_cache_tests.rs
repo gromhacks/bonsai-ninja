@@ -1,7 +1,7 @@
 use super::{
     cache_is_fresh, content_tree_fingerprint, dependency_metadata_fingerprint, eager_window,
-    rulepack_dir_skipped, workspace_fingerprint, workspace_metadata_fingerprint, PageCacheFile,
-    RENDER_CACHE_VERSION,
+    read_json_cache_file, rulepack_dir_skipped, serialize_json_bounded, workspace_fingerprint,
+    workspace_metadata_fingerprint, PageCacheFile, MAX_PAYLOAD_BYTES, RENDER_CACHE_VERSION,
 };
 use std::path::PathBuf;
 
@@ -22,6 +22,27 @@ fn eager_window_keeps_page_cache_opportunistic() {
         window.into_iter().collect::<Vec<_>>(),
         vec![1, 2, 3, 4, 10, 11, 12, 13]
     );
+}
+
+#[test]
+fn oversized_cache_file_is_rejected_before_deserialization() {
+    let root = tempdir("oversized-read");
+    let path = root.join("cache.json");
+    let file = std::fs::File::create(&path).expect("create sparse cache");
+    file.set_len(MAX_PAYLOAD_BYTES as u64 + 1)
+        .expect("size sparse cache");
+
+    assert!(read_json_cache_file::<serde_json::Value>(&path).is_none());
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn oversized_cache_value_is_rejected_during_serialization() {
+    let value = "x".repeat(256);
+    assert!(serialize_json_bounded(&value, 32)
+        .expect("bounded serialization")
+        .is_none());
 }
 
 #[test]

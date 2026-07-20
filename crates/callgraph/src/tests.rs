@@ -145,10 +145,16 @@ fn with_params_and_types(mut decl: Decl, params: &[(&str, &str)]) -> Decl {
 
 #[test]
 fn broad_actual_type_does_not_prove_specific_dispatch_type() {
-    assert_eq!(type_name_match_score("Service", "Object"), Some(1));
-    assert_eq!(type_name_match_score("Object", "Service"), None);
-    assert_eq!(type_name_match_score("unknown", "Service"), None);
-    assert!(!type_name_matches("unknown", "Service"));
+    let universal = &["Object"];
+    assert_eq!(type_name_match_score("Service", "Object", universal), Some(1));
+    assert_eq!(type_name_match_score("Object", "Service", universal), None);
+    assert_eq!(
+        type_name_match_score("Service", "Object", &[]),
+        None,
+        "a shared backend must not infer another language's universal type spelling"
+    );
+    assert_eq!(type_name_match_score("unknown", "Service", universal), None);
+    assert!(!type_name_matches("unknown", "Service", universal));
 }
 
 fn insert_file(global: &mut GlobalIndex, file: FileId, defs: Vec<Decl>) {
@@ -1028,24 +1034,32 @@ fn rust_crate_root_member_import_resolves_by_path_not_leaf_fanout() {
         },
     )]);
 
-    let cg = ResolvedCallGraph::build_with_file_info(
+    let cg = ResolvedCallGraph::build_with_file_semantics(
         &global,
-        |_| AHashMap::new(),
-        |file| {
-            if file == caller_file {
-                alias_targets.clone()
-            } else {
-                AHashMap::new()
-            }
-        },
-        |file| match file {
-            f if f == caller_file => Some("/repo/examples/rust/micro/gateway.rs".to_string()),
-            f if f == micro_file => Some("/repo/examples/rust/micro/user_service.rs".to_string()),
-            f if f == admin_file => Some("/repo/examples/rust/admin/user_service.rs".to_string()),
-            _ => None,
-        },
-        |_| &[],
-        |_| Some("rust"),
+        CallGraphFileSemantics::new(
+            |_| AHashMap::new(),
+            |file| {
+                if file == caller_file {
+                    alias_targets.clone()
+                } else {
+                    AHashMap::new()
+                }
+            },
+            |file| match file {
+                f if f == caller_file => Some("/repo/examples/rust/micro/gateway.rs".to_string()),
+                f if f == micro_file => Some("/repo/examples/rust/micro/user_service.rs".to_string()),
+                f if f == admin_file => Some("/repo/examples/rust/admin/user_service.rs".to_string()),
+                _ => None,
+            },
+            |_| Some("rust"),
+            |_| LanguageCapabilities {
+                module_path_syntax: bonsai_lang_api::ModulePathSyntax {
+                    rooted_prefixes: &["crate::", "self::"],
+                    repeatable_rooted_prefixes: &["super::"],
+                },
+                ..LanguageCapabilities::unsupported()
+            },
+        ),
     );
     let entry = FuncId::new(global.find_by_name("entry")[0].raw());
     let micro_get_user = FuncId::new(global.decls_in(micro_file)[0].symbol.raw());
@@ -2183,6 +2197,83 @@ fn import_qualified_call_does_not_retry_bare_tail() {
 }
 
 #[test]
+fn bare_namespace_call_requires_adapter_default_export_semantics() {
+    let caller_file = FileId::new(1);
+    let exported_file = FileId::new(2);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![with_module_path(
+            decl(caller_file, 0, "entry", vec![call(caller_file, "worker")]),
+            &["app", "main"],
+        )],
+    );
+    insert_file(
+        &mut global,
+        exported_file,
+        vec![with_module_path(
+            decl(exported_file, 0, "default", Vec::new()),
+            &["app", "worker"],
+        )],
+    );
+
+    let build = |default_export_names: &'static [&'static str]| {
+        ResolvedCallGraph::build_with_file_semantics(
+            &global,
+            CallGraphFileSemantics::new(
+                |_| AHashMap::new(),
+                |file| {
+                    if file == caller_file {
+                        AHashMap::from_iter([(
+                            "worker".to_string(),
+                            AliasTarget::Namespace {
+                                module: "./worker.js".to_string(),
+                            },
+                        )])
+                    } else {
+                        AHashMap::new()
+                    }
+                },
+                |file| {
+                    Some(
+                        if file == exported_file {
+                            "app/worker.js"
+                        } else {
+                            "app/main.js"
+                        }
+                        .to_string(),
+                    )
+                },
+                |_| Some("fixture"),
+                move |file| LanguageCapabilities {
+                    module_default_export_names: if file == caller_file {
+                        default_export_names
+                    } else {
+                        &[]
+                    },
+                    ..LanguageCapabilities::unsupported()
+                },
+            ),
+        )
+    };
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let default_export = FuncId::new(global.find_by_name("default")[0].raw());
+
+    let without_syntax = build(&[]);
+    assert!(without_syntax.callees_of(entry).next().is_none());
+
+    let with_syntax = build(&["default"]);
+    assert_eq!(
+        with_syntax
+            .callees_of(entry)
+            .map(|edge| edge.to)
+            .collect::<Vec<_>>(),
+        vec![default_export]
+    );
+}
+
+#[test]
 fn module_qualified_receiver_method_resolves_by_module_path_without_bare_fanout() {
     let caller_file = FileId::new(1);
     let executor_file = FileId::new(2);
@@ -2578,6 +2669,7 @@ fn receiver_projected_callable_binding_resolves_receiver_form_invocation() {
         &AHashMap::new(),
         &alias_index,
         Some(&callable_index),
+        bonsai_lang_api::ModulePathSyntax::none(),
     );
     assert_eq!(
         indexed_bindings.get("service.execute"),
@@ -2604,22 +2696,28 @@ fn workspace_alias_index_materializes_module_suffixes() {
     let file = FileId::new(1);
     let mut global = GlobalIndex::new();
     let mut module_decl = decl(file, 0, "persist", Vec::new());
-    module_decl.module_path = ModulePath::from_segments(["crate", "services", "storage"]);
+    module_decl.module_path = ModulePath::from_segments(["services", "storage"]);
     insert_file(&mut global, file, vec![module_decl]);
 
     let index = WorkspaceAliasIndex::build(&global);
-    for alias in [
-        "crate::services::storage",
-        "services::storage",
-        "services.storage",
-        "storage",
-    ] {
+    for alias in ["services::storage", "services.storage", "storage"] {
         assert!(
-            index.contains(alias),
+            index.contains(alias, bonsai_lang_api::ModulePathSyntax::none()),
             "syntax-derived module suffix `{alias}` should be indexed"
         );
     }
-    assert!(!index.contains("unrelated"));
+    assert!(!index.contains(
+        "crate::services::storage",
+        bonsai_lang_api::ModulePathSyntax::none()
+    ));
+    assert!(index.contains(
+        "crate::services::storage",
+        bonsai_lang_api::ModulePathSyntax {
+            rooted_prefixes: &["crate::", "self::"],
+            repeatable_rooted_prefixes: &["super::"],
+        }
+    ));
+    assert!(!index.contains("unrelated", bonsai_lang_api::ModulePathSyntax::none()));
 }
 
 #[test]
@@ -3523,6 +3621,7 @@ fn super_constructor_resolves_direct_parent_not_transitive_ancestors() {
         caller_decl,
         &AHashMap::new(),
         &|_| None,
+        &[],
         &[],
         &["super"],
     );

@@ -124,6 +124,9 @@ impl LanguageAdapter for SolidityAdapter {
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &[],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &["super"],

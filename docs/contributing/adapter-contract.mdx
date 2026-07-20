@@ -139,30 +139,25 @@ where adapters declare per-language behaviour the engine consults:
 
 - **`module_export_aliases`** — receiver names the language treats as
   module-export aliases (`exports.X` for JS/TS).
+- **`module_default_export_names`** — adapter-emitted declaration names
+  representing callable default exports.
+- **`module_path_syntax`** — rooted qualified-name prefixes recognized by
+  that language. Shared resolution never carries a union of source tokens.
+- **`universal_type_names`** — type spellings that intentionally provide no
+  receiver/overload narrowing in that language.
 - **`constructor_method_names`** — narrow constructor-name list.
-  Adapters should override the empty default with the narrowest
-  correct set; the engine's `effective_constructor_method_names()`
-  falls through to `bonsai_common::CONSTRUCTOR_METHOD_NAMES` when
-  the slice is empty (the cross-language fallback). Languages whose
-  constructors are class-named or grammar-node-only should set
-  `bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES`, not `&[]`.
+  Empty means the language has no method-name constructor form; there is no
+  cross-language fallback.
 - **`super_receiver_tokens`** / **`implicit_receiver_tokens`** — same
-  shape: per-adapter override with cross-language fall-through.
-  Languages with no super receiver token must set
-  `bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS` so ordinary variables
-  named `super`, `parent`, `base`, or `SUPER` are not treated as
-  superclass dispatch.
+  shape: exact per-adapter declarations. Empty means no such source syntax.
 - **`field_places_complete`** — every source-level field/property
   projection is emitted as an IDG `Place`. Sink-oriented analysis may then
   run sparse AST-demand forwarding for that adapter. Leave this false until
   call-shaped properties, patterns, and implicit projections all have
   conformance coverage; complete export graphs never use this optimization.
 
-When the adapter narrows these, ambiguous engine-side fallbacks stop
-firing for the adapter's language. Until an adapter populates them,
-the cross-language constants are used for legacy compatibility; this
-preserves recall at the cost of precision. Mature adapters should not
-leave these slices empty.
+The empty value is meaningful. Shared compiler backends do not substitute a
+cross-language token list, guess from capitalization, or parse source text.
 
 The `Decl`-field population matrix in
 [adapter-capabilities.mdx](./adapter-capabilities.mdx) is the
@@ -221,8 +216,8 @@ existing `Decl` / `FlowEvent` contracts.
   span.** Browse layer dedup expects exactly one; emitting both forces
   browse to choose, which encodes adapter conventions where they don't
   belong.
-- **No populating `source_bearing_functions` or any `InterTaintConfig`
-  fact table from an adapter.** Adapters report facts through `Decl`
+- **No populating any `InterTaintConfig` transfer table from an adapter.**
+  Adapters report facts through `Decl`
   and `FlowEvent`; the security layer is the only crate that translates
   rule matches into engine-config facts.
 - **No relying on the engine to strip language keywords.** The engine

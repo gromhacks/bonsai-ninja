@@ -3,7 +3,7 @@
 //! This command answers "what facts influence `<symbol>` at `<line>`?"
 //! It prefers the shared value-flow/IDG graph when semantic sidecars have
 //! already been hydrated, then merges adapter-emitted
-//! [`FlowEvent`](bonsai_lang_api::FlowEvent) evidence for local syntax
+//! [`FlowEvent`] evidence for local syntax
 //! detail. When it reaches a parameter boundary, an unavailable semantic
 //! graph, or a caller-supplied cap, the result says so through
 //! `analysis_incomplete_reasons`.

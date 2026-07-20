@@ -93,6 +93,9 @@ impl LanguageAdapter for ScalaAdapter {
         // path-disjoint precision instead of the over-approximate
         // "any arm's taint reaches every other arm's body."
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &["Any", "AnyRef", "Object"],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             pattern_matching: bonsai_lang_api::CapabilityLevel::Exact,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,

@@ -68,44 +68,6 @@ pub const PROJECTION_CANONICALIZATION_VECTORS: &[(&str, &str)] = &[
     ("args[:cmd]", "args.cmd"),
 ];
 
-/// Absolute-path prefixes that adapters may surface on
-/// fully-qualified call names — Rust's `crate::` (this crate's
-/// root) and `self::` (current module), PHP / C++ leading `\` and
-/// `::` (global namespace). Used by the resolver's
-/// workspace-rooted call lookup to peel off the absolute-path mark
-/// before splitting on a module separator.
-///
-/// `super::` is *not* listed here because it can repeat (`super::super::foo`);
-/// the resolver iterates `super::` strips separately and handles
-/// non-repeatable prefixes via this list.
-///
-/// Files only use one language at a time, so a Rust prefix never
-/// appears on PHP source and vice versa — the list is safe to
-/// apply without per-language gating.
-pub const ABSOLUTE_PATH_PREFIXES: &[&str] = &["crate::", "self::", "::", "\\"];
-
-/// Statement / expression keyword prefixes that adapters can include
-/// on raw `FlowEvent::Return.value_text` — the leading `return ` of
-/// a return statement and the constructor `new ` of object-creation
-/// expressions in C-family languages. The engine peels these
-/// defensively so dispatch helpers see the bare expression
-/// (`Foo()`, `Bar.baz()`) regardless of how the adapter shaped the
-/// raw text.
-///
-/// Adapters that use `bonsai_lang_api::kit::extract_return_value_text`
-/// already get clean text — this list exists so engine sites that
-/// receive less-processed text (factory-method inference,
-/// constructor-shape detection) don't have to enumerate the
-/// keywords inline.
-pub const VALUE_TEXT_LEADING_KEYWORDS: &[&str] = &["return ", "new "];
-
-/// Self-typed constructor expressions used by Rust (`Self`, `self`)
-/// and PHP late static binding (`static`). When an adapter emits a
-/// return value of the form `Self { ... }`, `Self(...)`, `self(...)`,
-/// or `new static(...)`, the engine treats it as a class-typed
-/// constructor return for dispatch.
-pub const SELF_CONSTRUCTOR_HEADS: &[&str] = &["Self(", "Self {", "self(", "static("];
-
 /// Filename prefix used by the VFS case-sensitivity probe.
 ///
 /// The probe is a short-lived filesystem artifact, not source code. Consumers
@@ -135,26 +97,6 @@ pub fn is_bonsai_case_probe_path(path: &std::path::Path) -> bool {
         && !nanos.is_empty()
         && pid.chars().all(|c| c.is_ascii_digit())
         && nanos.chars().all(|c| c.is_ascii_digit())
-}
-
-/// True when `value_text` returns a self-typed constructor
-/// expression — Rust `Self(...)` / `Self { ... }` / `self(...)`,
-/// PHP `new static(...)` late static binding. Both the taint
-/// engine and the callgraph need to recognise this shape so a
-/// `return Self::new(...)` body resolves to its enclosing class's
-/// constructor; the helper lives here so both crates share one
-/// source of truth.
-#[must_use]
-pub fn value_text_returns_self_constructor(value_text: &str) -> bool {
-    let mut text = value_text.trim();
-    text = text.strip_prefix("return ").unwrap_or(text).trim();
-    if SELF_CONSTRUCTOR_HEADS.iter().any(|head| text.starts_with(*head)) {
-        return true;
-    }
-    matches!(
-        text.strip_prefix("new ").map(str::trim),
-        Some(rest) if SELF_CONSTRUCTOR_HEADS.iter().any(|head| rest.starts_with(*head))
-    )
 }
 
 /// Tail of a qualified call/reference name.

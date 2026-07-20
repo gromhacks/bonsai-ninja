@@ -185,6 +185,12 @@ impl LanguageAdapter for RustAdapter {
             receiver_types: CapabilityLevel::Partial,
             field_places_complete: false,
             module_export_aliases: &[],
+            module_default_export_names: &[],
+            universal_type_names: &[],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax {
+                rooted_prefixes: &["crate::", "self::"],
+                repeatable_rooted_prefixes: &["super::"],
+            },
             // Rust has no constructor keyword or reserved factory name.
             // Associated functions are classified from their `-> Self`
             // return plus `Self { ... }` / `Self(...)` AST shape below.

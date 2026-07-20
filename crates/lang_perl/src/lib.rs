@@ -85,6 +85,9 @@ impl LanguageAdapter for PerlAdapter {
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &[],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             constructor_method_names: &["new"],
             // Perl uses `SUPER::` (case-sensitive) for super-class
             // dispatch, but the syntactic receiver token preceding

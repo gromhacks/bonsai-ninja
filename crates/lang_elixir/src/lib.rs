@@ -69,6 +69,9 @@ impl LanguageAdapter for ElixirAdapter {
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &[],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &[],
             implicit_receiver_tokens: &[],

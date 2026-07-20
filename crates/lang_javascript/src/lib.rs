@@ -60,6 +60,9 @@ impl LanguageAdapter for JavaScriptAdapter {
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
             module_export_aliases: &["exports", "module.exports"],
+            module_default_export_names: &["default"],
+            universal_type_names: &[],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             constructor_method_names: &["constructor"],
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],

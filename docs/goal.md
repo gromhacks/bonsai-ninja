@@ -168,7 +168,7 @@ Review and harden the taint engine and language adapters so taint behavior is se
 
 ### Key architecture note (important - earlier handoff was misleading here)
 
-`security ... taint-analysis`, `dump-taint`, `inspect`, and the mega-flow regression run on the **IDG value-flow engine**. The former `crates/taint/src/inter/mod.rs` walker has been deleted; `crates/taint/src/inter.rs` is now a compatibility façade over the same closure. The taint graph is produced by `entry_taint_graph_from_idg*` in `crates/taint/src/reachable.rs`, built from IDG facts in `crates/idg/src/{builder,transfer,workspace_adapter}.rs`. Debug the IDG (`--debug idg-closure,idg-closure-detail,idg-resolve`).
+`security ... taint-analysis`, `dump-taint`, `inspect`, and the mega-flow regression run on the **IDG value-flow engine**. The former `crates/taint/src/inter/mod.rs` walker has been deleted; `crates/taint/src/idg_api.rs` is the compatibility façade over the same closure. The taint graph is produced by `entry_taint_graph_from_idg*` in `crates/taint/src/reachable.rs`, built from IDG facts in `crates/idg/src/{builder,transfer,workspace_adapter}.rs`. Debug the IDG (`--debug idg-closure,idg-closure-detail,idg-resolve`).
 
 Also note: `Workspace::index` reuses the on-disk `.bonsai/` sidecar (gitignored). Source edits and analyzer upgrades both invalidate safely: sidecar pipeline hashes bind workspace/dependency content, transfer semantics, matcher/config inputs, and the build fingerprint (git HEAD plus the tracked/untracked dirty payload). Manual sidecar clearing is no longer required to measure a rebuilt analyzer.
 

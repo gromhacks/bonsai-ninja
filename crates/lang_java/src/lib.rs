@@ -118,6 +118,9 @@ impl LanguageAdapter for JavaAdapter {
         // forms remain unrewritten and the rule-load gate still
         // rejects rules anchored on the reflective shape.
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &["Object"],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
             reflection: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,

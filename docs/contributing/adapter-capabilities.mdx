@@ -160,31 +160,26 @@ scripts/audit-adapter-capabilities.sh > .snapshots/ADAPTER_CAPABILITIES.snapshot
 If you change an adapter to populate a new `Decl` field, regenerate the
 snapshot, run the conformance report, and update the review table cell.
 
-## `LanguageCapabilities` per-adapter token slices
+## `LanguageCapabilities` per-adapter syntax facts
 
 In addition to the `Decl`-field population matrix above, each adapter
-declares a `LanguageCapabilities` struct (`crates/lang_api/src/capabilities.rs`)
-that the engine consults for language-shaped (rather than truly
-cross-language) tokens. Three of these slices accept per-adapter
-overrides with a fall-through to the cross-language constants in
-`bonsai_common::names`:
+declares the exact syntax/linkage facts that shared compiler passes may
+consume. There is no cross-language token fallback: an empty slice means the
+language does not expose that form.
 
-| Field | Default fall-through | Adapter override |
-|---|---|---|
-| `module_export_aliases` | `&[]` | JS/TS: `&["exports", "module.exports"]` |
-| `constructor_method_names` | `bonsai_common::CONSTRUCTOR_METHOD_NAMES` (`__init__`, `constructor`, `__construct`, `init`, `new`) | Python: `&["__init__"]`; JS/TS: `&["constructor"]`; Ruby: `&["initialize", "new"]`; Swift/ObjC: `&["init"]`; PHP: `&["__construct"]`; class-named or grammar-node-only constructors: `NO_CONSTRUCTOR_METHOD_NAMES` |
-| `super_receiver_tokens` | `bonsai_common::SUPER_RECEIVER_TOKENS` (`super`, `parent`, `base`, `SUPER`) | JS/TS/Java/Kotlin: `&["super"]`; PHP: `&["parent", "self"]`; C#: `&["base"]`; Perl: `&["SUPER"]`; C/C++/Go/Lua/Elixir/Erlang: `NO_SUPER_RECEIVER_TOKENS` |
-| `implicit_receiver_tokens` | `bonsai_common::IMPLICIT_RECEIVER_TOKENS` (`self`, `this`, `me`) | Python/Ruby: `&["self"]`; JS/TS/Java/C#: `&["this"]` |
+| Field | Empty/default meaning |
+|---|---|
+| `module_export_aliases` | no receiver-shaped module export aliases |
+| `module_default_export_names` | no callable default-export declaration name |
+| `module_path_syntax` | no rooted qualified-name prefixes |
+| `universal_type_names` | no type spelling is treated as universally broad |
+| `constructor_method_names` | constructors are class-named, grammar-node-only, or unsupported |
+| `super_receiver_tokens` | no supertype receiver token |
+| `implicit_receiver_tokens` | no implicit instance/class receiver token |
 
-The cross-language fallback fires when an adapter declares an empty
-slice. **Adapters should override with the narrowest correct set so
-fallbacks don't fire for mature adapters**. For `super_receiver_tokens`,
-languages with no super receiver token use
-`bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS`; for
-`constructor_method_names`, languages whose constructors are class-named
-or grammar-node-only use `bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES`.
-These sentinels prevent ordinary variables or methods named like another
-language's special token from inheriting cross-language semantics.
+Use `bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES` when an explicit empty
+constructor inventory makes the adapter declaration clearer. It is an empty
+slice, not a sentinel that activates fallback behavior.
 
 Engine consumers prefer the adapter-aware accessor:
 
@@ -192,16 +187,13 @@ Engine consumers prefer the adapter-aware accessor:
 let names = db
     .adapter_for(file)
     .map(|a| a.capabilities().effective_constructor_method_names())
-    .unwrap_or(bonsai_common::CONSTRUCTOR_METHOD_NAMES);
+    .unwrap_or(&[]);
 ```
 
 The same `effective_*()` shape exists for `super_receiver_tokens` and
-`implicit_receiver_tokens`. Code that doesn't have a `LanguageAdapter`
-in scope should prefer conservative no-super behavior unless it is
-only presenting legacy/contextless data. The no-context wrapper
-`bonsai_resolve::is_super_receiver(name)` still falls through to the
-cross-language constant for those display paths; the adapter-aware
-counterpart is `is_super_receiver_with_tokens(name, tokens)`.
+`implicit_receiver_tokens`; those names remain for API compatibility and
+return only the adapter's declared values. Code without adapter context uses
+the conservative empty behavior.
 
 ## Related
 
@@ -212,6 +204,6 @@ counterpart is `is_super_receiver_with_tokens(name, tokens)`.
 - `crates/lang_api/src/types.rs` — `Decl` struct definition for the
   fields surveyed here.
 - `crates/lang_api/src/capabilities.rs` — `LanguageCapabilities`
-  struct and `effective_*()` fall-through helpers.
+  struct and adapter-owned syntax declarations.
 - Per-adapter sources (`crates/lang_<lang>/src/lib.rs`) — where each
   field is (or isn't) populated.

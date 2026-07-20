@@ -516,14 +516,7 @@ impl<'a> TraceBuilder<'a> {
                     }
                 }
                 let assigned_types = caller_decl
-                    .map(|decl| {
-                        self.infer_assigned_types(
-                            decl,
-                            source_name.as_deref(),
-                            source_call.as_deref(),
-                            source_names,
-                        )
-                    })
+                    .map(|decl| self.infer_assigned_types(decl, source_name.as_deref()))
                     .unwrap_or_default();
                 if !assigned_types.is_empty() {
                     if let Some(frame) = self.frames.last_mut() {
@@ -863,13 +856,21 @@ impl<'a> TraceBuilder<'a> {
         if raw.is_empty() {
             return None;
         }
-        let trimmed = raw.trim().trim_start_matches('&').trim_start_matches('*');
+        let trimmed = raw.trim();
         let global = self.db.global_index();
         let caller_file = global
             .declaring_file(caller_decl.symbol)
             .unwrap_or(caller_decl.span.file);
         let alias_map = self.alias_map_for_decl(caller_decl);
-        let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(&alias_map);
+        let capabilities = self
+            .db
+            .adapter_for(caller_file)
+            .map(|adapter| adapter.capabilities())
+            .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported);
+        let ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
+            .with_alias_map(&alias_map)
+            .with_same_directory_unqualified_calls(capabilities.same_directory_unqualified_calls)
+            .with_module_path_syntax(capabilities.module_path_syntax);
         for candidate in callable_name_variants(trimmed) {
             let hits = resolve_callable_with_context(&global, &candidate, &ctx)
                 .into_iter()
@@ -883,21 +884,23 @@ impl<'a> TraceBuilder<'a> {
     }
 
     fn type_names_for_expr(&self, expr: &str, caller_decl: &Decl) -> AHashSet<String> {
-        let normalized = normalize_receiver_alias_text(expr);
-        let tail = bonsai_lang_api::kit::short_name_of(&normalized);
-        let self_tail = format!("self.{tail}");
-        let this_tail = format!("this.{tail}");
-        let aliases = [
-            expr,
-            normalized.as_str(),
-            tail,
-            self_tail.as_str(),
-            this_tail.as_str(),
-        ];
+        let normalized = expr.trim();
+        let tail = bonsai_lang_api::kit::short_name_of(normalized);
+        let mut aliases = vec![expr, normalized, tail];
+        let mut receiver_aliases = Vec::new();
+        for receiver in &caller_decl.implicit_receiver_names {
+            receiver_aliases.push(format!("{receiver}.{tail}"));
+        }
+        if let Some(receiver_index) = caller_decl.receiver_param_index {
+            if let Some(receiver) = caller_decl.params.get(receiver_index) {
+                receiver_aliases.push(format!("{receiver}.{tail}"));
+            }
+        }
+        aliases.extend(receiver_aliases.iter().map(String::as_str));
         let mut out = AHashSet::new();
         if let Some(frame) = self.frames.last() {
-            for alias in aliases {
-                if let Some(types) = frame.types.get(alias) {
+            for alias in &aliases {
+                if let Some(types) = frame.types.get(*alias) {
                     out.extend(types.iter().cloned());
                 }
             }
@@ -912,29 +915,10 @@ impl<'a> TraceBuilder<'a> {
         out
     }
 
-    fn infer_assigned_types(
-        &self,
-        caller_decl: &Decl,
-        source_name: Option<&str>,
-        source_call: Option<&str>,
-        source_names: &[String],
-    ) -> AHashSet<String> {
+    fn infer_assigned_types(&self, caller_decl: &Decl, source_name: Option<&str>) -> AHashSet<String> {
         let mut out = AHashSet::new();
         if let Some(source_name) = source_name {
             out.extend(self.type_names_for_expr(source_name, caller_decl));
-        }
-        if let Some(call) = source_call {
-            if let Some(bare) = constructor_type_tail(call) {
-                out.insert(bare.to_string());
-            }
-        }
-        if source_names.len() == 2
-            && source_names[0]
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_uppercase())
-        {
-            out.insert(source_names[0].clone());
         }
         out
     }
@@ -1009,53 +993,15 @@ impl<'a> TraceBuilder<'a> {
 }
 
 fn callable_name_variants(raw: &str) -> Vec<String> {
-    let trimmed = raw.trim().trim_start_matches('&').trim_start_matches('*');
+    let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Vec::new();
     }
     let short = bonsai_lang_api::kit::short_name_of(trimmed);
     let mut out = Vec::new();
     push_unique_string(&mut out, trimmed.to_string());
-    if let Some(no_bang) = trimmed.strip_suffix('!') {
-        push_unique_string(&mut out, no_bang.to_string());
-    }
     push_unique_string(&mut out, short.to_string());
-    if let Some(short_no_bang) = short.strip_suffix('!') {
-        push_unique_string(&mut out, short_no_bang.to_string());
-    }
     out
-}
-
-fn normalize_receiver_alias_text(text: &str) -> String {
-    text.trim()
-        .trim_start_matches(['&', '*'])
-        .replace("->", ".")
-        .trim_matches('.')
-        .to_string()
-}
-
-fn constructor_type_tail(call: &str) -> Option<&str> {
-    // Peel any leading constructor keyword (`new `) before extracting
-    // the rightmost type segment. Other entries in
-    // VALUE_TEXT_LEADING_KEYWORDS (e.g. `return `) shouldn't appear
-    // here — this site receives only the call form — but iterating
-    // the constant keeps the strip future-proof against new additions.
-    let mut head = call.trim();
-    for keyword in bonsai_common::VALUE_TEXT_LEADING_KEYWORDS {
-        if let Some(rest) = head.strip_prefix(*keyword) {
-            head = rest.trim();
-        }
-    }
-    let bare = head
-        .rsplit(&['.', ':'][..])
-        .next()
-        .unwrap_or(call)
-        .trim()
-        .trim_end_matches("()");
-    bare.chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_uppercase())
-        .then_some(bare)
 }
 
 fn types_from_decl(decl: &Decl) -> AHashMap<String, AHashSet<String>> {
