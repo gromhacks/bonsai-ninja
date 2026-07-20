@@ -104,18 +104,20 @@ struct WorkspaceMaps {
     /// where the candidate is still a `SymbolId` rather than a
     /// `FuncId`.
     file_to_language: AHashMap<FileId, &'static str>,
+    /// Adapter-owned source suffixes used to resolve path-like module
+    /// imports. The IDG core never carries a language extension inventory.
+    file_to_module_resolution_extensions: AHashMap<FileId, &'static [&'static str]>,
 }
 
 impl WorkspaceMaps {
-    fn build_with_languages_for_files<F>(
+    fn build_with_semantics_for_files<S>(
         global: &GlobalIndex,
-        language_for_file: F,
-        path_for_file: &dyn Fn(FileId) -> Option<String>,
+        semantics: &S,
         included_files: Option<&AHashSet<FileId>>,
         included_funcs: Option<&AHashSet<FuncId>>,
     ) -> Self
     where
-        F: Fn(FileId) -> Option<&'static str>,
+        S: IdgFileSemanticsProvider,
     {
         let mut func_to_seg: AHashMap<FuncId, SegmentId> = AHashMap::new();
         let mut func_to_name: AHashMap<FuncId, String> = AHashMap::new();
@@ -131,16 +133,24 @@ impl WorkspaceMaps {
         let mut symbol_to_scope: AHashMap<bonsai_common::SymbolId, LocalScopeKey> = AHashMap::new();
         let mut symbol_to_directory: AHashMap<bonsai_common::SymbolId, String> = AHashMap::new();
         let mut file_to_language: AHashMap<FileId, &'static str> = AHashMap::new();
+        let mut file_to_module_resolution_extensions: AHashMap<FileId, &'static [&'static str]> =
+            AHashMap::new();
         let mut file_to_seg: AHashMap<FileId, SegmentId> = AHashMap::new();
         let mut next_seg = 0u32;
         for file in global.all_files() {
             if included_files.is_some_and(|files| !files.contains(&file)) {
                 continue;
             }
-            let language = language_for_file(file);
-            let file_directory = path_for_file(file).and_then(|path| parent_dir_key(path.as_str()));
+            let language = semantics.language(file);
+            let file_directory = semantics
+                .path(file)
+                .and_then(|path| parent_dir_key(path.as_str()));
             if let Some(language) = language {
                 file_to_language.insert(file, language);
+            }
+            let module_resolution_extensions = semantics.module_resolution_extensions(file);
+            if !module_resolution_extensions.is_empty() {
+                file_to_module_resolution_extensions.insert(file, module_resolution_extensions);
             }
             let seg = SegmentId(next_seg);
             next_seg = next_seg.wrapping_add(1);
@@ -201,6 +211,7 @@ impl WorkspaceMaps {
             symbol_to_scope,
             symbol_to_directory,
             file_to_language,
+            file_to_module_resolution_extensions,
         }
     }
 }
@@ -1952,6 +1963,70 @@ impl<'a> FuncToSegment for WorkspaceFuncToSegment<'a> {
     }
 }
 
+/// Per-file compiler contract consumed by the language-neutral IDG builder.
+///
+/// Production implementations obtain these facts from the registered
+/// language adapter and VFS. A single provider prevents independent build
+/// modes from accidentally omitting part of the compiler contract.
+pub trait IdgFileSemanticsProvider {
+    /// Return semantic import bindings for `file`.
+    fn aliases(&mut self, file: FileId) -> AHashMap<String, String>;
+    /// Return the opaque language identity used only to prevent cross-language
+    /// fallback edges.
+    fn language(&self, file: FileId) -> Option<&'static str>;
+    /// Return the canonical VFS path used for directory/module scoping.
+    fn path(&self, file: FileId) -> Option<String>;
+    /// Return adapter-owned module suffixes for path-like import resolution.
+    fn module_resolution_extensions(&self, file: FileId) -> &'static [&'static str];
+}
+
+struct ClosureIdgFileSemantics<A, L, P, E> {
+    aliases: A,
+    language: L,
+    path: P,
+    module_resolution_extensions: E,
+}
+
+impl<A, L, P, E> ClosureIdgFileSemantics<A, L, P, E> {
+    fn new(
+        aliases_for_file: A,
+        language_for_file: L,
+        path_for_file: P,
+        module_resolution_extensions_for_file: E,
+    ) -> Self {
+        Self {
+            aliases: aliases_for_file,
+            language: language_for_file,
+            path: path_for_file,
+            module_resolution_extensions: module_resolution_extensions_for_file,
+        }
+    }
+}
+
+impl<A, L, P, E> IdgFileSemanticsProvider for ClosureIdgFileSemantics<A, L, P, E>
+where
+    A: FnMut(FileId) -> AHashMap<String, String>,
+    L: Fn(FileId) -> Option<&'static str>,
+    P: Fn(FileId) -> Option<String>,
+    E: Fn(FileId) -> &'static [&'static str],
+{
+    fn aliases(&mut self, file: FileId) -> AHashMap<String, String> {
+        (self.aliases)(file)
+    }
+
+    fn language(&self, file: FileId) -> Option<&'static str> {
+        (self.language)(file)
+    }
+
+    fn path(&self, file: FileId) -> Option<String> {
+        (self.path)(file)
+    }
+
+    fn module_resolution_extensions(&self, file: FileId) -> &'static [&'static str] {
+        (self.module_resolution_extensions)(file)
+    }
+}
+
 /// Build a workspace IDG from a global index and resolved
 /// callgraph. The transfer pass runs in parallel across functions
 /// (rayon), then the serial stitching phase wires cross-function
@@ -2022,12 +2097,12 @@ where
     G: Fn(FileId) -> Option<&'static str>,
     P: Fn(FileId) -> Option<String>,
 {
-    build_with_file_info_and_options_with_paths(
+    build_with_file_semantics_and_options(
         global,
         call_graph,
-        aliases_for_file,
-        language_for_file,
-        path_for_file,
+        ClosureIdgFileSemantics::new(aliases_for_file, language_for_file, path_for_file, |_| {
+            &[] as &'static [&'static str]
+        }),
         &TransferOptions::default(),
     )
 }
@@ -2074,16 +2149,27 @@ where
     G: Fn(FileId) -> Option<&'static str>,
     P: Fn(FileId) -> Option<String>,
 {
-    build_with_file_info_and_options_scoped(
+    build_with_file_semantics_and_options(
         global,
         call_graph,
-        aliases_for_file,
-        language_for_file,
-        path_for_file,
+        ClosureIdgFileSemantics::new(aliases_for_file, language_for_file, path_for_file, |_| {
+            &[] as &'static [&'static str]
+        }),
         transfer_options,
-        None,
-        None,
     )
+}
+
+/// Build from a complete per-file compiler contract and transfer options.
+pub fn build_with_file_semantics_and_options<S>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    semantics: S,
+    transfer_options: &TransferOptions,
+) -> IdgWorkspace
+where
+    S: IdgFileSemanticsProvider,
+{
+    build_with_file_info_and_options_scoped(global, call_graph, semantics, transfer_options, None, None)
 }
 
 /// Build with per-file aliases, language ids, transfer options, and
@@ -2130,13 +2216,33 @@ where
     G: Fn(FileId) -> Option<&'static str>,
     P: Fn(FileId) -> Option<String>,
 {
+    build_with_file_semantics_and_options_for_files(
+        global,
+        call_graph,
+        ClosureIdgFileSemantics::new(aliases_for_file, language_for_file, path_for_file, |_| {
+            &[] as &'static [&'static str]
+        }),
+        transfer_options,
+        included_files,
+    )
+}
+
+/// Build a file-scoped IDG from a complete per-file compiler contract.
+pub fn build_with_file_semantics_and_options_for_files<S>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    semantics: S,
+    transfer_options: &TransferOptions,
+    included_files: &[FileId],
+) -> IdgWorkspace
+where
+    S: IdgFileSemanticsProvider,
+{
     let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
     build_with_file_info_and_options_scoped(
         global,
         call_graph,
-        aliases_for_file,
-        language_for_file,
-        path_for_file,
+        semantics,
         transfer_options,
         Some(&included_files),
         None,
@@ -2161,45 +2267,57 @@ where
     G: Fn(FileId) -> Option<&'static str>,
     P: Fn(FileId) -> Option<String>,
 {
+    build_with_file_semantics_and_options_for_files_and_funcs(
+        global,
+        call_graph,
+        ClosureIdgFileSemantics::new(aliases_for_file, language_for_file, path_for_file, |_| {
+            &[] as &'static [&'static str]
+        }),
+        transfer_options,
+        included_files,
+        included_funcs,
+    )
+}
+
+/// Build a file/function-scoped IDG from a complete compiler contract.
+pub fn build_with_file_semantics_and_options_for_files_and_funcs<S>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    semantics: S,
+    transfer_options: &TransferOptions,
+    included_files: &[FileId],
+    included_funcs: &[FuncId],
+) -> IdgWorkspace
+where
+    S: IdgFileSemanticsProvider,
+{
     let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
     let included_funcs: AHashSet<FuncId> = included_funcs.iter().copied().collect();
     build_with_file_info_and_options_scoped(
         global,
         call_graph,
-        aliases_for_file,
-        language_for_file,
-        path_for_file,
+        semantics,
         transfer_options,
         Some(&included_files),
         Some(&included_funcs),
     )
 }
 
-#[allow(clippy::too_many_arguments)] // Shared builder carries optional file/function scopes plus transfer hooks.
-fn build_with_file_info_and_options_scoped<F, G, P>(
+fn build_with_file_info_and_options_scoped<S>(
     global: &GlobalIndex,
     call_graph: &ResolvedCallGraph,
-    mut aliases_for_file: F,
-    language_for_file: G,
-    path_for_file: P,
+    mut semantics: S,
     transfer_options: &TransferOptions,
     included_files: Option<&AHashSet<FileId>>,
     included_funcs: Option<&AHashSet<FuncId>>,
 ) -> IdgWorkspace
 where
-    F: FnMut(FileId) -> AHashMap<String, String>,
-    G: Fn(FileId) -> Option<&'static str>,
-    P: Fn(FileId) -> Option<String>,
+    S: IdgFileSemanticsProvider,
 {
     let total_started = Instant::now();
     let phase_started = Instant::now();
-    let maps = WorkspaceMaps::build_with_languages_for_files(
-        global,
-        language_for_file,
-        &path_for_file,
-        included_files,
-        included_funcs,
-    );
+    let maps =
+        WorkspaceMaps::build_with_semantics_for_files(global, &semantics, included_files, included_funcs);
     idg_build_log(format_args!(
         "maps: {:.3}s funcs={} files={}",
         phase_started.elapsed().as_secs_f64(),
@@ -2232,7 +2350,7 @@ where
         if included_files.is_some_and(|files| !files.contains(&file)) {
             continue;
         }
-        let aliases = aliases_for_file(file);
+        let aliases = semantics.aliases(file);
         let caller_module = module_prefixes.get(&file).map(String::as_str);
         for (alias, original) in aliases {
             if let Some(member) = import_target_member(&original) {
@@ -2246,7 +2364,14 @@ where
                 }
             }
             if let Some(caller_module) = caller_module {
-                for module_name in import_module_candidates(caller_module, &original) {
+                let module_resolution_extensions = maps
+                    .file_to_module_resolution_extensions
+                    .get(&file)
+                    .copied()
+                    .unwrap_or(&[]);
+                for module_name in
+                    import_module_candidates(caller_module, &original, module_resolution_extensions)
+                {
                     if let Some(funcs) = module_default_exports.get(&module_name) {
                         for func in funcs {
                             if !maps.func_to_seg.contains_key(func) {
@@ -2664,7 +2789,11 @@ fn module_default_export_funcs_by_module(
     by_module
 }
 
-fn import_module_candidates(caller_module: &str, original: &str) -> Vec<String> {
+fn import_module_candidates(
+    caller_module: &str,
+    original: &str,
+    module_resolution_extensions: &[&str],
+) -> Vec<String> {
     let target = original
         .trim()
         .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
@@ -2687,7 +2816,8 @@ fn import_module_candidates(caller_module: &str, original: &str) -> Vec<String> 
                 ".." => {
                     parts.pop();
                 }
-                segment => parts.push(strip_known_source_extension(segment).to_string()),
+                segment => parts
+                    .push(strip_adapter_source_extension(segment, module_resolution_extensions).to_string()),
             }
         }
         if !parts.is_empty() {
@@ -2697,7 +2827,10 @@ fn import_module_candidates(caller_module: &str, original: &str) -> Vec<String> 
         let mut parts = Vec::new();
         for segment in target.split(['/', '\\']) {
             if !segment.is_empty() {
-                parts.push(strip_known_source_extension(segment));
+                parts.push(strip_adapter_source_extension(
+                    segment,
+                    module_resolution_extensions,
+                ));
             }
         }
         if !parts.is_empty() {
@@ -2713,9 +2846,16 @@ fn looks_like_module_path(value: &str) -> bool {
     value.starts_with('.') || value.contains('/') || value.contains('\\')
 }
 
-fn strip_known_source_extension(segment: &str) -> &str {
-    for suffix in [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"] {
-        if let Some(stripped) = segment.strip_suffix(suffix) {
+fn strip_adapter_source_extension<'a>(segment: &'a str, extensions: &[&str]) -> &'a str {
+    for extension in extensions {
+        let extension = extension.trim_start_matches('.');
+        if extension.is_empty() {
+            continue;
+        }
+        if let Some(stripped) = segment
+            .strip_suffix(extension)
+            .and_then(|stem| stem.strip_suffix('.'))
+        {
             return stripped;
         }
     }

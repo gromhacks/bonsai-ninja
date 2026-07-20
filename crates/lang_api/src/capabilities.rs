@@ -23,6 +23,36 @@ pub enum CapabilityLevel {
     Unsupported,
 }
 
+/// How a language explains multiple same-named callable declarations.
+///
+/// The callgraph may emit more than one semantic edge only when the adapter
+/// declares one of these source-language relationships.  Keeping the mode in
+/// adapter metadata prevents the language-neutral resolver from recognizing
+/// concrete language ids.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CallableDeclarationFamily {
+    /// Same-named declarations are not a compiler-proven family.
+    #[default]
+    None,
+    /// Repeated declarations with the same signature denote one callable
+    /// surface (for example a declaration and definition in one C TU).
+    SameSignature,
+    /// Same-name/arity clauses are alternative bodies of one callable.
+    FunctionClauses,
+}
+
+/// Grammar shapes a candidate-only text prefilter may recognize without
+/// excluding valid calls. Final call facts always come from the adapter AST;
+/// `Disabled` keeps the optimization off for grammars whose surface forms are
+/// not completely represented here.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CallTextPrefilter {
+    #[default]
+    Disabled,
+    Parenthesized,
+    ParenthesizedOrCommand,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct LanguageCapabilities {
     pub modules: CapabilityLevel,
@@ -75,6 +105,26 @@ pub struct LanguageCapabilities {
     /// `self_parameter` are represented by `Decl::receiver_param_index`, not
     /// by this inventory.
     pub implicit_receiver_tokens: &'static [&'static str],
+    /// Unqualified top-level names may resolve to declarations in sibling
+    /// files in the same directory. File-module languages leave this false
+    /// and require an import/module fact.
+    pub same_directory_unqualified_calls: bool,
+    /// Checked-in native build-target membership may narrow otherwise
+    /// ambiguous global call candidates for this language.
+    pub build_target_linkage: bool,
+    /// Adapter-declared relationship between repeated callable declarations.
+    pub callable_declaration_family: CallableDeclarationFamily,
+    /// A quoted literal can denote a statically resolvable callable value.
+    pub quoted_callable_literals: bool,
+    /// Safe candidate-only call-text grammar. This never creates call facts;
+    /// it can only avoid parsing files that provably lack a rule's call shape.
+    pub call_text_prefilter: CallTextPrefilter,
+    /// Source suffixes considered when an extensionless/dotted relative
+    /// import is resolved inside this language's module system.
+    pub module_resolution_extensions: &'static [&'static str],
+    /// Non-source template suffixes that share the language workspace's
+    /// dependency manifest context.
+    pub workspace_manifest_context_extensions: &'static [&'static str],
 }
 
 impl LanguageCapabilities {
@@ -121,6 +171,13 @@ impl LanguageCapabilities {
             bare_call_constructor_syntax: false,
             super_receiver_tokens: &[],
             implicit_receiver_tokens: &[],
+            same_directory_unqualified_calls: false,
+            build_target_linkage: false,
+            callable_declaration_family: CallableDeclarationFamily::None,
+            quoted_callable_literals: false,
+            call_text_prefilter: CallTextPrefilter::Disabled,
+            module_resolution_extensions: &[],
+            workspace_manifest_context_extensions: &[],
         }
     }
 
@@ -153,6 +210,13 @@ impl LanguageCapabilities {
             bare_call_constructor_syntax: false,
             super_receiver_tokens: &[],
             implicit_receiver_tokens: &[],
+            same_directory_unqualified_calls: false,
+            build_target_linkage: false,
+            callable_declaration_family: CallableDeclarationFamily::None,
+            quoted_callable_literals: false,
+            call_text_prefilter: CallTextPrefilter::Disabled,
+            module_resolution_extensions: &[],
+            workspace_manifest_context_extensions: &[],
         }
     }
 }

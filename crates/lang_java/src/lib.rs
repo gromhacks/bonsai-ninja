@@ -128,6 +128,7 @@ impl LanguageAdapter for JavaAdapter {
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
+            call_text_prefilter: bonsai_lang_api::CallTextPrefilter::Parenthesized,
             ..LanguageCapabilities::partial_baseline()
         }
     }

@@ -180,6 +180,23 @@ fn build_graph(
     )
 }
 
+fn build_graph_with_capabilities(
+    global: &GlobalIndex,
+    language_for_file: impl Fn(FileId) -> Option<&'static str>,
+    capabilities_for_file: impl Fn(FileId) -> LanguageCapabilities,
+) -> ResolvedCallGraph {
+    ResolvedCallGraph::build_with_file_semantics(
+        global,
+        CallGraphFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| AHashMap::new(),
+            |_| None,
+            language_for_file,
+            capabilities_for_file,
+        ),
+    )
+}
+
 fn build_graph_with_paths(
     global: &GlobalIndex,
     path_for_file: impl Fn(FileId) -> Option<String>,
@@ -192,6 +209,24 @@ fn build_graph_with_paths(
         path_for_file,
         |_| &[],
         language_for_file,
+    )
+}
+
+fn build_graph_with_paths_and_capabilities(
+    global: &GlobalIndex,
+    path_for_file: impl Fn(FileId) -> Option<String>,
+    language_for_file: impl Fn(FileId) -> Option<&'static str>,
+    capabilities_for_file: impl Fn(FileId) -> LanguageCapabilities,
+) -> ResolvedCallGraph {
+    ResolvedCallGraph::build_with_file_semantics(
+        global,
+        CallGraphFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| AHashMap::new(),
+            path_for_file,
+            language_for_file,
+            capabilities_for_file,
+        ),
     )
 }
 
@@ -857,7 +892,14 @@ fn elixir_function_clauses_emit_narrowed_virtual_edges() {
     );
     insert_file(&mut global, file, vec![entry, clause_one, clause_two]);
 
-    let cg = build_graph(&global, |_| Some("elixir"));
+    let cg = build_graph_with_capabilities(
+        &global,
+        |_| Some("elixir"),
+        |_| LanguageCapabilities {
+            callable_declaration_family: CallableDeclarationFamily::FunctionClauses,
+            ..LanguageCapabilities::unsupported()
+        },
+    );
     let entry_id = FuncId::new(global.find_by_name("entry")[0].raw());
     let helper_ids = global
         .find_by_name("helper")
@@ -927,7 +969,7 @@ fn kotlin_same_directory_top_level_call_resolves_across_file_modules() {
         )],
     );
 
-    let cg = build_graph_with_paths(
+    let cg = build_graph_with_paths_and_capabilities(
         &global,
         |file| match file.raw() {
             1 => Some("fixture/app.kt".to_string()),
@@ -935,6 +977,10 @@ fn kotlin_same_directory_top_level_call_resolves_across_file_modules() {
             _ => None,
         },
         |_| Some("kotlin"),
+        |_| LanguageCapabilities {
+            same_directory_unqualified_calls: true,
+            ..LanguageCapabilities::unsupported()
+        },
     );
     let handler = FuncId::new(global.find_by_name("handler")[0].raw());
     let run_pipeline = FuncId::new(global.find_by_name("runPipeline")[0].raw());
@@ -1109,13 +1155,20 @@ fn c_callgraph_uses_makefile_build_targets_to_avoid_cross_binary_fanout() {
     );
     paths.insert(cli_file, src.join("cli.c").to_string_lossy().into_owned());
 
-    let cg = ResolvedCallGraph::build_with_file_info(
+    let cg = ResolvedCallGraph::build_with_file_semantics(
         &global,
-        |_| AHashMap::new(),
-        |_| AHashMap::new(),
-        |file| paths.get(&file).cloned(),
-        |_| &[],
-        |_| Some("c"),
+        CallGraphFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| AHashMap::new(),
+            |file| paths.get(&file).cloned(),
+            |_| Some("c"),
+            |_| LanguageCapabilities {
+                same_directory_unqualified_calls: true,
+                build_target_linkage: true,
+                callable_declaration_family: CallableDeclarationFamily::SameSignature,
+                ..LanguageCapabilities::unsupported()
+            },
+        ),
     );
     let entry = FuncId::new(global.find_by_name("RM__Assert")[0].raw());
     let debug_assert = FuncId::new(
@@ -1162,7 +1215,15 @@ fn cpp_unqualified_cross_file_call_resolves_unique_linked_candidate() {
         )],
     );
 
-    let cg = build_graph(&global, |_| Some("cpp"));
+    let cg = build_graph_with_capabilities(
+        &global,
+        |_| Some("cpp"),
+        |_| LanguageCapabilities {
+            same_directory_unqualified_calls: true,
+            build_target_linkage: true,
+            ..LanguageCapabilities::unsupported()
+        },
+    );
     let handle = FuncId::new(global.find_by_name("handle_request")[0].raw());
     let get_user = FuncId::new(global.find_by_name("get_user")[0].raw());
     let edges = cg.callees_of(handle).collect::<Vec<_>>();
@@ -1651,16 +1712,17 @@ fn super_receiver_resolves_base_method_from_override_context() {
     );
     global.finalize_semantic_facts();
 
-    let cg = ResolvedCallGraph::build_with_file_info_and_super_tokens(
+    let cg = ResolvedCallGraph::build_with_file_semantics(
         &global,
         CallGraphFileSemantics::new(
             |_| ahash::AHashMap::new(),
             |_| ahash::AHashMap::new(),
             |_| None,
-            |_| &[] as &'static [&'static str],
             |_| Some("swift"),
-            |_| &["super"] as &'static [&'static str],
-            |_| false,
+            |_| LanguageCapabilities {
+                super_receiver_tokens: &["super"],
+                ..LanguageCapabilities::unsupported()
+            },
         ),
     );
     let from = func_id_by_name_and_parent(&global, "run", "AuditedRepository");
@@ -3420,16 +3482,17 @@ fn super_constructor_resolves_direct_parent_not_transitive_ancestors() {
         ],
     );
 
-    let graph = ResolvedCallGraph::build_with_file_info_and_super_tokens(
+    let graph = ResolvedCallGraph::build_with_file_semantics(
         &global,
         CallGraphFileSemantics::new(
             |_| AHashMap::new(),
             |_| AHashMap::new(),
             |_| None,
-            |_| &[] as &'static [&'static str],
             |_| Some("java"),
-            |_| &["super"] as &'static [&'static str],
-            |_| false,
+            |_| LanguageCapabilities {
+                super_receiver_tokens: &["super"],
+                ..LanguageCapabilities::unsupported()
+            },
         ),
     );
     let audited = func_id_by_name_and_parent(&global, "Audited", "Audited");
@@ -3497,16 +3560,17 @@ fn ambiguous_bare_call_constructs_only_with_adapter_capability_and_resolved_clas
     let caller = decl(file, 3, "entry", vec![call(file, "Widget")]);
     insert_file(&mut global, file, vec![class, constructor, caller]);
 
-    let graph = ResolvedCallGraph::build_with_file_info_and_super_tokens(
+    let graph = ResolvedCallGraph::build_with_file_semantics(
         &global,
         CallGraphFileSemantics::new(
             |_| ahash::AHashMap::new(),
             |_| ahash::AHashMap::new(),
             |_| None,
-            |_| &[] as &'static [&'static str],
             |_| Some("python"),
-            |_| &[] as &'static [&'static str],
-            |_| true,
+            |_| LanguageCapabilities {
+                bare_call_constructor_syntax: true,
+                ..LanguageCapabilities::unsupported()
+            },
         ),
     );
     let entry = FuncId::new(global.find_by_name("entry")[0].raw());

@@ -278,6 +278,13 @@ fn render_runtime_only() -> String {
             super_receiver_tokens: _,
             implicit_receiver_tokens: _,
             field_places_complete: _,
+            same_directory_unqualified_calls: _,
+            build_target_linkage: _,
+            callable_declaration_family: _,
+            quoted_callable_literals: _,
+            call_text_prefilter: _,
+            module_resolution_extensions: _,
+            workspace_manifest_context_extensions: _,
         } = caps;
         let aliases = if module_export_aliases.is_empty() {
             "—".to_string()

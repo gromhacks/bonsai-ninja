@@ -416,14 +416,12 @@ is the single semantic entry point. It applies, in order:
 3. Receiver-type narrowing when `ctx.receiver_type` is `Some` —
    `Decl.parent` must be the receiver type or in its base chain.
 
-Unqualified same-directory top-level fallbacks are enabled only for
-languages whose adapters model files as a shared package/module namespace
-or translation unit link surface (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`,
-`.hpp`, `.hh`, `.hxx`, `.kt`, `.kts`, `.swift`, `.pl`, `.pm`). The caller
-must provide the workspace file-path lookup in `ResolveContext`; otherwise
-the fallback is unavailable. File-scoped module languages such as Python
-must import or alias the symbol, so the resolver fails closed instead of
-fabricating a cross-file edge.
+Unqualified same-directory top-level fallbacks are enabled only when the
+caller adapter declares `LanguageCapabilities::same_directory_unqualified_calls`.
+The caller must also provide the workspace file-path lookup in
+`ResolveContext`; otherwise the fallback is unavailable. File-scoped module
+languages leave the capability false and must import or alias the symbol, so
+the resolver fails closed instead of fabricating a cross-file edge.
 
 The engine's `resolve_call_candidates_with_caller_at` builds the
 `ResolveContext` from each call site's `(caller_func, call_span)`,

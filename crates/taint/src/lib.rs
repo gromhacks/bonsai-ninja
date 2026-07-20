@@ -28,7 +28,10 @@ pub use idg_api::{
     ParamSideEffect, ReceiverStatePropagation, ReturnAccessPath, ReturnElementTaint, ReturnFieldTaint,
     SourceCallbackArgs, SourceOutputArgs, TaintedArg, TaintedArgAtCall, TaintedCall, TaintedCallKind,
 };
-pub use idg_build::{compiler_idg_service, ensure_idg_service};
+pub use idg_build::{
+    build_resolved_call_graph_snapshot, build_resolved_call_graph_snapshot_for_files,
+    compiler_idg_file_semantics, compiler_idg_service, ensure_idg_service,
+};
 pub use idg_query::{
     IdgReturnQuery, IdgTaintQuery, IdgTaintSeed, IdgTaintSource, IdgTaintTargets, IdgTaintTransfers,
 };

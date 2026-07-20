@@ -23,6 +23,44 @@ use std::sync::Arc;
 use bonsai_db::AnalyzerDb;
 use bonsai_idg::IdgQueryService;
 
+struct CompilerIdgFileSemantics<'a> {
+    db: &'a AnalyzerDb,
+}
+
+impl bonsai_idg::workspace_adapter::IdgFileSemanticsProvider for CompilerIdgFileSemantics<'_> {
+    fn aliases(&mut self, file: bonsai_common::FileId) -> ahash::AHashMap<String, String> {
+        bonsai_resolve::semantic_import_binding_map_for_file(&self.db.imports_for(file))
+    }
+
+    fn language(&self, file: bonsai_common::FileId) -> Option<&'static str> {
+        self.db
+            .adapter_for(file)
+            .map(|adapter| adapter.language_id().as_str())
+    }
+
+    fn path(&self, file: bonsai_common::FileId) -> Option<String> {
+        self.db
+            .vfs()
+            .path(file)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    fn module_resolution_extensions(&self, file: bonsai_common::FileId) -> &'static [&'static str] {
+        self.db
+            .adapter_for(file)
+            .map(|adapter| adapter.capabilities().module_resolution_extensions)
+            .unwrap_or(&[])
+    }
+}
+
+/// Return the canonical adapter/VFS compiler contract for an IDG build.
+pub fn compiler_idg_file_semantics(
+    db: &AnalyzerDb,
+) -> impl bonsai_idg::workspace_adapter::IdgFileSemanticsProvider + '_ {
+    CompilerIdgFileSemantics { db }
+}
+
 /// Return the workspace IDG query service, building and caching it on
 /// the db if it has not been seeded yet. Idempotent and thread-safe: a
 /// peer thread that seeds the slot first wins, and its service is
@@ -172,59 +210,66 @@ fn build_idg_service(
 ) -> Arc<IdgQueryService> {
     let global = db.global_index();
     let call_graph = build_resolved_call_graph_snapshot(db);
-    let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_with_paths(
+    let semantics = compiler_idg_file_semantics(db);
+    let ws = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options(
         global.as_ref(),
         &call_graph,
-        |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
-        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+        semantics,
+        transfer_options,
+    );
+    Arc::new(IdgQueryService::new(Arc::new(ws), global))
+}
+
+/// Build the canonical resolved call graph from adapter-emitted compiler
+/// facts. Workspace and IDG consumers share this facade so their syntax and
+/// linkage semantics cannot drift.
+pub fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
+    build_resolved_call_graph_snapshot_scoped(db, None)
+}
+
+/// Build the canonical resolved call graph for a subset of caller files while
+/// retaining workspace-wide targets and resolution indexes.
+pub fn build_resolved_call_graph_snapshot_for_files(
+    db: &AnalyzerDb,
+    included_files: &[bonsai_common::FileId],
+) -> bonsai_callgraph::ResolvedCallGraph {
+    build_resolved_call_graph_snapshot_scoped(db, Some(included_files))
+}
+
+fn build_resolved_call_graph_snapshot_scoped(
+    db: &AnalyzerDb,
+    included_files: Option<&[bonsai_common::FileId]>,
+) -> bonsai_callgraph::ResolvedCallGraph {
+    let global = db.global_index();
+    let semantics = bonsai_callgraph::CallGraphFileSemantics::new(
+        |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+        |file| {
+            bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
+                .into_iter()
+                .collect()
+        },
         |file| {
             db.vfs()
                 .path(file)
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned())
         },
-        transfer_options,
+        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+        |file| {
+            db.adapter_for(file)
+                .map(|adapter| adapter.capabilities())
+                .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
+        },
     );
-    Arc::new(IdgQueryService::new(Arc::new(ws), global))
-}
-
-/// Build the resolved call graph from a db. Mirrors the workspace
-/// snapshot builder (`build_resolved_call_graph_snapshot`) so the
-/// db-level IDG resolves calls identically to the workspace path.
-fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
-    let global = db.global_index();
-    bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens(
-        global.as_ref(),
-        bonsai_callgraph::CallGraphFileSemantics::new(
-            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
-            |file| {
-                bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
-                    .into_iter()
-                    .collect()
-            },
-            |file| {
-                db.vfs()
-                    .path(file)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
-            },
-            |file| {
-                db.adapter_for(file)
-                    .map(|adapter| adapter.capabilities().module_export_aliases)
-                    .unwrap_or(&[])
-            },
-            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-            |file| {
-                db.adapter_for(file)
-                    .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                    .unwrap_or(&[])
-            },
-            |file| {
-                db.adapter_for(file)
-                    .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
-            },
-        ),
-    )
+    if let Some(files) = included_files {
+        bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files(
+            global.as_ref(),
+            semantics,
+            files,
+        )
+    } else {
+        bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics(global.as_ref(), semantics)
+    }
 }
 
 #[cfg(test)]

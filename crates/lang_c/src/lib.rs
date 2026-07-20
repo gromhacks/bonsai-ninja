@@ -80,6 +80,9 @@ impl LanguageAdapter for CAdapter {
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &[],
             implicit_receiver_tokens: &[],
+            same_directory_unqualified_calls: true,
+            build_target_linkage: true,
+            callable_declaration_family: bonsai_lang_api::CallableDeclarationFamily::SameSignature,
             ..LanguageCapabilities::partial_baseline()
         }
     }

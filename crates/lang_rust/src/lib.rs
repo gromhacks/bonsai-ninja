@@ -196,6 +196,13 @@ impl LanguageAdapter for RustAdapter {
             // `self` is an explicit `self_parameter` grammar node and is
             // carried by receiver_param_index rather than synthesized.
             implicit_receiver_tokens: &[],
+            same_directory_unqualified_calls: false,
+            build_target_linkage: false,
+            callable_declaration_family: bonsai_lang_api::CallableDeclarationFamily::None,
+            quoted_callable_literals: false,
+            call_text_prefilter: bonsai_lang_api::CallTextPrefilter::Disabled,
+            module_resolution_extensions: &[],
+            workspace_manifest_context_extensions: &[],
         }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {

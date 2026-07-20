@@ -580,6 +580,7 @@ description: LDAP search.
             "class ElasticsearchHandler { String name = \"Elasticsearch\"; }",
             Some(&workspace_package),
             ConstraintMode::SinkInventory,
+            CallTextPrefilter::Parenthesized,
         ),
         "plain words containing a call name must not satisfy broad call-name prefiltering"
     );
@@ -588,19 +589,32 @@ description: LDAP search.
             "class App { void f(DirContext ctx, String q) { ctx.search(\"ou=users\", q, null); } }",
             Some(&workspace_package),
             ConstraintMode::SinkInventory,
+            CallTextPrefilter::Parenthesized,
         ),
         "real call syntax should satisfy broad call-name prefiltering"
     );
     assert!(
-        call_text_anchor_possible_in("x = cond ? STDIN.gets : \"safe\"", "gets", "ruby"),
+        call_text_anchor_possible_in(
+            "x = cond ? STDIN.gets : \"safe\"",
+            "gets",
+            CallTextPrefilter::ParenthesizedOrCommand,
+        ),
         "Ruby command/no-arg call syntax without parentheses must remain prefilter-possible"
     );
     assert!(
-        call_text_anchor_possible_in("include $tainted;", "include", "php"),
+        call_text_anchor_possible_in(
+            "include $tainted;",
+            "include",
+            CallTextPrefilter::ParenthesizedOrCommand,
+        ),
         "PHP include/require constructs normalized as calls must remain prefilter-possible"
     );
     assert!(
-        !call_text_anchor_possible_in("class ElasticsearchHandler {}", "search", "java"),
+        !call_text_anchor_possible_in(
+            "class ElasticsearchHandler {}",
+            "search",
+            CallTextPrefilter::Parenthesized,
+        ),
         "Java call prefilter should still reject identifiers embedded in larger words"
     );
 

@@ -92,6 +92,7 @@ impl LanguageAdapter for SwiftAdapter {
             constructor_method_names: &["init"],
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["self"],
+            same_directory_unqualified_calls: true,
             ..LanguageCapabilities::partial_baseline()
         }
     }

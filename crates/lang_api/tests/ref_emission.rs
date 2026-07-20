@@ -412,10 +412,16 @@ fn alias_map_unaliased_module_import_is_namespace() {
 }
 
 #[test]
-fn alias_map_unaliased_path_import_uses_stem() {
+fn alias_map_side_effect_path_import_has_no_local_binding() {
     let idx = imports_with(&[("./storage.ts", None, None, ImportScope::Module)]);
     let map = alias_map_from_imports(&idx);
-    assert_eq!(map.get("storage"), Some(&namespace("./storage.ts")));
+    assert!(map.is_empty());
+}
+
+#[test]
+fn alias_map_extensionless_path_import_has_no_local_binding() {
+    let idx = imports_with(&[("./storage", None, None, ImportScope::Module)]);
+    assert!(alias_map_from_imports(&idx).is_empty());
 }
 
 #[test]

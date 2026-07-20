@@ -10,8 +10,8 @@ use crate::rule::{ArgTaintedSpec, ConstraintKind, MatchKind, MatchOrigin, Rule, 
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{qualified_names_match, FileId, Span, SymbolId};
 use bonsai_lang_api::{
-    AliasTarget, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ImportSpec,
-    ModulePath, RefKind, TypeAliasBinding,
+    AliasTarget, AssignmentValueIndex, CallArg, CallKind, CallTextPrefilter, Decl, DeclIndex, DeclKind,
+    FlowEvent, ImportSpec, ModulePath, RefKind, TypeAliasBinding,
 };
 use bonsai_taint::{TaintedCall, TaintedCallKind};
 use bonsai_workspace::{decl_decorator_names, Workspace};
@@ -904,24 +904,18 @@ where
     let global_file_indexes = ws.db().global_index();
     let receiver_base_map = workspace_receiver_base_map_if_needed(ws, &prepared, mode, retention);
     let debug_security_phase = bonsai_diagnostics::debug::is_enabled("security-phase");
-    let constructor_fallback_languages: AHashSet<&str> = prepared
+    let needs_constructor_names = prepared
         .iter()
-        .filter(|r| {
-            r.rule.match_spec.kind == MatchKind::New
-                && language_needs_bare_constructor_fallback(&r.rule.language)
-        })
-        .map(|r| r.rule.language.as_str())
-        .collect();
-    let needs_constructor_names = !constructor_fallback_languages.is_empty();
+        .any(|rule| rule.rule.match_spec.kind == MatchKind::New);
     let constructor_started = (debug_security_phase && needs_constructor_names).then(Instant::now);
     let constructor_files = if needs_constructor_names {
         files
             .iter()
             .copied()
             .filter(|file| {
-                ws.db().adapter_for(*file).is_some_and(|adapter| {
-                    constructor_fallback_languages.contains(adapter.language_id().as_str())
-                })
+                ws.db()
+                    .adapter_for(*file)
+                    .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
             })
             .collect::<Vec<_>>()
     } else {
@@ -1112,10 +1106,6 @@ where
         Ok(pool) => run_parallel_scan(Some(&pool)),
         Err(_) => run_parallel_scan(None),
     }
-}
-
-fn language_needs_bare_constructor_fallback(language: &str) -> bool {
-    !matches!(language, "java" | "c" | "csharp" | "go" | "rust")
 }
 
 fn matcher_worker_count() -> usize {
@@ -1453,7 +1443,12 @@ impl<'a> PreparedRule<'a> {
 
     #[cfg(test)]
     fn text_possible_in(&self, text: &str, file_packages: Option<&AHashSet<String>>) -> bool {
-        self.text_possible_in_mode(text, file_packages, ConstraintMode::Strict)
+        self.text_possible_in_mode(
+            text,
+            file_packages,
+            ConstraintMode::Strict,
+            CallTextPrefilter::Disabled,
+        )
     }
 
     fn text_possible_in_mode(
@@ -1461,6 +1456,7 @@ impl<'a> PreparedRule<'a> {
         text: &str,
         file_packages: Option<&AHashSet<String>>,
         mode: ConstraintMode,
+        call_text_prefilter: CallTextPrefilter,
     ) -> bool {
         let target_possible = self
             .text_anchor_groups
@@ -1472,9 +1468,10 @@ impl<'a> PreparedRule<'a> {
         if !special_regex_text_possible(self.rule, text) {
             return false;
         }
-        if matches!(mode, ConstraintMode::SinkInventory) && self.rule.language == "java" {
+        if matches!(mode, ConstraintMode::SinkInventory) && call_text_prefilter != CallTextPrefilter::Disabled
+        {
             if let Some(anchor) = self.call_text_anchor.as_deref() {
-                if !call_text_anchor_possible_in(text, anchor, &self.rule.language) {
+                if !call_text_anchor_possible_in(text, anchor, call_text_prefilter) {
                     return false;
                 }
             }
@@ -1598,7 +1595,7 @@ impl<'a> PreparedRule<'a> {
     }
 
     fn request_object_source_allows_without_package(&self, callee: &str) -> bool {
-        if self.rule.kind != crate::rule::RuleKind::Source || self.rule.language != "javascript" {
+        if self.rule.kind != crate::rule::RuleKind::Source {
             return false;
         }
         let target = match self.rule.match_spec.kind {
@@ -1630,7 +1627,7 @@ impl<'a> PreparedRule<'a> {
     }
 
     fn express_response_sink_allows_without_package(&self, callee: &str) -> bool {
-        if self.rule.kind != crate::rule::RuleKind::Sink || self.rule.language != "javascript" {
+        if self.rule.kind != crate::rule::RuleKind::Sink {
             return false;
         }
         let target = match self.rule.match_spec.kind {
@@ -1662,7 +1659,7 @@ impl<'a> PreparedRule<'a> {
         callee: &str,
         file_packages: &AHashSet<String>,
     ) -> bool {
-        if self.rule.kind != crate::rule::RuleKind::Sink || self.rule.language != "javascript" {
+        if self.rule.kind != crate::rule::RuleKind::Sink {
             return false;
         }
         if self.rule.id != "javascript.upload.express_fileupload_mv_any_file" {
@@ -1818,7 +1815,7 @@ fn call_text_anchor_token(value: &str) -> Option<String> {
     .then(|| token.to_string())
 }
 
-fn call_text_anchor_possible_in(text: &str, anchor: &str, language: &str) -> bool {
+fn call_text_anchor_possible_in(text: &str, anchor: &str, syntax: CallTextPrefilter) -> bool {
     let mut search_from = 0usize;
     while let Some(relative) = text[search_from..].find(anchor) {
         let start = search_from + relative;
@@ -1831,7 +1828,9 @@ fn call_text_anchor_possible_in(text: &str, anchor: &str, language: &str) -> boo
             if call_anchor_followed_by_call_paren(text, end) {
                 return true;
             }
-            if matches!(language, "ruby" | "php") && call_anchor_followed_by_command_style_call(text, end) {
+            if syntax == CallTextPrefilter::ParenthesizedOrCommand
+                && call_anchor_followed_by_command_style_call(text, end)
+            {
                 return true;
             }
         }
@@ -2356,6 +2355,11 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
                 retention,
             )
         });
+        let call_text_prefilter = ws
+            .db()
+            .adapter_for(file)
+            .map(|adapter| adapter.capabilities().call_text_prefilter)
+            .unwrap_or_default();
         let mut rules = Vec::new();
         for &rule in self
             .call_rules
@@ -2365,7 +2369,7 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             .chain(self.param_rules.iter())
             .chain(self.return_rules.iter())
         {
-            if rule.text_possible_in_mode(text, file_packages.as_deref(), mode) {
+            if rule.text_possible_in_mode(text, file_packages.as_deref(), mode, call_text_prefilter) {
                 rules.push(rule);
             }
         }
@@ -3632,7 +3636,7 @@ fn build_file_package_set(
         out.insert(FILE_USES_REQ_FILES_MARKER.to_string());
         insert_import_target_prefixes(&mut out, "express-fileupload");
     }
-    if js_like_routed_controller_request_context(ws, file) {
+    if routed_controller_request_context(ws, file) {
         insert_import_target_prefixes(&mut out, "express");
     }
     out.extend(
@@ -3647,15 +3651,7 @@ fn build_file_package_set(
     Arc::new(out)
 }
 
-fn js_like_routed_controller_request_context(ws: &Workspace, file: FileId) -> bool {
-    if ws.db().adapter_for(file).is_none_or(|adapter| {
-        !matches!(
-            adapter.language_id().as_str(),
-            "javascript" | "typescript" | "tsx"
-        )
-    }) {
-        return false;
-    }
+fn routed_controller_request_context(ws: &Workspace, file: FileId) -> bool {
     if !file_path_has_route_controller_segment(ws, file) {
         return false;
     }
@@ -3906,7 +3902,12 @@ fn resolve_relative_import_file(ws: &Workspace, importer: FileId, module: &str) 
     let importer_path = ws.vfs().path(importer).ok()?;
     let base_dir = importer_path.parent()?;
     let raw = normalize_path(&base_dir.join(module));
-    relative_import_candidates(&raw)
+    let extensions = ws
+        .db()
+        .adapter_for(importer)
+        .map(|adapter| adapter.capabilities().module_resolution_extensions)
+        .unwrap_or(&[]);
+    relative_import_candidates(&raw, extensions)
         .into_iter()
         .find_map(|candidate| ws.vfs().lookup(&candidate))
 }
@@ -3925,18 +3926,17 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
     out
 }
 
-fn relative_import_candidates(raw: &std::path::Path) -> Vec<std::path::PathBuf> {
-    const EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
+fn relative_import_candidates(raw: &std::path::Path, extensions: &[&str]) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     out.push(raw.to_path_buf());
 
     let raw_ext = raw.extension().and_then(|ext| ext.to_str());
-    let has_known_code_ext = raw_ext.is_some_and(|ext| EXTENSIONS.contains(&ext));
+    let has_known_code_ext = raw_ext.is_some_and(|ext| extensions.contains(&ext));
     if raw_ext.is_none() {
-        for ext in EXTENSIONS {
+        for ext in extensions {
             out.push(raw.with_extension(ext));
         }
-        for ext in EXTENSIONS {
+        for ext in extensions {
             out.push(raw.join(format!("index.{ext}")));
         }
     } else if !has_known_code_ext {
@@ -3945,7 +3945,7 @@ fn relative_import_candidates(raw: &std::path::Path) -> Vec<std::path::PathBuf> 
         // `../user/user.model.ts`. `Path::extension()` sees `.model`,
         // so the extensionless branch above would otherwise never try
         // the real file.
-        for ext in EXTENSIONS {
+        for ext in extensions {
             let mut appended = raw.as_os_str().to_os_string();
             appended.push(format!(".{ext}"));
             out.push(std::path::PathBuf::from(appended));
@@ -3958,19 +3958,15 @@ fn workspace_manifest_package_context_allowed(ws: &Workspace, file: FileId) -> b
     let Some(adapter) = ws.db().adapter_for(file) else {
         return false;
     };
-    if adapter.language_id().as_str() != "ruby" {
-        return false;
-    }
+    let extensions = adapter.capabilities().workspace_manifest_context_extensions;
     let Ok(path) = ws.vfs().path(file) else {
         return false;
     };
     let path = path.to_string_lossy();
-    matches!(
-        std::path::Path::new(path.as_ref())
-            .extension()
-            .and_then(|ext| ext.to_str()),
-        Some("erb" | "rhtml" | "haml" | "slim")
-    )
+    std::path::Path::new(path.as_ref())
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| extensions.contains(&ext))
 }
 
 fn package_cache_content_hash(bytes: &[u8]) -> u64 {
@@ -7284,7 +7280,7 @@ fn collect_called_symbols_for_files(ws: &Workspace, files: &[FileId]) -> ahash::
     let global = db.global_index();
     let infer_debug = bonsai_diagnostics::debug::is_enabled("security-phase");
     let started = infer_debug.then(Instant::now);
-    let call_graph = bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens_for_files(
+    let call_graph = bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files(
         global.as_ref(),
         bonsai_callgraph::CallGraphFileSemantics::new(
             |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
@@ -7299,20 +7295,11 @@ fn collect_called_symbols_for_files(ws: &Workspace, files: &[FileId]) -> ahash::
                     .ok()
                     .map(|path| path.to_string_lossy().into_owned())
             },
-            |file| {
-                db.adapter_for(file)
-                    .map(|adapter| adapter.capabilities().module_export_aliases)
-                    .unwrap_or(&[])
-            },
             |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
             |file| {
                 db.adapter_for(file)
-                    .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                    .unwrap_or(&[])
-            },
-            |file| {
-                db.adapter_for(file)
-                    .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
+                    .map(|adapter| adapter.capabilities())
+                    .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
             },
         ),
         files,
@@ -7933,7 +7920,11 @@ fn resolve_assignment_callable_reference(
     };
     let ctx = bonsai_resolve::ResolveContext::new(caller.span.file, &caller.module_path)
         .with_alias_map(alias_map)
-        .with_file_path_lookup(&path_lookup);
+        .with_file_path_lookup(&path_lookup)
+        .with_same_directory_unqualified_calls(caller_allows_same_directory_unqualified_lookup(
+            ws,
+            caller.span.file,
+        ));
     let mut resolved = Vec::new();
     for func in bonsai_resolve::resolve_callable_with_context(global, trimmed, &ctx) {
         push_unique_assignment_symbol(&mut resolved, SymbolId::new(func.raw()));
@@ -8007,26 +7998,9 @@ fn assignment_reference_needs_resolver(
 }
 
 fn caller_allows_same_directory_unqualified_lookup(ws: &Workspace, file: FileId) -> bool {
-    let Ok(path) = ws.vfs().path(file) else {
-        return true;
-    };
-    matches!(
-        path.extension().and_then(|ext| ext.to_str()).unwrap_or_default(),
-        "c" | "h"
-            | "cc"
-            | "cpp"
-            | "cxx"
-            | "hpp"
-            | "hh"
-            | "hxx"
-            | "m"
-            | "mm"
-            | "kt"
-            | "kts"
-            | "swift"
-            | "pl"
-            | "pm"
-    )
+    ws.db()
+        .adapter_for(file)
+        .is_some_and(|adapter| adapter.capabilities().same_directory_unqualified_calls)
 }
 
 fn push_unique_assignment_symbol(out: &mut Vec<SymbolId>, symbol: SymbolId) {
@@ -8058,7 +8032,11 @@ fn collect_callee_symbols(
         };
         let ctx = bonsai_resolve::ResolveContext::new(caller.span.file, &caller.module_path)
             .with_alias_map(&ahash_alias)
-            .with_file_path_lookup(&path_lookup);
+            .with_file_path_lookup(&path_lookup)
+            .with_same_directory_unqualified_calls(caller_allows_same_directory_unqualified_lookup(
+                ws,
+                caller.span.file,
+            ));
         for func in bonsai_resolve::resolve_callable_with_context(global, name, &ctx) {
             out.insert(SymbolId::new(func.raw()));
         }
