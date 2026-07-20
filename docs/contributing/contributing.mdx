@@ -14,6 +14,10 @@ cargo test --workspace
 ```
 
 Use `./target/release/bonsai-ninja` for CLI validation when the test or script expects the release binary.
+Before merge, also run `cargo check --workspace --all-targets --locked`,
+Clippy with `-D warnings`, rustdoc with `-D warnings`, and the
+architecture invariants. The exact current gate is in
+[Release Readiness](../RELEASE_READINESS.md).
 
 ## Test Layout
 
@@ -45,8 +49,11 @@ Integration and matrix tests stay under each crate's `tests/` directory.
 <Steps>
 
 1. Add the tree-sitter grammar and adapter crate.
-2. Implement the adapter contract with decls, refs, imports, flow events, and visibility.
-3. Populate optional `Decl` fields where the language can support them.
+2. Implement the adapter contract with Tree-sitter-derived declarations,
+   refs, imports, scopes, flow events, expression flow, and visibility.
+3. Declare every `LanguageCapabilities` field explicitly, including module,
+   constructor, receiver, type, and field-place facts. Do not add language
+   branches or source-token inventories to shared analysis.
 4. Add micro, complex, sanitizer, and mega-flow fixtures.
 5. Register the adapter in the bundled registry.
 6. Run conformance, per-language matrix, and full workspace tests.
@@ -59,6 +66,7 @@ Integration and matrix tests stay under each crate's `tests/` directory.
 - [Architecture](architecture.mdx)
 - [Adapter Contract](adapter-contract.mdx)
 - [Adapter Capabilities](adapter-capabilities.mdx)
+- [FlowEvent IR Specification](flow-event-spec.mdx)
 - [Design Patterns](design-patterns.mdx)
 - [Analysis Roadmap](analysis-roadmap.mdx)
 - [Taint Engine Specification](taint-engine-spec.mdx)

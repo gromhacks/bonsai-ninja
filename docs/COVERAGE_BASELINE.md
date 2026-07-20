@@ -249,18 +249,20 @@ A plain-English read of where each language stands today:
   Objective-C bridge or `@_cdecl` isn't modeled at the language
   level.
 
-## The single Rust-customised matrix
+## Explicit adapter capability declarations
 
-For reference, **20 of 21 adapters** return
-[`LanguageCapabilities::partial_baseline()`](../crates/lang_api/src/capabilities.rs)
-verbatim. Only `lang_rust` declares a custom matrix today (macros and
-ffi promoted to `Partial`; exceptions demoted to `Unsupported`
-because Rust has no exception model). `lang_javascript` /
-`lang_typescript` add `module_export_aliases = ["exports",
-"module.exports"]` so the resolver can credit CommonJS-style
-assignments to the module's public surface. Everything else is the
-same conservative `partial_baseline()` - that's by design, not
-neglect.
+All 21 adapters explicitly declare the complete
+[`LanguageCapabilities`](../crates/lang_api/src/capabilities.rs) shape.
+Baseline constructors are initialization helpers only; no adapter inherits a
+cross-language syntax policy by omission. Each declaration owns its grammar
+coverage plus module/export aliases, module-path syntax, constructor method
+forms, implicit and super receivers, universal type spellings, and field-place
+completeness. Shared resolver and IDG code consume those facts without
+language-id branches or token unions.
+
+`scripts/audit-adapter-capabilities.sh --check` and the architecture
+invariants reject missing declarations, shared hardcoded source inventories,
+and adapter/core boundary violations.
 
 ## Backlog
 
@@ -324,7 +326,7 @@ Things that aren't visible in this matrix:
   Param / Return for every grammar shape. That's the actual taint-
   coverage question, and it's tested by the per-language matrix
   tests (`crates/taint/tests/over_taint_per_language.rs`,
-  `crates/security/tests/per_lang_cli_matrix.rs`,
+  `crates/cli/tests/per_lang_cli_matrix.rs`,
   `crates/security/tests/security_pipeline_regressions.rs`), not
   declared here.
 

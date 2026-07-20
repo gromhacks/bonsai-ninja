@@ -1,3 +1,17 @@
+# Engineering goal and historical handoff
+
+> **Archive notice (2026-07-20):** this file preserves the multi-session goal
+> and implementation history. It is not the current command or readiness
+> reference. The deployed engine is the single sparse IDG fixed-point closure;
+> each language adapter owns Tree-sitter syntax lowering; default `index` is
+> syntax/construct warm-up; and the current Elasticsearch scan is complete.
+> Use [Release Readiness](RELEASE_READINESS.md),
+> [Architecture](contributing/architecture.mdx), and
+> [Taint Engine Specification](contributing/taint-engine-spec.mdx) for current
+> behavior.
+
+## Original engineering brief
+
 Make bonsai-ninja a production-grade, highly accurate, fast code review and SAST tool.
 
   Primary objective:
@@ -41,12 +55,17 @@ Make bonsai-ninja a production-grade, highly accurate, fast code review and SAST
 
   Implementation approach:
   1. Audit current indexing, dataflow, value-flow, IDG, cache, refresh, export, debug, and security-analysis paths.
-  2. Make default `index` an intentional semantic warm-up that reuses compositional sidecars, while keeping `--structural-only` as the cheap parse/index path.
+  2. Keep default `index` as the syntax/construct warm-up; use `--semantic`
+  only for an intentional structural semantic sidecar prewarm and
+  `--structural-only` as the explicit spelling of the default.
   3. Build or strengthen reusable compositional summaries and SCC-based solving so exact command scopes avoid recomputing the same callees repeatedly.
   4. Ensure all taint/source/security/export/debug commands compute their requested scopes exactly before rendering.
   5. Fix cache freshness and invalidation for source content, rulepack content, matcher policy, pipeline versions, and file dependencies.
   6. Make expensive rebuild/prewarm/audit operations explicit, observable, and exact.
-  7. Add regression tests proving default indexing warms reusable sidecars without duplicating downstream work, structural-only indexing remains cheap, exact analysis remains accurate, caches are not stale, and repeated work is avoided.
+  7. Add regression tests proving default indexing builds reusable syntax facts
+  without duplicating downstream work, explicit semantic prewarm produces
+  reusable sidecars, exact analysis remains accurate, caches are not stale,
+  and repeated work is avoided.
   8. Run targeted tests for affected crates and CLI smoke/regression commands against `examples/`.
   9. When available locally, test Redis and Java OWASP Benchmark and document commands, timings, memory behavior, and finding counts.
   10. Keep changes scoped, deterministic, professional, and consistent with the existing codebase.

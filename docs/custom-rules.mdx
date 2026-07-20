@@ -17,7 +17,7 @@ Workspace-local rules live under `<workspace>/.bonsai/rules/` and use the same l
 | Layer | Precedence | Use case |
 |---|---:|---|
 | Bundled or `--rules-dir` pack | Base | Standard shipped rules. |
-| `<workspace>/.bonsai/rules/<lang>/...` | Overlay | Project-specific sources, sinks, and sanitizers (local layout drops the `langs/` wrapper). |
+| `<workspace>/.bonsai/rules/<lang>/...` | Overlay | Project-specific sources, sinks, sanitizers, and non-finding typing models (local layout drops the `langs/` wrapper). |
 | `<workspace>/.bonsai/rules/<kind>s/*.yml` | Overlay | Small flat local packs (rule must declare `language:`). |
 | Duplicate `id` in overlay | Replaces base rule | Disable or tighten a shipped rule for a workspace. |
 
@@ -47,3 +47,29 @@ bonsai-ninja security ./src taint-analysis --rules-dir ./security-patterns
 <Note>
 Rule IDs are stable API. Prefer adding a more specific rule ID over changing the meaning of an existing shipped ID.
 </Note>
+
+## Add A Factory Return Type
+
+Use a `typing/` rule when a library factory determines the static type of a
+later receiver but source syntax alone does not:
+
+```yaml
+- id: mycompany.python.typing_client
+  enabled: true
+  language: python
+  returns_type: Client
+  match:
+    kind: call
+    callee:
+      attribute: [mycompany, make_client]
+  match_examples:
+    - name: client factory
+      code: |
+        import mycompany
+        def example():
+            client = mycompany.make_client()
+            return client
+  description: "mycompany.make_client returns a Client receiver."
+```
+
+Typing rules provide resolver evidence only and never produce findings.

@@ -36,6 +36,17 @@ source to sink also answers the questions developers ask every day:
 One engine, one binary, one set of facts. Whatever role you are in, you
 are querying the same model of the codebase.
 
+That model is built like a compiler. Each language adapter uses its own
+Tree-sitter grammar and owns the lowering of declarations, imports,
+receivers, constructors, calls, branches, assignments, fields, and other
+source syntax into typed cross-language facts. Shared resolver, callgraph,
+IDG, taint, security, and export passes consume those facts; they do not
+guess language behavior from source strings or a hardcoded union of API
+names. Taint reachability is a sparse monotone IDG fixed point, not a BFS:
+there is no semantic call-depth ceiling, iteration limit, or result cap.
+Pagination and diagnostic path previews are separate presentation layers
+and report any truncation explicitly.
+
 ## Open Source On Purpose
 
 Enterprise-grade code intelligence should not be locked behind paywalls.
@@ -67,8 +78,9 @@ persisted sidecars and compute missing exact facts on demand when needed.
 For editor and agent workflows, `bonsai-ninja index --watch` stays running
 and hot-reloads saved file changes into the live workspace. Pass
 `--semantic` only when you intentionally want structural semantic sidecars
-prewarmed up front, and `--prewarm-dataflow` only when you intentionally
-want the legacy full-workspace taint/dataflow sidecar rebuilt by itself.
+prewarmed up front. `--prewarm-dataflow` explicitly materializes the
+compatibility dataflow projection used by older SDK/query surfaces; it is
+not a second taint engine.
 
 Explicit semantic producers write binary factstores for speed and
 `.bonsai/manifest.json` for visibility. The manifest records sidecar
@@ -175,13 +187,11 @@ surface syntax.
 bonsai-ninja is in beta. It has rough edges. Some rules over-fire, some
 under-fire, and some language frontends are sharper than others.
 
-The current local release snapshot is documented in
-[Release Readiness](docs/RELEASE_READINESS.md). The short version: the
-release binary builds, rulepack validation and focused conformance checks
-are green, and the latest local CVE-Bench run reports 99.57% detection
-recall, 75.91% bug recall, 79.24% precision, and 1.63 FP/KLOC. The
-known security-quality gap is fixed-snapshot validation at 30.43%, which
-means sanitizer/validator credit is still the next precision workstream.
+The current, dated validation and scale evidence is documented in
+[Release Readiness](docs/RELEASE_READINESS.md). It is the single source
+of truth for build gates, rulepack counts, Elasticsearch measurements,
+and external benchmark snapshots so this overview cannot silently drift
+from the tested binary.
 
 We are shipping anyway because the fastest way to make this useful is to
 put it in the hands of maintainers, security teams, researchers,

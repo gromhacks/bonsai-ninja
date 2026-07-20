@@ -107,9 +107,13 @@ The kit is split across several files:
   to the same dotted form.
 - `kit/return_extraction.rs` — return / throw / catch value extraction.
 
-The kit keeps the cross-language behaviour in one place. Adapters layer
-language-specific decisions on top: visibility rules, type aliases, base
-classes, exception types, reflection rewrites, async-scope isolation.
+The kit owns language-neutral compiler mechanics: walking a Tree-sitter tree,
+constructing common IR types, stable spans, and reusable algorithms over
+adapter-supplied node/field facts. Each adapter owns source syntax and
+semantics: grammar node kinds, declarations, imports, scopes, receivers,
+constructors, module roots, exports, type spellings, exception forms, and
+async/lambda boundaries. Shared analysis must not branch on language id or
+carry a union of source-language tokens.
 
 **`crates/lang_*`** — 21 adapters, one per supported language. Adapters
 range from a few hundred to a few thousand lines: they declare the
@@ -296,9 +300,9 @@ candidate indexes before they can narrow a query.
 - `DataFlowCache` (`dataflow.rs`) — per-`FuncId` `KindedTokens` +
   `EntryTaintGraph` + transitive-dependency file set. Loaded when a
   persisted sidecar is present, computed on demand for exact queries, and
-  fully rebuilt by explicit full-prewarm SDK opens or by the legacy
+  fully rebuilt by explicit full-prewarm SDK opens or by the compatibility
   dataflow-only path, `index --prewarm-dataflow`; persisted to
-  `.bonsai/dataflow.v3.factstore` (legacy `dataflow.v2.bin` is still
+  `.bonsai/dataflow.v3.factstore` (the older `dataflow.v2.bin` is still
   readable for warm reopens).
 - `SyntaxFlowQuery` (`flow_query.rs`) — the command-facing facade for
   rulepack-free entry taint graphs. It uses a warmed IDG target cut when
@@ -322,16 +326,17 @@ candidate indexes before they can narrow a query.
   `(source_func, sorted_seed_key) → Arc<EntryTaintGraph>`. Lifted
   out of the per-invocation map so a second `taint-analysis` /
   `source-analysis` run reuses the cached graph. Persisted to
-  `.bonsai/taint_graph.v9.<mode>.<config>.factstore` with version + fingerprint
+  `.bonsai/taint_graph.v*.<mode>.<config>.factstore` with version + fingerprint
   guard, so different analysis configurations do not evict each other.
   Write-through persistence is default-on and can be disabled with
   `BONSAI_TAINT_GRAPH_PERSIST=0` when cache I/O is undesirable.
   Security analysis reports the cache decision through
   `AnalysisProgress::Note`, including whether the run was a memory hit,
   disk hit, miss, or config invalidation.
-- `TransitiveCallersIndex` (`transitive_callers.rs`) — depth-bounded
-  caller closures on the resolved call graph. Rulepack-independent,
-  so the closure survives across rulepack swaps.
+- `TransitiveCallersIndex` (`transitive_callers.rs`) — cached,
+  explicitly depth-scoped caller-frontier queries on the resolved callgraph.
+  This is a candidate/scheduling utility, not the production taint closure;
+  the semantic IDG fixed point is uncapped.
 - `ClassMemberIndex` (`class_index.rs`) —
   `(class_sym, method_name) → Vec<FuncId>` and `class_sym →
   constructor FuncIds`. Replaces per-resolution linear scans of
@@ -366,10 +371,11 @@ source-to-sink callgraph/IDG corridor, then propagates only through that
 semantic corridor. `source-analysis` uses a source-lineage corridor from the
 resolved callgraph, including summary-output caller support, and seeds a scoped
 IDG over only the files/functions needed for the rendered lineage. Neither
-surface uses whole-workspace per-source/per-sink traversal for production
-evidence. The broader workspace dataflow sidecar remains the fast cache for
-navigation and export surfaces. The output formats (text / JSON / SARIF) live
-in `report.rs`. Sanitizer-credit calculation has its own module.
+  surface uses whole-workspace per-source/per-sink traversal for production
+  evidence. The broader workspace dataflow sidecar remains a compatibility
+  cache for navigation and older SDK/query surfaces; native export reads the
+  canonical IDG. The output formats (text / JSON / SARIF) live in
+  `report.rs`. Sanitizer-credit calculation has its own module.
 
 ## Query / browse / trace
 
@@ -423,8 +429,10 @@ while preserving access to private helpers through `use super::*;`.
 
 ## Dataflow at a glance
 
-During workspace indexing (the default `index` path stops after the structural
-steps; explicit full prewarm continues through cache materialization):
+The pipeline is demand-driven. Default `index` performs syntax/construct
+stages 1–4. `index --semantic` and query commands build the exact semantic
+stages they request from 5–7 plus the streamed IDG. Explicit compatibility
+full-prewarm paths can additionally materialize stages 8–10:
 
 1. `vfs` interns paths and stores text.
 2. `parser` parses each file (with cache).

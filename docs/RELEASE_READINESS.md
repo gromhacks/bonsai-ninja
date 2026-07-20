@@ -1,153 +1,186 @@
 # Release readiness
 
-Current local deployment snapshot for `main`.
+Current local deployment snapshot for `main`. This is the repository's
+single source of truth for current validation and scale measurements; older
+goal and benchmark documents are historical records.
 
 ## Status
 
-The repository is deployment-ready from a build, validation, command
-surface, and large-repo behavior standpoint. The security benchmark
-profile is much stronger on recall and precision than the earlier
-baseline. Aggregate fixed-snapshot validation remains low because many
-benchmark "fixed" snapshots are unchanged or metadata-only; actual
-code-changed fixed snapshots are clean in the latest local run.
+The production-code baseline `b341cb5` is green across compilation, lint,
+rustdoc, focused behavioral suites, architecture invariants, rulepack replay,
+self-analysis, and a complete Elasticsearch production scan. The documentation
+update recorded here does not change engine semantics.
 
-## Latest local validation
+The analyzer is one compiler-style pipeline:
 
-Validated on 2026-06-20 with the release binary:
+- 21 Tree-sitter adapters own source syntax and lower it into typed compiler
+  facts.
+- Resolver, callgraph, IDG, security, SDK, and export consume those facts
+  without shared language-name dispatch or cross-language token inventories.
+- Production taint reachability is a sparse monotone IDG fixed point with no
+  BFS name search, call-depth ceiling, iteration limit, or result cap.
+- Paging and diagnostic path previews can be bounded, but they report
+  truncation and never change the semantic result.
 
-- `cargo build --release` passed.
-- `cargo fmt --all --check` passed.
-- `git diff --check` passed.
-- `./target/release/bonsai-ninja security . pack --validate --taint-replay --rules-dir security-patterns --format json --no-color --no-progress` passed with 0 warnings.
-- `./target/release/bonsai-ninja security . pack --audit --context 16k --no-color --no-progress` reported no unexplained canonical sink-family gaps across the app/web taxonomy languages. Solidity is explicitly marked as a smart-contract taxonomy language, not an app/web parity row.
-- `cargo test -q -p bonsai_security --test rulepack_conformance` passed.
-- `cargo test -q -p bonsai_security --test sanitizer_credit_audit` passed.
-- `cargo test -q -p bonsai_security --test per_lang_gap_coverage` passed.
-- `cargo test -q -p bonsai_security --test matcher_batch` passed.
-- `cargo test -q -p bonsai_db` passed.
+## Current validation
 
-Focused engine/tool checks from the same pass were green:
+Validated on 2026-07-20:
 
-- `cargo test -q -p bonsai_cli --test inspect_output`
-- `cargo test -q -p bonsai_cli --test command_coverage`
-- `cargo test -q -p bonsai_taint --test inspect_target_graph`
-- `cargo test -q -p bonsai_security --test callback_flow_audit`
+- `cargo check --workspace --all-targets --locked` passed.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --locked` passed.
+- `cargo fmt --all -- --check` and `git diff --check` passed.
+- Focused compiler/engine suites passed 641 tests:
+  callgraph 76, IDG 304, resolver 37, taint 86, workspace 62,
+  architecture invariants 62, and CLI page-cache 14.
+- `cargo test -p bonsai_security --test rulepack_conformance` passed 28/28.
+- Layering, public-API, hardcoded-knowledge, adapter-capability, and adapter
+  `FlowEvent` snapshot audits passed. All 21 adapters explicitly declare the
+  compiler capability fields consumed by shared analysis; the reviewed
+  hardcoded-knowledge baseline contains 191 non-adapter hits.
 
-Additional syntax-flow/tooling validation on 2026-06-21:
-
-- `cargo build --release` passed after centralizing inspect syntax-flow
-  graph selection and default entry taint seeds.
-- `git diff --check` passed.
-- `inspect examples/python/micro --query os.system --context 8k` reported
-  the expected rulepack-free taint path to `os.system`.
-- `dump-taint examples/python/micro --source run_admin_command` used the
-  shared default seed set `{cmd, user_id}` and completed cleanly.
-- `inspect ../elasticsearch --query execute --context 16k` completed in
-  15.64 seconds, reported 3,105 inspect items, paged the result, and
-  skipped the default taint overlay with the explicit large-broad-query
-  warning.
-- `inspect ../elasticsearch --query execute --taint-flow --context 16k`
-  completed in 21.53 seconds, reported 96 taint rows on page 1, and
-  surfaced the default taint candidate/row truncation metadata.
-- Local Cargo integration-test execution in this sandbox currently hangs
-  after launching test binaries, even for `--list`; those processes were
-  stopped after compile. Release builds and direct release-binary command
-  probes completed successfully.
-
-CLI help and documentation validation on 2026-06-22:
-
-- `cargo fmt --check` passed.
-- `CARGO_INCREMENTAL=0 cargo check -q -p bonsai_cli` passed.
-- `cargo build --release -q -p bonsai_cli` passed.
-- Root help renders `USAGE`, `COMMAND GROUPS`, `OPTIONS`, `EXAMPLES`,
-  then `SEE ALSO`; all checked help surfaces use uppercase section
-  headings consistently.
-- A 41-menu release help sweep passed with no stale `SAMPLE OUTPUT`
-  blocks, no title-case help headings, no control characters, and no
-  context/width guard failures.
-- `CARGO_INCREMENTAL=0 cargo test -p bonsai_cli --test browse_commands -- --test-threads=1`
-  passed 226 tests.
-- Documentation navigation targets, internal Markdown/MDX links,
-  documented `bonsai-ninja` command paths, and CLI-reference flag
-  coverage were checked against the release binary.
-
-## Large-repo behavior
-
-Elasticsearch spot checks on 2026-06-20 with the release binary:
-
-- `security ../elasticsearch taint-analysis --profile production --format json`
-  completed in 39.52 seconds with 2.96 GB max RSS.
-- `security ../elasticsearch sources --rule java.source.spring_request_param --format json`
-  completed in 3.06 seconds with 120.6 MB max RSS and complete pagination
-  metadata.
-- `inspect ../elasticsearch --query execute --context 8k` completed in
-  16.51 seconds and skipped the default taint overlay with an explicit
-  large-broad-query warning.
-- `inspect ../elasticsearch --query execute --taint-flow --context 8k`
-  completed in 28.51 seconds and reported bounded taint-flow truncation
-  metadata.
-
-## Benchmark snapshot
-
-Latest CVE-Bench tier-4 run:
-
-- Tag: `bonsai-ninja-2026-06-20-precision-184418`
-- Report: `/home/builder/Documents/augment-projects/CVEBench-SAST/runs/bonsai-ninja-2026-06-20-precision-184418/report.json`
-- Detection recall: 99.13%
-- Bug recall: 75.61%
-- Precision: 80.57%
-- Fix-validation rate: 30.43%
-- False positives per KLOC: 1.60
-- Actual code-changed fixed snapshots: 70/70 clean.
-
-The CVE wrapper sanity checks were clean: 230 vulnerable SARIF files, 230
-fixed SARIF files, 0 malformed JSON files, 0 empty vulnerable-result
-SARIFs, and no `error`, `exception`, `traceback`, `panic`, invalid JSON,
-or empty-SARIF fallback text in `scan_all.log`.
-
-Latest OWASP Benchmark v1.2 Java run:
-
-- SARIF: `/home/builder/Documents/augment-projects/CVEBench-SAST/runs/bonsai-ninja-2026-06-20-precision-184708-owasp/owasp.sarif.json`
-- Scorecard: `/home/builder/Documents/augment-projects/owasp-benchmark/scorecard/Benchmark_v1.2_Scorecard_for_bonsai-ninja_vprecision184708.html`
-- Overall score: 54.04
-- LDAP TPR/FPR: 66.67% / 0.00%
-- XPath TPR/FPR: 66.67% / 10.00%
-- SQLi TPR/FPR: 44.12% / 2.16%
-
-The official Maven scorecard run completed, but the local `results/`
-directory contains multiple historical bonsai SARIF files with the same
-generated tool/version name. That makes the generated HTML filename
-ambiguous because old scorecards overwrite each other. Use the direct
-category-aware scorer above, or isolate the unique SARIF in a temporary
-results directory before producing a publication-grade HTML scorecard.
-
-## Known gap
-
-The remaining aggregate CVE fixed-snapshot gap is benchmark-data-shaped:
-160 "fixed" snapshots in the latest run are unchanged or metadata-only
-relative to their vulnerable version and still contain the vulnerable
-code shape. Do not suppress those just to raise aggregate
-fix-validation. Future sanitizer/rule precision work should stay
-evidence-driven: only credit a sanitizer when it is path-ordered before
-the sink and tied to the tainted value.
-
-## Pre-release gate
-
-Before cutting a deployable artifact from this checkout, rerun:
+The current deep rulepack gate is clean:
 
 ```bash
-cargo fmt --all --check
-git diff --check
-cargo build --release
 ./target/release/bonsai-ninja security . pack --validate --taint-replay \
   --rules-dir security-patterns \
   --format json \
   --no-color \
   --no-progress
-cargo test -q -p bonsai_cli --test command_coverage
-cargo test -q -p bonsai_security --test rulepack_conformance
-cargo test -q -p bonsai_security --test sanitizer_credit_audit
 ```
 
-Run CVE-Bench and OWASP only when the release owner explicitly wants the
-long benchmark gate refreshed.
+| Measure | Result |
+|---|---:|
+| Rules | 7,148 |
+| Enabled rules | 6,003 |
+| Disabled rules | 1,145 |
+| Match examples | 10,489 |
+| Enabled match examples | 10,090 |
+| Taint-replay misses | 0 |
+| Errors | 0 |
+| Warnings | 0 |
+
+On this macOS validation host, `syspolicyd` can delay the launch of newly
+linked Cargo test executables. That host-level launch latency is not analyzer
+runtime and is why readiness is reported from all-target compilation plus the
+focused warmed behavioral gates above, rather than claiming that every
+workspace test executable was launched in one uninterrupted command.
+
+## Self-analysis
+
+The release binary's production security scan of this repository completed
+with:
+
+- `analysis_complete: true` and no incomplete reasons.
+- 0 findings at the production profile's severity threshold.
+- 4.34–4.96 seconds wall time across repeated measurements.
+- Approximately 296 MiB maximum resident memory in the measured run.
+
+This is a correctness smoke, not a claim that an empty finding set proves the
+absence of all defects. It proves that the current workspace parses, resolves,
+and completes the requested production analysis without hidden truncation.
+
+## Elasticsearch scale result
+
+The current release binary was measured against the sibling Elasticsearch
+checkout with:
+
+```bash
+./target/release/bonsai-ninja security ../elasticsearch taint-analysis \
+  --profile production \
+  --format json \
+  --all \
+  --no-color \
+  --no-progress
+```
+
+The 2026-07-20 run completed successfully:
+
+| Measure | Result |
+|---|---:|
+| Indexed source files | 30,055 |
+| First-party files | 28,462 |
+| Dependency files | 104 |
+| Generated files | 1,068 |
+| Excluded files | 421 |
+| Source rule matches | 356 |
+| Sink rule matches | 1,507 |
+| Sanitizer rule matches | 47 |
+| Findings at production threshold | 0 |
+| `analysis_complete` | `true` |
+| Incomplete reasons | 0 |
+| Wall time | 57.98 s |
+| Maximum RSS | 2,505,703,424 bytes (about 2.33 GiB) |
+| Swaps | 0 |
+
+The result is not capped. `--all` removes output paging, while the semantic
+IDG closure itself is uncapped regardless of rendering flags. The streamed IDG
+sidecar has no source-file-count ceiling. Exact compressed export is used for
+potentially quadratic derived path families; `--full-propagations` is the
+explicit opt-in when a consumer requires every propagation record
+materialized.
+
+Earlier notes reported parser diagnostics and
+`analysis_complete: false` on this checkout. That was a real frontend/adapter
+completeness signal, not harmless noise: any parser or semantic diagnostic
+that prevents required facts must remain visible as an incomplete reason.
+The current measured production scan reports `analysis_complete: true` with
+an empty reason list, so that older caveat no longer describes the current
+binary.
+
+## Historical external benchmark snapshot
+
+The most recent recorded CVE-Bench tier-4 run predates the current engine
+baseline:
+
+- Tag: `bonsai-ninja-2026-06-20-precision-184418`
+- Detection recall: 99.13%
+- Bug recall: 75.61%
+- Precision: 80.57%
+- Fix-validation rate: 30.43%
+- False positives per KLOC: 1.60
+- Code-changed fixed snapshots: 70/70 clean.
+
+The wrapper produced 230 vulnerable and 230 fixed SARIF files with no
+malformed JSON, empty vulnerable-result SARIF, panic, traceback, or fallback
+text. The aggregate fixed-snapshot score remains benchmark-data-shaped: 160
+"fixed" snapshots were unchanged or metadata-only relative to their
+vulnerable version. Do not suppress real vulnerable code merely to improve
+that aggregate.
+
+The recorded OWASP Benchmark v1.2 Java snapshot had an overall score of
+54.04, with LDAP TPR/FPR 66.67%/0.00%, XPath 66.67%/10.00%, and SQL injection
+44.12%/2.16%. These numbers are historical evidence, not a current regression
+gate. Refresh external benchmarks only from isolated, reproducible artifacts
+and record a new dated snapshot here.
+
+## Pre-release gate
+
+Before cutting a deployable artifact, run:
+
+```bash
+cargo fmt --all -- --check
+git diff --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
+  --document-private-items --locked
+
+./target/release/bonsai-ninja security . pack --validate --taint-replay \
+  --rules-dir security-patterns \
+  --format json \
+  --no-color \
+  --no-progress
+
+cargo test -p bonsai_conformance --test architecture_invariants
+cargo test -p bonsai_security --test rulepack_conformance
+scripts/audit-layering.sh
+scripts/audit-hardcoded.sh --check
+scripts/audit-public-api.sh --check
+scripts/audit-adapter-capabilities.sh --check
+scripts/audit-adapter-flow-events.sh --check
+```
+
+Run the Elasticsearch and external benchmark gates when engine, resolver,
+adapter, security, cache, or export semantics change. Documentation-only
+changes still run the documentation, link, formatting, and rustdoc checks.

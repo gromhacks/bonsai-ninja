@@ -50,7 +50,7 @@ in `COVERAGE_BASELINE.md`.
 | `has_implicit_returns` | Return summaries can use terminal-tail evidence only for real expression-return body forms. | Terminal assignments are never treated as returns; expression-bodied helpers may need explicit `Return` events. |
 | `param_annotations` | Synthetic-source inference: `@route("/api")` on a Flask handler treats the params as remote sources without an explicit YAML rule. | Inferred sources need explicit rules instead. |
 | `export_aliases` | CommonJS resolver credits `module.exports = X` to the module's public surface. | `require()` consumers don't see the assignments. |
-| `super_dispatch` | `super.foo()` resolves precisely to the parent class's `foo`. | Falls back to name-only resolution. |
+| `super_dispatch` | `super.foo()` resolves precisely to the parent class's `foo`. | The edge remains unresolved/incomplete unless another semantic fact proves it; public analysis never widens to name-only dispatch. |
 
 These fields do not gate basic taint propagation, but they do gate
 semantic receiver/class precision. `has_implicit_returns` gates return
@@ -176,6 +176,15 @@ language does not expose that form.
 | `constructor_method_names` | constructors are class-named, grammar-node-only, or unsupported |
 | `super_receiver_tokens` | no supertype receiver token |
 | `implicit_receiver_tokens` | no implicit instance/class receiver token |
+| `field_places_complete` | sink-oriented builds must not assume every property/projection is represented |
+| `bare_call_constructor_syntax` | a bare call cannot be classified as construction from exact class identity |
+| `same_directory_unqualified_calls` | sibling files require explicit module/import evidence |
+| `build_target_linkage` | native build-target membership does not narrow global calls |
+| `callable_declaration_family` | repeated same-named declarations are not one compiler-proven callable family |
+| `quoted_callable_literals` | quoted literals are ordinary strings, not callable references |
+| `call_text_prefilter` | candidate-only text prefilter is disabled |
+| `module_resolution_extensions` | extensionless relative imports have no adapter-declared source suffixes |
+| `workspace_manifest_context_extensions` | no extra non-source template suffix shares dependency-manifest context |
 
 Use `bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES` when an explicit empty
 constructor inventory makes the adapter declaration clearer. It is an empty
@@ -194,6 +203,12 @@ The same `effective_*()` shape exists for `super_receiver_tokens` and
 `implicit_receiver_tokens`; those names remain for API compatibility and
 return only the adapter's declared values. Code without adapter context uses
 the conservative empty behavior.
+
+`field_places_complete` and the boolean/linkage declarations are equally
+strict: false/empty disables an optimization or leaves a candidate unresolved;
+it never activates a shared heuristic. `call_text_prefilter` can only reject
+files that provably lack a supported call grammar shape. Final call facts
+always come from the adapter AST.
 
 ## Related
 

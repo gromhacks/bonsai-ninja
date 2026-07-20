@@ -17,6 +17,11 @@ and the current rows or JSON lines. Use `--page next` or the printed
 `--context uncapped` only when you intentionally want an exhaustive
 artifact.
 
+These are presentation controls, not analysis budgets. The semantic IDG
+closure runs to a fixed point before authoritative taint/security facts are
+emitted. When a preview enumerator or page is limited, metadata says that more
+output exists or that the preview was truncated.
+
 ## Grouped
 
 Grouped view clusters flows that share a tail. Use it when a sink has many source paths but the same final call chain.
@@ -46,6 +51,12 @@ handle_request -> run_pipeline -> orchestrate -> execute
 ## Graph
 
 `export --format networkx`, `graphml`, and `cypher` project the same workspace graph into graph-tooling formats.
+
+Native `export --all` preserves exhaustive semantics in an exact compressed
+form when a derived path family could be quadratic. Add
+`--full-propagations` only when a downstream consumer explicitly requires
+every materialized propagation record; compression changes representation,
+not graph meaning.
 
 ```bash
 bonsai-ninja export ./src --format networkx --output-path graph.node_link.json

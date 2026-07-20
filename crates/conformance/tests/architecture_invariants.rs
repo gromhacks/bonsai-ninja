@@ -3248,7 +3248,7 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
         "full dataflow prewarm helper must remain explicit and visibly side-effectful"
     );
     assert!(
-        cache_cmd.contains("Open structurally, then refresh bounded reusable")
+        cache_cmd.contains("Open structurally, then refresh reusable")
             && cache_cmd.contains("Do not route through a full")
             && cache_cmd.contains("workspace prewarm path here")
             && cache_cmd.contains("build_and_seed_persisted_idg_service()"),

@@ -365,7 +365,7 @@ fn cache_rebuild(workspace: Option<std::path::PathBuf>, warm_export: bool) -> Re
         print_kv("freed", &format!("{freed} bytes"));
     }
 
-    // Open structurally, then refresh bounded reusable
+    // Open structurally, then refresh reusable
     // sidecars explicitly. Do not route through a full
     // workspace prewarm path here: that computes
     // dataflow/value-flow/flow-id caches and can retain
@@ -449,7 +449,7 @@ fn cache_rebuild(workspace: Option<std::path::PathBuf>, warm_export: bool) -> Re
         "note: ",
         &ui.dim("note: "),
         "      ",
-        "cache rebuild refreshes bounded structural sidecars. The export JSON cache is \
+        "cache rebuild refreshes reusable structural sidecars. The export JSON cache is \
                  warmed only with --export. Exact taint/source/security commands still compute \
                  their requested scope before rendering; caches only make that work faster when \
                  fresh.",

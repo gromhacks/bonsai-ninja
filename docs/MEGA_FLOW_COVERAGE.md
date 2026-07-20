@@ -8,6 +8,12 @@ are deliberately dense: language-specific constructs are present as real
 source code, and taint-relevant constructs are kept on the canonical
 source->sink path where the adapter can follow them.
 
+Each fixture is parsed by that language's Tree-sitter adapter and lowered into
+typed compiler facts. Shared analysis does not recognize these constructs from
+a cross-language list of strings. The production taint check runs the sparse
+IDG closure to its fixed point without a BFS depth, iteration budget, or result
+cap.
+
 CI pins this in `crates/cli/tests/security_commands.rs` with two checks:
 every language must expose its declared construct markers in source, and
 `security taint-analysis --format json --all` must match the default

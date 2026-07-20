@@ -7,6 +7,27 @@ description: "Common questions and troubleshooting guidance for bonsai-ninja."
 
 <AccordionGroup>
 
+<Accordion title="Does bonsai-ninja hardcode language syntax or API names?">
+
+No. Each language adapter owns its Tree-sitter grammar and lowers source
+syntax into typed declarations, imports, flow events, places, types, modules,
+receivers, constructors, and capability facts. Shared analysis consumes that
+IR and rulepack-declared API semantics. A language-specific syntax fix belongs
+in its adapter, not in a shared union of token or method names.
+
+</Accordion>
+
+<Accordion title="Is taint analysis capped or implemented as BFS?">
+
+No. Production taint reachability is a sparse monotone closure over numeric
+IDG edges and runs until the reachable fixed point is exhausted. It has no
+name-search BFS, hidden call-depth limit, iteration budget, or result cap.
+Paging, context budgets, and diagnostic path previews can limit rendered
+output; they report more pages or explicit truncation and never change the
+semantic result.
+
+</Accordion>
+
 <Accordion title="Why did a sanitizer not remove the finding?">
 
 Sanitizers are evidence, not propagation blockers. The finding remains visible with `status` set from the sanitizer context so reviewers can decide whether the sanitizer is sufficient.
@@ -39,7 +60,12 @@ The rule loader denies unknown fields and validates constraints before scanning.
 
 <Accordion title="Why is a flow marked incomplete?">
 
-The resolver could not prove a semantic target, the call had ambiguous semantic candidates, or a budgeted section was truncated. Public analysis does not widen those cases into guessed flows; use the debug commands such as `dump-resolve`, `dump-edges`, and `dump-taint` to inspect the missing fact.
+The parser or adapter could not produce a required fact, the resolver could
+not prove a semantic target, or the call had ambiguous semantic candidates.
+Preview-only output can also report its own explicit truncation. Public
+analysis does not widen those cases into guessed flows; use `diagnostics`,
+`dump-ast`, `dump-resolve`, `dump-edges`, and `dump-taint` to inspect the
+missing fact.
 
 </Accordion>
 

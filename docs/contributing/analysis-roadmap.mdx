@@ -196,7 +196,7 @@ the matcher would do today if the constraint kind existed.
 
 ---
 
-## Primitive 4 — Missing-call detection (`MatchKind::Missing`) — **shipped (intra-procedural), cross-proc BFS pending**
+## Primitive 4 — Missing-call detection (`MatchKind::Missing`) — **shipped**
 
 **Why it matters for injection.** Some injection-class bugs are about
 what *didn't* happen on a path: CSRF tokens never validated, rate-limit
@@ -205,11 +205,11 @@ verification not enabled before connecting, escaping never applied
 before output. The engine already walks every reachable path; inverting
 the matcher to flag paths *missing* a required helper is the new piece.
 
-**Engine work.** Add `MatchKind::Missing` to the rule schema. For each
-sink site, walk every CFG path back to the entrypoint and check whether
-any call to a declared "guard helper" appears. If no path crosses one,
-emit a finding with kind=Missing. ~10d. Mostly matcher-side; the taint
-engine already provides the reachability primitives.
+**Implemented shape.** `MatchKind::Missing` checks the enclosing
+function by default. A rule can opt into `search_depth > 0` to inspect
+resolved callees up to that explicit depth. That traversal is a bounded
+missing-call rule predicate, not the taint engine: it never changes the
+uncapped IDG fixed point or masquerades as complete whole-program taint.
 
 **Per-language adapter work.** 0d.
 

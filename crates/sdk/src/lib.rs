@@ -613,10 +613,10 @@ impl Bonsai {
         cache
     }
 
-    /// Rebuild the same bounded structural sidecars as
+    /// Rebuild the same reusable structural sidecars as
     /// `bonsai-ninja cache rebuild`: callgraph and IDG, plus the
     /// default export cache when `warm_export` is true. This does not
-    /// run the legacy full-workspace dataflow prewarm.
+    /// run the compatibility full-workspace dataflow prewarm.
     pub fn rebuild_structural_cache(&self, root: impl AsRef<Path>, warm_export: bool) -> Result<CacheStats> {
         let project = self.index_structural(root)?;
         project.cache().rebuild_structural_with_export(warm_export)
@@ -1788,12 +1788,12 @@ impl Cache<'_> {
             .stream_default_export_cache_if_fresh(writer)
     }
 
-    /// Rebuild the bounded structural sidecars used by query,
+    /// Rebuild the reusable structural sidecars used by query,
     /// inspect, export, and security commands. This matches CLI
     /// `cache rebuild`: clear the persisted workspace cache, write a
     /// fresh callgraph sidecar, build/write the workspace IDG sidecar,
     /// and optionally warm the default export cache. It deliberately
-    /// does not rebuild the legacy eager dataflow sidecar.
+    /// does not rebuild the compatibility eager dataflow sidecar.
     pub fn rebuild_structural(&self) -> Result<CacheStats> {
         self.rebuild_structural_with_export(false)
     }
@@ -1801,9 +1801,8 @@ impl Cache<'_> {
     /// Warm structural semantic sidecars without clearing unrelated
     /// cache artifacts. This is the SDK counterpart to
     /// `bonsai-ninja index --semantic`: write the resolved callgraph,
-    /// build/write the workspace IDG only when its sidecar is enabled
-    /// for this workspace size, and refresh the manifest. It does not
-    /// run the legacy all-entry dataflow prewarm.
+    /// build/write the streamed workspace IDG, and refresh the manifest.
+    /// It does not run the compatibility all-entry dataflow prewarm.
     pub fn warm_structural(&self) -> Result<CacheStats> {
         self.warm_structural_sidecars()?;
         Ok(self.workspace_cache().stats()?)
@@ -2230,7 +2229,7 @@ fn validate_manifest_sidecars(
                 return export_validation.clone();
             }
             if input.name == "idg" && !idg_sidecar_applicable {
-                return not_applicable_validation(input, "IDG sidecar is disabled for this workspace size");
+                return not_applicable_validation(input, "IDG sidecar is not applicable");
             }
             let manifest_sidecar = manifest
                 .sidecars
@@ -2392,7 +2391,7 @@ fn validate_without_manifest(
                 return export_validation.clone();
             }
             if input.name == "idg" && !idg_sidecar_applicable {
-                return not_applicable_validation(input, "IDG sidecar is disabled for this workspace size");
+                return not_applicable_validation(input, "IDG sidecar is not applicable");
             }
             CacheSidecarValidation {
                 name: input.name.to_string(),
@@ -2422,7 +2421,7 @@ fn validate_stale_manifest_sidecars(
                 return export_validation.clone();
             }
             if input.name == "idg" && !idg_sidecar_applicable {
-                return not_applicable_validation(input, "IDG sidecar is disabled for this workspace size");
+                return not_applicable_validation(input, "IDG sidecar is not applicable");
             }
             CacheSidecarValidation {
                 name: input.name.to_string(),
@@ -2453,7 +2452,7 @@ fn validate_error_sidecars(
                 return export_validation.clone();
             }
             if input.name == "idg" && !idg_sidecar_applicable {
-                return not_applicable_validation(input, "IDG sidecar is disabled for this workspace size");
+                return not_applicable_validation(input, "IDG sidecar is not applicable");
             }
             CacheSidecarValidation {
                 name: input.name.to_string(),

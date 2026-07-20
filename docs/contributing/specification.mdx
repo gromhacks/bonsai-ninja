@@ -34,6 +34,13 @@ behavioural contract; cross-cutting details live in
    each adapter implements the trait in `crates/lang_api`; the engine
    never names a language directly.
 
+Tree-sitter is the syntax layer of a compiler pipeline. Adapters own grammar
+node kinds, source tokens, declarations, imports, scopes, calls, receivers,
+constructors, types, and `FlowEvent` lowering. Shared passes consume the
+typed IR; a language-specific syntax fix must not become a language-id branch
+or cross-language spelling inventory in the resolver, IDG, taint, security, or
+export crates.
+
 ## 2. Output schema
 
 ### 2.1 `TraceResult` (produced by `trace`)
@@ -98,7 +105,7 @@ Field names are part of the public contract.
 ### 2.4 SARIF 2.1.0
 
 `security taint-analysis --format sarif` emits SARIF for GitHub code
-scanning. See [`../security-spec.mdx`](../security-spec.mdx#sarif-21-mapping).
+scanning. See [`../security-spec.mdx`](../security-spec.mdx#output-formats).
 
 ## 3. Stability
 
@@ -106,9 +113,9 @@ Public type field names in the SDK and CLI output are stable across
 minor versions. Adding a field is a minor change; renaming or removing
 one is a breaking change requiring a major version bump.
 
-The `MATCHER_POLICY_FINGERPRINT` constant in `bonsai_common::policy`
-versions the matcher / engine semantics. When bumped, stale dataflow
-sidecars are invalidated on reload.
+The `MATCHER_POLICY_FINGERPRINT` and analyzer build/pipeline fingerprints
+version matcher and engine semantics. Source, dependency, configuration, and
+pipeline mismatches invalidate sidecars before reuse.
 
 ## 4. Engine standalone contract
 
@@ -169,12 +176,14 @@ current matrix.
 
 ## 8. Extensibility
 
-- Adding a new language: ~200–500 lines (implement the
-  `LanguageAdapter` trait in `crates/lang_api`).
-- Adding a new rule: ~30–60 lines of YAML (see
-  [`../pattern-guide.mdx`](../pattern-guide.mdx)).
-- Adding a new browse command: ~150 lines of Rust (one source file in
-  `crates/browse/src/`).
+- Adding a new language means implementing `LanguageAdapter`, declaring
+  syntax capabilities explicitly, lowering all supported compiler facts, and
+  passing the cross-language conformance matrices. Size follows the grammar;
+  there is no line-count target.
+- Adding a new rule means declaring real API semantics plus positive and
+  negative examples (see [`../pattern-guide.mdx`](../pattern-guide.mdx)).
+- Adding a browse command means building on canonical workspace facts and the
+  shared paging/stable-ID surfaces rather than reparsing source.
 - Adding a new analysis: implement on top of `bonsai_taint`,
   `bonsai_callgraph`, or `bonsai_abstract_interp`.
 

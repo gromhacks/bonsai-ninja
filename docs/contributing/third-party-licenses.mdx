@@ -10,28 +10,29 @@ licenses of its transitive dependencies for compliance and attribution.
 
 ## License audit summary
 
-Total dependencies: 271 (44 local crates + 227 external).
+Current `Cargo.lock` / `cargo metadata --locked` graph: 246 packages
+(47 workspace crates + 199 external packages).
 
 | License | Count |
 |---|---|
-| Apache-2.0 OR MIT | 194 |
-| MIT | 46 |
-| MIT OR Unlicense | 7 |
+| Apache-2.0 OR MIT (equivalent metadata spellings normalized) | 134 |
+| MIT | 83 |
+| MIT OR Unlicense (equivalent metadata spellings normalized) | 7 |
 | Apache-2.0 OR Apache-2.0 WITH LLVM-exception OR MIT | 5 |
-| Apache-2.0 | 3 |
 | ISC | 3 |
 | Apache-2.0 OR BSD-2-Clause OR MIT | 2 |
+| (Apache-2.0 OR MIT) AND Unicode-3.0 | 1 |
 | 0BSD OR Apache-2.0 OR MIT | 1 |
-| Apache-2.0 OR MIT OR Zlib | 1 |
 | Apache-2.0 AND ISC | 1 |
+| Apache-2.0 OR BSL-1.0 | 1 |
 | Apache-2.0 OR ISC OR MIT | 1 |
 | Apache-2.0 OR LGPL-2.1-or-later OR MIT | 1 |
-| Apache-2.0 OR BSL-1.0 | 1 |
+| Apache-2.0 OR MIT OR Zlib | 1 |
 | BSD-3-Clause | 1 |
 | CC0-1.0 | 1 |
-| MPL-2.0 | 1 |
-| (Apache-2.0 OR MIT) AND Unicode-3.0 | 1 |
 | CDLA-Permissive-2.0 | 1 |
+| MPL-2.0 | 1 |
+| Zlib | 1 |
 
 All licenses are permissive (MIT, Apache-2.0, ISC, BSD-2/3-Clause, 0BSD,
 Zlib, BSL-1.0, CC0-1.0, Unicode-3.0, CDLA-Permissive-2.0) or
@@ -92,9 +93,14 @@ certificate set. Compatible with MIT distribution.
 ## Reproducing the audit
 
 ```sh
-cargo install cargo-license
-cargo license --json | jq …
+cargo metadata --format-version 1 --locked > /tmp/bonsai-metadata.json
+jq '.workspace_members | length' /tmp/bonsai-metadata.json
+jq '[.packages[].license] | group_by(.) | map({license: .[0], count: length})' \
+  /tmp/bonsai-metadata.json
 ```
 
-The `Cargo.lock` is the authoritative source for the dependency graph. Re-run
-the audit when adding or upgrading dependencies.
+`Cargo.lock` plus `cargo metadata --format-version 1 --locked` is the
+authoritative resolved graph. License strings above normalize only equivalent
+ordering/separator spellings such as `MIT OR Apache-2.0`,
+`Apache-2.0 OR MIT`, and `MIT/Apache-2.0`. Re-run the audit when adding or
+upgrading dependencies.
