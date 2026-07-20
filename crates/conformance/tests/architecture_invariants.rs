@@ -1855,6 +1855,52 @@ fn every_language_adapter_crate_has_local_tests() {
     );
 }
 
+/// Each supported language is a compiler frontend: its concrete adapter owns
+/// the Tree-sitter grammar and grammar-node vocabulary, while the shared kit
+/// only lowers the adapter-provided syntax contract into canonical facts.
+/// Keeping these pieces together prevents callgraph/IDG/taint from growing
+/// concrete language switches or reparsing source text independently.
+#[test]
+fn every_language_adapter_owns_its_tree_sitter_lowering() {
+    let root = repo_root();
+    let crates_dir = root.join("crates");
+    let mut checked = 0_usize;
+    let mut violations = Vec::new();
+
+    for entry in fs::read_dir(&crates_dir).expect("read crates dir") {
+        let path = entry.expect("crate entry").path();
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !name.starts_with("lang_") || name == "lang_api" {
+            continue;
+        }
+        let lib_path = path.join("src/lib.rs");
+        if !lib_path.exists() {
+            continue;
+        }
+        checked += 1;
+        let source = live_code(&read(&lib_path));
+        for required in [
+            "const HANDLER: GrammarHandler",
+            "impl LanguageAdapter for",
+            "fn tree_sitter_language",
+            "fn capabilities(",
+            "decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER)",
+            "fn extract_imports",
+        ] {
+            if !source.contains(required) {
+                violations.push(format!("{name}: missing adapter-owned `{required}`"));
+            }
+        }
+    }
+
+    assert_eq!(checked, 21, "expected every bundled language compiler frontend");
+    assert!(
+        violations.is_empty(),
+        "each lang_* crate must own its Tree-sitter syntax lowering:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
 // docs/contributing/review-checklist.mdx §2.8 drift guards. Each test asserts a specific
 // adapter-fact contract that downstream resolution depends on.
 // Without these, a reviewer accepting a partial migration would

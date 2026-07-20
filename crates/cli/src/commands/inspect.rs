@@ -1942,6 +1942,7 @@ fn finish_inspect(
             }
         }
         BrowseFormat::Text => {
+            let filters_hash = inspect_filters_hash(pattern, is_regex);
             let mut current_info = None;
             let current_text = page_cache::capture(|| {
                 current_info = Some(render_inspect_report_text(
@@ -1985,9 +1986,10 @@ fn finish_inspect(
                     });
                 }
             }
-            if let Err(e) = page_cache::save_pages(root, cached_pages) {
+            if let Err(e) = page_cache::save_pages(root, "inspect", filters_hash, cached_pages) {
                 tracing::debug!("page cache save failed: {e}");
             }
+            paging::write_last_cursor("inspect", filters_hash, &current_info.cursor);
             page_cache::emit_cached_text(&output_text)?;
         }
     }

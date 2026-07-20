@@ -83,6 +83,7 @@ fs2 = "0.4"
 ignore = "0.4"
 lru = "0.16.3"
 tempfile = "3"
+dirs = "6"
 
 # CLI / frontends
 clap = { version = "4", features = ["derive", "env"] }

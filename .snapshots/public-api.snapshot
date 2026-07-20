@@ -61,7 +61,7 @@ pub mod chains;
 pub struct BuildTargetIndex {
 pub struct CallEdge {
 pub struct CallGraph {
-pub struct CallGraphFileSemantics<F, T, P, L, G, S, B> {
+pub struct CallGraphFileSemantics<F, T, P, G, C> {
 pub struct EdgeProvenance {
 pub struct ResolvedCallGraph {
 pub struct ResolvedCallGraphBuildContext {
@@ -186,8 +186,10 @@ pub struct FragmentParseContext {
 pub trait LanguageAdapter: Send + Sync + 'static {
 pub trait TreeProvider: Send + Sync {
 pub type DynAdapter = Arc<dyn LanguageAdapter>;
-pub use capabilities::{CapabilityLevel, LanguageCapabilities, NO_CONSTRUCTOR_METHOD_NAMES};
+pub use bonsai_vfs::{FileSnapshot, Vfs};
+pub use capabilities::{
 pub use kit::{
+pub use parse_recovery::{c_family_declaration_macro_recovery_edits, syntax_damage_score, ParseRecoveryEdit};
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};
 pub use tree_sitter::Tree as SyntaxTree;
@@ -226,11 +228,13 @@ pub const LANG_ID: LanguageId = LanguageId::new("java");
 pub struct JavaAdapter;
 
 === lang_javascript ===
+pub const JS_TS_MODULE_RESOLUTION_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
 pub const LANG_ID: LanguageId = LanguageId::new("javascript");
 pub fn apply_javascript_getter_property_sources(
 pub fn apply_js_ts_commonjs_named_export_aliases(
 pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
 pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<ImportSpec> {
+pub fn js_ts_module_segments(path: &std::path::Path) -> Vec<String> {
 pub fn js_ts_require_calls(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<ImportSpec> {
 pub struct JavaScriptAdapter;
 
@@ -373,6 +377,7 @@ pub struct CacheManifestSidecar {
 pub struct CacheSidecarValidation {
 pub struct CacheStats {
 pub struct CacheValidationReport {
+pub struct DiagnosticFileRow {
 pub struct DiagnosticsReport {
 pub struct Dump<'a> {
 pub struct Export<'a> {
@@ -426,9 +431,9 @@ pub use sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recogniz
 pub mod idg_build;
 pub mod value_flow;
 pub use assignment::{assign_chain_taints, target_is_tainted};
-pub use idg_build::{compiler_idg_service, ensure_idg_service};
+pub use idg_api::{
+pub use idg_build::{
 pub use idg_query::{
-pub use inter::{
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{
 pub use value_flow::{
