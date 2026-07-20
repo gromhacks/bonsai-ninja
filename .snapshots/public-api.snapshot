@@ -345,6 +345,7 @@ pub fn load_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<Fa
 pub fn load_sidecar_with_pipeline(workspace_root: &Path, pipeline: u64) -> std::io::Result<FactIndex> {
 pub fn pipeline_hash_for_source_fingerprints<I, P>(workspace_root: Option<&Path>, fingerprints: I) -> u64
 pub fn pipeline_hash_for_workspace(ws: &Workspace) -> u64 {
+pub fn query_sidecar_file_paths_with_pipeline(
 pub fn retrieval_sidecar_path(workspace_root: &Path) -> PathBuf {
 pub fn save_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<usize> {
 pub fn validate_sidecar_file(path: &Path) -> std::io::Result<usize> {

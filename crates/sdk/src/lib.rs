@@ -370,22 +370,23 @@ impl Bonsai {
             Some(root_for_pipeline.as_path()),
             fingerprints.iter().map(|file| (file.path.as_path(), file.hash)),
         );
-        let Ok(index) = bonsai_retrieval::load_sidecar_with_pipeline(root, pipeline) else {
-            return Ok(None);
-        };
-        let candidates = index
-            .query(&bonsai_retrieval::RetrievalQuery {
+        let Ok(candidate_paths) = bonsai_retrieval::query_sidecar_file_paths_with_pipeline(
+            root,
+            pipeline,
+            &bonsai_retrieval::RetrievalQuery {
                 text: query,
                 kind: filters.kind,
                 file: filters.file,
                 workspace_root: Some(root_for_pipeline.as_path()),
                 regex: false,
                 limit: 0,
-            })
-            .map_err(|err| anyhow!("invalid retrieval query `{query}`: {err}"))?;
-        let mut include_filters: Vec<String> = candidates
+            },
+        ) else {
+            return Ok(None);
+        };
+        let mut include_filters: Vec<String> = candidate_paths
             .into_iter()
-            .filter_map(|doc| retrieval_include_filter(root, &doc.file_path))
+            .filter_map(|path| retrieval_include_filter(root, &path))
             .collect();
         include_filters.sort();
         include_filters.dedup();

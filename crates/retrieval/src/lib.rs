@@ -1061,6 +1061,42 @@ pub fn load_sidecar_with_pipeline(workspace_root: &Path, pipeline: u64) -> std::
     Ok(FactIndex::from_docs(snapshot.docs))
 }
 
+/// Query a persisted retrieval sidecar for candidate file paths without
+/// expanding its compact documents into the heavyweight in-memory
+/// [`FactIndex`].
+///
+/// Large-workspace CLI frontends use retrieval only to narrow the files they
+/// subsequently parse and hydrate through canonical compiler APIs. Building
+/// trigram/token/prefix indexes over every persisted file/kind document for
+/// each one-shot command defeats that purpose: the transient indexes can be
+/// orders of magnitude larger than the sidecar itself. This path validates
+/// the same pipeline and payload hash, scans the compact string ids directly,
+/// and returns only workspace file paths. It never exposes candidate metadata
+/// as public evidence.
+///
+/// Regex lookup remains an in-memory/full-workspace operation because the CLI
+/// deliberately does not use a persisted prefilter for regex queries.
+pub fn query_sidecar_file_paths_with_pipeline(
+    workspace_root: &Path,
+    pipeline: u64,
+    query: &RetrievalQuery<'_>,
+) -> std::io::Result<Vec<String>> {
+    if query.regex {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "persisted retrieval file prefilter does not support regex queries",
+        ));
+    }
+    let path = retrieval_sidecar_path(workspace_root);
+    let reader = FactStoreReader::open(&path, RETRIEVAL_TABLE_ID, pipeline).map_err(map_factstore_io)?;
+    let hit = reader
+        .get(SNAPSHOT_KEY)
+        .map_err(map_factstore_io)?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "retrieval snapshot missing"))?;
+    let snapshot = decode_compact_snapshot_hit(hit, pipeline)?;
+    snapshot.query_file_paths(query)
+}
+
 /// Validate that a retrieval factstore is structurally readable and carries
 /// a current retrieval snapshot. This intentionally does not prove the
 /// sidecar is fresh for a workspace; callers combine it with their own
@@ -1336,6 +1372,55 @@ impl CompactFactSnapshot {
             }
         }
         Ok(())
+    }
+
+    fn query_file_paths(&self, query: &RetrievalQuery<'_>) -> std::io::Result<Vec<String>> {
+        let text = query.text.trim().to_lowercase();
+        let kind = query.kind.map(str::to_lowercase);
+        let mut paths = Vec::new();
+        for doc in &self.docs {
+            let doc_kind = self.string(doc.kind)?;
+            if kind
+                .as_deref()
+                .is_some_and(|filter| !doc_kind.to_lowercase().contains(filter))
+            {
+                continue;
+            }
+            let file_path = self.string(doc.file_path)?;
+            if query
+                .file
+                .is_some_and(|filter| !file_path_matches_query(file_path, filter, query.workspace_root))
+            {
+                continue;
+            }
+            if !text.is_empty() {
+                let searchable = self.string(doc.normalized_search_text)?;
+                let fact_id_matches = self.string(doc.fact_id)? == query.text.trim();
+                let stable_id_matches = doc
+                    .stable_ids
+                    .iter()
+                    .any(|&id| self.string(id).is_ok_and(|value| value == query.text.trim()));
+                if !fact_id_matches && !stable_id_matches && !searchable.contains(&text) {
+                    continue;
+                }
+            }
+            paths.push(file_path.to_string());
+        }
+        paths.sort_unstable();
+        paths.dedup();
+        if query.limit > 0 {
+            paths.truncate(query.limit);
+        }
+        Ok(paths)
+    }
+
+    fn string(&self, id: u32) -> std::io::Result<&str> {
+        self.strings.get(id as usize).map(String::as_str).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("retrieval string id out of range: {id}"),
+            )
+        })
     }
 }
 
@@ -2913,6 +2998,45 @@ mod tests {
             .expect("query candidate sidecar");
         assert_eq!(hits.len(), 1);
         assert!(hits[0].file_path.ends_with("app.py"));
+
+        let pipeline = pipeline_hash_for_workspace(&ws);
+        let direct_paths = query_sidecar_file_paths_with_pipeline(
+            dir.path(),
+            pipeline,
+            &RetrievalQuery {
+                text: "host=endpoint",
+                kind: Some("arg"),
+                workspace_root: Some(dir.path()),
+                ..RetrievalQuery::default()
+            },
+        )
+        .expect("query compact candidate sidecar directly");
+        assert_eq!(direct_paths, vec![hits[0].file_path.clone()]);
+
+        let filtered_out = query_sidecar_file_paths_with_pipeline(
+            dir.path(),
+            pipeline,
+            &RetrievalQuery {
+                text: "host=endpoint",
+                kind: Some("class"),
+                workspace_root: Some(dir.path()),
+                ..RetrievalQuery::default()
+            },
+        )
+        .expect("query compact candidate sidecar with kind filter");
+        assert!(filtered_out.is_empty());
+
+        let regex_error = query_sidecar_file_paths_with_pipeline(
+            dir.path(),
+            pipeline,
+            &RetrievalQuery {
+                text: "host.*endpoint",
+                regex: true,
+                ..RetrievalQuery::default()
+            },
+        )
+        .expect_err("compact candidate query must reject regex lookup");
+        assert_eq!(regex_error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
