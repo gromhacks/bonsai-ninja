@@ -125,11 +125,10 @@ custom analyses, language servers, batch review tools, and ad-hoc
 tooling.
 
 CLI and SDK consumers drive the engine through
-`interprocedural_taint_to_completion_with_caches`, which manages the
-fixed-point worklist and caching of `InterTaintCaches`. The configured
-budget is a resumable chunk size, not a completeness cap. The
-standalone form documented above is the contract that the cache-driven
-driver respects on every iteration.
+`interprocedural_taint_with_caches`, which reuses `InterTaintCaches` while
+running the same IDG closure to its fixed point. There is no scheduler budget,
+continuation token, or second interprocedural worklist. The standalone form
+documented above and the cache-aware form have the same completeness contract.
 
 ## 5. Precision contract
 

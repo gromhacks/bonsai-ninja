@@ -274,6 +274,9 @@ fn render_runtime_only() -> String {
             // baseline doesn't render them yet — destructure-and-
             // ignore to keep the table contract stable.
             constructor_method_names: _,
+            module_default_export_names: _,
+            universal_type_names: _,
+            module_path_syntax: _,
             bare_call_constructor_syntax: _,
             super_receiver_tokens: _,
             implicit_receiver_tokens: _,

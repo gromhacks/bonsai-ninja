@@ -80,9 +80,9 @@ records. Every taint introduction goes through the `entry_sources: TokenSet`
 parameter. The engine never invents taint from heuristics or implicit-source
 patterns.
 
-The single exception is `InterTaintConfig.source_bearing_functions`, a
-security-layer-controlled set of helpers whose return values are tainted.
-The set is empty by default; only `bonsai_security` populates it.
+Source rules and source-returning helpers are translated into concrete IDG
+seed nodes by the security layer. The engine does not keep a helper-name
+inventory or infer a tainted return from a function name.
 
 Source seeding is identity-strict. A matched source `os.getenv` may seed
 `os.getenv` and the tail `getenv`, but never the receiver `os`. A matched
@@ -263,26 +263,16 @@ the engine.
 When in doubt, push the work to the adapter. Engine code should look the
 same regardless of the source language.
 
-### 12a. Cross-language tokens live in `bonsai_common`, but adapters can narrow
+### 12a. Source syntax belongs to the active adapter
 
-When the engine genuinely needs to recognise a syntactic token that
-appears in *several* languages — variable sigils, pointer/reference
-sigils, implicit-receiver prefixes, super-call tokens — the set lives
-as a named constant in `bonsai_common::names` and engine code reads
-the constant. Inline `&['$', '@', '%']` / `["self.", "this."]` arrays
-in engine code are forbidden because each new language requires
-touching every site that hardcoded the union.
+The 21 concrete adapters own Tree-sitter grammar nodes, constructor forms,
+receiver tokens, module roots, imports, exports, and broad type spellings.
+Shared compiler passes consume `Decl`, `FlowEvent`, `ImportSpec`, `Place`, and
+`LanguageCapabilities`; they do not select behavior by language id or use a
+union of source-language keywords as semantic proof.
 
-For tokens that are language-shaped rather than truly cross-language
-(constructor names, super-receiver tokens, implicit-receiver tokens),
-`LanguageCapabilities` exposes the per-adapter slice and an
-`effective_*()` accessor that falls through to the
-`bonsai_common::*_TOKENS` constant when the adapter declares an
-empty slice. Mature adapters should not rely on that fallback; if a
-language has no super-receiver token, set
-`bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS`. If constructors are
-class-named or grammar-node-only, set
-`bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES`:
+An empty capability means the syntax does not exist. The retained
+`effective_*` names are API compatibility shims, not fallback inventories:
 
 ```rust
 LanguageCapabilities::effective_constructor_method_names()
@@ -290,49 +280,24 @@ LanguageCapabilities::effective_super_receiver_tokens()
 LanguageCapabilities::effective_implicit_receiver_tokens()
 ```
 
-Engine code that has access to a `LanguageAdapter` (via
-`db.adapter_for(file)`) should prefer the `effective_*()` accessor
-so adapters can narrow their token sets. Code that doesn't have
-adapter context — `is_super_receiver(name)` style helpers — falls
-through to the cross-language constant; the adapter-aware variant
-is `is_super_receiver_with_tokens(name, tokens)` for callers that
-do know which adapter they're in.
-
-Existing token sets:
+Shared textual helpers are limited to normalization of the canonical IR
+spellings already emitted by adapters:
 
 - [`IDENTIFIER_SIGILS`] — `$ @ %` (Perl / PHP / Ruby variable sigils).
 - [`REFERENCE_SIGILS`] — `& *` (Rust borrow / C pointer / reference).
 - [`ALL_NAME_PUNCTUATION`] — union of the two; used at qualified-text
   comparison sites that need to strip whichever variant the adapter
   emitted.
-- [`IMPLICIT_RECEIVER_PREFIXES`] — `self.`, `this.` for prefix-match
-  detection of implicit-receiver method calls.
-- [`IMPLICIT_RECEIVER_TOKENS`] — `self`, `this` (the prefix entries
-  minus the trailing `.`) for receiver-equality checks.
-- [`SUPER_RECEIVER_TOKENS`] — `super`, `parent`, `base` for
-  super-call dispatch.
 - [`QUALIFIED_NAME_SEPARATORS`] — `::`, `->`, `.`, `:` for tail
-  extraction.
-- [`ABSOLUTE_PATH_PREFIXES`] — `crate::`, `self::`, `::`, `\` for
-  fully-qualified call resolution. (`super::` is excluded because
-  it can repeat — handled inline by the resolver.)
-- [`VALUE_TEXT_LEADING_KEYWORDS`] — `return `, `new ` for engine
-  helpers that receive less-processed `value_text` and must peel
-  these defensively. Adapters using
-  `kit::extract_return_value_text` already get clean text.
-- [`SELF_CONSTRUCTOR_HEADS`] — `Self(`, `Self {`, `self(`,
-  `static(` for Rust / Swift / PHP self-typed constructor returns.
-- [`CONSTRUCTOR_METHOD_NAMES`] — `__init__` (Python),
-  `constructor` (JS/TS), `__construct` (PHP), `init` (Swift /
-  Objective-C), `new` (Ruby / PHP factory). Fallback when
-  `DeclKind::Constructor` lookup misses.
+  candidate-tail extraction only; symbol identity still goes through the
+  contextual resolver.
+- `LanguageCapabilities::module_path_syntax` — rooted qualified-name
+  prefixes declared by each adapter. Shared resolution never carries a
+  cross-language prefix inventory.
 
-Adding a token to one of these constants is the right move when
-another language joins the workspace. Branching on a literal English
-keyword (`new `, `return `, `def `, `__construct`) inside engine code
-is the wrong move — emit a structural fact from the adapter
-(`CallKind::Construct`, `FlowEvent::Return`) and have the engine
-match on the variant instead.
+New source syntax belongs in its adapter's `GrammarHandler`, AST post-pass,
+or capability declaration. Emit a structural fact (`CallKind::Constructor`,
+`FlowEvent::Return`, a type alias, or a `Place`) and match that fact downstream.
 
 ## 13. Workspace-cached lookups, never query-time graph walks
 

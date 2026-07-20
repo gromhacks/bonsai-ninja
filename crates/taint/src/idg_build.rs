@@ -52,6 +52,20 @@ impl bonsai_idg::workspace_adapter::IdgFileSemanticsProvider for CompilerIdgFile
             .map(|adapter| adapter.capabilities().module_resolution_extensions)
             .unwrap_or(&[])
     }
+
+    fn module_default_export_names(&self, file: bonsai_common::FileId) -> &'static [&'static str] {
+        self.db
+            .adapter_for(file)
+            .map(|adapter| adapter.capabilities().module_default_export_names)
+            .unwrap_or(&[])
+    }
+
+    fn module_path_syntax(&self, file: bonsai_common::FileId) -> bonsai_lang_api::ModulePathSyntax {
+        self.db
+            .adapter_for(file)
+            .map(|adapter| adapter.capabilities().module_path_syntax)
+            .unwrap_or_else(bonsai_lang_api::ModulePathSyntax::none)
+    }
 }
 
 /// Return the canonical adapter/VFS compiler contract for an IDG build.

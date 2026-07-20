@@ -86,7 +86,13 @@ impl LanguageAdapter for PhpAdapter {
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &["mixed", "object"],
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax {
+                rooted_prefixes: &["\\"],
+                repeatable_rooted_prefixes: &[],
+            },
             constructor_method_names: &["__construct"],
             super_receiver_tokens: &["parent"],
             // PHP distinguishes the current object (`$this`) from current-

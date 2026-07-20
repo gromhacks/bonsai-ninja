@@ -693,23 +693,79 @@ fn compiler_engines_do_not_branch_on_concrete_languages() {
         "callable_declaration_family",
         "quoted_callable_literals",
         "same_directory_unqualified_calls",
+        "universal_type_names",
+        "module_path_syntax",
     ] {
         assert!(
             callgraph.contains(capability),
             "callgraph must consume adapter-owned `{capability}`"
         );
     }
+    for universal_type in ["Object", "Any", "AnyObject", "interface{}"] {
+        assert!(
+            !callgraph.contains(&format!("\"{universal_type}\"")),
+            "callgraph must consume adapter-owned universal type `{universal_type}`"
+        );
+    }
     let resolver = read(&root.join("crates/resolve/src/lib.rs"));
     assert!(
         resolver.contains("same_directory_unqualified_calls")
-            && !resolver.contains("strip_known_import_extension"),
+            && !resolver.contains("strip_known_import_extension")
+            && !resolver.contains("strip_suffix('!')")
+            && !resolver.contains("strip_suffix(\"()\")")
+            && !resolver.contains("format!(\"{module}.default\")"),
         "resolver must use adapter namespace capabilities and adapter-emitted import aliases"
+    );
+    let resolver_live = live_code(&resolver);
+    let callgraph_live = live_code(&callgraph);
+    for rooted_prefix in ["\"crate::\"", "\"self::\"", "\"super::\""] {
+        assert!(
+            !resolver_live.contains(rooted_prefix),
+            "resolver must not own adapter rooted-name token {rooted_prefix}"
+        );
+        assert!(
+            !callgraph_live.contains(rooted_prefix),
+            "callgraph must not own adapter rooted-name token {rooted_prefix}"
+        );
+    }
+    let common_names = read(&root.join("crates/common/src/names.rs"));
+    assert!(
+        !common_names.contains("ABSOLUTE_PATH_PREFIXES")
+            && !common_names.contains("VALUE_TEXT_LEADING_KEYWORDS")
+            && !common_names.contains("SELF_CONSTRUCTOR_HEADS")
+            && !common_names.contains("value_text_returns_self_constructor"),
+        "source keywords and rooted qualified-name syntax belong to concrete adapters, not common"
+    );
+    for adapter in ["lang_rust", "lang_cpp", "lang_php"] {
+        let source = read(&root.join("crates").join(adapter).join("src/lib.rs"));
+        assert!(
+            source.contains("module_path_syntax:"),
+            "{adapter} must declare its rooted qualified-name syntax"
+        );
+    }
+    assert!(
+        !callgraph.contains("strip_suffix('!')")
+            && !callgraph.contains("AliasTarget::Namespace { .. } => Some(\"default\")"),
+        "callgraph must preserve adapter-emitted callable names and default-export facts"
+    );
+    let cross_module = read(&root.join("crates/workspace/src/cross_module.rs"));
+    assert!(
+        !cross_module.contains("strip_suffix('!')")
+            && !cross_module.contains("constructor_type_tail")
+            && !cross_module.contains("is_ascii_uppercase"),
+        "workspace semantic expansion must consume adapter-emitted callable/type facts"
     );
     let idg_adapter = read(&root.join("crates/idg/src/workspace_adapter.rs"));
     assert!(
         idg_adapter.contains("module_resolution_extensions_for_file")
-            && idg_adapter.contains("file_to_module_resolution_extensions"),
-        "IDG module stitching must consume adapter-owned module resolution syntax"
+            && idg_adapter.contains("file_to_module_resolution_extensions")
+            && idg_adapter.contains("module_default_export_names")
+            && idg_adapter.contains("file_to_module_default_export_names"),
+        "IDG module stitching must consume adapter-owned module/export syntax"
+    );
+    assert!(
+        !idg_adapter.contains("\"default\"") && !idg_adapter.contains("\"exports\""),
+        "IDG core must not recognize JavaScript/TypeScript export declaration spellings"
     );
     for suffix in [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"] {
         assert!(
@@ -1884,6 +1940,11 @@ fn every_language_adapter_owns_its_tree_sitter_lowering() {
             "impl LanguageAdapter for",
             "fn tree_sitter_language",
             "fn capabilities(",
+            "module_default_export_names:",
+            "universal_type_names:",
+            "module_path_syntax:",
+            "super_receiver_tokens:",
+            "implicit_receiver_tokens:",
             "decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER)",
             "fn extract_imports",
         ] {
@@ -3605,5 +3666,57 @@ fn unified_taint_closure_is_uncapped_compiler_dataflow() {
             && !entry.contains("worklist")
             && !entry.contains("VecDeque"),
         "the public interprocedural API must delegate directly to the IDG engine"
+    );
+}
+
+/// Public and contributor documentation is part of the architecture contract:
+/// stale scheduler flags or retired module paths would direct callers back to
+/// an engine that no longer exists.
+#[test]
+fn taint_documentation_names_only_the_idg_api() {
+    let root = repo_root();
+    let documents = [
+        "docs/cli-reference.mdx",
+        "docs/contributing/adapter-contract.mdx",
+        "docs/contributing/architecture.mdx",
+        "docs/contributing/design-patterns.mdx",
+        "docs/contributing/sdk.mdx",
+        "docs/contributing/specification.mdx",
+        "docs/contributing/taint-engine-spec.mdx",
+    ];
+    let forbidden = [
+        "interprocedural_taint_to_completion_with_caches",
+        "crates/taint/src/inter.rs",
+        "`inter/summary.rs`",
+        "source_bearing_functions",
+        "intra_worklist_cap",
+        "callback_invocation_methods",
+        "--intra-worklist-cap",
+        "--taint-budget",
+        "--taint-intra-worklist-cap",
+        "--taint-sanitizer",
+    ];
+    let mut violations = Vec::new();
+    for relative in documents {
+        let source = read(&root.join(relative));
+        for &retired in &forbidden {
+            if source.contains(retired) {
+                violations.push(format!("{relative}: retired `{retired}`"));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "taint documentation must describe the canonical IDG API:\n  {}",
+        violations.join("\n  ")
+    );
+
+    let engine_spec = read(&root.join("docs/contributing/taint-engine-spec.mdx"));
+    assert!(
+        engine_spec.contains("`interprocedural_taint_with_caches`")
+            && engine_spec.contains("`crates/taint/src/idg_api.rs`")
+            && engine_spec
+                .contains("no breadth-first name search, depth bound, iteration limit, or result cap"),
+        "taint engine documentation must name the IDG cache facade and uncapped fixed-point contract"
     );
 }

@@ -99,7 +99,10 @@ impl LanguageAdapter for TypeScriptAdapter {
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
+            universal_type_names: &["any", "unknown", "object", "Object"],
             module_export_aliases: &["exports", "module.exports"],
+            module_default_export_names: &["default"],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: &["constructor"],
             super_receiver_tokens: &["super"],

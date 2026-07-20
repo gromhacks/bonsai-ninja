@@ -193,8 +193,6 @@ redo work.
 | `--inferred-sources` | false | Add synthetic entry-point parameter sources. |
 | `--exclude-tests` | false | Drop findings whose source, sink, or proof path is in a workspace-relative test path. |
 | `--show-sanitized` | false | Include sanitizer-cleared source-to-sink paths for audit and rulepack debugging. |
-| `--taint-budget <N>` | 512 | Interprocedural function/seed chunk size; analysis resumes chunks to completion. |
-| `--intra-worklist-cap <N>` | CFG-derived | Intraprocedural worklist cap per function. |
 | `--include-pattern-only` | false | Include exact source-independent local findings in text/JSON. SARIF enables these automatically. |
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
@@ -304,10 +302,7 @@ bonsai-ninja show ./src T:aabbccdd --taint-source update_user --taint-seed token
 | `--in-file <FILE>` | None | File context for `R:` resolver candidate IDs. |
 | `--taint-source <FUNCTION>` | None | Source function required when reopening structured dump-taint `T:` propagation IDs. |
 | `--taint-seed <NAME>` | None | Seed identifier for structured dump-taint `T:` propagation IDs. Repeatable; use the same seeds as the original `dump-taint` query. |
-| `--taint-sanitizer <NAME>` | None | Sanitizer identifier for structured dump-taint `T:` propagation IDs. Repeatable. |
 | `--taint-sink <TEXT>` | None | Sink-name filter for structured dump-taint `T:` propagation IDs. |
-| `--taint-budget <N>` | None | Compatibility budget forwarded to `dump-taint`. |
-| `--taint-intra-worklist-cap <N>` | None | Intraprocedural worklist cap forwarded to `dump-taint`. |
 | `--compact` | false | Render compact delegated output when supported. |
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
@@ -627,7 +622,7 @@ bonsai-ninja dump-taint ./src --source handle_request --seed cmd
 | `dump-edges` | Resolved call edges with stable `E:` ids, precision, resolver stage, evidence, and confidence. | `--from`, `--to`, `--precision`, `--compact`, `--edge`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-resolution` | Per-file and per-decl call resolution coverage from shared `FlowEvent::Call` facts and canonical callgraph edges. | `--file`, `--unresolved-only`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-resolve` | Resolver stages and candidates for a name. | positional name, `--name`, `--in-file`, `--compact`, `--candidate`, `--format`, `--output-path` |
-| `dump-taint` | Taint propagation records from one source function with stable `T:` ids. | `--source`, `--seed`, `--sanitizer`, `--sink`, `--budget`, `--intra-worklist-cap`, `--compact`, `--taint`, `--format`, `--output-path` |
+| `dump-taint` | Taint propagation records from one source function with stable `T:` ids. | `--source`, `--seed`, `--sink`, `--compact`, `--taint`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `diagnostics` | Adapter diagnostic report with parser diagnostics, workspace languages, and adapter capability declarations. | `<WORKSPACE>` |
 
 `dump-resolution` is a language-agnostic resolver honesty view. It compares

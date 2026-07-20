@@ -140,6 +140,12 @@ impl LanguageAdapter for CppAdapter {
         LanguageCapabilities {
             macros: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            module_default_export_names: &[],
+            universal_type_names: &[],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax {
+                rooted_prefixes: &["::"],
+                repeatable_rooted_prefixes: &[],
+            },
             // C++ constructors are class-named; the kind-based
             // `DeclKind::Constructor` lookup is authoritative.
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,

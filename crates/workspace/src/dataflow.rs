@@ -151,7 +151,7 @@ pub struct DataFlowCache {
     seeded_inter_taint: RwLock<Option<Arc<InterTaintCaches>>>,
     /// Optional disk-backed source of truth, populated by
     /// [`DataFlowCache::prewarm_to_disk`] or
-    /// [`DataFlowCache::load_from_disk`]. When present, lookups that
+    /// [`DataFlowCache::load_factstore_sidecar`]. When present, lookups that
     /// miss the in-memory map probe the fact store before falling
     /// through to the engine. Held in an `Arc` so look-up paths can
     /// drop the inner read-lock before doing the disk seek.

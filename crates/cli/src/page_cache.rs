@@ -12,7 +12,7 @@ use bonsai_common::{dependency_metadata::collect_dependency_metadata_fingerprint
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
@@ -41,12 +41,46 @@ struct WorkspaceMetadataFingerprint {
     digest: u64,
 }
 
-/// Hard ceiling on a cached command payload. The payload exists so a
-/// re-invocation can re-render without re-running analysis; past this
-/// size the save/reload memory cost outweighs the re-run it avoids,
-/// so larger payloads are simply not cached. This bound is what keeps
-/// huge-corpus reports from exhausting memory at render time.
+/// Hard ceiling on a serialized cache file. The cache is an optional
+/// acceleration only: larger reports are still analyzed and rendered, but
+/// are not persisted. The same bound is checked before reading so a corrupt
+/// or hostile workspace cache cannot force an unbounded allocation before
+/// its freshness fields are validated.
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+struct BoundedJsonBuffer {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    exceeded: bool,
+}
+
+impl BoundedJsonBuffer {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(max_bytes.min(64 * 1024)),
+            max_bytes,
+            exceeded: false,
+        }
+    }
+}
+
+impl std::io::Write for BoundedJsonBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() > self.max_bytes.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "rendered cache exceeds its persistence bound",
+            ));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PageCacheFile {
@@ -202,14 +236,13 @@ pub(crate) fn save_keyed_payload<T: Serialize>(
     if cache_disabled() {
         return Ok(());
     }
-    let value = serde_json::to_string(payload)?;
-    if value.len() > MAX_PAYLOAD_BYTES {
+    let Some(value) = serialize_json_bounded(payload, MAX_PAYLOAD_BYTES)? else {
         tracing::debug!(
-            "skipping {kind} keyed payload: {} bytes exceeds {MAX_PAYLOAD_BYTES} cap",
-            value.len()
+            "skipping {kind} keyed payload: serialized value exceeds {MAX_PAYLOAD_BYTES} cache bound"
         );
         return Ok(());
-    }
+    };
+    let value = String::from_utf8(value).expect("serde_json always emits UTF-8");
     let dir = cache_dir(workspace);
     std::fs::create_dir_all(&dir)?;
     let file = KeyedPayloadFile {
@@ -246,10 +279,7 @@ pub(crate) fn read_keyed_payload<T: DeserializeOwned>(
     if current_exe_is_newer_than_cache(&metadata) {
         return Ok(None);
     }
-    let Ok(bytes) = std::fs::read(&path) else {
-        return Ok(None);
-    };
-    let Ok(file) = serde_json::from_slice::<KeyedPayloadFile>(&bytes) else {
+    let Some(file) = read_json_cache_file::<KeyedPayloadFile>(&path) else {
         return Ok(None);
     };
     if file.version != RENDER_CACHE_VERSION
@@ -273,7 +303,22 @@ pub(crate) fn read_keyed_payload<T: DeserializeOwned>(
 /// fsync'd so a crash can't leave a torn cache file. Shared by the page
 /// cache and the keyed-payload store.
 fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
-    write_atomic_bytes(path, &serde_json::to_vec(value)?).map_err(Into::into)
+    let Some(bytes) = serialize_json_bounded(value, MAX_PAYLOAD_BYTES)? else {
+        tracing::debug!(
+            "skipping rendered cache file: serialized value exceeds {MAX_PAYLOAD_BYTES} cache bound"
+        );
+        return Ok(());
+    };
+    write_atomic_bytes(path, &bytes).map_err(Into::into)
+}
+
+fn serialize_json_bounded<T: Serialize>(value: &T, max_bytes: usize) -> anyhow::Result<Option<Vec<u8>>> {
+    let mut output = BoundedJsonBuffer::new(max_bytes);
+    match serde_json::to_writer(&mut output, value) {
+        Ok(()) => Ok(Some(output.bytes)),
+        Err(_) if output.exceeded => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn save_pages_value(
@@ -430,10 +475,7 @@ fn read_cache(workspace: &Path) -> anyhow::Result<Option<PageCacheFile>> {
     if current_exe_is_newer_than_cache(&metadata) {
         return Ok(None);
     }
-    let Ok(bytes) = std::fs::read(path) else {
-        return Ok(None);
-    };
-    let Ok(cache) = serde_json::from_slice::<PageCacheFile>(&bytes) else {
+    let Some(cache) = read_json_cache_file::<PageCacheFile>(&path) else {
         return Ok(None);
     };
     if cache.version != RENDER_CACHE_VERSION
@@ -444,6 +486,27 @@ fn read_cache(workspace: &Path) -> anyhow::Result<Option<PageCacheFile>> {
         return Ok(None);
     }
     Ok(Some(cache))
+}
+
+fn read_json_cache_file<T: DeserializeOwned>(path: &Path) -> Option<T> {
+    let file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if metadata.len() > MAX_PAYLOAD_BYTES as u64 {
+        tracing::debug!(
+            "ignoring rendered cache file {}: {} bytes exceeds {MAX_PAYLOAD_BYTES} cache bound",
+            path.display(),
+            metadata.len()
+        );
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PAYLOAD_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_PAYLOAD_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn binary_cache_fingerprint() -> &'static str {

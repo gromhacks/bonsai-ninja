@@ -85,9 +85,8 @@ const HANDLER: GrammarHandler = GrammarHandler {
     method_receiver_param_index: Some(0),
     // `self` for ordinary instance methods; `super` so `super().foo()`
     // and `super(Class, self).foo()` resolve to the parent class's
-    // `foo` via the engine's `resolve_super_method_candidates`. The
-    // engine treats both `super` and the call form `super()` as
-    // implicit-receiver markers.
+    // `foo` via the engine's `resolve_super_method_candidates`. The adapter
+    // normalizes these call receivers to the two forms declared below.
     implicit_receiver_names: &["self", "super"],
     implicit_receiver_prefixes: GENERIC_HANDLER.implicit_receiver_prefixes,
     tail_expression_returns: GENERIC_HANDLER.tail_expression_returns,
@@ -125,11 +124,14 @@ impl LanguageAdapter for PythonAdapter {
         // computed name remain unrewritten and rules anchored on the
         // reflective shape are still rejected at rulepack load time.
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &["Any", "object"],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             reflection: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: &["__init__"],
             bare_call_constructor_syntax: true,
-            super_receiver_tokens: &["super"],
+            super_receiver_tokens: &["super", "super()"],
             // Python's receiver is the adapter-proven first method parameter;
             // `self` is a convention, not an implicit grammar token.
             implicit_receiver_tokens: &[],

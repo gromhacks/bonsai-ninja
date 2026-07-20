@@ -233,15 +233,15 @@ construction. All interprocedural taint surfaces are IDG-backed: source seeds ar
 resolved to concrete IDG nodes, configured transfer summaries are applied to
 fixpoint, and the resulting closure is cut to a semantic target/lineage
 corridor before call records or findings are rendered.
-`interprocedural_taint_to_completion_with_caches` is a compatibility façade
-over that same closure, not a second scheduler. `reachable.rs` also owns the
+`interprocedural_taint_with_caches` is a compatibility façade over that same
+closure, not a second scheduler. `reachable.rs` also owns the
 shared default entry seed helpers used by cached dataflow, inspect, and
 `dump-taint`; command crates should not carry local copies of the
 params/assignment-target/bare-call-argument seed logic. Sub-modules:
 
 - `intra.rs` — single-function taint propagation over `flow_events`.
-- `inter.rs` — IDG-backed public compatibility types and entry points.
-- `inter/summary.rs` — IDG-derived function-return summaries.
+- `idg_api.rs` — IDG-backed public compatibility types and entry points.
+- `idg_api/summary.rs` — IDG-derived function-return summaries.
 - `assignment.rs` — assignment effect calculation.
 - `reachable.rs` — IDG-backed source-seeded graph builders, filtered
   call-record export, and semantic reachability helpers used by security,

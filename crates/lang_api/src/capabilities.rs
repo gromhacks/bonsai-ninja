@@ -53,6 +53,27 @@ pub enum CallTextPrefilter {
     ParenthesizedOrCommand,
 }
 
+/// Source-level prefixes that qualify a name from a module or namespace
+/// root. The compiler backend only strips values declared by the active
+/// adapter; an empty declaration means no such syntax exists.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ModulePathSyntax {
+    /// Prefixes consumed at most once (for example a global namespace mark).
+    pub rooted_prefixes: &'static [&'static str],
+    /// Prefixes that may repeat before one qualified path.
+    pub repeatable_rooted_prefixes: &'static [&'static str],
+}
+
+impl ModulePathSyntax {
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            rooted_prefixes: &[],
+            repeatable_rooted_prefixes: &[],
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct LanguageCapabilities {
     pub modules: CapabilityLevel,
@@ -82,8 +103,23 @@ pub struct LanguageCapabilities {
     /// Empty by default; an adapter that wants to participate in
     /// cross-module export resolution declares the full set.
     pub module_export_aliases: &'static [&'static str],
+    /// Public declaration names emitted by this adapter for a module's
+    /// callable default export. JavaScript/TypeScript adapters lower their
+    /// export syntax to its canonical `default` declaration name; other
+    /// languages leave this empty. IDG import stitching consumes this fact
+    /// instead of recognizing language-specific export spellings.
+    pub module_default_export_names: &'static [&'static str],
+    /// Type spellings that mean "no useful static receiver/parameter
+    /// narrowing" in this language. Callgraph overload selection consumes
+    /// this adapter declaration instead of carrying a cross-language type
+    /// name list.
+    pub universal_type_names: &'static [&'static str],
+    /// Adapter-owned source syntax for rooted qualified names. Resolver and
+    /// callgraph code consume this declaration rather than recognizing Rust,
+    /// C++, or PHP tokens in the shared compiler backend.
+    pub module_path_syntax: ModulePathSyntax,
     /// Method names this language's grammar uses for constructors when the
-    /// adapter cannot express the construct as [`DeclKind::Constructor`].
+    /// adapter cannot express the construct as [`crate::DeclKind::Constructor`].
     /// Empty means there is no method-name form. There is deliberately no
     /// cross-language fallback.
     pub constructor_method_names: &'static [&'static str],
@@ -167,6 +203,9 @@ impl LanguageCapabilities {
             receiver_types: CapabilityLevel::Unsupported,
             field_places_complete: false,
             module_export_aliases: &[],
+            module_default_export_names: &[],
+            universal_type_names: &[],
+            module_path_syntax: ModulePathSyntax::none(),
             constructor_method_names: &[],
             bare_call_constructor_syntax: false,
             super_receiver_tokens: &[],
@@ -206,6 +245,9 @@ impl LanguageCapabilities {
             receiver_types: CapabilityLevel::Unsupported,
             field_places_complete: false,
             module_export_aliases: &[],
+            module_default_export_names: &[],
+            universal_type_names: &[],
+            module_path_syntax: ModulePathSyntax::none(),
             constructor_method_names: &[],
             bare_call_constructor_syntax: false,
             super_receiver_tokens: &[],

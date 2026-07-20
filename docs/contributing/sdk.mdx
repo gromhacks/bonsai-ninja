@@ -318,8 +318,7 @@ ids require the original query through
 `ShowOptions::query`, matching CLI `show R:... --query`.
 Structured `T:` propagation ids require `ShowOptions::taint_source`
 because dump-taint propagation ids are source-seeded. Pass
-`taint_seeds`, `taint_sanitizers`, `taint_sink`, `taint_budget`, and
-`taint_intra_worklist_cap` when the original dump-taint query used those
+`taint_seeds` and `taint_sink` when the original dump-taint query used those
 filters.
 
 ### Dump (debugging / IR introspection)
@@ -343,8 +342,8 @@ confidence.
 
 `TaintReport` carries `analysis_complete` and
 `analysis_incomplete_reasons` alongside the propagation records so SDK
-callers do not have to infer completeness from `saturated` or precision
-labels.
+callers do not have to infer completeness from precision labels or rendered
+row counts.
 
 ### Export
 

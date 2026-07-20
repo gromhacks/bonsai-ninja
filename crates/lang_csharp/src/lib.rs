@@ -104,6 +104,9 @@ impl LanguageAdapter for CSharpAdapter {
         // an empty `catch_types` and the engine falls back to the
         // conservative seed-on-any-tainted-throw behavior.
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &["object", "Object", "dynamic"],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,

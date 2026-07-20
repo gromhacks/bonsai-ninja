@@ -107,6 +107,11 @@ struct WorkspaceMaps {
     /// Adapter-owned source suffixes used to resolve path-like module
     /// imports. The IDG core never carries a language extension inventory.
     file_to_module_resolution_extensions: AHashMap<FileId, &'static [&'static str]>,
+    /// Adapter-emitted declaration names representing callable default
+    /// exports. Empty means the language has no such syntax.
+    file_to_module_default_export_names: AHashMap<FileId, &'static [&'static str]>,
+    /// Adapter-owned rooted qualified-name syntax for each source file.
+    file_to_module_path_syntax: AHashMap<FileId, bonsai_lang_api::ModulePathSyntax>,
 }
 
 impl WorkspaceMaps {
@@ -135,6 +140,9 @@ impl WorkspaceMaps {
         let mut file_to_language: AHashMap<FileId, &'static str> = AHashMap::new();
         let mut file_to_module_resolution_extensions: AHashMap<FileId, &'static [&'static str]> =
             AHashMap::new();
+        let mut file_to_module_default_export_names: AHashMap<FileId, &'static [&'static str]> =
+            AHashMap::new();
+        let mut file_to_module_path_syntax = AHashMap::new();
         let mut file_to_seg: AHashMap<FileId, SegmentId> = AHashMap::new();
         let mut next_seg = 0u32;
         for file in global.all_files() {
@@ -151,6 +159,14 @@ impl WorkspaceMaps {
             let module_resolution_extensions = semantics.module_resolution_extensions(file);
             if !module_resolution_extensions.is_empty() {
                 file_to_module_resolution_extensions.insert(file, module_resolution_extensions);
+            }
+            let module_default_export_names = semantics.module_default_export_names(file);
+            if !module_default_export_names.is_empty() {
+                file_to_module_default_export_names.insert(file, module_default_export_names);
+            }
+            let module_path_syntax = semantics.module_path_syntax(file);
+            if module_path_syntax != bonsai_lang_api::ModulePathSyntax::none() {
+                file_to_module_path_syntax.insert(file, module_path_syntax);
             }
             let seg = SegmentId(next_seg);
             next_seg = next_seg.wrapping_add(1);
@@ -212,6 +228,8 @@ impl WorkspaceMaps {
             symbol_to_directory,
             file_to_language,
             file_to_module_resolution_extensions,
+            file_to_module_default_export_names,
+            file_to_module_path_syntax,
         }
     }
 }
@@ -1689,6 +1707,7 @@ fn class_symbols_matching_import_target(
     global: &GlobalIndex,
     class_symbols_by_name: &AHashMap<String, Vec<bonsai_common::SymbolId>>,
     target: &str,
+    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
 ) -> Vec<bonsai_common::SymbolId> {
     let Some(member) = import_target_member(target) else {
         return Vec::new();
@@ -1698,7 +1717,7 @@ fn class_symbols_matching_import_target(
         let Some(decl) = global.decl_of(*symbol) else {
             continue;
         };
-        if declaration_matches_import_target(decl, target) && !out.contains(symbol) {
+        if declaration_matches_import_target(decl, target, module_path_syntax) && !out.contains(symbol) {
             out.push(*symbol);
         }
     }
@@ -1717,7 +1736,11 @@ fn import_target_member(target: &str) -> Option<&str> {
     )
 }
 
-fn declaration_matches_import_target(decl: &bonsai_lang_api::Decl, target: &str) -> bool {
+fn declaration_matches_import_target(
+    decl: &bonsai_lang_api::Decl,
+    target: &str,
+    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
+) -> bool {
     let target = target.trim();
     if target.is_empty() {
         return false;
@@ -1728,11 +1751,14 @@ fn declaration_matches_import_target(decl: &bonsai_lang_api::Decl, target: &str)
     if decl.name != member.trim() {
         return false;
     }
-    bonsai_resolve::module_target_matches_decl_module_path(module.trim(), &decl.module_path)
-        || decl.qualified_name.as_deref().is_some_and(|qualified| {
-            let normalized = qualified.replace("::", ".").replace(['/', '\\'], ".");
-            normalized == target || normalized.ends_with(&format!(".{target}"))
-        })
+    bonsai_resolve::module_target_matches_decl_module_path_with_syntax(
+        module.trim(),
+        &decl.module_path,
+        module_path_syntax,
+    ) || decl.qualified_name.as_deref().is_some_and(|qualified| {
+        let normalized = qualified.replace("::", ".").replace(['/', '\\'], ".");
+        normalized == target || normalized.ends_with(&format!(".{target}"))
+    })
 }
 
 fn class_symbols_by_name_scope_for_files(
@@ -1978,6 +2004,15 @@ pub trait IdgFileSemanticsProvider {
     fn path(&self, file: FileId) -> Option<String>;
     /// Return adapter-owned module suffixes for path-like import resolution.
     fn module_resolution_extensions(&self, file: FileId) -> &'static [&'static str];
+    /// Return adapter-emitted declaration names that represent a callable
+    /// default export in `file`.
+    fn module_default_export_names(&self, _file: FileId) -> &'static [&'static str] {
+        &[]
+    }
+    /// Return adapter-owned rooted qualified-name syntax for `file`.
+    fn module_path_syntax(&self, _file: FileId) -> bonsai_lang_api::ModulePathSyntax {
+        bonsai_lang_api::ModulePathSyntax::none()
+    }
 }
 
 struct ClosureIdgFileSemantics<A, L, P, E> {
@@ -2345,20 +2380,29 @@ where
     }
     let class_symbols_by_name = class_symbols_by_name_for_files(global, included_files);
     let module_prefixes = module_prefixes_by_file(global);
-    let module_default_exports = module_default_export_funcs_by_module(global, &module_prefixes);
+    let module_default_exports = module_default_export_funcs_by_module(
+        global,
+        &module_prefixes,
+        &maps.file_to_module_default_export_names,
+    );
     for file in global.all_files() {
         if included_files.is_some_and(|files| !files.contains(&file)) {
             continue;
         }
         let aliases = semantics.aliases(file);
         let caller_module = module_prefixes.get(&file).map(String::as_str);
+        let module_path_syntax = maps
+            .file_to_module_path_syntax
+            .get(&file)
+            .copied()
+            .unwrap_or_else(bonsai_lang_api::ModulePathSyntax::none);
         for (alias, original) in aliases {
             if let Some(member) = import_target_member(&original) {
                 for func in funcs_by_decl_name.get(member).into_iter().flatten().copied() {
                     let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
                         continue;
                     };
-                    if declaration_matches_import_target(decl, &original) {
+                    if declaration_matches_import_target(decl, &original, module_path_syntax) {
                         add_func_call_alias(&mut func_to_call_names, func, &alias);
                     }
                 }
@@ -2382,7 +2426,12 @@ where
                     }
                 }
             }
-            let symbols = class_symbols_matching_import_target(global, &class_symbols_by_name, &original);
+            let symbols = class_symbols_matching_import_target(
+                global,
+                &class_symbols_by_name,
+                &original,
+                module_path_syntax,
+            );
             if !symbols.is_empty() {
                 let candidates = class_symbols_by_import_alias_file
                     .entry((file, alias.clone()))
@@ -2404,7 +2453,10 @@ where
     // Mirror the alias-rename treatment: every local binding
     // surfaced anywhere in the workspace contributes its lhs as an
     // additional call-name for the callable's FuncId.
-    let local_callable_bindings = bonsai_callgraph::collect_workspace_local_callable_bindings(global);
+    let local_callable_bindings =
+        bonsai_callgraph::collect_workspace_local_callable_bindings(global, |file| {
+            semantics.module_path_syntax(file)
+        });
     for bindings in local_callable_bindings.values() {
         for (alias, func) in bindings {
             if !maps.func_to_seg.contains_key(func) {
@@ -2771,14 +2823,18 @@ fn qname_module_prefix(decl: &bonsai_lang_api::Decl) -> Option<&str> {
 fn module_default_export_funcs_by_module(
     global: &GlobalIndex,
     module_prefixes: &AHashMap<FileId, String>,
+    names_by_file: &AHashMap<FileId, &'static [&'static str]>,
 ) -> AHashMap<String, Vec<FuncId>> {
     let mut by_module: AHashMap<String, Vec<FuncId>> = AHashMap::new();
     for file in global.all_files() {
         let Some(module_prefix) = module_prefixes.get(&file) else {
             continue;
         };
+        let Some(default_export_names) = names_by_file.get(&file) else {
+            continue;
+        };
         for decl in global.functions_in(file) {
-            if matches!(decl.name.as_str(), "default" | "exports") {
+            if default_export_names.contains(&decl.name.as_str()) {
                 by_module
                     .entry(module_prefix.clone())
                     .or_default()
@@ -2798,7 +2854,7 @@ fn import_module_candidates(
         .trim()
         .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
         .trim();
-    if target.is_empty() || target == "default" || !looks_like_module_path(target) {
+    if target.is_empty() || !looks_like_module_path(target) {
         return Vec::new();
     }
 

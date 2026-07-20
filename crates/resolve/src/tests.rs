@@ -393,11 +393,36 @@ fn unqualified_class_resolution_accepts_wildcard_import_target_only() {
 #[test]
 fn module_target_matches_rust_root_prefixed_modules() {
     let module = ModulePath::from_segments(["util"]);
+    let syntax = bonsai_lang_api::ModulePathSyntax {
+        rooted_prefixes: &["crate::", "self::"],
+        repeatable_rooted_prefixes: &["super::"],
+    };
 
-    assert!(module_target_matches_decl_module_path("crate::util", &module));
-    assert!(module_target_matches_decl_module_path("crate::util::*", &module));
-    assert!(module_target_matches_decl_module_path("self::util", &module));
-    assert!(module_target_matches_decl_module_path("super::util", &module));
+    assert!(
+        !module_target_matches_decl_module_path("crate::util", &module),
+        "a language-neutral resolver must not recognize Rust root syntax"
+    );
+
+    assert!(module_target_matches_decl_module_path_with_syntax(
+        "crate::util",
+        &module,
+        syntax
+    ));
+    assert!(module_target_matches_decl_module_path_with_syntax(
+        "crate::util::*",
+        &module,
+        syntax
+    ));
+    assert!(module_target_matches_decl_module_path_with_syntax(
+        "self::util",
+        &module,
+        syntax
+    ));
+    assert!(module_target_matches_decl_module_path_with_syntax(
+        "super::util",
+        &module,
+        syntax
+    ));
 }
 
 #[test]
@@ -472,6 +497,10 @@ fn rust_crate_root_member_import_resolves_by_exact_workspace_path() {
         |file| (file == callee_file).then(|| "/repo/examples/rust/micro/user_service.rs".to_string());
     let ctx = ResolveContext::new(caller_file, &caller_module)
         .with_alias_map(&aliases)
+        .with_module_path_syntax(bonsai_lang_api::ModulePathSyntax {
+            rooted_prefixes: &["crate::", "self::"],
+            repeatable_rooted_prefixes: &["super::"],
+        })
         .with_file_path_lookup(&path_lookup);
 
     let hits = resolve_callable_with_context(&global, "get_user", &ctx);
@@ -483,11 +512,15 @@ fn rust_crate_root_member_import_resolves_by_exact_workspace_path() {
 
 #[test]
 fn multi_segment_import_path_does_not_match_by_leaf_alone() {
+    let target = strip_module_path_prefix(
+        "crate::admin::user_service",
+        bonsai_lang_api::ModulePathSyntax {
+            rooted_prefixes: &["crate::", "self::"],
+            repeatable_rooted_prefixes: &["super::"],
+        },
+    );
     assert!(
-        !module_target_matches_path(
-            "crate::admin::user_service",
-            "/repo/examples/rust/micro/user_service.rs",
-        ),
+        !module_target_matches_path(target, "/repo/examples/rust/micro/user_service.rs",),
         "multi-segment imports must match their parent path, not only the file stem"
     );
 }

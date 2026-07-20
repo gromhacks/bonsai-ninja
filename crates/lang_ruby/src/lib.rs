@@ -67,6 +67,9 @@ impl LanguageAdapter for RubyAdapter {
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &[],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             constructor_method_names: &["initialize", "new"],
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["self"],

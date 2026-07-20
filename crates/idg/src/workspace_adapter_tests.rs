@@ -249,7 +249,12 @@ fn qualified_import_target_uses_member_index_then_module_validation() {
     let idx = build_index(vec![storage, sibling, unrelated]);
     let classes = class_symbols_by_name_for_files(&idx, None);
 
-    let matches = class_symbols_matching_import_target(&idx, &classes, "storage.Repository");
+    let matches = class_symbols_matching_import_target(
+        &idx,
+        &classes,
+        "storage.Repository",
+        bonsai_lang_api::ModulePathSyntax::none(),
+    );
     assert_eq!(matches.len(), 1);
     assert_eq!(idx.declaring_file(matches[0]), Some(FileId::new(0)));
 }

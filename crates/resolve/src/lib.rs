@@ -8,7 +8,7 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::{short_qualified_tail, FileId, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
-    module_local_binding, AliasTarget, DeclKind, ImportSpec, ModulePath, Visibility,
+    module_local_binding, AliasTarget, DeclKind, ImportSpec, ModulePath, ModulePathSyntax, Visibility,
     WILDCARD_IMPORT_ALIAS_PREFIX,
 };
 use std::{borrow::Cow, sync::Arc};
@@ -48,6 +48,8 @@ pub struct ResolveContext<'a> {
     /// Adapter-owned syntax/linkage fact. When false, unqualified calls do
     /// not cross a file module merely because another declaration is nearby.
     pub same_directory_unqualified_calls: bool,
+    /// Adapter-owned source prefixes for rooted qualified names.
+    pub module_path_syntax: ModulePathSyntax,
 }
 
 impl<'a> ResolveContext<'a> {
@@ -61,6 +63,7 @@ impl<'a> ResolveContext<'a> {
             file_path_lookup: None,
             file_path_match_lookup: None,
             same_directory_unqualified_calls: false,
+            module_path_syntax: ModulePathSyntax::none(),
         }
     }
 
@@ -91,6 +94,12 @@ impl<'a> ResolveContext<'a> {
     #[must_use]
     pub fn with_same_directory_unqualified_calls(mut self, enabled: bool) -> Self {
         self.same_directory_unqualified_calls = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_module_path_syntax(mut self, syntax: ModulePathSyntax) -> Self {
+        self.module_path_syntax = syntax;
         self
     }
 }
@@ -249,11 +258,6 @@ pub fn resolve_callable_with_context(
     };
 
     let mut out = collect_caller_lexical_scope(name);
-    if out.is_empty() {
-        if let Some(no_bang) = name.strip_suffix('!') {
-            out = collect_caller_lexical_scope(no_bang);
-        }
-    }
     // Walk the alias map: `cp.exec` where `cp = require("child_process")`
     // should resolve to `child_process.exec`. Without this rewrite,
     // in-workspace aliased calls miss and entry-point inference
@@ -266,11 +270,6 @@ pub fn resolve_callable_with_context(
     // otherwise stitch together unrelated workspace functions.
     if out.is_empty() {
         out = resolve_alias(name);
-    }
-    if out.is_empty() {
-        if let Some(no_bang) = name.strip_suffix('!') {
-            out = resolve_alias(no_bang);
-        }
     }
     if out.is_empty() && unqualified_lookup_name(name) {
         for target_module in wildcard_import_modules(ctx) {
@@ -426,7 +425,7 @@ fn resolve_workspace_rooted_call(
     ctx: &ResolveContext<'_>,
 ) -> Vec<bonsai_common::FuncId> {
     use bonsai_lang_api::DeclKind;
-    let stripped = strip_absolute_path_prefix(name);
+    let stripped = strip_module_path_prefix(name, ctx.module_path_syntax);
     if stripped.is_empty() {
         return Vec::new();
     }
@@ -469,29 +468,33 @@ fn resolve_workspace_rooted_call(
     out
 }
 
-/// Strip absolute-path prefixes from a fully-qualified call name so
-/// the remainder is a plain `<module>::<fn>` shape. The non-repeating
-/// prefixes (`crate::`, `self::`, `::`, `\`) come from the
-/// cross-language constant [`bonsai_common::ABSOLUTE_PATH_PREFIXES`];
-/// `super::` is handled inline because it can repeat
-/// (`super::super::foo`).
-fn strip_absolute_path_prefix(name: &str) -> &str {
+/// Remove only rooted-name syntax declared by the active language adapter.
+/// This is source normalization at the compiler boundary, not a global token
+/// inventory: an empty syntax descriptor leaves the name unchanged.
+#[must_use]
+pub fn strip_module_path_prefix(name: &str, syntax: ModulePathSyntax) -> &str {
     let trimmed = name.trim();
     let mut rest = trimmed;
-    let mut stripped_super = false;
-    while let Some(next) = rest.strip_prefix("super::") {
+    let mut stripped_repeatable = false;
+    loop {
+        let Some(next) = syntax
+            .repeatable_rooted_prefixes
+            .iter()
+            .find_map(|prefix| rest.strip_prefix(prefix))
+        else {
+            break;
+        };
         rest = next;
-        stripped_super = true;
+        stripped_repeatable = true;
     }
-    if stripped_super {
+    if stripped_repeatable {
         return rest;
     }
-    for prefix in bonsai_common::ABSOLUTE_PATH_PREFIXES {
-        if let Some(rest) = trimmed.strip_prefix(*prefix) {
-            return rest;
-        }
-    }
-    trimmed
+    syntax
+        .rooted_prefixes
+        .iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix))
+        .unwrap_or(trimmed)
 }
 
 /// Split `<module_path>::<fn_name>` into its parts using the
@@ -722,7 +725,11 @@ impl AliasTargetExt for AliasTarget {
     fn callable_target_text(&self) -> String {
         match self {
             AliasTarget::Member { module, member } => format!("{module}.{member}"),
-            AliasTarget::Namespace { module } => format!("{module}.default"),
+            // A namespace import denotes the module object, not a callable
+            // default export. Adapters that lower a real default import emit
+            // `AliasTarget::Member { member: <adapter export name> }`; the
+            // language-neutral resolver must not invent that member.
+            AliasTarget::Namespace { module } => module.clone(),
             AliasTarget::Type { type_name } => type_name.clone(),
         }
     }
@@ -768,6 +775,16 @@ pub fn module_target_matches_decl_module_path(
     target_module: &str,
     decl_module: &bonsai_lang_api::ModulePath,
 ) -> bool {
+    module_target_matches_decl_module_path_with_syntax(target_module, decl_module, ModulePathSyntax::none())
+}
+
+/// Adapter-aware form of [`module_target_matches_decl_module_path`].
+#[must_use]
+pub fn module_target_matches_decl_module_path_with_syntax(
+    target_module: &str,
+    decl_module: &bonsai_lang_api::ModulePath,
+    syntax: ModulePathSyntax,
+) -> bool {
     if target_module.is_empty() || decl_module.is_empty() {
         return false;
     }
@@ -778,6 +795,7 @@ pub fn module_target_matches_decl_module_path(
     // `::` bytes before splitting). The decl's `module_path`
     // is already canonical-segment-form so the only normalization
     // needed here is on the alias text.
+    let target_module = strip_module_path_prefix(target_module, syntax);
     let normalized: Cow<'_, str> = if target_module.contains("::") {
         Cow::Owned(target_module.replace("::", "."))
     } else {
@@ -795,11 +813,6 @@ pub fn module_target_matches_decl_module_path(
     if try_suffix_match(&target_segments, decl_segments) {
         return true;
     }
-    for stripped in absolute_module_prefix_str_variants(&target_segments) {
-        if try_suffix_match(stripped, decl_segments) {
-            return true;
-        }
-    }
     if target_segments.len() > 1 {
         let trimmed = &target_segments[..target_segments.len() - 1];
         if try_suffix_match(trimmed, decl_segments) {
@@ -807,21 +820,6 @@ pub fn module_target_matches_decl_module_path(
         }
     }
     false
-}
-
-fn absolute_module_prefix_str_variants<'a>(parts: &'a [&'a str]) -> Vec<&'a [&'a str]> {
-    let mut out = Vec::new();
-    if matches!(parts.first().copied(), Some("crate" | "self")) {
-        out.push(&parts[1..]);
-    }
-    let mut start = 0usize;
-    while parts.get(start).is_some_and(|part| *part == "super") {
-        start += 1;
-    }
-    if start > 0 {
-        out.push(&parts[start..]);
-    }
-    out
 }
 
 fn try_suffix_match(target: &[&str], decl: &[String]) -> bool {
@@ -860,11 +858,7 @@ fn symbol_in_alias_target(
     let Some(decl) = global.decl_of(symbol) else {
         return false;
     };
-    if module_target_matches_decl_module_path_from_context(
-        target_module,
-        &decl.module_path,
-        ctx.caller_module,
-    ) {
+    if module_target_matches_decl_module_path_from_context(target_module, &decl.module_path, ctx) {
         return true;
     }
     let Some(decl_file) = global.declaring_file(symbol) else {
@@ -874,6 +868,7 @@ fn symbol_in_alias_target(
 }
 
 fn alias_target_matches_file(ctx: &ResolveContext<'_>, target_module: &str, file: FileId) -> bool {
+    let target_module = strip_module_path_prefix(target_module, ctx.module_path_syntax);
     if let Some(lookup) = ctx.file_path_match_lookup {
         return lookup.matches(target_module, file);
     }
@@ -885,12 +880,12 @@ fn alias_target_matches_file(ctx: &ResolveContext<'_>, target_module: &str, file
 fn module_target_matches_decl_module_path_from_context(
     target_module: &str,
     decl_module: &bonsai_lang_api::ModulePath,
-    caller_module: &bonsai_lang_api::ModulePath,
+    ctx: &ResolveContext<'_>,
 ) -> bool {
-    if let Some(target_segments) = relative_module_target_segments(target_module, caller_module) {
+    if let Some(target_segments) = relative_module_target_segments(target_module, ctx.caller_module) {
         return decl_module.segments == target_segments;
     }
-    module_target_matches_decl_module_path(target_module, decl_module)
+    module_target_matches_decl_module_path_with_syntax(target_module, decl_module, ctx.module_path_syntax)
 }
 
 fn relative_module_target_segments(
@@ -1051,7 +1046,6 @@ pub fn is_super_receiver_with_tokens(receiver: &str, tokens: &[&str]) -> bool {
     let receiver = receiver
         .trim()
         .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
-    let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
     tokens.contains(&receiver)
 }
 
@@ -1734,16 +1728,6 @@ pub fn module_target_parts_match_path_parts(target_parts: &[String], path_parts:
         {
             return true;
         }
-        for stripped in absolute_module_prefix_variants(target_parts) {
-            if !stripped.is_empty()
-                && stripped.len() <= path_parts.len()
-                && path_parts
-                    .windows(stripped.len())
-                    .any(|window| window == stripped)
-            {
-                return true;
-            }
-        }
         // Workspaces are often opened below their language-level
         // module root (`import "app/util"` while the checked-out
         // target path is just `util/util.go`). Keep the match
@@ -1818,21 +1802,6 @@ pub fn module_import_parts(text: &str) -> Vec<String> {
                 .then(|| strip_extension(part).to_string())
         })
         .collect()
-}
-
-fn absolute_module_prefix_variants(parts: &[String]) -> Vec<&[String]> {
-    let mut out = Vec::new();
-    if matches!(parts.first().map(String::as_str), Some("crate" | "self")) {
-        out.push(&parts[1..]);
-    }
-    let mut start = 0usize;
-    while parts.get(start).is_some_and(|part| part == "super") {
-        start += 1;
-    }
-    if start > 0 {
-        out.push(&parts[start..]);
-    }
-    out
 }
 
 /// Split an absolute or relative file path (`/abs/dir/file.py`,
@@ -1981,7 +1950,7 @@ pub fn resolve_class(
                             module_target_matches_decl_module_path_from_context(
                                 target_module,
                                 &decl.module_path,
-                                ctx.caller_module,
+                                ctx,
                             ) || path_match
                         })
                     });
@@ -2148,13 +2117,7 @@ pub fn resolve_callable(global: &GlobalIndex, name: &str) -> Vec<bonsai_common::
             .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
             .collect::<Vec<_>>()
     };
-    let mut out = collect(name);
-    if out.is_empty() {
-        if let Some(no_bang) = name.strip_suffix('!') {
-            out = collect(no_bang);
-        }
-    }
-    out
+    collect(name)
 }
 
 /// Short tail after the last path separator in a qualified call /

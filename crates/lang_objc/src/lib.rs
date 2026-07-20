@@ -117,6 +117,9 @@ impl LanguageAdapter for ObjCAdapter {
         // declarators, so name-resolution narrows them. Genuine
         // multi-statement `#define` expansion isn't performed.
         LanguageCapabilities {
+            module_default_export_names: &[],
+            universal_type_names: &["id"],
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
             macros: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: &["init"],

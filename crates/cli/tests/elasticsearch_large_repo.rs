@@ -25,9 +25,11 @@ fn repo_root() -> PathBuf {
 }
 
 fn release_bin() -> Option<PathBuf> {
-    if let Some(path) = option_env!("CARGO_BIN_EXE_bonsai-ninja") {
-        return Some(PathBuf::from(path));
-    }
+    // Cargo sets CARGO_BIN_EXE_* to the current test-profile executable.
+    // For this production-scale corpus that is normally a debug binary:
+    // using it makes the same exact analysis an order of magnitude slower
+    // and materially more memory hungry. This gate intentionally validates
+    // production behavior, so never silently substitute the debug artifact.
     let path = repo_root().join("target/release/bonsai-ninja");
     if path.exists() {
         Some(path)

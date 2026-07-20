@@ -33,11 +33,11 @@ interprocedural_taint(
 Given a non-empty `entry_sources`, it traces every reachable propagation.
 Given an empty `entry_sources`, it produces zero records; the engine never
 invents taint. Diagnostic and compatibility consumers can drive it through
-`interprocedural_taint_to_completion_with_caches` in
-`crates/taint/src/inter.rs`. That façade composes concrete IDG seed nodes and
-runs one forward closure to completion. `InterTaintCaches` remains as a
-source-compatible handle; graph services are cached on `AnalyzerDb` by the
-canonical transfer-option fingerprint.
+`interprocedural_taint_with_caches` in `crates/taint/src/idg_api.rs`. That
+façade composes concrete IDG seed nodes and runs one forward closure to
+completion. `InterTaintCaches` remains as a source-compatible handle; graph
+services are cached on `AnalyzerDb` by the canonical transfer-option
+fingerprint.
 
 `security taint-analysis`, `security source-analysis`, `dump-taint`, inspect,
 and the public compatibility API use the IDG-backed graph builders in
@@ -145,11 +145,11 @@ alias maps, function summaries, and local bindings accumulate across runs in a
 single CLI process. `Workspace::ingest_dir` calls `InterTaintCaches::clear()`
 when a file edit lands.
 
-Only the security layer populates `config.source_bearing_functions` —
-the set of helpers whose matched source has been proven to reach a return.
-A function that reads untrusted data and returns only a status doesn't
-qualify. Other consumers drive the engine with their own seeds and an
-empty set.
+Security source sites and source-returning helpers are resolved to concrete
+IDG seed nodes before closure. A function that reads untrusted data and
+returns only a status does not acquire a synthetic return edge; consumers
+drive the engine with explicit source identities rather than a helper-name
+inventory.
 
 ## Ten concepts
 
@@ -465,7 +465,7 @@ The taint stack is layered:
   IDG seed nodes and converts closures back into public call/argument evidence
   for security, inspect, dump-taint, and compatibility callers.
 - **Layer 4 — compatibility surfaces** (`assignment.rs`, `intra.rs`, and
-  `inter.rs`): preserves local helper and public result types while
+  `idg_api.rs`): preserves local helper and public result types while
   interprocedural answers come exclusively from the IDG. There is no second
   interprocedural worklist engine.
 
@@ -476,12 +476,8 @@ points carry `BasicBlockId`; every row therefore serializes
 `backend: "cfg_local"`. It is compatibility/debug data, not a second
 interprocedural engine and not an alternate source-to-sink result.
 
-`InterTaintConfig` covers the knobs:
+`InterTaintConfig` contains semantic transfer inputs only:
 
-- `sanitizers: TokenSet` — informational only.
-- `budget`, `intra_worklist_cap`, and `source_bearing_functions` — retained
-  for API compatibility; IDG closure is complete and does not consume these
-  former scheduler controls.
 - `clean_output_overwrites: Vec<CleanOutputOverwrite>` — declarative
   overwrite shapes derived from rulepack `taint_semantics`.
 - `source_output_args: Vec<SourceOutputArgs>` — source calls whose
@@ -499,13 +495,13 @@ interprocedural engine and not an alternate source-to-sink result.
   selected value arguments flow into an output argument. This covers
   formatter/copy-style APIs without putting library names or argument
   orders in the engine.
-- `callback_invocation_methods: AHashSet<String>` — retained for API
-  compatibility. Callable arguments and local callable bindings are resolved
-  from AST/callgraph facts; the engine owns no invocation-method list.
 - `receiver_state_propagations: Vec<ReceiverStatePropagation>` —
   rulepack-declared receiver/method shapes that move argument taint into
   receiver state for later receiver-only sinks. The engine owns no global
   mutator-name list.
+- `max_edge_precision: Option<Precision>` — the accepted evidence class;
+  production consumers use exact/narrowed semantic edges and reject guessed
+  over-approximate edges.
 
 Language syntax and ABI intrinsics remain in adapter/compiler lowering (for
 example C variadic builtins). Library/framework API behavior belongs only in
@@ -520,8 +516,6 @@ rulepack/config transfer semantics.
   operands carry tainted values.
 - `precision: Precision` — worst seen along any traversed edge.
 - `pairs_analyzed: u32` — number of graph pairs represented by the closure.
-- `saturated` is false and `continuation` is `None`; IDG queries run to
-  completion rather than exposing scheduler chunks.
 
 The closure kernel is a sparse monotone stack over numeric CSR edges. It has
 no breadth-first name search, depth bound, iteration limit, or result cap and
