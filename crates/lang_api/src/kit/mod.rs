@@ -12,43 +12,15 @@
 //! - [`decl_index_with_handler`] — full adapter pipeline (decls + refs
 //!   + per-function flow events) using a supplied [`GrammarHandler`].
 //!
-//! ## Module navigation (sections within this file)
+//! ## Module navigation
 //!
-//! This file is large; future contributors should split it along
-//! these existing seams (see `docs/contributing/adapter-contract.mdx` for the
-//! formal contract; this comment is a navigation aid):
-//!
-//! 1. **Tree-sitter primitives** (lines ~22-130): `language_from_pack`,
-//!    `parse_with`, `collect_kinds`, `node_text`, `span_of`,
-//!    `first_named_child*`, `first_identifier*`.
-//! 2. **Return / throw / catch extraction** (~134-330): all the
-//!    `extract_return_value_*`, `extract_throw_value_*`,
-//!    `extract_catch_param` family.
-//! 3. **Identifier-shape detection** (~117-340): `looks_like_*`
-//!    predicates.
-//! 4. **`GrammarHandler` config + `GENERIC_HANDLER`** (~353-700):
-//!    declarative grammar configuration shared across adapters.
-//! 5. **Flow-event walker** (~807-1705): `walk_flow_events` and
-//!    `walk_into`. The core of the framework — drives all per-event
-//!    emission.
-//! 6. **Branch repair** (~2761): `repair_branch_events_by_else_keyword`
-//!    and helpers. Last-resort fix-up for grammars that lump both
-//!    arms under one body field.
-//! 7. **Pseudo-call synthesis** (~2139-2350): `pseudo_call_event`,
-//!    `jsx_call_from_opening`, `named_child_args`,
-//!    `infix_expression_args`. Adapters lower their language's
-//!    non-call-shaped invocations (Scala infix, JSX components,
-//!    Dart selector chains) here.
-//! 8. **Assignment / qualified-target normalization** (~2353-2487):
-//!    `qualified_assign_target`, `normalise_qualified_text`.
-//! 9. **Pattern and loop bindings**: `kit/bindings.rs` lowers parsed
-//!    pattern/iterable nodes into assignment facts.
-//! 10. **Param extraction**: `kit/param_extraction.rs` lowers parsed
-//!     parameter nodes.
-//!
-//! Each section can become its own file (`kit/walker.rs`, `kit/branch_repair.rs`, ...)
-//! during normal maintenance. Pure-data items (`GENERIC_HANDLER`,
-//! `COMMON_CALL_KINDS`) and `pub` re-exports stay at the top level.
+//! Grammar-specific lowering is split across the sibling `kit/*` modules:
+//! `walker` drives event emission; `bindings`, `param_extraction`,
+//! `return_extraction`, and `receiver_writes` lower syntax into compiler
+//! facts; `direct_calls`, `pseudo_call`, and `qualified` normalize call and
+//! place shapes. This module retains the shared handler configuration,
+//! public façade, and orchestration pipeline. See
+//! `docs/contributing/adapter-contract.mdx` for the formal contract.
 
 mod bindings;
 mod branch_conditions;

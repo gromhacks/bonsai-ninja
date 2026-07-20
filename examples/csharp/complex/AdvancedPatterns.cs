@@ -596,84 +596,85 @@ namespace HealthcareAPI.Advanced
             patterns.SyncData(syncUrl);
         }
     }
-}
 
     // ============================================================
     // ADDITIONAL PATTERNS - Attributes, LINQ, inheritance, patterns
     // ============================================================
 
-    // Attribute-based handler (simulated ASP.NET)
-    // [HttpGet("/api/exec")]
-    public string AttributeHandler(string input)
+    public class AdditionalPatterns
     {
-        return Process.Start(input)?.StandardOutput.ReadToEnd() ?? "";
-    }
-
-    // LINQ chain with taint flow
-    public string LinqFlow(List<string> inputs)
-    {
-        var result = inputs
-            .Where(x => x.StartsWith("cmd:"))
-            .Select(x => x.Substring(4))
-            .FirstOrDefault();
-        Process.Start(result);  // taint flows through LINQ chain
-        return result;
-    }
-
-    // Pattern matching (C# 8+)
-    public string PatternMatchFlow(object input)
-    {
-        return input switch
+        // Attribute-based handler (simulated ASP.NET)
+        // [HttpGet("/api/exec")]
+        public string AttributeHandler(string input)
         {
-            string s when s.Length > 0 => s,  // taint through pattern
-            int n => n.ToString(),
-            null => "empty",
-            _ => throw new ArgumentException()
-        };
-    }
+            return Process.Start(input)?.StandardOutput.ReadToEnd() ?? "";
+        }
 
-    // Inheritance chain
-    public abstract class BaseService
-    {
-        public abstract string Process(string data);
-        public string Handle(string data) => Process(data);  // virtual dispatch
-    }
-
-    public class UnsafeService : BaseService
-    {
-        public override string Process(string data)
+        // LINQ chain with taint flow
+        public string LinqFlow(List<string> inputs)
         {
-            System.Diagnostics.Process.Start(data);  // overridden sink
-            return data;
+            var result = inputs
+                .Where(x => x.StartsWith("cmd:"))
+                .Select(x => x.Substring(4))
+                .FirstOrDefault();
+            Process.Start(result);  // taint flows through LINQ chain
+            return result;
+        }
+
+        // Pattern matching (C# 8+)
+        public string PatternMatchFlow(object input)
+        {
+            return input switch
+            {
+                string s when s.Length > 0 => s,  // taint through pattern
+                int n => n.ToString(),
+                null => "empty",
+                _ => throw new ArgumentException()
+            };
+        }
+
+        // Inheritance chain
+        public abstract class BaseService
+        {
+            public abstract string Process(string data);
+            public string Handle(string data) => Process(data);  // virtual dispatch
+        }
+
+        public class UnsafeService : BaseService
+        {
+            public override string Process(string data)
+            {
+                System.Diagnostics.Process.Start(data);  // overridden sink
+                return data;
+            }
+        }
+
+        // String interpolation flow
+        public void InterpolationFlow(string userInput)
+        {
+            var query = $"SELECT * FROM users WHERE name = '{userInput}'";
+            // query contains tainted interpolated string
+        }
+
+        // Nullable reference type flow
+        public void NullableFlow(string? input)
+        {
+            if (input is not null)
+            {
+                Process.Start(input);  // null-checked taint
+            }
+            var safe = input ?? "default";
+            Process.Start(safe);  // coalesced taint
+        }
+
+        // Async stream (IAsyncEnumerable)
+        public async IAsyncEnumerable<string> StreamFlow(string input)
+        {
+            yield return input;  // taint through async stream
+            await Task.Delay(100);
+            yield return input.ToUpper();
         }
     }
-
-    // String interpolation flow
-    public void InterpolationFlow(string userInput)
-    {
-        var query = $"SELECT * FROM users WHERE name = '{userInput}'";
-        // query contains tainted interpolated string
-    }
-
-    // Nullable reference type flow
-    public void NullableFlow(string? input)
-    {
-        if (input is not null)
-        {
-            Process.Start(input);  // null-checked taint
-        }
-        var safe = input ?? "default";
-        Process.Start(safe);  // coalesced taint
-    }
-
-    // Async stream (IAsyncEnumerable)
-    public async IAsyncEnumerable<string> StreamFlow(string input)
-    {
-        yield return input;  // taint through async stream
-        await Task.Delay(100);
-        yield return input.ToUpper();
-    }
-}
 
     // Interface dispatch
     public interface ICommandRunner
@@ -695,3 +696,4 @@ namespace HealthcareAPI.Advanced
             get; set;
         }
     }
+}

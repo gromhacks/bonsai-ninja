@@ -105,6 +105,21 @@ Helpers that aren't hooks:
   `apply_module_path_semantic_identity` — standalone because they need
   the adapter context.
 
+`LanguageAdapter::parse_recovery_edits` is the parser-boundary hook for
+grammar mismatches that the adapter can prove from the concrete syntax tree.
+Recovery edits operate on a private, same-width parser buffer; the workspace
+keeps the original source snapshot, and every emitted span still addresses
+the original bytes. The parser accepts a recovery only when its exact
+`ERROR`/missing-node damage score strictly improves.
+
+The shared C-family recovery derives declaration macros from parsed
+preprocessor directives and resolvable include edges. It also recognizes the
+standard `va_arg(list, pointer_type)` CST shape, where Tree-sitter parses the
+type head but leaves only the pointer declarator as an `ERROR` sibling. That
+recovery masks the proven pointer token; it does not maintain a library API
+inventory, expand arbitrary macros, or reinterpret malformed value
+expressions.
+
 New hooks should:
 
 1. Take only data the adapter could know (no `Db` handle).

@@ -367,7 +367,6 @@ public class AdvancedPatterns {
         }
         out.write("]");
     }
-}
 
     // ============================================================
     // ADDITIONAL PATTERNS - Annotation-based dispatch, inheritance

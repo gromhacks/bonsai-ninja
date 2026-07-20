@@ -18,7 +18,8 @@ namespace Micro
             var user = _userService.GetUser(token);       // flows to SQL injection
             var result = _userService.UpdateUser(token, action); // flows to command injection
 
-            return $"{{\"user\": \"{user[\"id\"]}\", \"result\": \"{result}\"}}";
+            var userId = user["id"];
+            return $"{{\"user\": \"{userId}\", \"result\": \"{result}\"}}";
         }
     }
 }

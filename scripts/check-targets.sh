@@ -96,6 +96,6 @@ EOF
             ;;
     esac
 
-    echo "==> cargo check --workspace --target $target"
-    cargo check --workspace --target "$target"
+    echo "==> cargo check --workspace --locked --target $target"
+    cargo check --workspace --locked --target "$target"
 done

@@ -3,6 +3,8 @@ use bonsai_lang_api::{AdapterContext, DeclIndex, ImportIndex, LanguageAdapter, L
 
 struct TestPythonAdapter;
 
+struct TestCAdapter;
+
 impl LanguageAdapter for TestPythonAdapter {
     fn language_id(&self) -> LanguageId {
         LanguageId::new("python")
@@ -43,6 +45,55 @@ fn test_python_adapter() -> AdapterArc {
     Arc::new(TestPythonAdapter)
 }
 
+impl LanguageAdapter for TestCAdapter {
+    fn language_id(&self) -> LanguageId {
+        LanguageId::new("c")
+    }
+
+    fn display_name(&self) -> &'static str {
+        "test C"
+    }
+
+    fn file_extensions(&self) -> &'static [&'static str] {
+        &["c"]
+    }
+
+    fn tree_sitter_language(&self) -> Result<tree_sitter::Language, AdapterError> {
+        bonsai_lang_api::kit::language_from_pack("c")
+    }
+
+    fn parse_recovery_edits(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        vfs: &Vfs,
+        tree: &Tree,
+    ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
+        bonsai_lang_api::c_family_declaration_macro_recovery_edits(snapshot, vfs, tree)
+    }
+
+    fn capabilities(&self) -> LanguageCapabilities {
+        LanguageCapabilities::unsupported()
+    }
+
+    fn extract_declarations(&self, file: FileId, _ctx: &AdapterContext<'_>) -> DeclIndex {
+        DeclIndex {
+            file,
+            ..DeclIndex::default()
+        }
+    }
+
+    fn extract_imports(&self, file: FileId, _ctx: &AdapterContext<'_>) -> ImportIndex {
+        ImportIndex {
+            file,
+            imports: Vec::new(),
+        }
+    }
+}
+
+fn test_c_adapter() -> AdapterArc {
+    Arc::new(TestCAdapter)
+}
+
 #[test]
 fn byte_offsets_saturate_instead_of_wrapping() {
     assert_eq!(saturating_byte_offset(u64::MAX as usize), u64::MAX);
@@ -77,6 +128,29 @@ fn parse_timeout_diagnostic_is_file_level_warning() {
     assert_eq!(diagnostic.code.as_deref(), Some("parse-timeout"));
     assert_eq!(diagnostic.span, bonsai_common::Span::new(FileId::new(1), 0, 42));
     assert_eq!(diagnostic.message, "file skipped: parse timeout after 7 ms");
+}
+
+#[test]
+fn c_variadic_pointer_type_recovers_without_changing_source_coordinates() {
+    let source = "void exec_all(int count, ...) {\n\
+                  va_list args;\n\
+                  char *cmd = va_arg(args, char *);\n\
+                  sink(cmd);\n\
+                  }\n";
+    let cache = ParserCache::with_options(ParserOptions::with_parse_timeout(None));
+    let vfs = Vfs::new();
+    let file = vfs.write("variadic.c", source);
+    let parsed = cache
+        .parse(file, &test_c_adapter(), &vfs)
+        .expect("parse recovered C variadic fixture");
+
+    assert!(
+        parsed.used_recovery,
+        "pointer type operand should use grammar recovery"
+    );
+    assert!(!parsed.tree.root_node().has_error());
+    assert!(parsed.diagnostics.is_empty());
+    assert_eq!(parsed.source_text(), source);
 }
 
 #[test]

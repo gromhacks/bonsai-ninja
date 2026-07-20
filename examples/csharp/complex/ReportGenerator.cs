@@ -237,7 +237,6 @@ namespace HealthcareAPI.Reports
             string templatePath = _reportDir + "/templates/" + templateName;
             return _dataAccess.ReadFromFile(templatePath);
         }
-    }
 
         // VULN: Command injection via mail export
         public void MailReport(string recipientEmail, string reportPath)
