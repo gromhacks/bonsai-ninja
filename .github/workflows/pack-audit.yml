@@ -1,13 +1,13 @@
 name: pack-audit
 
-# Rulepack health gate. Runs the three audit scripts on every PR
-# touching the rulepack or related tooling. Blocks merge on:
+# Rulepack health gate. Runs the audit scripts on every PR touching the
+# rulepack or related tooling. Blocks merge on:
 #   - coverage regression (any cell goes from x/partial to -)
-#   - new bare-name fragility (fp_audit reports a new offender)
 #   - YAML parse errors (pack_audit reports any)
-#
-# See: docs/COVERAGE_BASELINE.md for the per-language matrix this gate
-# is meant to keep monotonic.
+#   - pattern validator failures
+# False-positive risk is reported as an artifact but remains a soft gate.
+# See: docs/COVERAGE_BASELINE.md for the per-language matrix this workflow
+# keeps monotonic.
 
 on:
   pull_request:
@@ -56,7 +56,7 @@ jobs:
         run: python3 -m pip install --require-hashes -r .github/requirements/pack-audit.txt
 
       - name: build bonsai-ninja release binary
-        run: cargo build --release -p bonsai_cli
+        run: cargo build --release --locked -p bonsai_cli
 
       - name: pack_audit (rulepack health)
         run: |

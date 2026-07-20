@@ -25,10 +25,9 @@ pub struct NativeExportConfig {
     /// can be much larger than the structural taint graph.
     pub full_propagations: bool,
     /// Request complete semantic chain/flow-label evidence.
-    /// Defaults stay bounded for routine exports; this mode is
-    /// explicit because dense semantic graphs can have exponentially
-    /// many exact paths and may need the compressed callgraph
-    /// representation instead of materialized path rows.
+    /// Routine exports bound only the optional materialized path rows. This
+    /// mode preserves the complete semantic relation as an exact compressed
+    /// callgraph because dense graphs can have exponentially many paths.
     pub complete_chains: bool,
     /// Keep the complete propagation relation in compiler form rather than
     /// materializing its potentially quadratic per-entry transitive product.
@@ -1462,8 +1461,8 @@ fn build_export_flow_sections(
     complete_chains: bool,
 ) -> ExportFlowSections {
     // Flow graph + per-function upstream chains. Default export emits
-    // bounded path rows with explicit truncation metadata. Complete
-    // complete export always uses the exact compressed semantic callgraph.
+    // bounded path rows with explicit truncation metadata. Complete export
+    // always uses the exact compressed semantic callgraph.
     // Selecting unbounded simple-path materialization from a graph-size
     // threshold is unsafe: a small graph can still have exponentially many
     // paths (or cycles), while the compressed graph remains linear in facts.

@@ -10,7 +10,11 @@
 //!
 //! Recovery edits are same-width masks. The recovered tree's byte ranges stay
 //! aligned with the original source, so every downstream span and source slice
-//! remains exact. Macro bodies are never guessed or hard-coded.
+//! remains exact. Macro bodies are never guessed or hard-coded. The only
+//! standardized macro handled directly is C-family `va_arg`: Tree-sitter
+//! represents a pointer type operand as an expression plus an `ERROR` node, so
+//! the recovery masks only the pointer declarator token proven by that CST
+//! shape.
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_vfs::{FileSnapshot, Vfs};
@@ -136,13 +140,17 @@ pub fn c_family_declaration_macro_recovery_edits(
         return Vec::new();
     }
 
-    let macros = reachable_object_macros(snapshot, vfs);
-    if macros.is_empty() {
-        return Vec::new();
-    }
-
     let source = snapshot.text.as_bytes();
     let mut edits = Vec::new();
+    collect_variadic_pointer_type_recovery_edits(source, tree, &mut edits);
+
+    let macros = reachable_object_macros(snapshot, vfs);
+    if macros.is_empty() {
+        edits.sort_by_key(|edit| (edit.start_byte, edit.end_byte));
+        edits.dedup();
+        return edits;
+    }
+
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         if node.is_error() {
@@ -164,6 +172,77 @@ pub fn c_family_declaration_macro_recovery_edits(
     edits.sort_by_key(|edit| (edit.start_byte, edit.end_byte));
     edits.dedup();
     edits
+}
+
+/// Recover the standardized C-family `va_arg(list, pointer_type)` form.
+///
+/// Tree-sitter parses the type head (`char`) as an expression and leaves the
+/// pointer declarator (`*`) as an `ERROR` sibling. Masking only that sibling
+/// yields a valid same-width recovery tree while downstream text and spans
+/// continue to address the original type operand. No arbitrary call or
+/// malformed value expression is accepted by this recovery.
+fn collect_variadic_pointer_type_recovery_edits(
+    source: &[u8],
+    tree: &Tree,
+    edits: &mut Vec<ParseRecoveryEdit>,
+) {
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.is_error() {
+            if variadic_pointer_type_error(node, source) {
+                edits.push(ParseRecoveryEdit::new(node.start_byte(), node.end_byte()));
+            }
+            continue;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.has_error() || child.is_missing() {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+fn variadic_pointer_type_error(node: Node<'_>, source: &[u8]) -> bool {
+    let Some(fragment) = source.get(node.start_byte()..node.end_byte()) else {
+        return false;
+    };
+    if !fragment.contains(&b'*')
+        || fragment
+            .iter()
+            .any(|byte| *byte != b'*' && !byte.is_ascii_whitespace())
+    {
+        return false;
+    }
+
+    let Some(arguments) = node.parent().filter(|parent| parent.kind() == "argument_list") else {
+        return false;
+    };
+    let has_list_and_type_before_error = {
+        let mut cursor = arguments.walk();
+        arguments
+            .named_children(&mut cursor)
+            .filter(|child| child.end_byte() <= node.start_byte())
+            .take(2)
+            .count()
+            == 2
+    };
+    if !has_list_and_type_before_error {
+        return false;
+    }
+
+    let Some(call) = arguments
+        .parent()
+        .filter(|parent| parent.kind() == "call_expression")
+    else {
+        return false;
+    };
+    let Some(function) = call.child_by_field_name("function") else {
+        return false;
+    };
+    source
+        .get(function.start_byte()..function.end_byte())
+        .is_some_and(|name| matches!(name, b"va_arg" | b"__builtin_va_arg"))
 }
 
 fn declaration_prefix_container(mut node: Node<'_>) -> Option<Node<'_>> {
