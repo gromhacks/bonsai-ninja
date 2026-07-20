@@ -178,17 +178,58 @@ fn page_next_uses_last_rendered_cursor() {
 }
 
 #[test]
-fn cursor_file_tmp_paths_are_unique_per_write() {
-    let path = std::env::temp_dir().join("bonsai-ninja-last-cursor.v1.json");
-    let first = cursor_file_tmp_path(&path);
-    let second = cursor_file_tmp_path(&path);
+fn cursor_file_is_scoped_beneath_user_state() {
+    let state = Path::new("/user-state");
+    let path = cursor_file_in_state_dir(state);
 
-    assert_ne!(first, second);
-    assert_eq!(first.parent(), path.parent());
-    assert!(first
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("bonsai-ninja-last-cursor.v1.json.tmp.")));
+    assert_eq!(path, state.join("bonsai-ninja/last-cursor.v2.json"));
+    assert!(path.starts_with(state));
+}
+
+#[test]
+fn cursor_store_key_does_not_disclose_paths_or_arguments() {
+    let key = cursor_key_for_parts(
+        "/private/work/customer",
+        "security\0.\0--source\0secret-rule",
+        "security/taint-analysis",
+        0x1234,
+    );
+
+    assert_eq!(key.len(), 16);
+    assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(!key.contains("customer"));
+    assert!(!key.contains("secret-rule"));
+}
+
+#[test]
+fn cursor_file_decoder_rejects_oversized_or_invalid_state() {
+    assert!(decode_cursor_file(&vec![b' '; MAX_CURSOR_FILE_BYTES as usize + 1]).is_empty());
+
+    let invalid = br#"{
+        "0123456789abcdef": "not-a-cursor",
+        "raw workspace path": "P:12345678",
+        "fedcba9876543210": "P:deadbeef"
+    }"#;
+    let decoded = decode_cursor_file(invalid);
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(
+        decoded.get("fedcba9876543210").map(String::as_str),
+        Some("P:deadbeef")
+    );
+
+    let too_many: BTreeMap<String, String> = (0..=MAX_CURSOR_HISTORY_ENTRIES)
+        .map(|index| (format!("{index:016x}"), "P:deadbeef".to_string()))
+        .collect();
+    let bytes = serde_json::to_vec(&too_many).expect("encode cursor state");
+    assert!(bytes.len() as u64 <= MAX_CURSOR_FILE_BYTES);
+    assert!(decode_cursor_file(&bytes).is_empty());
+}
+
+#[test]
+fn cursor_history_rejects_malformed_cached_cursor() {
+    clear_cursor_history_for_tests();
+    write_last_cursor("untrusted-cache", 19, "not-a-cursor");
+    assert_eq!(last_cursor("untrusted-cache", 19), None);
 }
 
 #[test]

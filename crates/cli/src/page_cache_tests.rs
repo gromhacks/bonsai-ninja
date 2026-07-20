@@ -25,6 +25,51 @@ fn eager_window_keeps_page_cache_opportunistic() {
 }
 
 #[test]
+fn eager_page_rendering_preserves_the_displayed_cursor() {
+    crate::paging::clear_cursor_history_for_tests();
+    let root = tempdir("displayed-cursor");
+    let rows: Vec<String> = (0..8).map(|index| format!("row-{index}")).collect();
+    let cfg = crate::paging::PagingConfig::new(
+        Some(64),
+        crate::paging::PageArg::First,
+        Some(1),
+        false,
+        crate::paging::FormatClass::Text,
+    );
+
+    super::emit_paged_text(
+        &root,
+        &rows,
+        &cfg,
+        "cache-cursor-test",
+        17,
+        |row| row.len() as u64,
+        |_, _, _| Ok(()),
+    )
+    .expect("render page window");
+
+    let expected_cursor = crate::paging::cursor_id("cache-cursor-test", 17, 0);
+    assert_eq!(
+        crate::paging::last_cursor("cache-cursor-test", 17).as_deref(),
+        Some(expected_cursor.as_str()),
+        "eagerly rendered neighboring pages must not replace the displayed page"
+    );
+    let next_cfg = crate::paging::PagingConfig::new(
+        Some(64),
+        crate::paging::PageArg::Next,
+        Some(1),
+        false,
+        crate::paging::FormatClass::Text,
+    );
+    let (_, next_info) =
+        crate::paging::paginate(&rows, &next_cfg, "cache-cursor-test", 17, |row| row.len() as u64);
+    assert_eq!(next_info.page_number, 2);
+
+    crate::paging::clear_cursor_history_for_tests();
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn workspace_fingerprint_changes_when_indexed_file_changes() {
     let root = tempdir("content-change");
     let file = root.join("app.py");
@@ -155,6 +200,8 @@ fn cache_file_for(workspace: &std::path::Path) -> PageCacheFile {
         rulepack_fingerprint: super::rulepack_fingerprint_for_command(workspace)
             .expect("rulepack fingerprint"),
         normalized_argv_hash: 0,
+        command: "test".to_string(),
+        filters_hash: 0,
         pages: Vec::new(),
     }
 }

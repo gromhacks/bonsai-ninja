@@ -1465,7 +1465,7 @@ fn save_taint_payload_if_requested(
     // filter) — they ARE the shaped output, so each variant caches its
     // own bytes for an identical re-run.
     if !pages.is_empty() {
-        if let Err(e) = page_cache::save_pages(workspace, pages) {
+        if let Err(e) = page_cache::save_pages(workspace, "security/taint-analysis", filters_hash, pages) {
             tracing::debug!("taint page cache save failed: {e}");
         }
     }
@@ -2887,7 +2887,12 @@ fn cmd_source_analysis(
                 text_cost,
             );
             let cache_progress = ScopedProgress::new("saving source page cache");
-            if let Err(e) = page_cache::save_pages(workspace, cached_pages.clone()) {
+            if let Err(e) = page_cache::save_pages(
+                workspace,
+                "security/source-analysis",
+                filters_hash,
+                cached_pages.clone(),
+            ) {
                 tracing::debug!("page cache save failed: {e}");
             }
             cache_progress.finish();

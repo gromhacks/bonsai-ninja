@@ -26,7 +26,7 @@ thread_local! {
 }
 
 const EAGER_PAGE_LIMIT: u64 = 4;
-const RENDER_CACHE_VERSION: u32 = 7;
+const RENDER_CACHE_VERSION: u32 = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CachedPage {
@@ -58,6 +58,8 @@ struct PageCacheFile {
     dependency_metadata_fingerprint: u64,
     rulepack_fingerprint: Option<u64>,
     normalized_argv_hash: u64,
+    command: String,
+    filters_hash: u64,
     pages: Vec<CachedPage>,
 }
 
@@ -149,12 +151,18 @@ pub(crate) fn replay_if_hit(workspace: &Path) -> anyhow::Result<bool> {
         return Ok(false);
     };
     stage.finish();
+    paging::write_last_cursor(&cache.command, cache.filters_hash, &page.cursor);
     emit_cached_text(&page.text)?;
     Ok(true)
 }
 
-pub(crate) fn save_pages(workspace: &Path, pages: Vec<CachedPage>) -> anyhow::Result<()> {
-    save_pages_value(workspace, pages)
+pub(crate) fn save_pages(
+    workspace: &Path,
+    command: &str,
+    filters_hash: u64,
+    pages: Vec<CachedPage>,
+) -> anyhow::Result<()> {
+    save_pages_value(workspace, command, filters_hash, pages)
 }
 
 /// A payload cached under an explicit SEMANTIC key rather than the
@@ -268,7 +276,12 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()>
     write_atomic_bytes(path, &serde_json::to_vec(value)?).map_err(Into::into)
 }
 
-fn save_pages_value(workspace: &Path, pages: Vec<CachedPage>) -> anyhow::Result<()> {
+fn save_pages_value(
+    workspace: &Path,
+    command: &str,
+    filters_hash: u64,
+    pages: Vec<CachedPage>,
+) -> anyhow::Result<()> {
     if cache_disabled() || pages.is_empty() {
         return Ok(());
     }
@@ -286,6 +299,8 @@ fn save_pages_value(workspace: &Path, pages: Vec<CachedPage>) -> anyhow::Result<
         dependency_metadata_fingerprint: dependency_metadata_fingerprint(workspace)?,
         rulepack_fingerprint: rulepack_fingerprint_for_command(workspace)?,
         normalized_argv_hash: normalized_argv_hash(),
+        command: command.to_string(),
+        filters_hash,
         pages,
     };
     // Per docs/contributing/design-patterns.mdx::Lossless Caches: a
@@ -361,10 +376,14 @@ where
     }
     render_stage.finish();
     let cache_stage = progress::ScopedSpinner::new("saving rendered page cache");
-    if let Err(e) = save_pages(workspace, cached_pages.clone()) {
+    if let Err(e) = save_pages(workspace, command, filters_hash, cached_pages.clone()) {
         tracing::debug!("page cache save failed: {e}");
     }
     cache_stage.finish();
+    // Eager cache population renders nearby pages through the canonical
+    // paginator. Those internal renders must not replace the user's actual
+    // current page in `--page next` history.
+    paging::write_last_cursor(command, filters_hash, &current_info.cursor);
     if let Some(page) = cached_pages.iter().find(|p| p.number == current_page) {
         emit_cached_text(&page.text)?;
     }

@@ -251,6 +251,7 @@ dependencies = [
  "bonsai_sdk",
  "clap",
  "comfy-table",
+ "dirs",
  "ignore",
  "indicatif",
  "once_cell",

@@ -41,18 +41,19 @@ jobs:
     name: rulepack audits
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           # Need history so `category_audit.py --diff origin/main`
           # can resolve the merge-base.
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: install python deps
-        run: pip install pyyaml
+        run: python3 -m pip install --require-hashes -r .github/requirements/pack-audit.txt
 
       - name: build bonsai-ninja release binary
         run: cargo build --release -p bonsai_cli
@@ -91,7 +92,7 @@ jobs:
 
       - name: upload audit artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pack-audit-${{ github.sha }}
           path: |

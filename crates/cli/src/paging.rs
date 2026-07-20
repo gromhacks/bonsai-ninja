@@ -9,12 +9,9 @@
 
 use ahash::AHashMap;
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    OnceLock,
-};
+use std::sync::OnceLock;
 
 /// Default context budget when neither `--context` nor
 /// `BONSAI_CONTEXT` is set. Chosen to match Ollama's mid-tier local
@@ -28,7 +25,8 @@ pub(crate) const DEFAULT_CONTEXT_TEXT: u64 = 32_768;
 /// output comfortably below the stated ceiling so the
 /// `tokens/budget` percentage never prints 100 %+.
 const CHROME_RESERVE: f64 = 0.05;
-static CURSOR_FILE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+const MAX_CURSOR_HISTORY_ENTRIES: usize = 4_096;
+const MAX_CURSOR_FILE_BYTES: u64 = 512 * 1_024;
 
 /// How a row's byte cost converts to a token estimate. Matches the
 /// existing token-footer heuristic (~4 ASCII bytes per token for
@@ -468,8 +466,8 @@ where
 
 // Last-cursor history backs `--page next`. Keyed by `(normalized argv,
 // command, filters_hash)`; each invocation overwrites its own key so the
-// next call advances by one. The in-process map serves tests; a temp-dir
-// JSON file persists across the fresh-process invocations of normal CLI use.
+// next call advances by one. The in-process map serves tests; a user-private
+// state file persists across the fresh-process invocations of normal CLI use.
 static LAST_CURSORS: OnceLock<std::sync::Mutex<AHashMap<(String, u64), String>>> = OnceLock::new();
 
 fn cursor_store() -> &'static std::sync::Mutex<AHashMap<(String, u64), String>> {
@@ -489,11 +487,20 @@ pub(crate) fn last_cursor(command: &str, filters_hash: u64) -> Option<String> {
 }
 
 pub(crate) fn write_last_cursor(command: &str, filters_hash: u64, cursor: &str) {
+    if !cursor_value_is_valid(cursor) {
+        return;
+    }
     let key = cursor_key(command, filters_hash);
     if let Ok(mut m) = cursor_store().lock() {
         m.insert((key.clone(), filters_hash), cursor.to_string());
     }
     let mut on_disk = read_cursor_file();
+    if !on_disk.contains_key(&key) && on_disk.len() >= MAX_CURSOR_HISTORY_ENTRIES {
+        // This is a convenience cache, not semantic state. Resetting a full
+        // history preserves the current command while preventing an
+        // unbounded number of distinct argv/workspace combinations.
+        on_disk.clear();
+    }
     on_disk.insert(key, cursor.to_string());
     let _ = write_cursor_file(&on_disk);
 }
@@ -503,10 +510,20 @@ fn cursor_key(command: &str, filters_hash: u64) -> String {
         .ok()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    format!(
-        "{cwd}\0{}\0{command}\0{filters_hash:x}",
-        normalized_argv_for_cursor()
-    )
+    cursor_key_for_parts(&cwd, &normalized_argv_for_cursor(), command, filters_hash)
+}
+
+fn cursor_key_for_parts(cwd: &str, normalized_argv: &str, command: &str, filters_hash: u64) -> String {
+    // The persistent state must not disclose a workspace path, search query,
+    // rule filter, or another command-line value. Only equality is needed to
+    // recover the last cursor, so retain a stable digest instead of raw input.
+    let mut hasher = bonsai_hash::Hasher::new();
+    for part in [cwd, normalized_argv, command] {
+        hasher.absorb(part.as_bytes());
+        hasher.absorb_separator();
+    }
+    hasher.absorb(&filters_hash.to_le_bytes());
+    format!("{:016x}", hasher.finish())
 }
 
 fn normalized_argv_for_cursor() -> String {
@@ -525,54 +542,89 @@ fn normalized_argv_for_cursor() -> String {
     out.join("\0")
 }
 
-fn cursor_file() -> PathBuf {
-    std::env::temp_dir().join("bonsai-ninja-last-cursor.v1.json")
-}
-
-fn cursor_file_tmp_path(path: &Path) -> PathBuf {
-    let counter = CURSOR_FILE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut name = path
-        .file_name()
-        .map(OsString::from)
-        .unwrap_or_else(|| OsString::from("bonsai-ninja-last-cursor.v1.json"));
-    name.push(format!(".tmp.{}.{}", std::process::id(), counter));
-    path.with_file_name(name)
-}
-
-fn read_cursor_file() -> BTreeMap<String, String> {
-    let path = cursor_file();
-    let Ok(bytes) = std::fs::read(path) else {
-        return BTreeMap::new();
-    };
-    serde_json::from_slice(&bytes).unwrap_or_default()
-}
-
-fn write_cursor_file(map: &BTreeMap<String, String>) -> std::io::Result<()> {
-    let path = cursor_file();
-    let tmp = cursor_file_tmp_path(&path);
-    let bytes = serde_json::to_vec(map).map_err(std::io::Error::other)?;
-    {
-        use std::io::Write;
-        let mut tmp_file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        tmp_file.write_all(&bytes)?;
-        tmp_file.sync_all()?;
-    }
-    if let Err(err) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err);
-    }
-    Ok(())
+#[cfg(not(test))]
+fn cursor_file() -> Option<PathBuf> {
+    dirs::state_dir()
+        .or_else(dirs::cache_dir)
+        .map(|state_dir| cursor_file_in_state_dir(&state_dir))
 }
 
 #[cfg(test)]
-fn clear_cursor_history_for_tests() {
+fn cursor_file() -> Option<PathBuf> {
+    // Unit tests exercise the in-process cursor store and must never mutate a
+    // developer's persistent CLI state.
+    None
+}
+
+fn cursor_file_in_state_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("bonsai-ninja").join("last-cursor.v2.json")
+}
+
+fn read_cursor_file() -> BTreeMap<String, String> {
+    let Some(path) = cursor_file() else {
+        return BTreeMap::new();
+    };
+    let Ok(file) = std::fs::File::open(path) else {
+        return BTreeMap::new();
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_CURSOR_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return BTreeMap::new();
+    }
+    decode_cursor_file(&bytes)
+}
+
+fn decode_cursor_file(bytes: &[u8]) -> BTreeMap<String, String> {
+    if bytes.len() as u64 > MAX_CURSOR_FILE_BYTES {
+        return BTreeMap::new();
+    }
+    let Ok(mut cursors) = serde_json::from_slice::<BTreeMap<String, String>>(bytes) else {
+        return BTreeMap::new();
+    };
+    cursors.retain(|key, cursor| {
+        key.len() == 16
+            && key
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            && cursor_value_is_valid(cursor)
+    });
+    if cursors.len() > MAX_CURSOR_HISTORY_ENTRIES {
+        return BTreeMap::new();
+    }
+    cursors
+}
+
+fn cursor_value_is_valid(cursor: &str) -> bool {
+    cursor.len() == 10
+        && cursor.starts_with("P:")
+        && cursor[2..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn write_cursor_file(map: &BTreeMap<String, String>) -> std::io::Result<()> {
+    let Some(path) = cursor_file() else {
+        // Some embedded/minimal platforms do not expose a user state or
+        // cache directory. Pagination remains correct in-process there; only
+        // the cross-process `--page next` convenience is unavailable.
+        return Ok(());
+    };
+    let bytes = serde_json::to_vec(map).map_err(std::io::Error::other)?;
+    bonsai_common::write_atomic_bytes(&path, &bytes)
+}
+
+#[cfg(test)]
+pub(crate) fn clear_cursor_history_for_tests() {
     if let Ok(mut m) = cursor_store().lock() {
         m.clear();
     }
-    let _ = std::fs::remove_file(cursor_file());
+    if let Some(path) = cursor_file() {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[cfg(test)]
