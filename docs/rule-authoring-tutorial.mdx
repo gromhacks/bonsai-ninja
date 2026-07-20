@@ -5,7 +5,7 @@ description: "Write a source, sink, sanitizer, constraint, and test for a new ru
 
 # Rule Authoring Tutorial
 
-This walkthrough creates a small Python command-injection rule set. The same structure applies to every language: sources introduce taint, sinks require tainted arguments, sanitizers attach evidence, and constraints keep matches precise.
+This walkthrough creates a small Python command-injection rule set. The same structure applies to every language: sources introduce taint, sinks require tainted arguments, sanitizers attach evidence, and constraints keep matches precise. Libraries whose factory methods determine receiver types can also add non-finding `typing/` rules with `returns_type`; see [Custom Rules](custom-rules.mdx).
 
 <Steps>
 

@@ -308,6 +308,7 @@ pub fn is_super_receiver_with_tokens(receiver: &str, tokens: &[&str]) -> bool {
 pub fn module_import_parts(text: &str) -> Vec<String> {
 pub fn module_path_parts(text: &str) -> Vec<String> {
 pub fn module_target_matches_decl_module_path(
+pub fn module_target_matches_decl_module_path_with_syntax(
 pub fn module_target_matches_path(alias_target: &str, file_path: &str) -> bool {
 pub fn module_target_parts(alias_target: &str) -> Vec<String> {
 pub fn module_target_parts_match_path_parts(target_parts: &[String], path_parts: &[String]) -> bool {
@@ -323,6 +324,7 @@ pub fn semantic_import_binding_map_for_file(imports: &[ImportSpec]) -> AHashMap<
 pub fn short_tail(name: &str) -> &str {
 pub fn split_qualified_head_tail(name: &str) -> Option<(&str, &str)> {
 pub fn strip_extension(part: &str) -> &str {
+pub fn strip_module_path_prefix(name: &str, syntax: ModulePathSyntax) -> &str {
 pub fn visibility_allows(
 pub struct FilePathLookup<'a> {
 pub struct FilePathMatchLookup<'a> {

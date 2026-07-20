@@ -1,26 +1,30 @@
 ---
 title: "Rule Testing"
-description: "Validate rule schema, match examples, collision audits, and integration fixtures."
+description: "Validate rule schema, examples, live taint replay, collisions, integration fixtures, and scale behavior."
 ---
 
 # Rule Testing
 
-Rule testing has two layers: rulepack validation proves the YAML matches the schema and examples, while integration fixtures prove source-to-sink behavior against real adapter facts.
+Rule testing has three layers: schema/example validation proves rule content,
+integration fixtures prove behavior against adapter compiler facts, and scale
+checks prove the same uncapped IDG semantics remain practical on production
+workspaces.
 
 <Steps>
 
 1. Add or update `match_examples` on every enabled rule.
-2. Run rulepack validation.
-3. Run match-example collision auditing.
-4. Add a fixture when propagation behavior changes.
-5. Run the deployment readiness checks that cover the affected command
-   surface.
+2. Run normal validation while editing.
+3. Run `--taint-replay` before merge.
+4. Add a fixture when propagation or adapter lowering changes.
+5. Run the deployment gates for the affected command surface.
 
 </Steps>
 
 ## Match Examples
 
-Positive examples should contain the exact callee or target shape the rule claims. Negative examples should cover the closest safe form, usually a literal argument, disabled option, or wrong receiver.
+Positive examples contain the exact callee or target shape the rule claims.
+Negative examples cover the closest safe form, usually a literal argument,
+disabled option, wrong receiver type, or unrelated package.
 
 ```yaml
 match_examples:
@@ -41,24 +45,16 @@ match_examples:
 
 ```bash
 cargo build --release -p bonsai_cli
-python3 scripts/validate-pattern-pack.py \
-  --binary ./target/release/bonsai-ninja \
-  --json-out /tmp/pattern-pack-validator.json
+
+./target/release/bonsai-ninja security . pack --validate \
+  --rules-dir security-patterns \
+  --format json --no-color --no-progress
 ```
 
-`pack --validate` checks schema, required metadata, and statically replays
-each rule's `match_examples` against the matcher. By default it cannot
-replay **taint-dependent** rules (`arg_tainted` / `any_arg_tainted` /
-`receiver_tainted`) — those need live source-to-sink dataflow, so the
-static pass skips them.
-
-Add `--taint-replay` for the deep gate: it seeds each taint-dependent
-rule's positive example through live taint analysis (treating inferred
-inputs as sources) and reports any rule whose own example no longer fires
-as `match-example-taint-miss`. This catches a rule that silently stopped
-matching after a gate, receiver-name, or arg-index change. It runs taint
-per example, so it is slower than the default — intended for the deep CI
-gate rather than every edit.
+The normal validator checks schema, metadata, collisions, and statically
+replays examples. Taint-dependent constraints
+(`arg_tainted`, `any_arg_tainted`, and `receiver_tainted`) require live
+source-to-sink evidence, so run the deep gate before merge:
 
 ```bash
 ./target/release/bonsai-ninja security . pack --validate --taint-replay \
@@ -66,330 +62,128 @@ gate rather than every edit.
   --format json --no-color --no-progress
 ```
 
-A `match-example-taint-miss` usually means one of: the rule is genuinely
-broken; its package gate rejects the receiver (give the rule a
-`receiver_type_in` constraint and construct the receiver in the example —
-see [Pattern Guide](pattern-guide)); or the example uses a literal instead
-of a function-parameter source, so there is nothing to taint.
+The 2026-07-20 deep gate covers 7,148 rules and 10,489 examples with zero
+errors, warnings, or taint-replay misses. Current counts belong in
+[Release Readiness](RELEASE_READINESS.md); the command remains authoritative.
+
+A `match-example-taint-miss` usually means the rule is broken, its package or
+receiver gate rejects the example, or its example has no source. Use a real
+parameter source and, when appropriate, a typed receiver. See the
+[Pattern Guide](./pattern-guide.mdx).
 
 ## Integration Fixtures
 
-Use `examples/<lang>/micro` for small command-surface checks, `mega_flow` for construct coverage, and focused fixtures for sanitizer or lifecycle behavior.
+Use `examples/<lang>/micro` for command-surface checks,
+`examples/<lang>/mega_flow` for construct coverage, and focused fixtures for
+sanitizer, lifecycle, resolver, and field-sensitive behavior.
 
 ```bash
-./target/release/bonsai-ninja security examples/python/mega_flow taint-analysis \
+./target/release/bonsai-ninja security examples/python/mega_flow \
+  taint-analysis \
   --rules-dir security-patterns \
   --format json \
-  --all
+  --all \
+  --no-color \
+  --no-progress
 ```
+
+Adapter syntax changes must be tested at the Tree-sitter/IR boundary and at
+the public behavior boundary. A language-specific node kind, receiver,
+constructor, module root, or type spelling belongs in that adapter and its
+fixtures, never in a shared hardcoded source-token union.
 
 ## Deployment Readiness Checks
 
 ```bash
-cargo fmt --all --check
+cargo fmt --all -- --check
 git diff --check
-cargo build -q --release -p bonsai_cli
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
+  --document-private-items --locked
 
-./target/release/bonsai-ninja security . pack --validate \
-  --format json \
-  --no-color \
-  --no-progress
+./target/release/bonsai-ninja security . pack --validate --taint-replay \
+  --rules-dir security-patterns \
+  --format json --no-color --no-progress
 
 ./target/release/bonsai-ninja security . pack --audit \
-  --context 16k \
-  --no-color \
-  --no-progress
+  --context 16k --no-color --no-progress
 
-cargo test -p bonsai_security --test rulepack_conformance -- --test-threads=1
-cargo test -p bonsai_security --test security_pipeline_regressions -- --test-threads=1
-cargo test -p bonsai_security --test branch_merge_audit -- --nocapture
+cargo test -p bonsai_security --test rulepack_conformance
+cargo test -p bonsai_security --test security_pipeline_regressions
+cargo test -p bonsai_security --test branch_merge_audit
+cargo test -p bonsai_cli --test sanitizer_fixtures
+cargo test -p bonsai_cli --test per_lang_cli_matrix
+cargo test -p bonsai_conformance --test architecture_invariants
 
-cargo test -p bonsai_cli --test sanitizer_fixtures -- --nocapture
-cargo test -p bonsai_cli --test security_commands \
-  taint_analysis_run_across_every_mega_flow_lang \
-  -- --nocapture
-cargo test -p bonsai_cli --test per_lang_cli_matrix \
-  micro_security_sarif_shape \
-  -- --nocapture
-
+scripts/audit-adapter-capabilities.sh --check
 python3 scripts/validate-mega-cli.py \
   --bin ./target/release/bonsai-ninja \
   --skip-realworld
-
-python3 scripts/realworld-lang-benchmark.py \
-  --bin ./target/release/bonsai-ninja \
-  --langs all \
-  --command-timeout 1500 \
-  --clone-timeout 1200 \
-  --continue-on-error
 ```
 
-For the current local release snapshot, see
-[Release Readiness](RELEASE_READINESS.md). The 2026-06-19 CVE-Bench run
-improved detection recall and precision substantially, but fixed-snapshot
-validation remains the known rulepack-quality gap. Treat sanitizer-credit
-changes as path-ordering changes: source -> sanitizer -> sink may suppress
-or mark the path, while source -> sink -> sanitizer must not.
+Treat sanitizer changes as path-ordering changes:
+source -> sanitizer -> sink can mark or suppress a path, while
+source -> sink -> sanitizer cannot.
 
 ## Large-Codebase Performance Checks
 
-For large Java or JVM-family repositories, validate both cold and warm runs.
-Keep the real codebase in `/tmp`, delete it after the audit, and run the
-release binary with progress disabled for machine-readable logs:
+Run the release binary and request an exhaustive JSON artifact. Do not impose a
+command timeout as a substitute for scalability; external CI watchdogs may
+still detect a genuine hang, but the analyzer must complete the requested
+semantic fixed point.
 
 ```bash
 env BONSAI_DEBUG=security-phase,idg-build \
-  ./target/release/bonsai-ninja security /tmp/large-java-project taint-analysis \
+  ./target/release/bonsai-ninja security ../large-project taint-analysis \
   --profile production \
   --format json \
+  --all \
   --no-color \
-  --no-progress > /tmp/bonsai-large-java-taint.json
+  --no-progress \
+  --output-path /tmp/bonsai-large-project.json
 ```
 
-The 2026-06-06 Elasticsearch smoke used the reported CLI shape,
-`security ../elasticsearch taint-analysis --context 512k --no-color
---no-progress`, against the local Elasticsearch checkout. The release run
-completed in 121.25s with 327 total findings and no `payload exceeds 4GiB` or
-`save_to_disk failed` warning. Phase timing with
-`BONSAI_DEBUG=security-phase` showed source matching in 6.776s, sink matching
-in 5.200s, sanitizer matching in 4.685s, source-reachable callgraph
-construction in 11.968s, scoped semantic graph construction in 6.939s,
-source-sink reachability in 0.004s, taint-chain building in 23.262s, flow
-evidence in 0.012s, and first-page rendering in 1.011s. The source-reachable
-graph was scoped to 15,557 functions / 3,074 files from 2,018 source functions
-and 7,954 sink functions, reaching 1,745 sink functions; the IDG scope was
-further narrowed to 13,876 functions / 2,958 files. Source groups were filtered
-from 2,018 to 497.
+A valid result has `analysis_complete: true`, an empty incomplete-reason
+list, valid source/sink/path files, deterministic IDs, clean pagination, and no
+cache persistence warning. Record cold and warm wall time, peak RSS, file
+count, rule-match counts, finding count, cache state, and swaps.
 
-A valid large-codebase run should have `analysis_complete: true` for JSON/SARIF
-runs, no incomplete reasons, no malformed page metadata, no `payload exceeds
-4GiB` warning, and no `save_to_disk failed` warning. Large Java scopes should
-log `large_java_scope=true`, `receiver_method_propagation=false`, and
-`field_argument_forwarding=false` in the scoped semantic graph phase; exact
-taint still runs over source-to-sink IDG/callgraph corridors rather than a
-workspace-wide graph.
+The production taint result is not bounded by BFS depth, iterations, source
+count, or result count. The sparse IDG closure runs to a fixed point.
+`--all` removes output paging; it does not enable a more accurate engine.
+Path-preview and diagnostic controls are allowed only when they report
+truncation and do not feed semantic reachability. The streamed IDG sidecar has
+no workspace file-count ceiling.
 
-`BONSAI_DEBUG=security-phase` writes phase timing to stderr even when
-`--no-progress` keeps stdout clean. `--no-progress` and `NO_PROGRESS` are the
-only progress mute switches; `--no-color` and `NO_COLOR` keep progress visible
-in an interactive terminal but render monochrome bars. For taint-analysis,
-expect separate progress phases and timings for rule loading, parsing,
-source/sink/sanitizer matching, semantic graph construction, source-sink
-reachability, taint scheduling, taint-chain building, finding finalization,
-flow evidence, and JSON/text rendering. Text output also reports page cost
-estimation, pagination, page-window rendering, and page-cache save time.
-The rendered page cache reuses the indexed source fingerprint from the opened
-workspace, so a first-page render should not perform a second full source-tree
-content scan after analysis completes.
-Rendered-page caching is intentionally opportunistic: it renders the first four
-pages plus the current page and up to the next three pages. This keeps
-`--page 2` cheap without making large source-body reports wait for dozens of
-future pages to render before stdout is returned.
+The current Elasticsearch reference is the dated 30,055-file run in
+[Release Readiness](RELEASE_READINESS.md): `analysis_complete: true`, no
+incomplete reasons, 57.98 seconds wall time, and about 2.33 GiB maximum RSS.
+Older synthetic and real-world benchmark measurements remain in
+[the archived goal benchmark](goal-benchmark-2026-05-15.md).
 
-Add `idg-build` when a run is slow after rule matching. That expands the
-semantic graph phase into map construction, transfer, call-name aliases,
-call-edge site indexing, IDG stitching, field forwarding, and receiver
-propagation. For package-oriented languages, call-edge site counts should stay
-proportional to real call sites. A sibling-package same-name explosion means
-module/package narrowing regressed.
-
-The 2026-06-05 synthetic Java mega-flow clone benchmark generated 2,500 unique
-Java packages, each with the four-file servlet-to-command-injection mega-flow
-fixture: 10,000 valid `.java` files, 50,000 functions, and 2,500 expected
-findings. Release `index` completed in 2.25s. Release `security taint-analysis
---format json --all` completed cold in 30.81s with 2,500 findings. In the fixed
-run, the IDG call-edge site index had 40,000 edges and call-name aliasing took
-0.025s. The pre-fix shape retained sibling-package candidates and was still
-CPU-bound after several minutes; a 400-file diagnostic clone showed 51,100
-call-edge site edges before the fix versus 1,600 after it.
-
-The 2026-06-06 all-language 10,000-file mega-flow benchmark copied only valid
-`examples/<lang>/mega_flow` source files into isolated package/module
-directories, deleted each generated `/tmp` workspace after its audit, and
-validated content rather than just JSON shape. Every language matched the
-expected finding count, and every finding's source file, sink file, and
-taint-path files stayed inside the same generated copy.
-
-| Language | Files | Findings | Index | Taint |
-| --- | ---: | ---: | ---: | ---: |
-| C | 10,000 | 2,000 | 2.26s | 4.56s |
-| C++ | 10,000 | 2,000 | 2.66s | 7.83s |
-| C# | 10,000 | 2,500 | 4.33s | 23.60s |
-| Dart | 10,000 | 2,500 | 3.65s | 36.17s |
-| Elixir | 10,000 | 2,500 | 2.22s | 13.40s |
-| Erlang | 10,000 | 2,000 | 1.77s | 5.64s |
-| Go | 10,000 | 2,500 | 2.94s | 22.47s |
-| Java | 10,000 | 2,500 | 2.60s | 40.19s |
-| JavaScript | 10,000 | 2,500 | 2.91s | 31.94s |
-| Kotlin | 10,000 | 2,500 | 2.80s | 15.92s |
-| Lua | 10,000 | 2,500 | 2.19s | 6.93s |
-| Objective-C | 10,000 | 2,500 | 3.08s | 13.43s |
-| Perl | 10,000 | 2,500 | 2.84s | 7.09s |
-| PHP | 10,000 | 5,000 | 3.49s | 10.62s |
-| Python | 10,000 | 1,250 | 2.65s | 11.41s |
-| Ruby | 10,000 | 5,000 | 2.29s | 18.66s |
-| Rust | 10,000 | 2,500 | 3.25s | 17.29s |
-| Scala | 10,000 | 2,500 | 2.93s | 18.44s |
-| Solidity | 10,002 | 3,334 | 2.88s | 16.02s |
-| Swift | 10,000 | 2,500 | 3.50s | 38.26s |
-| TypeScript | 10,000 | 2,000 | 2.74s | 25.19s |
-
-The 2026-06-07 real-world non-Java benchmark used fresh shallow clones under
-`/tmp` and deleted every checkout after the run. The harness command was:
-
-```bash
-python3 scripts/realworld-lang-benchmark.py \
-  --bin ./target/release/bonsai-ninja \
-  --langs all \
-  --command-timeout 1500 \
-  --clone-timeout 1200 \
-  --continue-on-error
-```
-
-The harness runs `index`, then production `security taint-analysis --format
-json --all --no-color --no-progress` with `BONSAI_DEBUG=security-phase`.
-Validation checks content, not just shape: stable finding ids, source/sink
-objects, `analysis_complete`, source/sink/taint-path files under the disposable
-workspace, existing referenced files, language counts, severity counts,
-precision counts, and forbidden persistence warnings. Empty-finding production
-runs are accepted only after the command exits successfully and the JSON parses
-cleanly. All 20 non-Java targets passed with no validation problems, no
-timeouts, no `payload exceeds 4GiB` warning, and no `save_to_disk failed`
-warning.
-
-| Language | Real repository | Language files | Index | Taint | Findings |
-| --- | --- | ---: | ---: | ---: | ---: |
-| C | FFmpeg | 4,659 | 10.393s | 13.285s | 5 |
-| C++ | OpenCV | 2,945 | 17.928s | 23.168s | 80 |
-| C# | ASP.NET Core | 10,427 | 15.648s | 23.337s | 20 |
-| Dart | Flutter | 6,428 | 25.708s | 31.372s | 19 |
-| Elixir | Elixir | 567 | 1.437s | 1.691s | 0 |
-| Erlang | OTP | 4,128 | 23.790s | 41.204s | 13 |
-| Go | Kubernetes | 12,797 | 20.503s | 30.291s | 10 |
-| JavaScript | Node.js | 20,750 | 6.426s | 9.622s | 27 |
-| Kotlin | JetBrains Kotlin | 65,805 | 40.471s | 100.599s | 32 |
-| Lua | Kong | 1,308 | 2.549s | 2.930s | 0 |
-| Objective-C | Firebase iOS SDK | 868 | 6.520s | 8.613s | 3 |
-| Perl | Perl 5 | 3,824 | 8.564s | 32.790s | 7 |
-| PHP | WordPress | 3,119 | 6.123s | 10.908s | 10 |
-| Python | Ansible | 1,801 | 1.551s | 2.150s | 0 |
-| Ruby | Rails | 3,413 | 3.175s | 4.607s | 5 |
-| Rust | rust-lang/rust | 36,109 | 55.041s | 65.139s | 2 |
-| Scala | Spark | 6,056 | 22.667s | 38.173s | 4 |
-| Solidity | OpenZeppelin Contracts | 402 | 0.822s | 1.308s | 2 |
-| Swift | Swift | 22,418 | 22.731s | 32.860s | 14 |
-| TypeScript | VS Code | 10,923 | 22.332s | 37.767s | 3 |
-
-The summary-output corridor is intentionally source-origin scoped. It can climb
-return-to-caller edges from a source-bearing helper when the helper has a
-semantic output summary, then continue through the caller-to-callee graph. That
-keeps returned-object flows schedulable without letting every reached
-summary-returning utility fan out to unrelated callers.
-
-The 2026-06-04 and 2026-06-06 source-to-sink scheduler regression passes verify
-that taint-analysis does not analyze every source in a large project when most
-sources cannot reach any sink. Source eligibility is source-scoped: the
-scheduler uses concrete source-seed to sink-node IDG cuts when possible, uses a
-source-origin resolved-callgraph corridor when a concrete node cut cannot prove
-completeness, and skips source groups with no semantic source-to-sink corridor.
-It must not materialize all semantic function edges before source filtering,
-the taint budget must not cap source eligibility, and there is no workspace-wide
-graph fallback. Once a source group is eligible, the per-source IDG graph build
-is cut to the proven source-to-sink corridor. Same-file source batches also get
-a concrete seed-node to sink-node reachability prefilter so adapter module
-wrappers or dense files do not schedule source-only calls. Cross-file node-cut
-uncertainty stays scheduled and is decided by the normal corridor-scoped
-semantic taint graph to avoid false negatives.
-
-Release-binary Java scale checks from the same pass:
-
-- 10,000 same-function servlet-to-JDBC flows across 10,000 files: 10,000
-  findings in 9.53s, with 10,000 scheduled taint-chain groups.
-- 5,000 two-file Entry-to-Helper flows across 10,000 files: 5,000 findings in
-  5.88s, with 5,000 scheduled taint-chain groups.
-- 9,999 Entry files feeding one shared sink helper: one grouped finding in
-  10.69s, with 9,999 scheduled taint-chain groups and a 5.626s taint-chain
-  phase.
-- 1 real source-to-sink flow plus 1,000 unreachable source-only Java files:
-  one finding in 0.61s, with source groups filtered from 1,001 to 1 and exactly
-  one taint-chain tick.
-- OWASP Benchmark production taint-analysis default page: 1,745 total findings
-  in 12.83s, with source groups filtered from 2,562 to 2,558 and taint chains
-  built in 1.954s.
-- `dvws-node` release taint-analysis with `--context 512k`: 50 JavaScript
-  findings in 3.44s; source-sink reachability completed in 0.191s and taint
-  chains in 0.523s on the dense cached IDG sidecar that previously hung while
-  building source-sink reachability.
-
-The 2026-06-03 synthetic Python scale smoke copied `examples/python/mega_flow`
-into 10,000 valid flows across 80,000 source files, then deleted the generated
-workspace from `/tmp`. Expected content checks were exact: 20,000 Flask
-`request.args.get` source rows, 20,000 `os.system` sink rows, 300,000 function
-definition rows, and 10,000 taint findings with one verified source-to-sink
-finding per copied flow. Cold taint completed in 124.49s, warm taint completed
-in 64.15s, and cold/warm JSON matched byte-for-byte. The same no-warning
-requirements apply: no `payload exceeds 4GiB` warning and no `save_to_disk
-failed` warning.
-
-The sharded duplicate-class scale smoke generated 10,000 valid Python flows
-across 80,100 source files, then deleted the generated workspace from `/tmp`.
-Every flow imported its own executor module while all flows reused the same
-`CommandRunner.execute` class/method names. Exact checks passed: 10,000
-`perform_* -> execute` edges in 43.64s with no cross-flow targets, 20,000
-Flask `request.args.get` source rows in 27.50s, 20,000 `os.system` sink rows
-in 28.35s, 10,000 cold taint findings in 94.32s, and 10,000 warm taint
-findings in 58.05s. No `payload exceeds 4GiB` warning and no `save_to_disk
-failed` warning occurred.
+Use `BONSAI_DEBUG=security-phase` for phase timing and add `idg-build` when
+the semantic graph phase is slow. For package-oriented languages, call-edge
+site counts should remain proportional to real resolved call sites. A
+sibling-package same-name explosion indicates resolver/module narrowing
+regressed.
 
 ## Security Pattern Audit
 
 Use this stricter pass when reviewing the checked-in rulepack end to end:
 
 ```bash
-./target/release/bonsai-ninja security . pack --validate \
-  --format json \
-  --no-color \
-  --no-progress
+./target/release/bonsai-ninja security . pack --validate --taint-replay \
+  --format json --no-color --no-progress
 
 ./target/release/bonsai-ninja security . pack --audit \
-  --format json \
-  --no-color \
-  --no-progress
+  --format json --no-color --no-progress
 
 python3 scripts/pack_audit.py --duplicates --fail-on-family-file-mismatch
 python3 scripts/pack_audit.py --json > /tmp/bonsai-pack-audit.json
-
-cargo test -p bonsai_security --test rulepack_conformance -- --test-threads=1
-cargo test -p bonsai_security --test false_positive_guards -- --nocapture
-cargo test -p bonsai_security --test validate_pack_constraint_coverage -- --nocapture
-cargo test -p bonsai_security --test validate_pack_negative_examples -- --nocapture
-cargo test -p bonsai_security --test pack_constraint_coverage_property -- --nocapture
-cargo test -p bonsai_security --test vuln_class_regression -- --nocapture
-cargo test -p bonsai_cli --test sanitizer_fixtures -- --nocapture
 ```
 
-For the audit to be clean, `pack --validate` must report zero warnings and
-errors, `pack --audit` must have no unexplained canonical family gaps, and
-`pack_audit.py` must report zero duplicate ids, zero duplicate enabled match
-shapes, zero cross-family API collisions, zero family-file mismatches, zero
-unreviewed fragile bare-name rules, and no unresolved canonical sink-family
-gaps. The intentional exceptions are the same as the CLI audit: Solidity uses
-an ecosystem-specific taxonomy, and C deserialization is not applicable.
-
-`cargo test --workspace --no-fail-fast` is the broad local sweep used for
-release-confidence runs. It is much slower than the focused deployment pass
-because it builds and runs every debug test target, including integration
-matrices, inspect matrices, cache/hot-reload tests, SARIF tests, doc tests, and
-21-language command/content suites. Run it periodically before a release branch
-or overnight validation; after scoped rulepack, formatter, or command-output
-changes, the focused checks above cover schema validity, SARIF shape,
-21-language mega-flow behavior, sanitizer fixtures, and the release CLI command
-surface.
-
-No Rust test-startup caveat remains open from the 2026-06-03 deployment pass.
-The earlier `_dyld_start` stalls on the local macOS host were fixed by cleaning
-an overgrown generated `target/` tree; fresh default-target test harnesses then
-launched normally, and `cargo test --workspace --no-fail-fast -- --test-threads=1`
-completed successfully. If a future test parent appears idle,
-inspect child processes before treating it as a Rust harness hang; some harnesses
-legitimately wait on child scripts such as `scripts/validate-mega-cli.py`.
+Do not enable generic print, log, join, or parse patterns without a real
+security boundary and constraints that keep common safe usage quiet. Solidity
+uses the smart-contract taxonomy; do not manufacture app/web SQLi, XSS, SSRF,
+path, or command-injection parity rules for it.

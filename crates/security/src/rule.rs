@@ -1078,7 +1078,7 @@ pub struct Rule {
     pub match_examples: Vec<RuleMatchExample>,
     pub description: String,
     /// Populated by the loader from the containing directory
-    /// (`sources/`, `sinks/`, `sanitizers/`).
+    /// (`sources/`, `sinks/`, `sanitizers/`, `typing/`).
     #[serde(skip)]
     pub kind: RuleKind,
     /// Either declared in YAML (`language: python`) or derived from the

@@ -79,7 +79,7 @@ let bonsai = Bonsai::new()
 | `.index_with_progress(root, callback)` | Same with `WorkspaceOpenEvent` callbacks |
 | `.index_structural(root)` | Explicit spelling for `.index(root)` |
 | `.index_structural_with_progress(root, callback)` | Same with `WorkspaceOpenEvent` callbacks |
-| `.index_semantic(root)` | Explicitly prebuild structural semantic sidecars: resolved callgraph, IDG when enabled for the workspace size, and retrieval factstore |
+| `.index_semantic(root)` | Explicitly prebuild structural semantic sidecars: resolved callgraph, streamed workspace IDG, and retrieval factstore |
 | `.index_semantic_with_progress(root, callback)` | Same with `WorkspaceOpenEvent` callbacks |
 | `.open_query(root)` | Load sidecar, compute requested missing facts on demand |
 | `.open_query_matching_literal_with_progress(root, literal, cb)` | Open only files whose text contains a literal and emit ingest/parse progress |
@@ -116,7 +116,7 @@ state, and write-through sidecar finish status. The CLI renders those notes
 on stderr; SDK callers can route the same stream into logs or embedding UI.
 Taint-graph write-through is enabled by default so a second process can
 hydrate exact graphs from config-specific
-`.bonsai/taint_graph.v9.<mode>.<config>.factstore` files; set
+`.bonsai/taint_graph.v*.<mode>.<config>.factstore` files; set
 `BONSAI_TAINT_GRAPH_PERSIST=0` only for disk-constrained runs.
 
 ### Workspace open events
@@ -157,7 +157,7 @@ only ingest events when the selected options deliberately defer
 declaration indexing. Reduced-open projects keep that narrowed file set
 stable unless a caller explicitly re-enables auto-refresh. Query and
 prewarm opens also emit `CacheChecked`
-events for reusable sidecars such as dataflow factstore, legacy dataflow,
+events for reusable sidecars such as the dataflow factstore, older dataflow,
 callgraph, value-flow, and flow-ids, so embedding tools can explain warm
 and cold opens without CLI-only logic.
 `ValueFlowPrewarmStarted` / `ValueFlowPrewarmFinished` are emitted only when
@@ -372,7 +372,7 @@ let stats = project.cache().rebuild_structural_with_export(true)?;
 ```
 
 `rebuild_structural_cache` and `Project::cache().rebuild_structural*`
-match CLI `cache rebuild`: they refresh the bounded callgraph, IDG, and
+match CLI `cache rebuild`: they refresh the reusable callgraph, IDG, and
 retrieval sidecars and warm the default export cache only when requested.
 They do not run the full dataflow prewarm; use
 `open_with_options(root, WorkspaceOpenOptions::full_prewarm())` when reusable
@@ -384,7 +384,7 @@ and publish `.bonsai/manifest.json`, so subsequent cache stats can validate
 every produced sidecar instead of treating them as orphaned files.
 Security `taint_analysis*` and `source_analysis*` facades refresh the same
 manifest after their exact source-seeded taint graph write-through finishes,
-so the current `.bonsai/taint_graph.v9.<mode>.<config>.factstore` shows as
+so the current `.bonsai/taint_graph.v*.<mode>.<config>.factstore` shows as
 validated reusable state on the next `cache.stats()` call. Source-analysis
 and taint-analysis use distinct config-qualified files and do not overwrite
 each other's warm facts.
@@ -431,7 +431,7 @@ let flow_ids = ws.flow_ids();             // per-FuncId browse-row F-IDs
 let inter_caches = ws.inter_taint_caches(); // engine resolver memo + alias maps
 let resolved = ws.cached_resolved_call_graph(); // Arc<ResolvedCallGraph>
 let taint_idx = ws.taint_index();         // (source_func, seed_key) → EntryTaintGraph
-let callers_idx = ws.transitive_callers(); // depth-bounded caller closures
+let callers_idx = ws.transitive_callers(); // explicitly scoped caller-frontier cache
 let class_idx = ws.class_members();       // (class_sym, method) → FuncId
 let enclosing = ws.enclosing_index();     // per-file binary-searchable enclosing-decl
 let decl_names = ws.decl_name_index();    // lowercased decl-name table for inspect query

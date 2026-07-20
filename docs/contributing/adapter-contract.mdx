@@ -172,10 +172,10 @@ or equivalent:
 - **`ClassMemberIndex`** — `(class_sym, method_name) → Vec<FuncId>`
   and `class_sym → constructor FuncIds`. Built from the global
   decl index. Requires adapters to populate `Decl::parent` for
-  class methods and `DeclKind::Constructor` for constructors. If
-  the adapter doesn't tag `DeclKind::Constructor`, the workspace's
-  `Workspace::find_constructor_symbol` falls back to the
-  per-language constructor-name allowlist (see capabilities above).
+  class methods and `DeclKind::Constructor` for constructors. Constructor
+  method forms are adapter-declared in `constructor_method_names`; an empty
+  declaration means no method-name constructor form. Shared resolution has no
+  cross-language constructor fallback.
 - **`EnclosingIndex`** — per-file binary-searchable enclosing-decl
   span array. Requires `Decl::body_span` (or `Decl::span`) to be
   monotonically increasing in file-position order; decl bodies in

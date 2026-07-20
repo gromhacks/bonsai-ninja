@@ -280,14 +280,14 @@ pub(crate) enum Cmd {
                       exact facts on demand.\n\
                       \n\
                       Pass `--semantic` when you intentionally want a full \
-                      semantic prewarm: resolved callgraph and, when enabled \
-                      for the workspace size, the workspace IDG plus \
+                      semantic prewarm: resolved callgraph, the streamed \
+                      workspace IDG, and \
                       `.bonsai/manifest.json`. This \
                       can be expensive on large or dense workspaces and should \
                       be used only when front-loading that cost is desired.\n\
                       \n\
                       Pass `--prewarm-dataflow` only when you explicitly want \
-                      the legacy full-workspace dataflow sidecar rebuild. That \
+                      the compatibility dataflow projection rebuilt. That \
                       computes every missing callable entry to completion, so it \
                       can be intentionally expensive on large or dense workspaces.\n\
                       \n\
@@ -317,13 +317,13 @@ pub(crate) enum Cmd {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// Use `cache clear ./src --dataflow-only` first to force a fresh
-        /// rebuild, then compute and persist only the legacy dataflow
+        /// rebuild, then compute and persist only the compatibility dataflow
         /// factstore during this index run. This is narrower than `--semantic`
         /// and intentionally more expensive than default indexing.
         #[arg(long, conflicts_with = "structural_only")]
         prewarm_dataflow: bool,
         /// Build and persist structural semantic sidecars used by later
-        /// query commands. Does not run the legacy all-entry dataflow prewarm.
+        /// query commands. Does not run the compatibility all-entry dataflow prewarm.
         #[arg(long, conflicts_with_all = ["prewarm_dataflow", "structural_only"])]
         semantic: bool,
         /// Parse and structurally index only; do not warm semantic sidecars.
@@ -2374,7 +2374,7 @@ pub(crate) enum Cmd {
                       (plus backward-compatible `dataflow.v2.bin` reads), \
                       value-flow, flow-id, callgraph, IDG, and export \
                       sidecars; paginated commands also write rendered page \
-                      windows under `page-cache.v5/`. `cache stats` reports \
+                      windows under the versioned `page-cache.v*/` directory. `cache stats` reports \
                       the sidecar dir, `cache clear` removes it, and \
                       `cache rebuild` refreshes the reusable analysis facts."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
@@ -3484,16 +3484,16 @@ pub(crate) enum CacheAction {
         #[arg(long)]
         dataflow_only: bool,
     },
-    /// Remove persisted analysis sidecars and rebuild bounded
+    /// Remove persisted analysis sidecars and rebuild reusable
     /// structural artifacts from scratch. Refreshes callgraph and
-    /// IDG sidecars without running a legacy full-workspace
-    /// taint/dataflow prewarm. Exact taint/source commands still
+    /// IDG sidecars without running a compatibility full-workspace
+    /// dataflow projection prewarm. Exact taint/source commands still
     /// compute their requested scope when invoked.
     #[command(
         long_about = themed_subcommand_long_about("Remove persisted analysis sidecars and rebuild \
-                      bounded structural artifacts from scratch. Refreshes \
+                      reusable structural artifacts from scratch. Refreshes \
                       callgraph and IDG sidecars without \
-                      running a legacy full-workspace taint/dataflow prewarm.\n\
+                      running a compatibility full-workspace dataflow prewarm.\n\
                       \n\
                       Pass `--export` when you explicitly want to warm the \
                       default export JSON cache too; that can be large because \

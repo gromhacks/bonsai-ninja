@@ -9,13 +9,20 @@
     "groups": [
       {
         "group": "Get Started",
-        "pages": ["docs/index", "docs/getting-started", "docs/platform-support"]
+        "pages": [
+          "docs/index",
+          "docs/getting-started",
+          "docs/platform-support",
+          "docs/RELEASE_READINESS"
+        ]
       },
       {
         "group": "Concepts",
         "pages": [
           "docs/concepts",
           "docs/language-support",
+          "docs/solidity-support",
+          "docs/PER_LANGUAGE_DETECTION_AUDIT",
           "docs/MEGA_FLOW_COVERAGE",
           "docs/COVERAGE_BASELINE",
           "docs/TAINT_COVERAGE_MATRIX"
@@ -56,6 +63,7 @@
           "docs/contributing/architecture",
           "docs/contributing/adapter-contract",
           "docs/contributing/adapter-capabilities",
+          "docs/contributing/flow-event-spec",
           "docs/contributing/analysis-roadmap",
           "docs/contributing/design-patterns",
           "docs/contributing/sanitizer-test-coverage",

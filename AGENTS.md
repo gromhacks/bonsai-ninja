@@ -31,6 +31,15 @@ use a warmed sidecar only before opening a scoped workspace. Rendered facts
 still hydrate through canonical APIs, and scoped query workspaces do not
 publish partial retrieval sidecars under the full workspace cache.
 
+Treat the analyzer as a compiler pipeline. Each language adapter owns its
+Tree-sitter grammar, source-syntax recognition, declaration/import lowering,
+and `FlowEvent`/capability facts. Shared analysis consumes that typed IR; do
+not add language-id branches, cross-language token inventories, or API-name
+guesses to shared crates. The production taint engine is the sparse IDG
+fixed-point closure. It has no BFS name search, call-depth ceiling, iteration
+limit, or result cap. Paging and diagnostic path limits affect rendering only
+and must report truncation explicitly.
+
 Always treat pagination as correctness. If output says more pages exist,
 continue with `--page 2`, `--page next`, or the printed `P:...` cursor
 before claiming coverage. Use `--all` only for tight filters or explicit
@@ -182,10 +191,12 @@ coverage for Solidity.
 
 ## Rulepack Work
 
-Rules live under `security-patterns/langs/<lang>/{sources,sinks,sanitizers}`.
+Rules live under `security-patterns/langs/<lang>/{sources,sinks,sanitizers,typing}`.
 Enable rules when they represent a real security boundary and the current
 constraints can keep common safe APIs quiet. Do not enable generic print,
 log, join, or parse patterns without a security-specific constraint.
+`typing` rules are non-finding compiler models for rulepack-declared factory
+return types; they must never be used to smuggle API names into the engine.
 
 Validate before reporting:
 

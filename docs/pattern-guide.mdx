@@ -1,6 +1,6 @@
 ---
 title: "Pattern Guide"
-description: "Rulepack schema and authoring contracts for sources, sinks, sanitizers, and constraints."
+description: "Rulepack schema and authoring contracts for sources, sinks, sanitizers, typing models, and constraints."
 ---
 
 # Pattern guide
@@ -12,7 +12,7 @@ rejected.
 ## File layout
 
 ```
-security-patterns/langs/<lang>/{sources,sinks,sanitizers}/<family>.yml
+security-patterns/langs/<lang>/{sources,sinks,sanitizers,typing}/<family>.yml
 ```
 
 The directory determines the rule kind. `<lang>` matches one of the 21
@@ -573,10 +573,11 @@ constraints:
 
 Inverse-match: fires on every function-shaped decl that does
 *not* contain a call to the declared target. `search_depth > 0`
-extends the walker to BFS through resolved callees up to that
-depth (capped at 4 engine-side); use sparingly - cheaper to keep
-the walker intra-procedural and add scoping via
-`enclosing_decorator_in` or package gates.
+opts this rule predicate into a resolved-callee traversal up to the
+declared depth (capped at 4); use sparingly. This is not taint
+propagation and does not cap the semantic IDG fixed point. Prefer the
+intra-procedural default plus `enclosing_decorator_in` or package gates
+when that expresses the rule accurately.
 
 ## Subsumption / disabling
 

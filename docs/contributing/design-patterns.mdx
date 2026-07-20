@@ -299,10 +299,12 @@ New source syntax belongs in its adapter's `GrammarHandler`, AST post-pass,
 or capability declaration. Emit a structural fact (`CallKind::Constructor`,
 `FlowEvent::Return`, a type alias, or a `Place`) and match that fact downstream.
 
-## 13. Workspace-cached lookups, never query-time graph walks
+## 13. Workspace-cached facts, never repeated query-time graph walks
 
-The query path is a *lookup* against precomputed state, not a fresh
-graph walk. Every workspace cache follows the same shape:
+Queries validate reusable facts first. A cache miss can build the exact
+requested graph once, but subsequent consumers share that result instead of
+repeating the same workspace walk. Every workspace cache follows the same
+shape:
 
 1. **Lazy-or-eager build** — the cache holds an
    `Option<Arc<...>>` (or per-key map). `Workspace::open_with_options`

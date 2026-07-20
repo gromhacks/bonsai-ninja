@@ -27,7 +27,7 @@ fixture before merge.
 
 ## Variant catalog
 
-The eleven `FlowEvent` variants below are the complete vocabulary the
+The fifteen `FlowEvent` variants below are the complete vocabulary the
 engine accepts. Anything else is an adapter bug.
 
 ### `Call`
@@ -38,7 +38,7 @@ Call {
   name: String,               // adapter-normalized callee identifier
   receiver: Option<String>,   // explicit `obj.foo()` receiver text
   receiver_types: Vec<String>,// static types of `receiver`, post-kit pass
-  call_kind: CallKind,        // Function | Method | Constructor | Macro | Indirect
+  call_kind: CallKind,        // Function | Method | Constructor | Macro | Operator | Indirect | ChannelSend
   args: Vec<CallArg>,         // positional arguments, `text` always set
 }
 ```
@@ -159,6 +159,25 @@ Multiple sibling assignments in a single source-level statement
 heterogeneous RHS shapes (`a, b = c, d`) emits `Assign { target: "a",
 source_name: Some("c") }` and `Assign { target: "b", source_name:
 Some("d") }`.
+
+### `AggregateAssign`
+
+```text
+AggregateAssign {
+  span,
+  target: String,                 // normalized aggregate binding/place
+  type_name: Option<String>,      // adapter-derived declared type
+  value_flow: ExpressionFlow,     // fields/items/spreads from AST nodes
+}
+```
+
+Adapters emit this variant for positional or named aggregate initializers.
+`value_flow.aggregate_fields` preserves statically named map/object/record
+fields, `tuple_items` preserves positional order, and `spreads` preserves
+aggregate spread operands. For positional struct initializers, the workspace
+resolves those items against the adapter-emitted `Decl::aggregate_layouts`;
+it does not infer field order from names or a language table. This is the
+field-sensitive compiler fact used by IDG transfer and export.
 
 ### `Return`
 

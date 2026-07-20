@@ -5,7 +5,13 @@ description: "Run bonsai-ninja in GitHub Actions, GitLab CI, and CircleCI."
 
 # CI Integration
 
-Use release binaries or a cached Rust build. In CI, pass `--no-color --no-progress` for clean logs and `--format json` or `--format sarif` for artifacts. Run `index` first when you want to validate syntax/construct indexing before later commands; scan commands also open the workspace and compute any missing exact scope on demand. Use `index --semantic` only for workflows that intentionally warm structural semantic sidecars up front, and use `index --prewarm-dataflow` only for workflows that intentionally warm the legacy full-workspace dataflow sidecar by itself.
+Use release binaries or a cached Rust build. In CI, pass `--no-color --no-progress` for clean logs and `--format json` or `--format sarif` for artifacts. Run `index` first when you want to validate syntax/construct indexing before later commands; scan commands also open the workspace and compute any missing exact scope on demand. Use `index --semantic` only for workflows that intentionally warm structural semantic sidecars up front. `index --prewarm-dataflow` materializes the compatibility dataflow projection for older SDK/query consumers; it does not select another taint engine.
+
+The compiler frontends and sparse IDG closure use the same semantics in
+interactive, CI, SDK, and export modes. Semantic taint analysis has no BFS
+depth, iteration, or result cap. `--all` controls artifact pagination; omitting
+it can produce a valid first page but must not be treated as review of every
+finding.
 
 ## GitHub Release Artifacts
 

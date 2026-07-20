@@ -5,7 +5,24 @@ description: "Supported languages and the security-analysis capabilities availab
 
 # Language Support
 
-The table summarizes bundled rule coverage and analyzer precision. "Sources" and "sinks" indicate shipped rule families. "Lifecycle" means lifecycle/state-machine rules are supported when rules exist. "Cross-procedural depth" describes the practical call-chain support. "Known limitations" lists precision gaps that may affect false positives or false negatives.
+Every language is a compiler frontend, not a filename switch over a shared
+string parser. Its adapter selects the Tree-sitter grammar and lowers
+language-specific declarations, imports, scopes, calls, receivers,
+constructors, branches, assignments, aggregate fields, lambdas, and types into
+the common IR. Adapter capabilities also declare module roots, export aliases,
+implicit/super receivers, constructor method forms, universal types, and field
+place completeness. Shared resolver, callgraph, IDG, security, and export
+passes consume those facts without branching on the language id.
+
+The production taint engine computes a sparse monotone fixed point over the
+resolved IDG for every supported language. Cross-procedural semantics do not
+have a BFS depth, iteration, or result cap. Explicit trace/path previews and
+output pages can be bounded for presentation; they report truncation and do
+not change the semantic taint result.
+
+The table summarizes bundled security coverage and the most important dynamic
+syntax that remains inherently approximate. "Lifecycle" means lifecycle or
+state-machine rules are supported when rules exist.
 
 Security support is not one flat claim across every adapter. The
 canonical app/web source-sink-sanitizer taxonomy applies to the
@@ -13,26 +30,26 @@ general-purpose languages. Solidity is supported as a parser/navigation
 adapter and as a smart-contract security pack; its rule taxonomy is
 on-chain-specific rather than web-family-specific.
 
-| Language | Sources | Sinks | Lifecycle | Cross-procedural depth | Known limitations |
+| Language | Sources | Sinks | Lifecycle | Adapter-owned dispatch facts | Inherent limitations |
 |---|---|---|---|---|---|
-| C | Yes | Yes | Limited | Multi-file C calls and function pointers | Macro-heavy code may need normalized examples |
-| C++ | Yes | Yes | Limited | Methods, namespaces, constructors | Template-heavy receiver types may be approximate |
-| C# | Yes | Yes | Yes | Methods, classes, async-style calls | Reflection and dynamic dispatch are approximate |
-| Dart | Yes | Yes | Limited | Functions, methods, futures | Framework-specific sources depend on adapter facts |
-| Elixir | Yes | Yes | Limited | Modules, pipes, callbacks | Macro expansion is not fully modeled |
-| Erlang | Yes | Yes | Limited | Modules, functions, message-style calls | Dynamic atoms and apply forms are approximate |
-| Go | Yes | Yes | Limited | Functions, methods, interfaces, packages | Interface dispatch is narrowed when type facts exist |
-| Java | Yes | Yes | Yes | Classes, methods, imports, inheritance | Reflection and generated code remain approximate |
-| JavaScript | Yes | Yes | Limited | CommonJS, imports, callbacks, async | Dynamic property access can reduce precision |
-| Kotlin | Yes | Yes | Yes | Classes, methods, imports | Extension functions and DSLs may need targeted rules |
-| Lua | Yes | Yes | Limited | Functions, tables, colon calls | Metatable dispatch is approximate |
-| Objective-C | Yes | Yes | Limited | Methods, receivers, C bridge calls | Runtime selector indirection is approximate |
-| Perl | Yes | Yes | Limited | Subs, package calls, common imports | Keyword-like pairs are positional in adapter facts |
-| PHP | Yes | Yes | Limited | Functions, methods, includes | Variable functions and dynamic includes are approximate |
-| Python | Yes | Yes | Yes | Imports, decorators, methods, async, callbacks | Highly dynamic attribute assignment can reduce precision |
-| Ruby | Yes | Yes | Limited | Methods, blocks, common dispatch | Metaprogramming is approximate |
-| Rust | Yes | Yes | Yes | Modules, functions, methods, traits | Macro expansion and trait objects may need follow-up |
-| Scala | Yes | Yes | Limited | Objects, classes, methods | Implicits and symbolic DSLs are approximate |
-| Solidity | Contract globals/params | Smart-contract taxonomy | Yes | Contracts, modifiers, external calls | Not part of the canonical app/web taint-family audit; rules target reentrancy, delegatecall, selfdestruct, oracle, randomness, token, access-control, and unchecked-call hazards |
-| Swift | Yes | Yes | Limited | Functions, classes, protocols | Dynamic Objective-C bridging is approximate |
-| TypeScript | Yes | Yes | Limited | ES modules, classes, async, callbacks | Complex type-level behavior is not executed |
+| C | Yes | Yes | Limited | Functions, structs, pointers, out-params, field places | Preprocessor expansion and indirect pointers can be unresolved |
+| C++ | Yes | Yes | Limited | Namespaces, methods, constructors, inheritance, aggregates | Uninstantiated templates and runtime polymorphism can be unresolved |
+| C# | Yes | Yes | Yes | Namespaces, classes, inheritance, lambdas, async calls | Reflection and `dynamic` dispatch are unresolved without type evidence |
+| Dart | Yes | Yes | Limited | Libraries, classes, constructors, methods, futures | Mirrors and generated framework code require emitted source facts |
+| Elixir | Yes | Yes | Limited | Modules, qualified calls, pipes, closures, map fields | Runtime macro expansion is not executed |
+| Erlang | Yes | Yes | Limited | Modules, functions, message forms, closures | Dynamic atoms and computed `apply` targets can be unresolved |
+| Go | Yes | Yes | Limited | Packages, functions, methods, interfaces, tuple returns | Interface dispatch narrows only when concrete type facts exist |
+| Java | Yes | Yes | Yes | Packages, classes, constructors, inheritance, lambdas | Reflection and generated bytecode are not executed |
+| JavaScript | Yes | Yes | Limited | ES modules, CommonJS, classes, closures, async calls | Computed properties and runtime prototype mutation can be unresolved |
+| Kotlin | Yes | Yes | Yes | Packages, classes, inheritance, lambdas, expression bodies | Compiler-plugin DSL expansion is not executed |
+| Lua | Yes | Yes | Limited | Functions, closures, tables, dot/colon calls | Runtime metatable dispatch can be unresolved |
+| Objective-C | Yes | Yes | Limited | Selectors, receivers, blocks, classes, C bridge calls | Runtime selector construction can be unresolved |
+| Perl | Yes | Yes | Limited | Packages, subs, closures, method/arrow calls | Symbol-table mutation and computed dispatch can be unresolved |
+| PHP | Yes | Yes | Limited | Namespaces, classes, constructors, closures, includes | Variable functions and computed includes can be unresolved |
+| Python | Yes | Yes | Yes | Modules, decorators, classes, closures, async calls | Monkey-patching and highly dynamic attributes can be unresolved |
+| Ruby | Yes | Yes | Limited | Modules, classes, blocks, closures, method dispatch | `method_missing` and runtime metaprogramming can be unresolved |
+| Rust | Yes | Yes | Yes | Modules, impls, traits, closures, tuples, async calls | Unexpanded procedural macros and trait objects can be unresolved |
+| Scala | Yes | Yes | Limited | Packages, objects, classes, inheritance, lambdas | Runtime reflection and compiler-expanded implicits can be unresolved |
+| Solidity | Contract globals/params | Smart-contract taxonomy | Yes | Contracts, inheritance, modifiers, external calls | Uses on-chain hazard rules rather than app/web taxonomy |
+| Swift | Yes | Yes | Limited | Modules, classes, protocols, closures, async calls | Dynamic Objective-C bridging can be unresolved |
+| TypeScript | Yes | Yes | Limited | ES modules, types, classes, closures, async calls | Type erasure and computed runtime properties can be unresolved |

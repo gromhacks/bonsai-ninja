@@ -22,10 +22,11 @@ security-patterns/
     └── <lang>/
         ├── sources/<family>.yml
         ├── sinks/<family>.yml
-        └── sanitizers/<family>.yml
+        ├── sanitizers/<family>.yml
+        └── typing/<family>.yml
 ```
 
-Two layouts work: the canonical `langs/<lang>/{sources,sinks,sanitizers}/`
+Two layouts work: the canonical `langs/<lang>/{sources,sinks,sanitizers,typing}/`
 where the rule kind comes from the directory, and a flat custom layout
 where each YAML file declares `language:` explicitly. `RuleKind` is always
 derived from the directory - never declared in YAML.
@@ -47,6 +48,12 @@ Sources also need `trust: remote|local|service|ipc|database|library|config|physi
 Use source `tag` values to describe the trust boundary, not the sink
 class; for example `network-input`, `archive-input`, `graphql-input`,
 `env-input`, or `cli-input`.
+
+Typing rules require `returns_type` and a structured call/new match. They
+declare a factory or constructor's result type so `receiver_type_in` can
+resolve a later local receiver. Typing rules never emit findings, source/sink
+inventory rows, or SARIF results; API names and types remain rulepack data
+rather than a hardcoded engine list.
 
 ## Disabled rules
 
@@ -311,8 +318,10 @@ Three:
 
 Finding JSON and SARIF are content-stable: the same workspace produces
 the same bytes (sorted findings, deterministic `finding_id`s, no
-timestamps in the default emission). That property is exercised by
-`crates/security/tests/report_stability.rs`.
+timestamps in the default emission). Stable IDs are exercised by
+`crates/security/tests/finding_id_stability.rs`; repeated CLI analysis and
+export rendering are covered by `crates/cli/tests/taint_engine_e2e.rs` and
+`crates/cli/tests/determinism.rs`.
 
 Each taint finding carries `analysis_complete` and
 `analysis_incomplete_reasons`. Public findings are emitted only from complete

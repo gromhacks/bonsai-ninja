@@ -29,7 +29,8 @@ fixed-shape Python workspace and asserts:
 
 ## Why a partial projection rather than the whole SARIF
 
-Full SARIF includes timestamps, version metadata, and provenance
-fields that drift across machines and runs even when the analysis
-output is byte-identical. The projection drops these so the diff
-gate fails only on real semantic change.
+The default finding payload is deterministic. The projection deliberately
+pins the GitHub Code Scanning contract—rule id, message, level, kind, and
+fingerprints—while allowing optional tool metadata and provenance fields to
+evolve without turning every such addition into a large fixture rewrite.
+Dedicated determinism tests cover repeated full analysis and export output.

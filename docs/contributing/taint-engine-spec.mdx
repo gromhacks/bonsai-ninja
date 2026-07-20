@@ -42,7 +42,7 @@ fingerprint.
 `security taint-analysis`, `security source-analysis`, `dump-taint`, inspect,
 and the public compatibility API use the IDG-backed graph builders in
 `crates/taint/src/reachable.rs`. Those builders resolve source seeds to IDG
-nodes, apply configured transfer summaries, compute a precision-bounded
+nodes, apply configured transfer summaries, compute a precision-filtered
 closure, and then cut/report only the relevant semantic target or lineage
 corridor. This is the deployed source-to-sink path; direct raw-AST taint and
 whole-workspace per-source/per-sink traversal are not production evidence
@@ -264,7 +264,8 @@ site to translate local names to global decls.
 
 Same function, different seeds → distinct results. The engine memoises by
 `FunctionSeed { func, seed }` (sorted) so each `(func, seed)` pair has its
-own analysis. Recursion is bounded by this memoisation.
+own analysis. Recursive SCCs converge because transfer is monotone over a
+finite interned-place lattice; there is no recursion-depth or iteration cap.
 
 ### 8. Field sensitivity
 
@@ -338,10 +339,9 @@ summary pass only uses terminal-tail evidence when that adapter fact is
 present; ordinary terminal assignments are not treated as returns.
 
 When an adapter emits `Assign.source_call` without `source_call_args` but
-also emits the sibling `FlowEvent::Call`, the inter walker borrows the
-call's arg list. That's semantic correlation between two adapter facts,
-not a text fallback — return-summary checks still use positional
-arguments.
+also emits the sibling `FlowEvent::Call`, IDG lowering correlates the two
+AST-derived facts and uses the call's argument list. This is not a text
+fallback; return-summary checks still use positional arguments.
 
 Container summaries are intentionally split. Whole-container taint is a
 fallback for dynamic aggregate returns. Named-field returns and positional
@@ -358,9 +358,9 @@ lookup instead of a fresh propagation pass.
 - **`DataFlowCache`** (`crates/workspace/src/dataflow.rs`) — per-`FuncId`
   `KindedTokens` + `EntryTaintGraph`. Loaded from a valid persisted
   sidecar when present, computed on demand for exact query scopes, and
-  fully rebuilt by explicit full-prewarm SDK opens or by the legacy
+  fully rebuilt by explicit full-prewarm SDK opens or by the compatibility
   dataflow-only path, `index --prewarm-dataflow`; persisted to
-  `.bonsai/dataflow.v3.factstore` (legacy `dataflow.v2.bin` is still
+  `.bonsai/dataflow.v3.factstore` (the older `dataflow.v2.bin` is still
   readable for warm reopens). The cache carries each entry's transitive
   dependency file set, so an edit to any callee invalidates only the
   affected entries.
@@ -380,7 +380,7 @@ lookup instead of a fresh propagation pass.
   out of the per-invocation map in `build_findings_chain_aware` so
   a second `taint-analysis` against the same workspace + rulepack
   reuses the cached graph. Persisted to
-  `.bonsai/taint_graph.v9.<mode>.<config>.factstore` with version +
+  `.bonsai/taint_graph.v*.<mode>.<config>.factstore` with version +
   config-fingerprint guard; mismatched fingerprints invalidate and distinct
   source/taint analysis configurations do not overwrite each other.
   Write-through persistence is
@@ -390,10 +390,10 @@ lookup instead of a fresh propagation pass.
   see scope, memory/disk hit or miss, config invalidation, and
   write-through status.
 - **`TransitiveCallersIndex`** (`crates/workspace/src/transitive_callers.rs`) —
-  depth-bounded transitive caller closures on the resolved call
-  graph. The closure is rulepack-independent; security-analysis
-  consults it to schedule caller-frontier expansion for
-  source-returning helpers without re-running BFS per invocation.
+  cached, explicitly depth-scoped caller-frontier queries on the resolved
+  call graph. They are an operational candidate/scheduling aid for callers
+  that request such a frontier, not the semantic taint closure and not an
+  accuracy boundary. The canonical IDG fixed point remains uncapped.
 - **`Workspace::cached_resolved_call_graph()`** — singleton
   `Arc<ResolvedCallGraph>` shared across `inspect`, `security`,
   `dump callgraph`, the `DataFlowCache`, and the `FlowIdCache`. The

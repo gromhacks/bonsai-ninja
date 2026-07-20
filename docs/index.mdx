@@ -10,7 +10,11 @@ bonsai-ninja indexes source code, resolves cross-file call paths, and runs rulep
 - [Getting Started](getting-started.mdx) - install the CLI, run a first scan, and learn how to read the finding IDs and flow output.
 - [Platform And Architecture Support](platform-support.mdx) - understand release targets, source-build targets, and cross-target checks.
 - [Concepts](concepts.mdx) - understand sources, sinks, sanitizers, taint propagation, lifecycle rules, must-alias constraints, and missing-call checks.
+- [Language Support](language-support.mdx) - see how each Tree-sitter adapter owns language syntax and what dynamic constructs remain unresolved.
 - [CLI Reference](cli-reference.mdx) - find the command and flag surface for security scans, taint analysis, source analysis, inspect, trace, and export.
+- [Output Formats](output-formats.mdx) - consume paged text, exact JSON exports, SARIF, GraphML, NetworkX, and Cypher.
+- [Configuration](configuration.mdx) - understand cache sidecars, environment variables, and precedence.
+- [CI Integration](ci-integration.mdx) - run deterministic scans and publish artifacts in common CI systems.
 - [Rule Authoring](rule-authoring-tutorial.mdx) - write and test workspace-local or shipped rules using the same schema as the bundled security-patterns pack.
 - [Release Readiness](RELEASE_READINESS.md) - current local validation status, benchmark snapshot, and the pre-release gate.
 - [Solidity Support](solidity-support.mdx) - explains why Solidity is a smart-contract security pack instead of an app/web taint-family parity language.
@@ -19,4 +23,7 @@ Coverage references: [mega-flow fixtures](MEGA_FLOW_COVERAGE.md),
 [engine coverage baseline](COVERAGE_BASELINE.md), and
 [taint matrix](TAINT_COVERAGE_MATRIX.md).
 
-Contributor references live under [Contributing](contributing/contributing.mdx).
+Contributor references live under [Contributing](contributing/contributing.mdx),
+including the [compiler architecture](contributing/architecture.mdx), the
+[FlowEvent IR contract](contributing/flow-event-spec.mdx), and the
+[SDK](contributing/sdk.mdx).

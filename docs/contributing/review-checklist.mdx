@@ -10,7 +10,7 @@ class and verify each box.
 
 ---
 
-## Engine change (`crates/taint/src/inter/`, `intra.rs`, `assignment.rs`, `reachable.rs`)
+## Engine change (`crates/taint/src/idg_api.rs`, `idg_build.rs`, `reachable.rs`, `intra.rs`, `assignment.rs`)
 
 - [ ] **Test pins the change.** A focused test in the affected crate's
       dedicated test file (`*_tests.rs`, `tests/over_taint_matrix.rs`,
@@ -36,6 +36,9 @@ class and verify each box.
 - [ ] **Single-candidate edges stay `Direct/Narrowed`.** No new
       widenings to `OverApproximate` when the resolver already
       narrowed the candidate set.
+- [ ] **Fixed point stays uncapped.** No BFS name search, hidden call-depth
+      ceiling, iteration budget, or result cap is introduced into the
+      semantic IDG closure. Preview/path limits remain presentation-only.
 - [ ] **Documentation updated.** `docs/contributing/taint-engine-spec.mdx` reflects the
       new behaviour.
 
@@ -50,6 +53,10 @@ class and verify each box.
       reports the expected finding count.
 - [ ] **Capabilities declaration matches reality.** `fn capabilities()`
       reflects the actual coverage; `Unsupported` levels are honest.
+- [ ] **Syntax ownership stays in the adapter.** New source tokens, grammar
+      node kinds, constructor/receiver forms, module roots, and broad type
+      spellings are emitted as adapter facts. Shared crates do not branch on
+      language id or accumulate a cross-language spelling union.
 - [ ] **Adapter never reaches into core analysis.** Imports are limited
       to `bonsai_lang_api` and tree-sitter.
 - [ ] **Documentation updated.** `docs/contributing/architecture.mdx` per-language

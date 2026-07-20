@@ -54,9 +54,9 @@ bonsai-ninja index ./src --prewarm-dataflow
 | Flag | Default | Description |
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root to analyze. |
-| `--semantic` | false | Explicitly build and persist structural semantic sidecars: resolved callgraph, IDG when enabled for the workspace size, retrieval factstore, and `.bonsai/manifest.json`. This does not run all-entry dataflow prewarm. |
+| `--semantic` | false | Explicitly build and persist structural semantic sidecars: resolved callgraph, streamed workspace IDG, retrieval factstore, and `.bonsai/manifest.json`. This does not run all-entry dataflow prewarm. |
 | `--structural-only` | false | Explicit spelling for default syntax/construct indexing; do not warm reusable semantic sidecars. |
-| `--prewarm-dataflow` | false | Compute and persist only the legacy dataflow factstore during this index run. This is intentionally expensive on large workspaces. |
+| `--prewarm-dataflow` | false | Compute and persist the compatibility dataflow projection used by older SDK/query surfaces. This does not select another taint engine and can be expensive on large workspaces. |
 | `--watch` | false | Keep running, poll the source tree, hot-reload saved changes into the live workspace, and print fresh stats. |
 | `--interval-ms <N>` | 750 | Poll interval for `--watch`. Values below 100 ms are clamped to 100 ms. |
 
@@ -120,7 +120,7 @@ longer fires (`match-example-taint-miss`) — slower, for the deep CI gate.
 Plain `pack` text renders one block per rule so long rule ids, package
 gates, framework gates, enabled/disabled state, severity, tag, and
 description remain readable; JSON returns the same rule rows under `rows`.
-See [Rule Testing](rule-testing).
+See [Rule Testing](./rule-testing.mdx).
 
 Common inventory flags for `sources`, `sinks`, `sanitizers`, and `deps`:
 
@@ -249,7 +249,7 @@ bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
 | `--file <TEXT>` | None | Hit workspace-relative file path filter. Explicit absolute paths are also accepted. |
 | `--in-fn <TEXT>` | None | Enclosing-function filter for non-decl hits. |
 | `--max-flows <N>` | 50 | Max flows per decl hit. |
-| `--max-entry-probes <N>` | 500 | DFS probe budget. |
+| `--max-entry-probes <N>` | 500 | Inspect path-preview probe budget; truncation is reported and semantic reachability is unchanged. |
 | `--max-hits <N>` | 200 | Max non-decl hits. |
 | `--all` | false | Remove flow, probe, and hit caps. |
 | `--compact` | false | Omit inlined source bodies from text output. |
@@ -500,7 +500,7 @@ bonsai-ninja cache rebuild ./src
 | `stats --output-path <PATH>` | stdout | Write the selected `stats --format` output to a file. |
 | `clear [WORKSPACE]` | current directory | Remove persisted `.bonsai/` analysis sidecars for the workspace. |
 | `--dataflow-only` | false | For `clear`, remove only `dataflow.v3.factstore` and the compatibility `dataflow.v2.bin`. |
-| `rebuild [WORKSPACE]` | current directory | Remove persisted analysis sidecars and rebuild bounded structural sidecars: callgraph, IDG when enabled, and retrieval factstore. It does not run the legacy full-workspace dataflow prewarm. |
+| `rebuild [WORKSPACE]` | current directory | Remove persisted analysis sidecars and rebuild reusable structural sidecars: callgraph, streamed IDG, and retrieval factstore. It does not run the compatibility full-workspace dataflow prewarm. |
 | `rebuild --export` | false | Also warm the default export JSON cache. |
 
 `index --semantic`, SDK semantic/full-prewarm facades, `cache rebuild`, and
@@ -515,7 +515,7 @@ facts and semantic graph verification decide truth. Vector similarity is
 never evidence. Retrieval sidecars are complete-workspace artifacts; scoped
 query opens do not persist partial retrieval snapshots. Path-scoped security
 runs likewise keep taint graph reuse in memory for that command and do not
-overwrite full-workspace `.bonsai/taint_graph.v9.<mode>.<config>.factstore` files.
+overwrite full-workspace `.bonsai/taint_graph.v*.<mode>.<config>.factstore` files.
 `cache stats --format json` includes the same validation report the
 SDK exposes: `manifest_status`, semantic/dataflow/taint/export readiness,
 per-sidecar freshness, and stale reasons.

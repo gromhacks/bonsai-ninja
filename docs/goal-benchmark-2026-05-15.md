@@ -2,10 +2,11 @@
 
 Benchmark run for `docs/goal.md` using `./target/release/bonsai-ninja`.
 
-Historical note: this benchmark predates the later `index` contract change.
-At the time of these measurements, default `index <workspace>` was a
-structural parse/index pass. Current builds use plain `index` as the semantic
-sidecar warm-up path and expose the old cheap behavior as `--structural-only`.
+> **Archived measurement:** these 2026-05-15 numbers, cache names, and command
+> descriptions are preserved for provenance and are not current product
+> documentation. Default `index <workspace>` is the syntax/construct warm-up
+> path; `index --semantic` is the explicit structural semantic sidecar prewarm.
+> See [Release Readiness](RELEASE_READINESS.md) for current measurements.
 
 Full JSON reports:
 
