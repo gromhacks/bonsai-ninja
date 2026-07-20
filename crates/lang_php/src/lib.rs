@@ -93,6 +93,7 @@ impl LanguageAdapter for PhpAdapter {
             // class dispatch (`self` / late-bound `static`). None denotes a
             // parent type; that role belongs exclusively to `parent` above.
             implicit_receiver_tokens: &["$this", "self", "static"],
+            quoted_callable_literals: true,
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -337,7 +338,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             continue;
         }
         // Split off `as Alias` if present.
-        let (module_text, alias) = if let Some((module_part, alias_part)) = raw.rsplit_once(" as ") {
+        let (module_text, explicit_alias) = if let Some((module_part, alias_part)) = raw.rsplit_once(" as ") {
             (
                 module_part.trim().to_string(),
                 Some(alias_part.trim().to_string()),
@@ -354,6 +355,11 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             Some(prefix) if !module_text.starts_with(&prefix) => format!("{prefix}\\{module_text}"),
             _ => module_text,
         };
+        // PHP `use App\Middle;` binds `Middle` even without an explicit
+        // `as` clause. This is grammar semantics, so emit the binding here
+        // instead of asking the language-neutral resolver to infer a basename
+        // from every path-like import.
+        let alias = explicit_alias.or_else(|| canonical_php_base_name(&qualified_module));
         imports.push(ImportSpec {
             span: span_of(file, &clause),
             module: qualified_module,

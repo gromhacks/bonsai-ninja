@@ -12,7 +12,10 @@ mod storage;
 pub mod taxonomy;
 pub mod types;
 
-pub use capabilities::{CapabilityLevel, LanguageCapabilities, NO_CONSTRUCTOR_METHOD_NAMES};
+pub use capabilities::{
+    CallTextPrefilter, CallableDeclarationFamily, CapabilityLevel, LanguageCapabilities,
+    NO_CONSTRUCTOR_METHOD_NAMES,
+};
 pub use kit::{
     alias_map_from_import_specs, alias_map_from_imports, apply_assign_call_result_types,
     apply_assign_value_kind, apply_call_receiver_types, apply_call_receiver_types_with_super_tokens,
@@ -21,7 +24,7 @@ pub use kit::{
     collect_assign_targets, collect_constructor_result_type_aliases, collect_modifier_visibility,
     collect_param_type_aliases, decl_index_with_handler, extend_alias_map_with_flow_events,
     extract_assignment_value_facts, extract_branch_condition_facts, extract_call_receiver_facts,
-    extract_imports_via, extract_runtime_type_narrowing_facts, inject_lifecycle_events,
+    extract_imports_via, extract_runtime_type_narrowing_facts, inject_lifecycle_events, module_local_binding,
     normalize_call_result_assignment_sources, populate_decl_return_types, rewrite_implicit_member_reads,
     with_fn_kinds, AliasTarget, GrammarHandler, ImplicitMemberReadCall, LifecycleTransition,
     ModifierVocabulary, SyntaxSpecialForm, TypeAliasVocabulary, GENERIC_HANDLER,

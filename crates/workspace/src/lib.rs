@@ -349,79 +349,14 @@ fn raw_value_references_target(raw: &str, target_keys: &AHashSet<String>) -> boo
 }
 
 pub(crate) fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
-    let global = db.global_index();
-    bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens(
-        global.as_ref(),
-        bonsai_callgraph::CallGraphFileSemantics::new(
-            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
-            |file| {
-                bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
-                    .into_iter()
-                    .collect()
-            },
-            |file| {
-                db.vfs()
-                    .path(file)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
-            },
-            |file| {
-                db.adapter_for(file)
-                    .map(|adapter| adapter.capabilities().module_export_aliases)
-                    .unwrap_or(&[])
-            },
-            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-            |file| {
-                db.adapter_for(file)
-                    .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                    .unwrap_or(&[])
-            },
-            |file| {
-                db.adapter_for(file)
-                    .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
-            },
-        ),
-    )
+    bonsai_taint::build_resolved_call_graph_snapshot(db)
 }
 
 pub(crate) fn build_resolved_call_graph_snapshot_for_files(
     db: &AnalyzerDb,
     included_files: &[FileId],
 ) -> bonsai_callgraph::ResolvedCallGraph {
-    let global = db.global_index();
-    bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens_for_files(
-        global.as_ref(),
-        bonsai_callgraph::CallGraphFileSemantics::new(
-            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
-            |file| {
-                bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
-                    .into_iter()
-                    .collect()
-            },
-            |file| {
-                db.vfs()
-                    .path(file)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
-            },
-            |file| {
-                db.adapter_for(file)
-                    .map(|adapter| adapter.capabilities().module_export_aliases)
-                    .unwrap_or(&[])
-            },
-            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-            |file| {
-                db.adapter_for(file)
-                    .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                    .unwrap_or(&[])
-            },
-            |file| {
-                db.adapter_for(file)
-                    .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
-            },
-        ),
-        included_files,
-    )
+    bonsai_taint::build_resolved_call_graph_snapshot_for_files(db, included_files)
 }
 
 #[derive(Debug, Error)]
@@ -1156,7 +1091,8 @@ impl Workspace {
                 self.inner
                     .db
                     .adapter_for(file)
-                    .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
+                    .map(|adapter| adapter.capabilities())
+                    .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
             },
         );
         while !queued_files.is_empty() {
@@ -1169,27 +1105,13 @@ impl Workspace {
             batch.dedup();
 
             let batch_graph =
-                bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens_for_files_with_context(
+                bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_with_context(
                     global.as_ref(),
                     |file| bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for(file)),
                     |file| {
                         bonsai_lang_api::alias_map_from_import_specs(&self.inner.db.imports_for(file))
                             .into_iter()
                             .collect()
-                    },
-                    |file| {
-                        self.inner
-                            .db
-                            .adapter_for(file)
-                            .map(|adapter| adapter.capabilities().module_export_aliases)
-                            .unwrap_or(&[])
-                    },
-                    |file| {
-                        self.inner
-                            .db
-                            .adapter_for(file)
-                            .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                            .unwrap_or(&[])
                     },
                     &batch,
                     &callgraph_context,
@@ -1400,17 +1322,11 @@ impl Workspace {
         // reuses them to keep its name filter from rejecting
         // alias-rewritten call sites.
         let db = &self.inner.db;
-        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_with_paths(
+        let semantics = bonsai_taint::compiler_idg_file_semantics(db);
+        let ws = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options(
             global.as_ref(),
             cg.as_ref(),
-            |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
-            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-            |file| {
-                db.vfs()
-                    .path(file)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
-            },
+            semantics,
             &transfer_options,
         );
         // Persist before constructing the query service so a subsequent
@@ -1494,17 +1410,11 @@ impl Workspace {
         }
         let cg = self.cached_resolved_call_graph();
         let db = &self.inner.db;
-        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_with_paths(
+        let semantics = bonsai_taint::compiler_idg_file_semantics(db);
+        let ws = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options(
             global.as_ref(),
             cg.as_ref(),
-            |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
-            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-            |file| {
-                db.vfs()
-                    .path(file)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
-            },
+            semantics,
             &transfer_options,
         );
         if use_idg_sidecar {
@@ -1565,17 +1475,11 @@ impl Workspace {
         }
         let cg = build_resolved_call_graph_snapshot_for_files(&self.inner.db, included_files);
         let db = &self.inner.db;
-        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_for_files_with_paths(
+        let semantics = bonsai_taint::compiler_idg_file_semantics(db);
+        let ws = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options_for_files(
             global.as_ref(),
             &cg,
-            |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
-            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-            |file| {
-                db.vfs()
-                    .path(file)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
-            },
+            semantics,
             &transfer_options,
             included_files,
         );
@@ -1632,22 +1536,15 @@ impl Workspace {
         let transfer_options = transfer_options.clone().canonicalized();
         let global = self.inner.db.global_index();
         let db = &self.inner.db;
-        let ws =
-            bonsai_idg::workspace_adapter::build_with_file_info_and_options_for_files_and_funcs_with_paths(
-                global.as_ref(),
-                call_graph,
-                |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
-                |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-                |file| {
-                    db.vfs()
-                        .path(file)
-                        .ok()
-                        .map(|path| path.to_string_lossy().into_owned())
-                },
-                &transfer_options,
-                included_files,
-                included_funcs,
-            );
+        let semantics = bonsai_taint::compiler_idg_file_semantics(db);
+        let ws = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options_for_files_and_funcs(
+            global.as_ref(),
+            call_graph,
+            semantics,
+            &transfer_options,
+            included_files,
+            included_funcs,
+        );
         Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global))
     }
 

@@ -5981,7 +5981,11 @@ pub fn alias_map_from_import_specs(
     map
 }
 
-fn module_local_binding(module: &str) -> Option<String> {
+/// Derive a local module binding only when the normalized import target
+/// exposes an identifier directly. File-extension stripping is intentionally
+/// absent: adapters know whether a string is a file URI and must emit its
+/// local binding in `ImportSpec::alias`.
+pub fn module_local_binding(module: &str) -> Option<String> {
     let trimmed = module
         .trim()
         .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
@@ -5990,17 +5994,13 @@ fn module_local_binding(module: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let path_like = trimmed.contains('/') || trimmed.contains('\\') || trimmed.starts_with('.');
-    let mut candidate = if path_like {
-        trimmed
-            .rsplit(['/', '\\'])
-            .next()
-            .and_then(strip_known_import_extension)
-            .or_else(|| trimmed.rsplit(['/', '\\']).next())
-            .unwrap_or(trimmed)
-    } else if let Some(stem) = strip_known_import_extension(trimmed) {
-        stem.rsplit(['.', ':']).next().unwrap_or(stem)
-    } else if let Some((_, tail)) = trimmed.rsplit_once("::") {
+    // A path-like target can be a side-effect import, include, or require.
+    // Only its grammar adapter knows whether it creates a binding, so the
+    // shared layer must not infer one from a basename.
+    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.starts_with('.') {
+        return None;
+    }
+    let mut candidate = if let Some((_, tail)) = trimmed.rsplit_once("::") {
         tail
     } else if let Some((_, tail)) = trimmed.rsplit_once(':') {
         tail
@@ -6019,47 +6019,6 @@ fn module_local_binding(module: &str) -> Option<String> {
         return None;
     }
     Some(candidate.to_string())
-}
-
-fn strip_known_import_extension(module: &str) -> Option<&str> {
-    let (stem, ext) = module.rsplit_once('.')?;
-    let ext = ext.trim();
-    if matches!(
-        ext,
-        "c" | "cc"
-            | "cpp"
-            | "cs"
-            | "cxx"
-            | "dart"
-            | "erl"
-            | "ex"
-            | "exs"
-            | "h"
-            | "hh"
-            | "hpp"
-            | "hrl"
-            | "java"
-            | "js"
-            | "kt"
-            | "kts"
-            | "lua"
-            | "m"
-            | "mm"
-            | "php"
-            | "pl"
-            | "pm"
-            | "py"
-            | "rb"
-            | "rs"
-            | "scala"
-            | "sol"
-            | "swift"
-            | "ts"
-    ) {
-        Some(stem)
-    } else {
-        None
-    }
 }
 
 // --- attribute-chain / subscript ref emission -------------------------------

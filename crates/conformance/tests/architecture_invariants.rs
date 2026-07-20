@@ -625,6 +625,114 @@ fn taint_crate_has_no_language_name_branches() {
     );
 }
 
+/// Resolver/callgraph/IDG/taint are compiler backends over adapter-emitted
+/// facts. They may compare opaque language identities to prevent cross-language
+/// edges, but they must not recognize a concrete language literal. Any syntax
+/// or linkage distinction belongs in `LanguageCapabilities` on the adapter.
+#[test]
+fn compiler_engines_do_not_branch_on_concrete_languages() {
+    let root = repo_root();
+    let language_literals = [
+        "c",
+        "cpp",
+        "csharp",
+        "dart",
+        "elixir",
+        "erlang",
+        "go",
+        "java",
+        "javascript",
+        "kotlin",
+        "lua",
+        "objc",
+        "perl",
+        "php",
+        "python",
+        "ruby",
+        "rust",
+        "scala",
+        "solidity",
+        "swift",
+        "typescript",
+    ];
+    let mut violations = Vec::new();
+    for crate_name in ["callgraph", "resolve", "idg", "taint"] {
+        let mut files = Vec::new();
+        collect_rs_files(&root.join("crates").join(crate_name).join("src"), &mut files);
+        for path in files {
+            let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            if file_name == "tests.rs" || file_name.ends_with("_tests.rs") {
+                continue;
+            }
+            let source = read(&path);
+            let scan_end = source.find("#[cfg(test)]").unwrap_or(source.len());
+            for (line_index, line) in source[..scan_end].lines().enumerate() {
+                let live = line.split("//").next().unwrap_or("");
+                for language in language_literals {
+                    let literal = format!("\"{language}\"");
+                    if live.contains(&literal) {
+                        violations.push(format!(
+                            "{}:{} contains concrete language literal {literal}",
+                            path.strip_prefix(&root).unwrap_or(&path).display(),
+                            line_index + 1,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "compiler engines must consume adapter capabilities instead of concrete language ids:\n  {}",
+        violations.join("\n  ")
+    );
+
+    let callgraph = read(&root.join("crates/callgraph/src/lib.rs"));
+    for capability in [
+        "build_target_linkage",
+        "callable_declaration_family",
+        "quoted_callable_literals",
+        "same_directory_unqualified_calls",
+    ] {
+        assert!(
+            callgraph.contains(capability),
+            "callgraph must consume adapter-owned `{capability}`"
+        );
+    }
+    let resolver = read(&root.join("crates/resolve/src/lib.rs"));
+    assert!(
+        resolver.contains("same_directory_unqualified_calls")
+            && !resolver.contains("strip_known_import_extension"),
+        "resolver must use adapter namespace capabilities and adapter-emitted import aliases"
+    );
+    let idg_adapter = read(&root.join("crates/idg/src/workspace_adapter.rs"));
+    assert!(
+        idg_adapter.contains("module_resolution_extensions_for_file")
+            && idg_adapter.contains("file_to_module_resolution_extensions"),
+        "IDG module stitching must consume adapter-owned module resolution syntax"
+    );
+    for suffix in [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"] {
+        assert!(
+            !idg_adapter.contains(&format!("\"{suffix}\"")),
+            "IDG core must not carry the concrete module suffix {suffix}"
+        );
+    }
+
+    let workspace = read(&root.join("crates/workspace/src/lib.rs"));
+    let taint_idg_build = read(&root.join("crates/taint/src/idg_build.rs"));
+    assert!(
+        workspace.contains("bonsai_taint::build_resolved_call_graph_snapshot(db)")
+            && workspace.contains("bonsai_taint::build_resolved_call_graph_snapshot_for_files(")
+            && !workspace.contains("CallGraphFileSemantics::new"),
+        "workspace callgraph construction must delegate to the canonical taint compiler facade"
+    );
+    assert_eq!(
+        taint_idg_build.matches("CallGraphFileSemantics::new").count(),
+        1,
+        "the canonical workspace/IDG callgraph semantics must have one builder"
+    );
+}
+
 #[test]
 fn shared_ast_lowering_selects_adapter_capabilities_not_language_ids() {
     let root = repo_root();

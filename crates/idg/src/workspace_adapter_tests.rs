@@ -4,6 +4,26 @@ use bonsai_callgraph::{CallEdge, CallGraph, EdgeKind, EdgeProvenance, ResolvedCa
 use bonsai_common::{Precision, Span, SymbolId};
 use bonsai_lang_api::{Decl, DeclKind, FlowEvent, ModulePath, Visibility};
 
+#[test]
+fn path_module_resolution_uses_only_adapter_extensions() {
+    assert_eq!(
+        import_module_candidates("src.app", "./render.ts", &["js", "ts"]),
+        vec!["src.render"]
+    );
+    assert_eq!(
+        import_module_candidates("src.app", "./render.ts", &[]),
+        vec!["src.render.ts"]
+    );
+}
+
+#[test]
+fn path_module_resolution_accepts_dot_prefixed_adapter_extensions() {
+    assert_eq!(
+        import_module_candidates("src.app", "./render.tsx", &[".tsx"]),
+        vec!["src.render"]
+    );
+}
+
 fn span(file: u32, start: u64, end: u64) -> Span {
     Span::new(FileId::new(file), start, end)
 }

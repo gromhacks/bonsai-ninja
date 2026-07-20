@@ -70,6 +70,7 @@ impl LanguageAdapter for RubyAdapter {
             constructor_method_names: &["initialize", "new"],
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["self"],
+            workspace_manifest_context_extensions: &["erb", "rhtml", "haml", "slim"],
             ..LanguageCapabilities::partial_baseline()
         }
     }

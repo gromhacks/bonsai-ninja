@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("javascript");
+pub const JS_TS_MODULE_RESOLUTION_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
 const PACK_NAME: &str = "javascript";
 const HANDLER: GrammarHandler = GrammarHandler {
     call_kinds: &["new_expression"],
@@ -62,6 +63,7 @@ impl LanguageAdapter for JavaScriptAdapter {
             constructor_method_names: &["constructor"],
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
+            module_resolution_extensions: JS_TS_MODULE_RESOLUTION_EXTENSIONS,
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -73,7 +75,7 @@ impl LanguageAdapter for JavaScriptAdapter {
         // Module identity = workspace-relative path with the JS/TS extension stripped.
         let module_segments = ctx
             .workspace_relative_path(file)
-            .map(|p| js_module_segments(&p))
+            .map(|p| js_ts_module_segments(&p))
             .unwrap_or_default();
         if !module_segments.is_empty() {
             bonsai_lang_api::apply_module_path_semantic_identity(&mut decl_index, module_segments);
@@ -1797,7 +1799,7 @@ fn canonical_js_class_name(name: &str) -> String {
 /// Split a workspace-relative JS/TS path into module-identity segments.
 /// The trailing source extension is stripped so `src/utils/log.ts` becomes
 /// `["src", "utils", "log"]`. Skips path roots and parent (`..`) components.
-fn js_module_segments(path: &std::path::Path) -> Vec<String> {
+pub fn js_ts_module_segments(path: &std::path::Path) -> Vec<String> {
     let mut segments: Vec<String> = path
         .components()
         .filter_map(|component| match component {

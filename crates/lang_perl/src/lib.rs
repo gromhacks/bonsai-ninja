@@ -93,6 +93,7 @@ impl LanguageAdapter for PerlAdapter {
             // Perl's invocant is an explicit first `@_` binding whose name is
             // adapter-derived (`$self`, `$class`, or another identifier).
             implicit_receiver_tokens: &[],
+            same_directory_unqualified_calls: true,
             ..LanguageCapabilities::partial_baseline()
         }
     }

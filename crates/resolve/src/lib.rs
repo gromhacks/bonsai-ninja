@@ -8,7 +8,8 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::{short_qualified_tail, FileId, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
-    AliasTarget, DeclKind, ImportSpec, ModulePath, Visibility, WILDCARD_IMPORT_ALIAS_PREFIX,
+    module_local_binding, AliasTarget, DeclKind, ImportSpec, ModulePath, Visibility,
+    WILDCARD_IMPORT_ALIAS_PREFIX,
 };
 use std::{borrow::Cow, sync::Arc};
 
@@ -44,6 +45,9 @@ pub struct ResolveContext<'a> {
     pub alias_map: Option<&'a AHashMap<String, AliasTarget>>,
     pub file_path_lookup: Option<FilePathLookup<'a>>,
     pub file_path_match_lookup: Option<FilePathMatchLookup<'a>>,
+    /// Adapter-owned syntax/linkage fact. When false, unqualified calls do
+    /// not cross a file module merely because another declaration is nearby.
+    pub same_directory_unqualified_calls: bool,
 }
 
 impl<'a> ResolveContext<'a> {
@@ -56,6 +60,7 @@ impl<'a> ResolveContext<'a> {
             alias_map: None,
             file_path_lookup: None,
             file_path_match_lookup: None,
+            same_directory_unqualified_calls: false,
         }
     }
 
@@ -80,6 +85,12 @@ impl<'a> ResolveContext<'a> {
     #[must_use]
     pub fn with_file_path_match_lookup(mut self, lookup: &'a dyn Fn(&str, FileId) -> bool) -> Self {
         self.file_path_match_lookup = Some(FilePathMatchLookup { lookup });
+        self
+    }
+
+    #[must_use]
+    pub fn with_same_directory_unqualified_calls(mut self, enabled: bool) -> Self {
+        self.same_directory_unqualified_calls = enabled;
         self
     }
 }
@@ -386,7 +397,7 @@ fn same_directory_unqualified_module_candidate(
         return false;
     };
     if (!decl.module_path.is_empty() || !ctx.caller_module.is_empty())
-        && !same_directory_global_namespace_extension(&caller_path)
+        && !ctx.same_directory_unqualified_calls
     {
         return false;
     }
@@ -397,26 +408,6 @@ fn file_parent_dir(path: &str) -> Option<&str> {
     let trimmed = path.trim();
     let idx = trimmed.rfind(['/', '\\'])?;
     Some(&trimmed[..idx])
-}
-
-fn same_directory_global_namespace_extension(path: &str) -> bool {
-    matches!(
-        path.rsplit('.').next().unwrap_or_default(),
-        "c" | "h"
-            | "cc"
-            | "cpp"
-            | "cxx"
-            | "hpp"
-            | "hh"
-            | "hxx"
-            | "m"
-            | "mm"
-            | "kt"
-            | "kts"
-            | "swift"
-            | "pl"
-            | "pm"
-    )
 }
 
 /// Final-fallback resolver for fully-qualified workspace paths
@@ -1673,6 +1664,7 @@ fn class_decl_context<'a>(
     if let Some(file_path_match_lookup) = inherited.file_path_match_lookup {
         ctx = ctx.with_file_path_match_lookup(file_path_match_lookup.lookup);
     }
+    ctx = ctx.with_same_directory_unqualified_calls(inherited.same_directory_unqualified_calls);
     ctx
 }
 
@@ -2262,87 +2254,6 @@ pub fn semantic_import_binding_map_for_file(imports: &[ImportSpec]) -> AHashMap<
         }
     }
     map
-}
-
-fn module_local_binding(module: &str) -> Option<String> {
-    let trimmed = module
-        .trim()
-        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
-        .trim_end_matches(['/', '\\'])
-        .trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let path_like = trimmed.contains('/') || trimmed.contains('\\') || trimmed.starts_with('.');
-    let mut candidate = if path_like {
-        trimmed
-            .rsplit(['/', '\\'])
-            .next()
-            .and_then(strip_known_import_extension)
-            .or_else(|| trimmed.rsplit(['/', '\\']).next())
-            .unwrap_or(trimmed)
-    } else if let Some(stem) = strip_known_import_extension(trimmed) {
-        stem.rsplit(['.', ':']).next().unwrap_or(stem)
-    } else if let Some((_, tail)) = trimmed.rsplit_once("::") {
-        tail
-    } else if let Some((_, tail)) = trimmed.rsplit_once(':') {
-        tail
-    } else if let Some((_, tail)) = trimmed.rsplit_once('.') {
-        tail
-    } else {
-        trimmed
-    };
-    candidate = candidate.trim();
-    let mut chars = candidate.chars();
-    let first = chars.next()?;
-    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
-        return None;
-    }
-    if !chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()) {
-        return None;
-    }
-    Some(candidate.to_string())
-}
-
-fn strip_known_import_extension(module: &str) -> Option<&str> {
-    let (stem, ext) = module.rsplit_once('.')?;
-    let ext = ext.trim();
-    if matches!(
-        ext,
-        "c" | "cc"
-            | "cpp"
-            | "cs"
-            | "cxx"
-            | "dart"
-            | "erl"
-            | "ex"
-            | "exs"
-            | "h"
-            | "hh"
-            | "hpp"
-            | "hrl"
-            | "java"
-            | "js"
-            | "kt"
-            | "kts"
-            | "lua"
-            | "m"
-            | "mm"
-            | "php"
-            | "pl"
-            | "pm"
-            | "py"
-            | "rb"
-            | "rs"
-            | "scala"
-            | "sol"
-            | "swift"
-            | "ts"
-    ) {
-        Some(stem)
-    } else {
-        None
-    }
 }
 
 // Note: a previous version of this file shipped a Go-stdlib package

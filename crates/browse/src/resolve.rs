@@ -168,7 +168,12 @@ where
         };
         let ctx = ResolveContext::new(file_id, &module_path)
             .with_alias_map(&typed_alias_map)
-            .with_file_path_lookup(&path_lookup);
+            .with_file_path_lookup(&path_lookup)
+            .with_same_directory_unqualified_calls(
+                ws.db()
+                    .adapter_for(file_id)
+                    .is_some_and(|adapter| adapter.capabilities().same_directory_unqualified_calls),
+            );
         resolve_callable_with_context(global.as_ref(), &short, &ctx)
     } else {
         collect_callable_targets(global.as_ref(), &post_alias_name)

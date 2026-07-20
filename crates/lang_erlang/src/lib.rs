@@ -89,6 +89,7 @@ impl LanguageAdapter for ErlangAdapter {
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &[],
             implicit_receiver_tokens: &[],
+            callable_declaration_family: bonsai_lang_api::CallableDeclarationFamily::FunctionClauses,
             ..LanguageCapabilities::partial_baseline()
         }
     }

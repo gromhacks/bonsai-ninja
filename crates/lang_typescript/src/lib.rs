@@ -37,7 +37,8 @@ const TYPESCRIPT_VOCAB: ModifierVocabulary = ModifierVocabulary {
 };
 use bonsai_lang_javascript::{
     apply_javascript_getter_property_sources, apply_js_ts_commonjs_named_export_aliases,
-    apply_js_ts_default_export_aliases, js_ts_imports, js_ts_require_calls,
+    apply_js_ts_default_export_aliases, js_ts_imports, js_ts_module_segments, js_ts_require_calls,
+    JS_TS_MODULE_RESOLUTION_EXTENSIONS,
 };
 use tree_sitter::{Language, Tree};
 
@@ -103,6 +104,7 @@ impl LanguageAdapter for TypeScriptAdapter {
             constructor_method_names: &["constructor"],
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
+            module_resolution_extensions: JS_TS_MODULE_RESOLUTION_EXTENSIONS,
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -114,7 +116,7 @@ impl LanguageAdapter for TypeScriptAdapter {
         // TS/JS module = workspace-relative file path with `.ts`/`.tsx` (etc.) stripped.
         let module_segments = ctx
             .workspace_relative_path(file)
-            .map(|p| js_module_segments(&p))
+            .map(|p| js_ts_module_segments(&p))
             .unwrap_or_default();
         if !module_segments.is_empty() {
             bonsai_lang_api::apply_module_path_semantic_identity(&mut decl_index, module_segments);
@@ -1154,28 +1156,4 @@ fn canonical_ts_base_name(raw: &str) -> Option<String> {
         return None;
     }
     Some(bare.to_string())
-}
-
-/// Split a workspace-relative TS/JS path into module-identity segments.
-/// The trailing source extension is stripped so `src/utils/log.ts` becomes
-/// `["src", "utils", "log"]`. Skips path roots and parent (`..`) components.
-fn js_module_segments(path: &std::path::Path) -> Vec<String> {
-    let mut segments: Vec<String> = path
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
-    if let Some(last_segment) = segments.last_mut() {
-        // Strip exactly one source extension; `.tsx` is checked before `.ts`.
-        for extension in [".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs"] {
-            if last_segment.ends_with(extension) {
-                *last_segment = last_segment.trim_end_matches(extension).to_string();
-                break;
-            }
-        }
-    }
-    segments.retain(|segment| !segment.is_empty());
-    segments
 }

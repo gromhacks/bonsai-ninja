@@ -122,6 +122,8 @@ impl LanguageAdapter for ObjCAdapter {
             constructor_method_names: &["init"],
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["self"],
+            same_directory_unqualified_calls: true,
+            build_target_linkage: true,
             ..LanguageCapabilities::partial_baseline()
         }
     }

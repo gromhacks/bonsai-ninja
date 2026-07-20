@@ -145,6 +145,8 @@ impl LanguageAdapter for CppAdapter {
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &[],
             implicit_receiver_tokens: &["this"],
+            same_directory_unqualified_calls: true,
+            build_target_linkage: true,
             ..LanguageCapabilities::partial_baseline()
         }
     }

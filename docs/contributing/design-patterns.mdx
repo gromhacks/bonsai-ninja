@@ -31,10 +31,10 @@ string match as a call.
 
 For global-namespace languages with translation-unit or shared package
 linkage, same-directory unqualified calls are semantic only when the
-`ResolveContext` includes the workspace file-path lookup. This lets C/C++
-helpers such as `storage.cpp -> executor.cpp` resolve without marking
-`execute(cmd)` as an inferred standalone entry point, while Python-style
-file modules still require imports or aliases.
+`ResolveContext` includes the workspace file-path lookup and the caller's
+adapter declares `same_directory_unqualified_calls`. This lets native/shared
+package helpers resolve without teaching the resolver any language names,
+while file-module languages still require imports or aliases.
 
 The receiver-callback shorthand is intentionally narrower than method
 calls. `cb.call(x)` / `cb.run(x)` only dispatches when `cb` resolves to a

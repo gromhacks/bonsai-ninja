@@ -151,7 +151,9 @@ fn unqualified_callable_resolution_accepts_same_directory_kotlin_globals() {
         2 => Some("src/pipeline.kt".to_string()),
         _ => None,
     };
-    let ctx = ResolveContext::new(caller_file, &caller_module).with_file_path_lookup(&path_lookup);
+    let ctx = ResolveContext::new(caller_file, &caller_module)
+        .with_file_path_lookup(&path_lookup)
+        .with_same_directory_unqualified_calls(true);
     let hits = resolve_callable_with_context(&global, "runPipeline", &ctx);
 
     assert_eq!(hits.len(), 1);
@@ -882,9 +884,15 @@ fn unaliased_import_derives_namespace_binding() {
 }
 
 #[test]
-fn unaliased_path_import_derives_stem_binding() {
+fn side_effect_path_import_does_not_invent_a_local_binding() {
     let map = alias_map_for_file(&[spec("./storage.ts", None, None)]);
-    assert_eq!(map.get("storage").map(String::as_str), Some("./storage.ts"));
+    assert!(map.is_empty());
+}
+
+#[test]
+fn extensionless_path_import_does_not_invent_a_local_binding() {
+    let map = alias_map_for_file(&[spec("./storage", None, None)]);
+    assert!(map.is_empty());
 }
 
 #[test]
