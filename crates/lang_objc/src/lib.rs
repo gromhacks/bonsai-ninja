@@ -95,14 +95,21 @@ impl LanguageAdapter for ObjCAdapter {
         "Objective-C"
     }
     fn file_extensions(&self) -> &'static [&'static str] {
-        // `.h` is ambiguous with C / C++; we claim `.m` (Objective-C
-        // implementation) and `.mm` (Objective-C++). Users wanting
-        // headers scoped to Objective-C can include `.h` via CLI
-        // include/exclude patterns.
-        &["m", "mm"]
+        // `.h` is shared with C and C++; the database evaluates every
+        // candidate grammar against the concrete CST instead of assigning
+        // headers by extension alone.
+        &["m", "mm", "h"]
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
+    }
+    fn parse_recovery_edits(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        vfs: &bonsai_lang_api::Vfs,
+        tree: &Tree,
+    ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
+        bonsai_lang_api::c_family_declaration_macro_recovery_edits(snapshot, vfs, tree)
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Macros: tree-sitter-objc parses `NSAssert(...)` / `NS_INLINE`
@@ -1197,7 +1204,7 @@ fn objc_cast_type_of_value(value: &Node<'_>, src: &[u8]) -> Option<String> {
     canonical_objc_type_name(node_text(&ti, src))
 }
 
-/// First descendant (BFS) of the given kind, or `None`.
+/// First descendant found by a depth-first syntax-tree walk, or `None`.
 fn objc_first_descendant_of_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
     let mut stack = vec![*node];
     while let Some(n) = stack.pop() {

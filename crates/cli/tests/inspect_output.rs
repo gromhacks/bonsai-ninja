@@ -16,6 +16,9 @@ fn ws_path() -> PathBuf {
 }
 
 fn bin_path() -> PathBuf {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_bonsai-ninja") {
+        return PathBuf::from(path);
+    }
     let mut p = std::env::current_dir().expect("cwd");
     p.push("../../target/release/bonsai-ninja");
     p

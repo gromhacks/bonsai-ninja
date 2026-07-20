@@ -113,10 +113,24 @@ impl LanguageAdapter for CppAdapter {
         "C++"
     }
     fn file_extensions(&self) -> &'static [&'static str] {
-        &["cpp", "cc", "cxx", "hpp", "hh", "hxx"]
+        // `.h` is shared with C. The registry preserves both candidates and
+        // the database selects the grammar whose concrete syntax tree has the
+        // fewest errors, preferring C on an exact tie. This mirrors a compiler
+        // frontend's translation-unit context without guessing from names or
+        // repository paths, using the syntax facts available without a
+        // compile-command database.
+        &["cpp", "cc", "cxx", "hpp", "hh", "hxx", "h"]
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
+    }
+    fn parse_recovery_edits(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        vfs: &bonsai_lang_api::Vfs,
+        tree: &Tree,
+    ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
+        bonsai_lang_api::c_family_declaration_macro_recovery_edits(snapshot, vfs, tree)
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Macros: same story as C — tree-sitter-cpp parses

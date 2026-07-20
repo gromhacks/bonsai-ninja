@@ -1,4 +1,6 @@
 //! Java language adapter.
+mod parse_recovery;
+
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler,
@@ -6,10 +8,11 @@ use bonsai_lang_api::{
         collect_kinds, language_from_pack, node_text, package_module_segments_with_workspace_prefix,
         parse_with, span_of, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, AssignValueKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, AssignValueKind, DeclIndex, DeclKind, FileSnapshot, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ParseRecoveryEdit, SyntaxTree, TypeAliasBinding, Vfs, Visibility,
 };
+use parse_recovery::java_parse_recovery_edits;
 use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("java");
@@ -92,6 +95,14 @@ impl LanguageAdapter for JavaAdapter {
     }
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
+    }
+    fn parse_recovery_edits(
+        &self,
+        snapshot: &FileSnapshot,
+        _vfs: &Vfs,
+        tree: &SyntaxTree,
+    ) -> Vec<ParseRecoveryEdit> {
+        java_parse_recovery_edits(snapshot, tree)
     }
     fn capabilities(&self) -> LanguageCapabilities {
         // Exceptions: the adapter populates `Throw::thrown_type` from

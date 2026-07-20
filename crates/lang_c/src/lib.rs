@@ -57,6 +57,14 @@ impl LanguageAdapter for CAdapter {
     fn tree_sitter_language(&self) -> Result<Language, AdapterError> {
         language_from_pack(PACK_NAME)
     }
+    fn parse_recovery_edits(
+        &self,
+        snapshot: &bonsai_lang_api::FileSnapshot,
+        vfs: &bonsai_lang_api::Vfs,
+        tree: &Tree,
+    ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
+        bonsai_lang_api::c_family_declaration_macro_recovery_edits(snapshot, vfs, tree)
+    }
     fn capabilities(&self) -> LanguageCapabilities {
         // Macros: tree-sitter-c parses `STR_CPY(dest, src)` and
         // `LOG(fmt, ...)` as ordinary `call_expression` nodes, so the
