@@ -100,6 +100,7 @@ fn facade_indexes_and_exposes_workspace_basics() {
     assert!(project.diagnostics().is_empty());
     let diagnostics = project.diagnostics_report();
     assert!(diagnostics.diagnostics.is_empty());
+    assert!(diagnostics.diagnostic_files.is_empty());
     assert!(diagnostics
         .workspace_languages
         .iter()
@@ -170,6 +171,23 @@ fn facade_indexes_and_exposes_workspace_basics() {
             .bonsai_dir_exists
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn diagnostics_report_attributes_errors_to_workspace_relative_paths() {
+    let root = tempdir("diagnostic-paths");
+    std::fs::create_dir_all(root.join("src")).expect("source directory");
+    std::fs::write(root.join("src/broken.py"), "def broken(\n").expect("broken source");
+
+    let project = sdk().index_structural(&root).expect("structural index");
+    let report = project.diagnostics_report();
+    assert!(!report.diagnostics.is_empty());
+    assert_eq!(report.diagnostic_files.len(), 1);
+    let file = &report.diagnostic_files[0];
+    assert_eq!(file.path, "src/broken.py");
+    assert_eq!(file.language.as_deref(), Some("python"));
+    assert_eq!(file.diagnostic_count, report.diagnostics.len());
+    assert!(file.codes.iter().any(|code| code == "syntax-error"));
 }
 
 #[test]

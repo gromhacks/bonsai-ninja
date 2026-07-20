@@ -6,6 +6,7 @@
 
 pub mod capabilities;
 pub mod kit;
+mod parse_recovery;
 pub mod registry;
 mod storage;
 pub mod taxonomy;
@@ -26,6 +27,7 @@ pub use kit::{
     ModifierVocabulary, SyntaxSpecialForm, TypeAliasVocabulary, GENERIC_HANDLER,
     WILDCARD_IMPORT_ALIAS_PREFIX,
 };
+pub use parse_recovery::{c_family_declaration_macro_recovery_edits, syntax_damage_score, ParseRecoveryEdit};
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};
 pub use types::{
@@ -41,7 +43,7 @@ pub use types::{
 
 use bonsai_common::FileId;
 use bonsai_diagnostics::DiagnosticSink;
-use bonsai_vfs::{FileSnapshot, Vfs};
+pub use bonsai_vfs::{FileSnapshot, Vfs};
 use parking_lot::RwLock;
 use std::sync::Arc;
 pub use tree_sitter::Tree as SyntaxTree;
@@ -126,6 +128,26 @@ pub trait LanguageAdapter: Send + Sync + 'static {
     /// The Tree-sitter `Language` used for parsing. Most adapters fetch
     /// this from `tree_sitter_language_pack::get_language`.
     fn tree_sitter_language(&self) -> Result<tree_sitter::Language, AdapterError>;
+
+    /// Return same-width parser-buffer normalizations for a second,
+    /// grammar-recovery parse.
+    ///
+    /// This hook is deliberately narrower than arbitrary source rewriting:
+    /// adapters can only hide syntax whose role they have independently
+    /// established from compiler facts and the raw CST (for example, a
+    /// declaration macro reached through a C/C++ include, or qualification
+    /// unsupported by an otherwise capable grammar production). The parser
+    /// accepts the recovered tree only when it contains strictly fewer syntax
+    /// errors, and all byte offsets continue to address the original source
+    /// snapshot.
+    fn parse_recovery_edits(
+        &self,
+        _snapshot: &FileSnapshot,
+        _vfs: &Vfs,
+        _tree: &SyntaxTree,
+    ) -> Vec<ParseRecoveryEdit> {
+        Vec::new()
+    }
 
     /// Wrapper required to parse a standalone mid-file source fragment.
     /// Returned bytes are adapter grammar metadata and never appear in output.

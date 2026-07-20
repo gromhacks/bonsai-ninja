@@ -25,7 +25,7 @@ use fs2::FileExt as _;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
     io::{self, Write},
@@ -140,8 +140,23 @@ pub mod trace_render {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiagnosticsReport {
     pub diagnostics: Vec<bonsai_diagnostics::Diagnostic>,
+    /// Workspace-relative attribution for every file represented in
+    /// `diagnostics`. `FileId` values are workspace-local implementation
+    /// details; this table gives CLI and SDK consumers stable, actionable
+    /// source paths from the same analysis process.
+    pub diagnostic_files: Vec<DiagnosticFileRow>,
     pub workspace_languages: Vec<String>,
     pub adapter_capabilities: Vec<AdapterCapabilityRow>,
+}
+
+/// Diagnostics aggregated by their exact source file.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiagnosticFileRow {
+    pub file: bonsai_common::FileId,
+    pub path: String,
+    pub language: Option<String>,
+    pub diagnostic_count: usize,
+    pub codes: Vec<String>,
 }
 
 /// One adapter's declared capability metadata, serialized for diagnostics
@@ -882,11 +897,54 @@ impl Project {
     #[must_use]
     pub fn diagnostics_report(&self) -> DiagnosticsReport {
         self.refresh_from_disk_best_effort();
+        let diagnostics = self.workspace.diagnostics();
         DiagnosticsReport {
-            diagnostics: self.workspace.diagnostics(),
+            diagnostic_files: self.diagnostic_file_rows(&diagnostics),
+            diagnostics,
             workspace_languages: self.workspace_languages(),
             adapter_capabilities: self.adapter_capability_rows(),
         }
+    }
+
+    fn diagnostic_file_rows(&self, diagnostics: &[bonsai_diagnostics::Diagnostic]) -> Vec<DiagnosticFileRow> {
+        let mut by_file = BTreeMap::<bonsai_common::FileId, (usize, BTreeSet<String>)>::new();
+        for diagnostic in diagnostics {
+            let entry = by_file.entry(diagnostic.span.file).or_default();
+            entry.0 += 1;
+            if let Some(code) = &diagnostic.code {
+                entry.1.insert(code.clone());
+            }
+        }
+
+        let db = self.workspace.db();
+        let root = db.workspace_root();
+        by_file
+            .into_iter()
+            .map(|(file, (diagnostic_count, codes))| {
+                let path = self
+                    .workspace
+                    .vfs()
+                    .path(file)
+                    .map(|path| {
+                        root.as_deref()
+                            .and_then(|root| path.strip_prefix(root).ok())
+                            .unwrap_or(path.as_path())
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .unwrap_or_else(|_| format!("<unknown-file-{file}>"));
+                let language = db
+                    .adapter_for(file)
+                    .map(|adapter| adapter.language_id().as_str().to_string());
+                DiagnosticFileRow {
+                    file,
+                    path,
+                    language,
+                    diagnostic_count,
+                    codes: codes.into_iter().collect(),
+                }
+            })
+            .collect()
     }
 
     fn workspace_languages(&self) -> Vec<String> {

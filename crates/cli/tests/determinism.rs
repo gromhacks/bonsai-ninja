@@ -23,6 +23,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn release_bin() -> Option<PathBuf> {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_bonsai-ninja") {
+        return Some(PathBuf::from(path));
+    }
     // Walk up from CARGO_MANIFEST_DIR (= crates/cli) to the workspace
     // root, then look for target/release/bonsai-ninja.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

@@ -80,30 +80,6 @@ fn parse_timeout_diagnostic_is_file_level_warning() {
 }
 
 #[test]
-fn parser_diagnostics_are_capped_with_suppression_count() {
-    let mut diagnostics = Vec::new();
-    let mut suppressed = 0usize;
-    for _ in 0..(MAX_PARSE_NODE_DIAGNOSTICS + 5) {
-        push_parser_diagnostic(
-            &mut diagnostics,
-            Diagnostic::new(
-                bonsai_common::Span::new(FileId::new(1), 0, 1),
-                Severity::Warning,
-                "syntax error",
-            )
-            .with_code("syntax-error"),
-            &mut suppressed,
-        );
-    }
-
-    assert_eq!(diagnostics.len(), MAX_PARSE_NODE_DIAGNOSTICS);
-    assert_eq!(suppressed, 5);
-    let summary = suppression_summary_diagnostic(FileId::new(1), 10, suppressed);
-    assert_eq!(summary.message, "5 more syntax errors suppressed");
-    assert_eq!(summary.code.as_deref(), Some("syntax-error"));
-}
-
-#[test]
 fn repeated_exact_snapshot_reuses_parsed_file_and_tree_arcs() {
     let cache = ParserCache::with_options(ParserOptions::with_parse_timeout(None));
     let vfs = Vfs::new();

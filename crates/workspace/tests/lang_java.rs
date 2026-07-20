@@ -151,3 +151,46 @@ fn try_with_resources_is_try() {
     );
     assert!(has_try(&w, "f"));
 }
+
+#[test]
+fn qualified_java_21_record_patterns_parse_and_lower_cleanly() {
+    let w = make(
+        r#"
+        class A {
+            int switchPattern(Object value) {
+                return switch (value) {
+                    case pkg.Shape.Point(int x, int y) -> sink(x) + sink(y);
+                    default -> 0;
+                };
+            }
+
+            int instanceofPattern(Object value) {
+                if (value instanceof pkg.telemetry.Sample(var count)) {
+                    return sink(count);
+                }
+                return 0;
+            }
+
+            int sink(int value) { return value; }
+        }
+        "#,
+    );
+
+    let diagnostics = w.diagnostics();
+    assert!(
+        diagnostics.is_empty(),
+        "qualified record patterns are valid Java 21 syntax: {diagnostics:#?}"
+    );
+    assert!(has_call(&w, "switchPattern", "sink"));
+    assert!(has_call(&w, "instanceofPattern", "sink"));
+}
+
+#[test]
+fn leading_zero_decimal_floats_parse_cleanly() {
+    let w = make("class A { double f() { return 00d + 0012D + 0_0f; } }");
+    let diagnostics = w.diagnostics();
+    assert!(
+        diagnostics.is_empty(),
+        "decimal floating suffix determines the radix even with leading zeroes: {diagnostics:#?}"
+    );
+}

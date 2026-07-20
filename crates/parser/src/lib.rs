@@ -20,7 +20,6 @@ use std::{
 use thiserror::Error;
 use tree_sitter::{InputEdit, Node, ParseOptions, Parser, Point, Tree};
 
-const MAX_PARSE_NODE_DIAGNOSTICS: usize = 100;
 type ParseKey = (u64, FileId, LanguageId);
 type ParserPool = Arc<Mutex<Vec<Parser>>>;
 
@@ -72,6 +71,7 @@ pub struct ParsedFile {
     pub diagnostics: Vec<Diagnostic>,
     pub adapter_id: bonsai_lang_api::LanguageId,
     source: Arc<str>,
+    used_recovery: bool,
 }
 
 impl std::fmt::Debug for ParsedFile {
@@ -81,15 +81,18 @@ impl std::fmt::Debug for ParsedFile {
             .field("version", &self.version)
             .field("adapter_id", &self.adapter_id)
             .field("diagnostics", &self.diagnostics.len())
+            .field("used_recovery", &self.used_recovery)
             .finish()
     }
 }
 
 impl ParsedFile {
-    /// Source text corresponding exactly to [`Self::tree`].
+    /// Original source text addressed by every byte range in [`Self::tree`].
     ///
     /// Consumers that interpret node byte ranges must use this text instead
     /// of taking a fresh VFS snapshot, which may already be a newer version.
+    /// Grammar recovery can normalize a same-width private parser buffer, but
+    /// that buffer is never exposed and cannot alter these source slices.
     #[must_use]
     pub fn source_text(&self) -> &str {
         &self.source
@@ -231,74 +234,38 @@ impl ParserCache {
             .as_deref()
             .and_then(|parsed| incremental_tree(parsed, &snapshot.text));
         let old_tree = incremental_tree.as_ref();
-        let (tree, timed_out) = parse_with_timeout(
+        let (mut tree, timed_out) = parse_with_timeout(
             &mut parser,
             snapshot.text.as_ref(),
             old_tree,
             self.options.parse_timeout,
         )?;
+        let mut used_recovery = false;
+        if timed_out.is_none() && tree.root_node().has_error() {
+            let mut recovery_source = snapshot.text.as_bytes().to_vec();
+            loop {
+                let edits = adapter.parse_recovery_edits(snapshot, vfs, &tree);
+                if !apply_recovery_edits(snapshot.text.as_ref(), &mut recovery_source, &edits) {
+                    break;
+                }
+                let recovery_text = std::str::from_utf8(&recovery_source)
+                    .expect("same-width recovery normalization preserves UTF-8");
+                let (candidate, candidate_timed_out) =
+                    parse_with_timeout(&mut parser, recovery_text, None, self.options.parse_timeout)?;
+                if candidate_timed_out.is_some()
+                    || bonsai_lang_api::syntax_damage_score(&candidate)
+                        >= bonsai_lang_api::syntax_damage_score(&tree)
+                {
+                    break;
+                }
+                tree = candidate;
+                used_recovery = true;
+            }
+        }
         drop(parser);
         drop(incremental_tree);
 
-        let mut diagnostics = Vec::new();
-        if let Some(timeout) = timed_out {
-            diagnostics.push(parse_timeout_diagnostic(file, snapshot.text.len(), timeout));
-        } else if tree.root_node().has_error() {
-            // Walk the tree and emit one diagnostic per ERROR / MISSING
-            // node so the user sees exactly where the parser choked
-            // instead of a single opaque "syntax errors present" that
-            // points at the whole file. The vector is capped so one
-            // badly broken generated file cannot flood diagnostics.
-            let mut stack = vec![tree.root_node()];
-            let mut suppressed = 0usize;
-            while let Some(node) = stack.pop() {
-                let is_error = node.is_error();
-                let is_missing = node.is_missing();
-                if is_error || is_missing {
-                    let span = span_for_node(file, node);
-                    let msg = if is_missing {
-                        format!("missing `{}`", node.kind())
-                    } else {
-                        "syntax error".to_string()
-                    };
-                    push_parser_diagnostic(
-                        &mut diagnostics,
-                        Diagnostic::new(span, Severity::Warning, msg).with_code("syntax-error"),
-                        &mut suppressed,
-                    );
-                }
-                if !is_error {
-                    // Only recurse into non-error nodes — ERROR subtrees
-                    // often contain nested ERRORs that don't add info.
-                    let mut cursor = node.walk();
-                    for child in node.children(&mut cursor) {
-                        if child.has_error() || child.is_missing() {
-                            stack.push(child);
-                        }
-                    }
-                }
-            }
-            if suppressed > 0 {
-                diagnostics.push(suppression_summary_diagnostic(
-                    file,
-                    snapshot.text.len(),
-                    suppressed,
-                ));
-            }
-            // Always include a file-level summary too so tooling that
-            // only looks at the first diagnostic still learns there was
-            // a problem.
-            if diagnostics.is_empty() {
-                diagnostics.push(
-                    Diagnostic::new(
-                        file_span(file, snapshot.text.len()),
-                        Severity::Warning,
-                        "syntax errors present",
-                    )
-                    .with_code("syntax-error"),
-                );
-            }
-        }
+        let diagnostics = diagnostics_for_tree(file, snapshot.text.len(), &tree, timed_out);
 
         let parsed = Arc::new(ParsedFile {
             file,
@@ -307,6 +274,7 @@ impl ParserCache {
             diagnostics,
             adapter_id: adapter.language_id(),
             source: Arc::clone(&snapshot.text),
+            used_recovery,
         });
         // Cache the newest version, but always return the tree for the exact
         // snapshot requested by this caller. Returning a peer's newer entry
@@ -368,10 +336,11 @@ fn parsed_matches_snapshot(parsed: &ParsedFile, snapshot: &FileSnapshot) -> bool
 /// changes is not a hint: tree-sitter treats unchanged ranges as authoritative
 /// and may reuse stale syntax.
 fn incremental_tree(parsed: &ParsedFile, new_source: &str) -> Option<Tree> {
-    if parsed
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code.as_deref() == Some("parse-timeout"))
+    if parsed.used_recovery
+        || parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("parse-timeout"))
     {
         // A timeout stores an intentionally empty placeholder tree, which does
         // not describe `parsed.source` and therefore cannot be edited safely.
@@ -382,6 +351,73 @@ fn incremental_tree(parsed: &ParsedFile, new_source: &str) -> Option<Tree> {
         tree.edit(&single_replacement_edit(&parsed.source, new_source));
     }
     Some(tree)
+}
+
+fn apply_recovery_edits(
+    source: &str,
+    recovered: &mut [u8],
+    edits: &[bonsai_lang_api::ParseRecoveryEdit],
+) -> bool {
+    let mut changed = false;
+    for edit in edits {
+        changed |= edit.apply_to(source, recovered);
+    }
+    changed
+}
+
+fn diagnostics_for_tree(
+    file: FileId,
+    text_len: usize,
+    tree: &Tree,
+    timed_out: Option<Duration>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    if let Some(timeout) = timed_out {
+        diagnostics.push(parse_timeout_diagnostic(file, text_len, timeout));
+        return diagnostics;
+    }
+    if !tree.root_node().has_error() {
+        return diagnostics;
+    }
+
+    // Walk the tree and emit one diagnostic per ERROR / MISSING node so the
+    // user sees exactly where the parser choked instead of a single opaque
+    // "syntax errors present" that points at the whole file. Diagnostics are
+    // exhaustive; presentation layers may paginate them but
+    // the compiler query never suppresses syntax facts.
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let is_error = node.is_error();
+        let is_missing = node.is_missing();
+        if is_error || is_missing {
+            let span = span_for_node(file, node);
+            let msg = if is_missing {
+                format!("missing `{}`", node.kind())
+            } else {
+                "syntax error".to_string()
+            };
+            diagnostics.push(Diagnostic::new(span, Severity::Warning, msg).with_code("syntax-error"));
+        }
+        if !is_error {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.has_error() || child.is_missing() {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    if diagnostics.is_empty() {
+        diagnostics.push(
+            Diagnostic::new(
+                file_span(file, text_len),
+                Severity::Warning,
+                "syntax errors present",
+            )
+            .with_code("syntax-error"),
+        );
+    }
+    diagnostics
 }
 
 /// Describe an arbitrary source change as one replacement spanning the first
@@ -534,28 +570,6 @@ fn file_span(file: FileId, text_len: usize) -> bonsai_common::Span {
 
 fn saturating_byte_offset(byte: usize) -> u64 {
     u64::try_from(byte).unwrap_or(u64::MAX)
-}
-
-/// Append a parser diagnostic up to `MAX_PARSE_NODE_DIAGNOSTICS`,
-/// counting the rest in `suppressed` for the trailing summary line.
-fn push_parser_diagnostic(diagnostics: &mut Vec<Diagnostic>, diagnostic: Diagnostic, suppressed: &mut usize) {
-    if diagnostics.len() < MAX_PARSE_NODE_DIAGNOSTICS {
-        diagnostics.push(diagnostic);
-    } else {
-        *suppressed += 1;
-    }
-}
-
-/// Trailing "(N more syntax errors suppressed)" diagnostic shown when
-/// parser diagnostics exceeded the per-file cap.
-fn suppression_summary_diagnostic(file: FileId, text_len: usize, suppressed: usize) -> Diagnostic {
-    let noun = if suppressed == 1 { "error" } else { "errors" };
-    Diagnostic::new(
-        file_span(file, text_len),
-        Severity::Warning,
-        format!("{suppressed} more syntax {noun} suppressed"),
-    )
-    .with_code("syntax-error")
 }
 
 /// File-level diagnostic for "this file timed out during parsing."

@@ -18,7 +18,7 @@ pub struct LanguageRegistry {
 #[derive(Default)]
 struct Inner {
     by_id: AHashMap<LanguageId, DynAdapter>,
-    by_ext: AHashMap<String, DynAdapter>,
+    by_ext: AHashMap<String, Vec<DynAdapter>>,
 }
 
 impl std::fmt::Debug for LanguageRegistry {
@@ -43,18 +43,43 @@ impl LanguageRegistry {
     /// declared file extension.
     pub fn register(&self, adapter: AdapterArc) {
         let mut inner = self.inner.write();
-        // Index by extension first so that extension-based dispatch is the
-        // common-path lookup; lowercase the keys so callers can match against
-        // a Path's raw extension without normalising.
+        // Preserve every adapter for ambiguous compiler extensions (`.h` is
+        // valid C or C++). Registration order is the deterministic tie-breaker
+        // used when both grammars parse a file equally well.
         for ext in adapter.file_extensions() {
-            inner.by_ext.insert((*ext).to_ascii_lowercase(), adapter.clone());
+            let candidates = inner.by_ext.entry((*ext).to_ascii_lowercase()).or_default();
+            if !candidates
+                .iter()
+                .any(|candidate| candidate.language_id() == adapter.language_id())
+            {
+                candidates.push(adapter.clone());
+            }
         }
         inner.by_id.insert(adapter.language_id(), adapter);
     }
 
     /// Look up an adapter by file extension. Case-insensitive.
+    ///
+    /// For an ambiguous extension this returns the first registered adapter;
+    /// database-backed source analysis uses [`Self::adapters_for_extension`]
+    /// and selects from the complete candidate set using concrete parse facts.
     pub fn adapter_for_extension(&self, ext: &str) -> Option<AdapterArc> {
-        self.inner.read().by_ext.get(&ext.to_ascii_lowercase()).cloned()
+        self.inner
+            .read()
+            .by_ext
+            .get(&ext.to_ascii_lowercase())
+            .and_then(|candidates| candidates.first())
+            .cloned()
+    }
+
+    /// Every adapter that claims `ext`, in deterministic registration order.
+    pub fn adapters_for_extension(&self, ext: &str) -> Vec<AdapterArc> {
+        self.inner
+            .read()
+            .by_ext
+            .get(&ext.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Look up an adapter by its registered language id.

@@ -50,6 +50,9 @@ fn repo_root() -> PathBuf {
 }
 
 fn bin_path() -> Option<PathBuf> {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_bonsai-ninja") {
+        return Some(PathBuf::from(path));
+    }
     let p = repo_root().join("target/release/bonsai-ninja");
     p.exists().then_some(p)
 }

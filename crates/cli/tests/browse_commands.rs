@@ -23,6 +23,9 @@ fn ws_path() -> PathBuf {
 }
 
 fn bin_path() -> Option<PathBuf> {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_bonsai-ninja") {
+        return Some(PathBuf::from(path));
+    }
     let p = repo_root().join("target/release/bonsai-ninja");
     if !p.exists() {
         eprintln!(
@@ -35,12 +38,11 @@ fn bin_path() -> Option<PathBuf> {
     Some(p)
 }
 
-/// Panic loudly if the release binary is older than the engine sources
-/// or the rulepack. These integration tests run `target/release/bonsai-
-/// ninja` (debug taint analysis is too slow), so a STALE release binary
-/// silently tests yesterday's behaviour and produces phantom failures
-/// that look like real regressions. Fail fast with the exact rebuild
-/// command instead. Runs once per test-binary process.
+/// Panic loudly if the fallback release binary is older than the engine
+/// sources or rulepack. Normal Cargo test runs use the exact executable from
+/// `CARGO_BIN_EXE_bonsai-ninja`; this protects only manual/nonstandard
+/// environments where that compile-time path is unavailable. Runs once per
+/// test-binary process.
 fn assert_release_binary_is_fresh(bin: &Path) {
     static CHECKED: OnceLock<()> = OnceLock::new();
     CHECKED.get_or_init(|| {
@@ -102,9 +104,9 @@ fn is_release_relevant_source(path: &Path) -> bool {
         .is_some_and(|name| matches!(name, "test.rs" | "tests.rs") || name.ends_with("_tests.rs"))
 }
 
-/// Run `bonsai-ninja` with `args` and `--no-color`. Returns `None` if the
-/// release binary hasn't been built yet (so the tests don't block
-/// `cargo test` when run before `cargo build --release`).
+/// Run Cargo's exact `bonsai-ninja` test executable with `args` and
+/// `--no-color`. Returns `None` only when neither that executable nor the
+/// manual release fallback is available.
 fn run(args: &[&str]) -> Option<String> {
     let bin = bin_path()?;
     let mut full: Vec<&str> = args.to_vec();

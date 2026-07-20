@@ -84,6 +84,10 @@ struct DbInner {
 
 #[derive(Default)]
 struct Caches {
+    /// Grammar selected for an extension-ambiguous source snapshot. The value
+    /// is a language id rather than an adapter Arc so registry ownership stays
+    /// centralized and cache serialization is never implied.
+    adapter_languages: AHashMap<(FileId, u64), bonsai_lang_api::LanguageId>,
     decl_index: AHashMap<(FileId, u64), Arc<DeclIndex>>,
     import_index: AHashMap<(FileId, u64), Arc<ImportIndex>>,
     /// CFGs are keyed on `(FuncId, file_version)` so an in-place edit
@@ -243,12 +247,59 @@ impl AnalyzerDb {
         self.inner.diagnostics.read().snapshot()
     }
 
-    /// Adapter responsible for `file`, looked up by extension.
-    /// `None` when the file extension isn't registered.
+    /// Adapter responsible for `file`.
+    ///
+    /// Most extensions have one grammar and take the constant-time registry
+    /// path. Ambiguous compiler extensions retain every candidate; each grammar
+    /// parses the exact snapshot and the tree with the least syntax damage
+    /// wins, with registration order as the deterministic tie-breaker. The
+    /// result is cached by `(FileId, version)` and invalidated with the file.
     pub fn adapter_for(&self, file: FileId) -> Option<DynAdapter> {
-        let path = self.inner.vfs.path(file).ok()?;
+        let snapshot = self.inner.vfs.snapshot(file).ok()?;
+        let path = &snapshot.path;
         let ext = path.extension()?.to_str()?;
-        self.inner.registry.adapter_for_extension(ext)
+        let candidates = self.inner.registry.adapters_for_extension(ext);
+        match candidates.as_slice() {
+            [] => None,
+            [only] => Some(only.clone()),
+            _ => {
+                let key = (file, snapshot.version);
+                if let Some(language) = self.inner.cache.read().adapter_languages.get(&key).copied() {
+                    return self.inner.registry.adapter(language);
+                }
+
+                let mut selected_index = 0usize;
+                let mut selected_score = (usize::MAX, usize::MAX);
+                for (index, adapter) in candidates.iter().enumerate() {
+                    let score = self
+                        .inner
+                        .parser
+                        .parse_snapshot(&snapshot, adapter, &self.inner.vfs)
+                        .map_or((usize::MAX, usize::MAX), |parsed| {
+                            bonsai_lang_api::syntax_damage_score(&parsed.tree)
+                        });
+                    if score < selected_score {
+                        selected_index = index;
+                        selected_score = score;
+                    }
+                }
+                let selected = candidates[selected_index].clone();
+                let language = {
+                    let mut cache = self.inner.cache.write();
+                    *cache
+                        .adapter_languages
+                        .entry(key)
+                        .or_insert_with(|| selected.language_id())
+                };
+                let selected = self.inner.registry.adapter(language)?;
+                for candidate in candidates {
+                    if candidate.language_id() != language {
+                        self.inner.parser.release(file, &candidate, &self.inner.vfs);
+                    }
+                }
+                Some(selected)
+            }
+        }
     }
 
     /// Adapter language ids whose tree-sitter lowering emits every field
@@ -790,6 +841,7 @@ impl AnalyzerDb {
             .unwrap_or_default();
         cache.decl_index.retain(|(f, _), _| *f != file);
         cache.import_index.retain(|(f, _), _| *f != file);
+        cache.adapter_languages.retain(|(f, _), _| *f != file);
         cache.global_index = None;
         // CFGs are keyed on `(FuncId, file_version)` (see `cfg`).
         // For a file EDIT the version naturally bumps and the next
