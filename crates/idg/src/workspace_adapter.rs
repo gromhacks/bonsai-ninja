@@ -26,7 +26,9 @@ use parking_lot::RwLock;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{path::Path, time::Instant};
 
-use crate::builder::{stitch_idg_from_segment_batches, CalleeResolver, ResolvedCallee};
+use crate::builder::{
+    stitch_idg_from_segment_batches, CalleeResolver, ResolvedCallee, ReverseLookupRetention,
+};
 use crate::transfer::{
     declared_receiver_names, receiver_name_matches, transfer_function_for_with_options_and_syntax_facts,
     TransferOptions, TransferOutput,
@@ -2191,7 +2193,43 @@ pub fn build_with_file_semantics_and_options<S>(
 where
     S: IdgFileSemanticsProvider,
 {
-    build_with_file_info_and_options_scoped(global, call_graph, semantics, transfer_options, None, None)
+    build_with_file_info_and_options_scoped(
+        global,
+        call_graph,
+        semantics,
+        transfer_options,
+        None,
+        None,
+        ReverseLookupRetention::Queryable,
+    )
+}
+
+/// Build a complete compiler IDG for immediate sidecar persistence.
+///
+/// This produces the same canonical nodes and edges as
+/// [`build_with_file_semantics_and_options`], but releases per-segment reverse
+/// dictionaries once endpoint resolution no longer needs them. The returned
+/// workspace is intended to be consumed by
+/// [`IdgWorkspace::save_into_disk`](crate::workspace::IdgWorkspace::save_into_disk);
+/// warm loads rebuild all query indexes from the canonical vectors.
+pub fn build_for_persistence_with_file_semantics_and_options<S>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    semantics: S,
+    transfer_options: &TransferOptions,
+) -> IdgWorkspace
+where
+    S: IdgFileSemanticsProvider,
+{
+    build_with_file_info_and_options_scoped(
+        global,
+        call_graph,
+        semantics,
+        transfer_options,
+        None,
+        None,
+        ReverseLookupRetention::SidecarOnly,
+    )
 }
 
 /// Build with per-file aliases, language ids, transfer options, and
@@ -2268,6 +2306,7 @@ where
         transfer_options,
         Some(&included_files),
         None,
+        ReverseLookupRetention::Queryable,
     )
 }
 
@@ -2322,6 +2361,7 @@ where
         transfer_options,
         Some(&included_files),
         Some(&included_funcs),
+        ReverseLookupRetention::Queryable,
     )
 }
 
@@ -2332,6 +2372,7 @@ fn build_with_file_info_and_options_scoped<S>(
     transfer_options: &TransferOptions,
     included_files: Option<&AHashSet<FileId>>,
     included_funcs: Option<&AHashSet<FuncId>>,
+    reverse_lookup_retention: ReverseLookupRetention,
 ) -> IdgWorkspace
 where
     S: IdgFileSemanticsProvider,
@@ -2555,6 +2596,7 @@ where
         transfer_options.include_field_argument_forwarding,
         transfer_options.symbolic_field_forwarding,
         symbolic_funcs.as_ref(),
+        reverse_lookup_retention,
     );
     stitch_declared_exception_hierarchy(&mut ws, &resolver);
     idg_build_log(format_args!(

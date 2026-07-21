@@ -656,7 +656,14 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
         include_field_argument_forwarding,
         symbolic_field_forwarding,
         symbolic_funcs,
+        ReverseLookupRetention::Queryable,
     )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReverseLookupRetention {
+    Queryable,
+    SidecarOnly,
 }
 
 /// Stitch lazily lowered segment batches without retaining every function's
@@ -669,6 +676,7 @@ pub(crate) fn stitch_idg_from_segment_batches<B, I>(
     include_field_argument_forwarding: bool,
     symbolic_field_forwarding: bool,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
+    reverse_lookup_retention: ReverseLookupRetention,
 ) -> IdgWorkspace
 where
     B: IntoIterator<Item = I>,
@@ -775,6 +783,13 @@ where
         endpoint_started.elapsed().as_secs_f64(),
         callee_endpoints.len()
     ));
+    if reverse_lookup_retention == ReverseLookupRetention::SidecarOnly {
+        // Endpoint resolution is the last phase that needs every segment's
+        // O(1) reverse dictionaries simultaneously. Canonical place/node
+        // vectors remain authoritative; later uncommon lookups scan them
+        // exactly, while new fallback nodes use small delta indexes.
+        ws.release_segment_build_lookups();
+    }
 
     let call_started = Instant::now();
     let collect_stats = stitch_debug_enabled();

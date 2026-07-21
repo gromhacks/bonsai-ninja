@@ -979,7 +979,7 @@ impl Workspace {
         }
         let path = callgraph_sidecar::callgraph_sidecar_path(root);
         let graph = self.cached_resolved_call_graph();
-        callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, &graph)
+        callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, graph)
     }
 
     /// Load the workspace IDG sidecar for `root` and seed the shared
@@ -1387,7 +1387,7 @@ impl Workspace {
         let global = self.inner.db.global_index();
         let transfer_options = default_workspace_idg_transfer_options(&self.inner.db);
         let semantics = bonsai_taint::compiler_idg_file_semantics(&self.inner.db);
-        let workspace = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options(
+        let workspace = bonsai_idg::workspace_adapter::build_for_persistence_with_file_semantics_and_options(
             global.as_ref(),
             call_graph.as_ref(),
             semantics,

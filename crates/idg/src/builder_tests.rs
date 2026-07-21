@@ -214,6 +214,44 @@ fn single_function_no_calls_creates_one_segment() {
 }
 
 #[test]
+fn sidecar_only_stitch_preserves_the_exact_canonical_graph() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["x".to_string()];
+    decl.flow_events = vec![FlowEvent::Return {
+        span: span(20, 30),
+        value_name: Some("x".to_string()),
+        value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("x"),
+    }];
+    let output = transfer_function_for(&decl);
+    let batches = || vec![vec![(SegmentId(0), vec![output.clone()])]];
+    let resolver = MockResolver::new();
+
+    let queryable = stitch_idg_from_segment_batches(
+        batches(),
+        1,
+        &resolver,
+        true,
+        false,
+        None,
+        ReverseLookupRetention::Queryable,
+    );
+    let sidecar_only = stitch_idg_from_segment_batches(
+        batches(),
+        1,
+        &resolver,
+        true,
+        false,
+        None,
+        ReverseLookupRetention::SidecarOnly,
+    );
+
+    let queryable_wire = bonsai_common::wire::encode(&queryable).expect("encode queryable IDG");
+    let sidecar_wire = bonsai_common::wire::encode(&sidecar_only).expect("encode sidecar IDG");
+    assert_eq!(sidecar_wire, queryable_wire);
+}
+
+#[test]
 fn receiver_consumers_follow_declared_metadata_not_identifier_spelling() {
     let mut caller = empty_decl(1, "caller");
     caller.params = vec!["obj".to_string()];

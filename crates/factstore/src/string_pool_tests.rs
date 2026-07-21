@@ -25,6 +25,21 @@ fn intern_dedupes_repeated_strings() {
 }
 
 #[test]
+fn released_builder_keeps_exact_lookup_and_delta_interning() {
+    let mut pool = StringPoolBuilder::new();
+    let existing = pool.intern("existing");
+    pool.release_lookup();
+
+    assert_eq!(pool.lookup("existing"), Some(existing));
+    assert_eq!(pool.intern("existing"), existing);
+    let added = pool.intern("added");
+    assert_eq!(pool.lookup("added"), Some(added));
+    assert_eq!(pool.intern("added"), added);
+    assert!(!pool.lookup_complete);
+    assert_eq!(pool.len(), 2);
+}
+
+#[test]
 fn builder_get_roundtrips_inserted_strings() {
     let mut pool = StringPoolBuilder::new();
     let a = pool.intern("alpha");

@@ -2,6 +2,49 @@ use super::*;
 use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{CallKind, DeclIndex, ModulePath, Visibility};
 
+#[test]
+fn compact_callgraph_wire_rebuilds_adjacency_and_provenance() {
+    assert!(std::mem::size_of::<EdgeProvenance>() <= 16);
+    let caller = FuncId::new(1);
+    let callee = FuncId::new(2);
+    let mut graph = CallGraph::new();
+    graph.add_edge(CallEdge {
+        from: caller,
+        to: callee,
+        span: Span::new(FileId::new(3), 10, 14),
+        kind: EdgeKind::Direct,
+        precision: Precision::Narrowed,
+        provenance: EdgeProvenance::receiver_dispatch(),
+    });
+
+    let encoded = bonsai_common::wire::encode(&graph).expect("encode compact callgraph");
+    let restored: CallGraph = bonsai_common::wire::decode(&encoded).expect("decode compact callgraph");
+    let edge = restored
+        .callees(caller)
+        .next()
+        .expect("deserialize rebuilds outgoing adjacency");
+    assert_eq!(edge.to, callee);
+    assert_eq!(edge.provenance.resolver_stage(), "receiver_type");
+    assert_eq!(edge.provenance.confidence(), 82);
+    assert_eq!(restored.callers(callee).count(), 1);
+}
+
+#[test]
+fn human_readable_provenance_keeps_the_public_json_contract() {
+    let provenance = EdgeProvenance::receiver_dispatch();
+    let value = serde_json::to_value(&provenance).expect("serialize provenance JSON");
+    assert_eq!(value["resolver_stage"], "receiver_type");
+    assert!(value["evidence"]
+        .as_str()
+        .is_some_and(|text| text.contains("receiver type")));
+    assert_eq!(value["confidence"], 82);
+    assert!(value.get("kind").is_none());
+    assert!(value.get("custom").is_none());
+
+    let restored: EdgeProvenance = serde_json::from_value(value).expect("deserialize provenance JSON");
+    assert_eq!(restored, provenance);
+}
+
 fn decl(file: FileId, local_symbol: u32, name: &str, flow_events: Vec<FlowEvent>) -> Decl {
     decl_with(file, local_symbol, name, DeclKind::Function, None, flow_events)
 }
@@ -257,9 +300,9 @@ fn direct_call_edges_carry_exact_symbol_provenance() {
         .find(|edge| edge.to == handler)
         .expect("entry -> handler edge");
 
-    assert_eq!(edge.provenance.resolver_stage, "exact_symbol");
-    assert!(edge.provenance.evidence.contains("unique callable"));
-    assert!(edge.provenance.confidence >= 90);
+    assert_eq!(edge.provenance.resolver_stage(), "exact_symbol");
+    assert!(edge.provenance.evidence().contains("unique callable"));
+    assert!(edge.provenance.confidence() >= 90);
 }
 
 #[test]
@@ -355,9 +398,9 @@ fn typed_receiver_edges_carry_receiver_type_provenance() {
         .find(|edge| edge.to == run)
         .expect("entry -> Service.run edge");
 
-    assert_eq!(edge.provenance.resolver_stage, "receiver_type");
-    assert!(edge.provenance.evidence.contains("receiver"));
-    assert!(edge.provenance.confidence >= 80);
+    assert_eq!(edge.provenance.resolver_stage(), "receiver_type");
+    assert!(edge.provenance.evidence().contains("receiver"));
+    assert!(edge.provenance.confidence() >= 80);
 }
 
 fn func_id_by_name_and_parent(global: &GlobalIndex, name: &str, parent_name: &str) -> FuncId {
@@ -2686,9 +2729,9 @@ fn receiver_projected_callable_binding_resolves_receiver_form_invocation() {
                 cg.callees_of(entry).collect::<Vec<_>>()
             )
         });
-    assert_eq!(edge.provenance.resolver_stage, "callable_value");
-    assert!(edge.provenance.evidence.contains("projected callable binding"));
-    assert!(edge.provenance.confidence >= 80);
+    assert_eq!(edge.provenance.resolver_stage(), "callable_value");
+    assert!(edge.provenance.evidence().contains("projected callable binding"));
+    assert!(edge.provenance.confidence() >= 80);
 }
 
 #[test]
@@ -2757,9 +2800,9 @@ fn receiver_projected_callable_binding_resolves_assignment_rhs_invocation() {
     let edge = cg.callees_of(entry).find(|edge| edge.to == handler).expect(
         "callable stored in receiver-projected storage should resolve when invoked in Assign::source_call",
     );
-    assert_eq!(edge.provenance.resolver_stage, "callable_value");
-    assert!(edge.provenance.evidence.contains("projected callable binding"));
-    assert!(edge.provenance.confidence >= 80);
+    assert_eq!(edge.provenance.resolver_stage(), "callable_value");
+    assert!(edge.provenance.evidence().contains("projected callable binding"));
+    assert!(edge.provenance.confidence() >= 80);
 }
 
 #[test]

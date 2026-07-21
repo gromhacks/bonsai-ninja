@@ -1790,9 +1790,9 @@ fn export_structural_callgraph(
             call_site_line,
             call_site_column,
             precision: export_precision_label(edge.precision),
-            resolver_stage: edge.provenance.resolver_stage.clone(),
-            evidence: edge.provenance.evidence.clone(),
-            confidence: edge.provenance.confidence,
+            resolver_stage: edge.provenance.resolver_stage().to_string(),
+            evidence: edge.provenance.evidence().to_string(),
+            confidence: edge.provenance.confidence(),
         });
     }
     out.sort_by(|a, b| {
@@ -1826,9 +1826,9 @@ fn export_taint_call_edges(ws: &Workspace) -> Vec<ExportCallEdge> {
             to: e.to.raw(),
             kind: format!("{:?}", e.kind).to_lowercase(),
             precision: format!("{:?}", e.precision).to_lowercase(),
-            resolver_stage: e.provenance.resolver_stage.clone(),
-            evidence: e.provenance.evidence.clone(),
-            confidence: e.provenance.confidence,
+            resolver_stage: e.provenance.resolver_stage().to_string(),
+            evidence: e.provenance.evidence().to_string(),
+            confidence: e.provenance.confidence(),
         })
         .collect();
     call_edges.sort_by(|a, b| a.from.cmp(&b.from).then_with(|| a.to.cmp(&b.to)));

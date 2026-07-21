@@ -12,12 +12,16 @@ use bonsai_db::AnalyzerDb;
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_hash::fnv1a_bytes64;
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+// v14 (2026-07-20): graph payloads stream directly and contain only compact
+// typed edges; numeric adjacency indexes are rebuilt after decode.
 // v13 (2026-07-18): metadata and graph payloads are independent factstore
 // entries, so freshness checks do not recursively decode millions of edges.
 // v12 (2026-07-16): MessagePack replaced the retired binary codec.
-pub const CALLGRAPH_CACHE_VERSION: u32 = 13;
+pub const CALLGRAPH_CACHE_VERSION: u32 = 14;
 
 const CALLGRAPH_TABLE_ID: u32 = 102;
 const METADATA_KEY: u64 = 0;
@@ -42,7 +46,7 @@ pub fn callgraph_sidecar_path(workspace_root: &Path) -> PathBuf {
 pub(crate) fn save_callgraph_sidecar(
     path: &Path,
     db: &AnalyzerDb,
-    graph: &ResolvedCallGraph,
+    graph: Arc<ResolvedCallGraph>,
 ) -> std::io::Result<()> {
     let metadata = CallgraphMetadata {
         version: CALLGRAPH_CACHE_VERSION,
@@ -59,11 +63,10 @@ pub(crate) fn save_callgraph_sidecar(
     writer
         .add_owned(METADATA_KEY, CALLGRAPH_CACHE_VERSION as u64, metadata_bytes)
         .map_err(factstore_io)?;
-    // Encode the borrowed graph directly. The v12 snapshot cloned the entire
-    // graph before allocating its wire buffer, doubling a large cold-build IR.
-    let graph_bytes = wire::encode(graph).map_err(invalid_wire)?;
     writer
-        .add_owned(GRAPH_KEY, CALLGRAPH_CACHE_VERSION as u64, graph_bytes)
+        .add_streamed(GRAPH_KEY, CALLGRAPH_CACHE_VERSION as u64, move |output| {
+            wire::encode_to_writer(output, graph.as_ref()).map_err(invalid_wire)
+        })
         .map_err(factstore_io)?;
     writer.finish().map_err(factstore_io)?;
     // The current artifact is durable before cleanup starts. Cache migration
@@ -198,19 +201,30 @@ fn open_sidecar(path: &Path) -> std::io::Result<(FactStoreReader, CallgraphMetad
 }
 
 fn decode_graph(reader: &FactStoreReader) -> std::io::Result<ResolvedCallGraph> {
-    let hit = reader.get(GRAPH_KEY).map_err(factstore_io)?.ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "callgraph sidecar graph payload is missing",
-        )
-    })?;
-    if hit.body_hash != CALLGRAPH_CACHE_VERSION as u64 {
+    let mut payload = reader
+        .payload_reader(GRAPH_KEY)
+        .map_err(factstore_io)?
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "callgraph sidecar graph payload is missing",
+            )
+        })?;
+    if payload.body_hash != CALLGRAPH_CACHE_VERSION as u64 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "callgraph sidecar graph body version mismatch",
         ));
     }
-    wire::decode(&hit.payload).map_err(invalid_wire)
+    let graph = wire::decode_from_reader(&mut payload).map_err(invalid_wire)?;
+    let mut trailing = [0u8; 1];
+    if payload.read(&mut trailing)? != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "callgraph sidecar graph payload has trailing bytes",
+        ));
+    }
+    Ok(graph)
 }
 
 fn validate_metadata(path: &Path, metadata: &CallgraphMetadata) -> std::io::Result<()> {
@@ -246,7 +260,7 @@ fn validate_metadata(path: &Path, metadata: &CallgraphMetadata) -> std::io::Resu
 
 fn metadata_pipeline_hash(metadata: &CallgraphMetadata) -> u64 {
     let mut hasher = bonsai_hash::Hasher::new();
-    hasher.absorb(b"bonsai-callgraph-sidecar-v13");
+    hasher.absorb(b"bonsai-callgraph-sidecar-v14");
     hasher.absorb_separator();
     hasher.absorb(&metadata.version.to_le_bytes());
     hasher.absorb(&metadata.matcher_policy_fingerprint.to_le_bytes());

@@ -182,9 +182,9 @@ pub(crate) fn edge_record_from_resolved_edge(
         call_text: call_text_for_edge(ws, caller_decl, edge).unwrap_or_else(|| callee_decl.name.clone()),
         kind: edge_kind_display(edge.kind).to_string(),
         precision: precision_display(edge.precision).to_string(),
-        resolver_stage: edge.provenance.resolver_stage.clone(),
-        evidence: edge.provenance.evidence.clone(),
-        confidence: edge.provenance.confidence,
+        resolver_stage: edge.provenance.resolver_stage().to_string(),
+        evidence: edge.provenance.evidence().to_string(),
+        confidence: edge.provenance.confidence(),
     })
 }
 

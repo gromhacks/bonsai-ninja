@@ -75,64 +75,248 @@ pub struct CallEdge {
 }
 
 /// Why the resolver accepted a call edge.
-///
-/// Kept as strings instead of a closed enum so downstream JSON stays
-/// forwards-compatible when new resolver stages land. `confidence` is a
-/// coarse 0-100 score for ranking/debugging; precision remains the formal
-/// lattice used by analysis.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EdgeProvenanceKind {
+    Unknown,
+    DirectSymbol,
+    ReceiverDispatch,
+    DeclarationFamily,
+    CallableBindingCall,
+    CallableBindingAssignment,
+    CallableArgument,
+    Custom,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct CustomEdgeProvenance {
+    resolver_stage: Box<str>,
+    evidence: Box<str>,
+    confidence: u8,
+}
+
+/// Compact compiler provenance for one resolved edge.
+///
+/// Production resolver stages are a closed numeric vocabulary. Rendering
+/// expands them to stable strings at the API boundary, so millions of edges do
+/// not each allocate identical stage/evidence strings. `Custom` remains
+/// available for diagnostic projections that intentionally carry novel text.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EdgeProvenance {
-    pub resolver_stage: String,
-    pub evidence: String,
-    pub confidence: u8,
+    kind: EdgeProvenanceKind,
+    custom: Option<Box<CustomEdgeProvenance>>,
+}
+
+#[derive(Serialize)]
+struct RenderedEdgeProvenance<'a> {
+    resolver_stage: &'a str,
+    evidence: &'a str,
+    confidence: u8,
+}
+
+#[derive(Deserialize)]
+struct RenderedEdgeProvenanceOwned {
+    resolver_stage: String,
+    evidence: String,
+    confidence: u8,
+}
+
+#[derive(Serialize)]
+struct CompactEdgeProvenance<'a> {
+    kind: EdgeProvenanceKind,
+    custom: &'a Option<Box<CustomEdgeProvenance>>,
+}
+
+#[derive(Deserialize)]
+struct CompactEdgeProvenanceOwned {
+    kind: EdgeProvenanceKind,
+    custom: Option<Box<CustomEdgeProvenance>>,
+}
+
+impl Serialize for EdgeProvenance {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            return RenderedEdgeProvenance {
+                resolver_stage: self.resolver_stage(),
+                evidence: self.evidence(),
+                confidence: self.confidence(),
+            }
+            .serialize(serializer);
+        }
+        CompactEdgeProvenance {
+            kind: self.kind,
+            custom: &self.custom,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for EdgeProvenance {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            let rendered = RenderedEdgeProvenanceOwned::deserialize(deserializer)?;
+            return Ok(Self::from_rendered(
+                rendered.resolver_stage,
+                rendered.evidence,
+                rendered.confidence,
+            ));
+        }
+        let compact = CompactEdgeProvenanceOwned::deserialize(deserializer)?;
+        Ok(Self {
+            kind: compact.kind,
+            custom: compact.custom,
+        })
+    }
 }
 
 impl Default for EdgeProvenance {
     fn default() -> Self {
-        Self::new("unknown", "legacy edge without resolver provenance", 0)
+        Self::known(EdgeProvenanceKind::Unknown)
     }
 }
 
 impl EdgeProvenance {
+    fn from_rendered(stage: String, evidence: String, confidence: u8) -> Self {
+        let known = match (stage.as_str(), evidence.as_str(), confidence) {
+            ("unknown", "legacy edge without resolver provenance", 0) => Some(EdgeProvenanceKind::Unknown),
+            ("exact_symbol", "unique callable resolved in caller visibility/module/import context", 90) => {
+                Some(EdgeProvenanceKind::DirectSymbol)
+            }
+            (
+                "receiver_type",
+                "receiver type, assigned receiver, or class ancestry evidence narrowed dispatch",
+                82,
+            ) => Some(EdgeProvenanceKind::ReceiverDispatch),
+            ("decl_family", "multiple candidates share a semantic declaration family", 72) => {
+                Some(EdgeProvenanceKind::DeclarationFamily)
+            }
+            (
+                "callable_value",
+                "local or receiver-projected callable binding matched call expression",
+                86,
+            ) => Some(EdgeProvenanceKind::CallableBindingCall),
+            (
+                "callable_value",
+                "local or receiver-projected callable binding matched assignment call",
+                86,
+            ) => Some(EdgeProvenanceKind::CallableBindingAssignment),
+            ("callable_value", "call argument resolved as callable reference", 86) => {
+                Some(EdgeProvenanceKind::CallableArgument)
+            }
+            _ => None,
+        };
+        known.map_or_else(|| Self::new(stage, evidence, confidence), Self::known)
+    }
+
     #[must_use]
     pub fn new(stage: impl Into<String>, evidence: impl Into<String>, confidence: u8) -> Self {
         Self {
-            resolver_stage: stage.into(),
-            evidence: evidence.into(),
-            confidence: confidence.min(100),
+            kind: EdgeProvenanceKind::Custom,
+            custom: Some(Box::new(CustomEdgeProvenance {
+                resolver_stage: stage.into().into_boxed_str(),
+                evidence: evidence.into().into_boxed_str(),
+                confidence: confidence.min(100),
+            })),
         }
     }
 
     #[must_use]
+    pub fn resolver_stage(&self) -> &str {
+        match self.kind {
+            EdgeProvenanceKind::Unknown => "unknown",
+            EdgeProvenanceKind::DirectSymbol => "exact_symbol",
+            EdgeProvenanceKind::ReceiverDispatch => "receiver_type",
+            EdgeProvenanceKind::DeclarationFamily => "decl_family",
+            EdgeProvenanceKind::CallableBindingCall
+            | EdgeProvenanceKind::CallableBindingAssignment
+            | EdgeProvenanceKind::CallableArgument => "callable_value",
+            EdgeProvenanceKind::Custom => self
+                .custom
+                .as_deref()
+                .map_or("custom", |custom| &custom.resolver_stage),
+        }
+    }
+
+    #[must_use]
+    pub fn evidence(&self) -> &str {
+        match self.kind {
+            EdgeProvenanceKind::Unknown => "legacy edge without resolver provenance",
+            EdgeProvenanceKind::DirectSymbol => {
+                "unique callable resolved in caller visibility/module/import context"
+            }
+            EdgeProvenanceKind::ReceiverDispatch => {
+                "receiver type, assigned receiver, or class ancestry evidence narrowed dispatch"
+            }
+            EdgeProvenanceKind::DeclarationFamily => {
+                "multiple candidates share a semantic declaration family"
+            }
+            EdgeProvenanceKind::CallableBindingCall => {
+                "local or receiver-projected callable binding matched call expression"
+            }
+            EdgeProvenanceKind::CallableBindingAssignment => {
+                "local or receiver-projected callable binding matched assignment call"
+            }
+            EdgeProvenanceKind::CallableArgument => "call argument resolved as callable reference",
+            EdgeProvenanceKind::Custom => self
+                .custom
+                .as_deref()
+                .map_or("custom resolver evidence", |custom| &custom.evidence),
+        }
+    }
+
+    #[must_use]
+    pub fn confidence(&self) -> u8 {
+        match self.kind {
+            EdgeProvenanceKind::Unknown => 0,
+            EdgeProvenanceKind::DirectSymbol => 90,
+            EdgeProvenanceKind::ReceiverDispatch => 82,
+            EdgeProvenanceKind::DeclarationFamily => 72,
+            EdgeProvenanceKind::CallableBindingCall
+            | EdgeProvenanceKind::CallableBindingAssignment
+            | EdgeProvenanceKind::CallableArgument => 86,
+            EdgeProvenanceKind::Custom => self.custom.as_deref().map_or(0, |custom| custom.confidence),
+        }
+    }
+
+    const fn known(kind: EdgeProvenanceKind) -> Self {
+        Self { kind, custom: None }
+    }
+
+    #[must_use]
     pub fn direct_symbol() -> Self {
-        Self::new(
-            "exact_symbol",
-            "unique callable resolved in caller visibility/module/import context",
-            90,
-        )
+        Self::known(EdgeProvenanceKind::DirectSymbol)
     }
 
     #[must_use]
     pub fn receiver_dispatch() -> Self {
-        Self::new(
-            "receiver_type",
-            "receiver type, assigned receiver, or class ancestry evidence narrowed dispatch",
-            82,
-        )
+        Self::known(EdgeProvenanceKind::ReceiverDispatch)
     }
 
     #[must_use]
-    pub fn callable_value(evidence: impl Into<String>) -> Self {
-        Self::new("callable_value", evidence, 86)
+    pub fn callable_value(evidence: impl AsRef<str>) -> Self {
+        let evidence = evidence.as_ref();
+        let kind = match evidence {
+            "local or receiver-projected callable binding matched call expression" => {
+                EdgeProvenanceKind::CallableBindingCall
+            }
+            "local or receiver-projected callable binding matched assignment call" => {
+                EdgeProvenanceKind::CallableBindingAssignment
+            }
+            "call argument resolved as callable reference" => EdgeProvenanceKind::CallableArgument,
+            _ => return Self::new("callable_value", evidence, 86),
+        };
+        Self::known(kind)
     }
 
     #[must_use]
     pub fn decl_family() -> Self {
-        Self::new(
-            "decl_family",
-            "multiple candidates share a semantic declaration family",
-            72,
-        )
+        Self::known(EdgeProvenanceKind::DeclarationFamily)
     }
 }
 
@@ -147,13 +331,30 @@ impl EdgeProvenance {
 /// resolver-driven build pipeline. `CallGraph` itself is exposed for
 /// callers that want to build edges from a different source (HIR
 /// walker, trace replay, fixture data).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct CallGraph {
     pub edges: Vec<CallEdge>,
     /// `caller → indices into `edges`` where the caller is `from`.
-    outgoing: AHashMap<FuncId, Vec<usize>>,
+    #[serde(skip)]
+    outgoing: AHashMap<FuncId, Vec<u32>>,
     /// `callee → indices into `edges`` where the callee is `to`.
-    incoming: AHashMap<FuncId, Vec<usize>>,
+    #[serde(skip)]
+    incoming: AHashMap<FuncId, Vec<u32>>,
+}
+
+#[derive(Deserialize)]
+struct CallGraphWire {
+    edges: Vec<CallEdge>,
+}
+
+impl<'de> Deserialize<'de> for CallGraph {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = CallGraphWire::deserialize(deserializer)?;
+        Ok(Self::from_unique_edges(wire.edges))
+    }
 }
 
 impl CallGraph {
@@ -169,7 +370,7 @@ impl CallGraph {
     pub fn add_edge(&mut self, edge: CallEdge) {
         if self.outgoing.get(&edge.from).is_some_and(|ids| {
             ids.iter().any(|&idx| {
-                let existing = &self.edges[idx];
+                let existing = &self.edges[idx as usize];
                 existing.to == edge.to
                     && existing.span.file == edge.span.file
                     && existing.span.start == edge.span.start
@@ -179,7 +380,7 @@ impl CallGraph {
         }) {
             return;
         }
-        let idx = self.edges.len();
+        let idx = u32::try_from(self.edges.len()).expect("callgraph overflow: > 2^32 edges");
         self.outgoing.entry(edge.from).or_default().push(idx);
         self.incoming.entry(edge.to).or_default().push(idx);
         self.edges.push(edge);
@@ -194,9 +395,14 @@ impl CallGraph {
     /// Reusing the flattened edge vector avoids both a second edge allocation
     /// and a second, potentially quadratic, per-caller duplicate scan.
     fn from_unique_edges(edges: Vec<CallEdge>) -> Self {
-        let mut outgoing: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
-        let mut incoming: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
+        assert!(
+            u32::try_from(edges.len()).is_ok(),
+            "callgraph overflow: > 2^32 edges"
+        );
+        let mut outgoing: AHashMap<FuncId, Vec<u32>> = AHashMap::new();
+        let mut incoming: AHashMap<FuncId, Vec<u32>> = AHashMap::new();
         for (idx, edge) in edges.iter().enumerate() {
+            let idx = idx as u32;
             outgoing.entry(edge.from).or_default().push(idx);
             incoming.entry(edge.to).or_default().push(idx);
         }
@@ -212,7 +418,7 @@ impl CallGraph {
         self.outgoing
             .get(&func)
             .into_iter()
-            .flat_map(move |ids| ids.iter().map(move |i| &self.edges[*i]))
+            .flat_map(move |ids| ids.iter().map(move |i| &self.edges[*i as usize]))
     }
 
     /// Edges where `func` is the callee.
@@ -220,7 +426,7 @@ impl CallGraph {
         self.incoming
             .get(&func)
             .into_iter()
-            .flat_map(move |ids| ids.iter().map(move |i| &self.edges[*i]))
+            .flat_map(move |ids| ids.iter().map(move |i| &self.edges[*i as usize]))
     }
 
     /// Depth-first reachability from `start`. Cycles are broken by a
@@ -238,7 +444,7 @@ impl CallGraph {
                 // Reverse so the first listed callee is popped first
                 // (stable pre-order regardless of edge insertion order).
                 for &idx in ids.iter().rev() {
-                    stack.push(self.edges[idx].to);
+                    stack.push(self.edges[idx as usize].to);
                 }
             }
         }

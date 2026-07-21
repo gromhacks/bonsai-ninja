@@ -1,7 +1,7 @@
 use super::*;
 use crate::format::INDEX_ENTRY_SIZE;
 use crate::writer::FactStoreWriter;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 fn write_test_store(path: &Path, table: u32, hash: u64, entries: &[(u64, u64, &[u8])]) {
     let w = FactStoreWriter::create(path, table, hash).expect("create");
@@ -39,6 +39,20 @@ fn get_returns_payload_for_known_key() {
     assert_eq!(ten.payload, b"ten");
     let thirty = r.get(30).expect("ok").expect("hit");
     assert_eq!(thirty.payload, b"thirty");
+}
+
+#[test]
+fn payload_reader_streams_one_bounded_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v.bin");
+    write_test_store(&path, 2, 0xDEAD, &[(10, 100, b"ten"), (20, 200, b"twenty")]);
+    let reader = FactStoreReader::open(&path, 2, 0xDEAD).expect("open");
+    let mut payload = reader.payload_reader(20).expect("ok").expect("hit");
+    assert_eq!(payload.body_hash, 200);
+    let mut decoded = String::new();
+    payload.read_to_string(&mut decoded).expect("stream payload");
+    assert_eq!(decoded, "twenty");
+    assert!(reader.payload_reader(30).expect("missing lookup").is_none());
 }
 
 #[test]

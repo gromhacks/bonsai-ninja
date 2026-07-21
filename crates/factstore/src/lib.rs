@@ -52,6 +52,6 @@ pub mod writer;
 pub use cache::{CacheGet, FactCache};
 pub use error::{FactStoreError, FactStoreResult};
 pub use format::{Header, IndexEntry, FORMAT_VERSION, HEADER_SIZE, INDEX_ENTRY_SIZE, MAGIC};
-pub use reader::{EntryIter, FactStoreReader, LookupHit};
+pub use reader::{EntryIter, FactStoreReader, LookupHit, PayloadReader};
 pub use string_pool::{StrId, StringPoolBuilder, StringPoolView};
 pub use writer::FactStoreWriter;
