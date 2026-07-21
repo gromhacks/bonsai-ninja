@@ -3066,6 +3066,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && stitch.contains("segment.release_build_lookups()")
             && stitch.contains("segment.rebuild_build_lookups()")
             && stitch.contains("remap_transfer_into_segment")
+            && stitch.contains("schedule_to_workspace")
             && stitch.contains("canonical_function_count")
             && stitch.contains("stitched_function_count")
             && stitch.contains("disable_cross_file_indexes()")

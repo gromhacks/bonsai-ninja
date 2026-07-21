@@ -1062,6 +1062,7 @@ where
     let mut ws = IdgWorkspace::new();
     ws.disable_cross_file_indexes();
     let mut callee_endpoints: AHashMap<FuncId, CalleeEndpoints> = AHashMap::with_capacity(function_count);
+    let mut schedule_to_workspace: AHashMap<SegmentId, SegmentId> = AHashMap::new();
     let mut previous_placeholder = None;
     let mut canonical_function_count = 0usize;
 
@@ -1088,9 +1089,10 @@ where
             }
             canonical_function_count = canonical_function_count.saturating_add(segment_funcs.len());
             let segment_id = ws.register_segment(segment);
-            assert_eq!(
-                segment_id, placeholder,
-                "canonical segment schedule must match registered segment ids"
+            assert!(
+                schedule_to_workspace.insert(placeholder, segment_id).is_none(),
+                "canonical segment schedule must not repeat segment {}",
+                placeholder.0
             );
             extend_callee_endpoints_for_segment(
                 segment_id,
@@ -1121,12 +1123,21 @@ where
     let mut stitched_function_count = 0usize;
     let mut previous_placeholder = None;
     for batch in stitch_batches {
-        for (segment_id, mut outputs) in batch {
+        for (scheduled_segment, mut outputs) in batch {
             debug_assert!(
-                previous_placeholder.is_none_or(|previous| previous < segment_id),
+                previous_placeholder.is_none_or(|previous| previous < scheduled_segment),
                 "stitch segment batches must be strictly ordered"
             );
-            previous_placeholder = Some(segment_id);
+            previous_placeholder = Some(scheduled_segment);
+            let segment_id = schedule_to_workspace
+                .get(&scheduled_segment)
+                .copied()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "stitch pass referenced unscheduled segment {}",
+                        scheduled_segment.0
+                    )
+                });
             outputs.sort_by_key(|out| out.func.raw());
             let Some(segment) = ws.segment_mut(segment_id) else {
                 panic!("stitch pass referenced missing segment {}", segment_id.0);
