@@ -2008,9 +2008,9 @@ fn push_edge_docs(ws: &Workspace, docs: &mut Vec<FactDoc>, pipeline: u64) {
             enclosing_class: class_name_for_decl(ws, caller).as_deref(),
             stable_ids: vec![edge_id],
             precision: Some(precision_label(edge.precision)),
-            resolver_stage: Some(edge.provenance.resolver_stage.as_str()),
-            provenance: Some(edge.provenance.evidence.as_str()),
-            confidence: Some(edge.provenance.confidence),
+            resolver_stage: Some(edge.provenance.resolver_stage()),
+            provenance: Some(edge.provenance.evidence()),
+            confidence: Some(edge.provenance.confidence()),
             static_limits: Vec::new(),
             incomplete_reasons: Vec::new(),
             search_parts: &[

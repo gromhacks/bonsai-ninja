@@ -38,7 +38,7 @@ pub type StrId = u32;
 /// `intern("foo")` returns a deterministic id: the first call inserts
 /// the string and returns a fresh id; subsequent calls return the same
 /// id without re-appending.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StringPoolBuilder {
     bytes: Vec<u8>,
     offsets: Vec<u32>,
@@ -47,6 +47,17 @@ pub struct StringPoolBuilder {
     /// after deserialise.
     #[serde(skip)]
     by_str: AHashMap<String, StrId>,
+    /// Whether `by_str` covers the complete canonical pool. When false it is
+    /// a small delta index for strings added after a compiler persistence
+    /// phase released the full reverse map.
+    #[serde(skip)]
+    lookup_complete: bool,
+}
+
+impl Default for StringPoolBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StringPoolBuilder {
@@ -59,6 +70,7 @@ impl StringPoolBuilder {
             bytes: Vec::new(),
             offsets: Vec::new(),
             by_str: AHashMap::new(),
+            lookup_complete: true,
         }
     }
 
@@ -70,6 +82,7 @@ impl StringPoolBuilder {
             bytes: Vec::with_capacity(byte_capacity),
             offsets: Vec::with_capacity(string_capacity),
             by_str: AHashMap::with_capacity(string_capacity),
+            lookup_complete: true,
         }
     }
 
@@ -82,6 +95,14 @@ impl StringPoolBuilder {
     pub fn intern(&mut self, s: &str) -> StrId {
         if let Some(&id) = self.by_str.get(s) {
             return id;
+        }
+        if !self.lookup_complete {
+            if let Some(id) = (0..self.offsets.len())
+                .map(|index| index as StrId)
+                .find(|id| self.get(*id) == Some(s))
+            {
+                return id;
+            }
         }
         let id_usize = self.offsets.len();
         let id = u32::try_from(id_usize).expect("string pool overflow: > 2^32 unique strings");
@@ -131,6 +152,7 @@ impl StringPoolBuilder {
                 self.by_str.insert(s.to_string(), id);
             }
         }
+        self.lookup_complete = true;
     }
 
     /// Release the build/query reverse index while retaining the canonical
@@ -142,13 +164,26 @@ impl StringPoolBuilder {
     /// pool rebuilds the same index through [`Self::rebuild_lookup`].
     pub fn release_lookup(&mut self) {
         self.by_str = AHashMap::new();
+        self.lookup_complete = false;
     }
 
-    /// Look up `name`, returning its id if already interned. O(1).
-    /// Distinct from [`Self::intern`] which always inserts on miss.
+    /// Look up `name`, returning its id if already interned.
+    ///
+    /// This is O(1) while the complete reverse index is present. A consumed
+    /// compiler build can release that index before persistence; lookups then
+    /// scan the canonical pool exactly and consult the small post-release
+    /// delta map before returning a miss.
     #[must_use]
     pub fn lookup(&self, name: &str) -> Option<StrId> {
-        self.by_str.get(name).copied()
+        if let Some(id) = self.by_str.get(name) {
+            return Some(*id);
+        }
+        if self.lookup_complete {
+            return None;
+        }
+        (0..self.offsets.len())
+            .map(|index| index as StrId)
+            .find(|id| self.get(*id) == Some(name))
     }
 
     /// Look up an id back to its string. O(1). Returns `None` for

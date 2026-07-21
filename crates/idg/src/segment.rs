@@ -148,6 +148,12 @@ impl IdgSegment {
         self.strings.release_lookup();
     }
 
+    pub(crate) fn release_build_lookups(&mut self) {
+        self.places.release_lookup();
+        self.nodes.release_lookup();
+        self.strings.release_lookup();
+    }
+
     /// True iff the segment carries no edges (and so contributes
     /// nothing to the workspace IDG even if its dictionaries are
     /// populated).

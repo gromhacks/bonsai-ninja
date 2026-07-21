@@ -25,6 +25,7 @@ use crate::error::{FactStoreError, FactStoreResult};
 use crate::format::{Header, IndexEntry, FORMAT_VERSION, HEADER_SIZE, INDEX_ENTRY_SIZE};
 use crate::string_pool::StringPoolView;
 use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 /// One looked-up entry.
@@ -41,6 +42,42 @@ pub struct LookupHit {
     pub body_hash: u64,
     /// Raw payload bytes, exactly as the writer encoded them.
     pub payload: Vec<u8>,
+}
+
+/// Bounded streaming view of one validated payload entry.
+///
+/// Reads remain positioned and therefore do not mutate a shared file cursor.
+/// The internal buffer amortizes decoder-sized reads without allocating a
+/// second whole payload for large compiler artifacts.
+pub struct PayloadReader<'a> {
+    /// Body hash recorded in the entry index.
+    pub body_hash: u64,
+    inner: BufReader<PositionedEntryReader<'a>>,
+}
+
+impl Read for PayloadReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+struct PositionedEntryReader<'a> {
+    file: &'a File,
+    offset: u64,
+    remaining: u64,
+}
+
+impl Read for PositionedEntryReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 || buf.is_empty() {
+            return Ok(0);
+        }
+        let len = usize::try_from(self.remaining.min(buf.len() as u64)).unwrap_or(buf.len());
+        read_exact_at(self.file, self.offset, &mut buf[..len])?;
+        self.offset = self.offset.saturating_add(len as u64);
+        self.remaining = self.remaining.saturating_sub(len as u64);
+        Ok(len)
+    }
 }
 
 /// Read-only view of a fact-store file.
@@ -214,6 +251,29 @@ impl FactStoreReader {
         Ok(Some(LookupHit {
             body_hash: entry.body_hash,
             payload: buf,
+        }))
+    }
+
+    /// Open one payload as a bounded buffered reader without first copying the
+    /// complete entry into a `Vec<u8>`.
+    pub fn payload_reader(&self, key: u64) -> FactStoreResult<Option<PayloadReader<'_>>> {
+        let count = self.header.index_count as usize;
+        let Some(row) = binary_search_index(&self.index_bytes, count, key) else {
+            return Ok(None);
+        };
+        let entry =
+            IndexEntry::from_bytes(&self.index_bytes[row * INDEX_ENTRY_SIZE..(row + 1) * INDEX_ENTRY_SIZE])
+                .ok_or(FactStoreError::BadIndexEntry { row })?;
+        Ok(Some(PayloadReader {
+            body_hash: entry.body_hash,
+            inner: BufReader::with_capacity(
+                64 * 1024,
+                PositionedEntryReader {
+                    file: &self.file,
+                    offset: entry.payload_offset,
+                    remaining: u64::from(entry.payload_len),
+                },
+            ),
         }))
     }
 

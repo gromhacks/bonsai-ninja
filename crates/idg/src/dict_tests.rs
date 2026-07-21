@@ -55,11 +55,26 @@ fn place_dict_rebuild_lookup_after_serde_roundtrip() {
     let id_param = d.intern(Place::Param { idx: 5 });
     let bytes = bonsai_common::wire::encode(&d).expect("serialize");
     let mut restored: PlaceDict = bonsai_common::wire::decode(&bytes).expect("deserialize");
-    // After deserialise, by_place is empty (skip). lookup returns None.
-    assert_eq!(restored.lookup(&Place::Return), None);
+    // The reverse map is skipped on the wire, but canonical-vector fallback
+    // keeps lookup exact until a warm reader rebuilds the O(1) index.
+    assert_eq!(restored.lookup(&Place::Return), Some(PlaceId(0)));
     restored.rebuild_lookup();
     assert_eq!(restored.lookup(&Place::Return), Some(PlaceId(0)));
     assert_eq!(restored.lookup(&Place::Param { idx: 5 }), Some(id_param));
+}
+
+#[test]
+fn place_dict_intern_after_wire_decode_uses_exact_delta_index() {
+    let mut original = PlaceDict::new();
+    let existing = original.intern(Place::Return);
+    let bytes = bonsai_common::wire::encode(&original).expect("serialize");
+    let mut restored: PlaceDict = bonsai_common::wire::decode(&bytes).expect("deserialize");
+
+    assert_eq!(restored.intern(Place::Return), existing);
+    let added = restored.intern(Place::Param { idx: 9 });
+    assert_eq!(restored.intern(Place::Param { idx: 9 }), added);
+    assert!(!restored.lookup_complete);
+    assert_eq!(restored.len(), 2);
 }
 
 #[test]
@@ -112,10 +127,24 @@ fn node_dict_rebuild_lookup_after_serde_roundtrip() {
     let b = d.intern(FuncId::new(8), PlaceId(11));
     let bytes = bonsai_common::wire::encode(&d).expect("serialize");
     let mut restored: NodeDict = bonsai_common::wire::decode(&bytes).expect("deserialize");
-    assert_eq!(restored.lookup(FuncId::new(7), PlaceId(11)), None);
+    assert_eq!(restored.lookup(FuncId::new(7), PlaceId(11)), Some(a));
     restored.rebuild_lookup();
     assert_eq!(restored.lookup(FuncId::new(7), PlaceId(11)), Some(a));
     assert_eq!(restored.lookup(FuncId::new(8), PlaceId(11)), Some(b));
+}
+
+#[test]
+fn node_dict_intern_after_wire_decode_uses_exact_delta_index() {
+    let mut original = NodeDict::new();
+    let existing = original.intern(FuncId::new(7), PlaceId(11));
+    let bytes = bonsai_common::wire::encode(&original).expect("serialize");
+    let mut restored: NodeDict = bonsai_common::wire::decode(&bytes).expect("deserialize");
+
+    assert_eq!(restored.intern(FuncId::new(7), PlaceId(11)), existing);
+    let added = restored.intern(FuncId::new(8), PlaceId(12));
+    assert_eq!(restored.intern(FuncId::new(8), PlaceId(12)), added);
+    assert!(!restored.lookup_complete);
+    assert_eq!(restored.len(), 2);
 }
 
 #[test]

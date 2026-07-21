@@ -421,6 +421,12 @@ impl IdgWorkspace {
         result
     }
 
+    pub(crate) fn release_segment_build_lookups(&mut self) {
+        for segment in &mut self.segments {
+            segment.release_build_lookups();
+        }
+    }
+
     /// Load a workspace IDG from `path`. Returns `Ok(None)` for missing
     /// files, version drift, or `pipeline_hash` mismatch — the caller
     /// rebuilds in those cases. Returns `Err` for genuine I/O / decode

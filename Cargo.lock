@@ -225,6 +225,7 @@ dependencies = [
  "bonsai_resolve",
  "rayon",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
