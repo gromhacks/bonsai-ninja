@@ -218,7 +218,7 @@ struct WorkspaceCalleeResolver<'a> {
     func_to_call_names: &'a AHashMap<FuncId, Vec<String>>,
     funcs_by_callback_name: &'a AHashMap<String, Vec<FuncId>>,
     file_to_directory: &'a AHashMap<FileId, String>,
-    call_edges_by_site: &'a CallSiteEdgeIndex,
+    included_funcs: &'a AHashMap<FuncId, SegmentId>,
     file_to_language: &'a AHashMap<FileId, &'static str>,
     class_symbols_by_name: &'a AHashMap<String, Vec<bonsai_common::SymbolId>>,
     class_symbols_by_name_scope: &'a AHashMap<(String, LocalScopeKey), Vec<bonsai_common::SymbolId>>,
@@ -239,13 +239,13 @@ struct WorkspaceCalleeResolver<'a> {
     /// without this fallback, lambda bodies are unreachable for adapters
     /// whose functional-invocation forms the callgraph doesn't model.
     local_callable_bindings: &'a AHashMap<FuncId, AHashMap<String, FuncId>>,
+    call_edge_site_cache: RwLock<Option<CallerCallSiteEdges>>,
     callback_cache: RwLock<AHashMap<(FuncId, u32), Vec<ResolvedCallee>>>,
     ancestor_dispatch_cache: RwLock<AHashMap<(FuncId, FuncId), bool>>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct IndexedCallSiteEdge {
-    caller: FuncId,
     site: bonsai_common::Span,
     edge: IndexedCallEdge,
 }
@@ -257,49 +257,39 @@ struct IndexedCallEdge {
     precision: bonsai_common::Precision,
 }
 
-/// Flat, sorted compiler index over exact AST call sites.
-///
-/// A hash map with one heap-allocated `Vec` per call site costs several
-/// times the edge payload on large projects. The immutable IDG build only
-/// needs exact-key lookup, so contiguous rows provide the same semantics with
-/// binary search and no per-site allocation.
-#[derive(Default)]
-struct CallSiteEdgeIndex {
+struct CallerCallSiteEdges {
+    caller: FuncId,
     rows: Vec<IndexedCallSiteEdge>,
 }
 
-impl CallSiteEdgeIndex {
+impl CallerCallSiteEdges {
     fn finish(&mut self) {
-        self.rows.sort_unstable_by_key(call_site_edge_sort_key);
+        self.rows.sort_unstable_by_key(caller_call_site_edge_sort_key);
         self.rows.dedup_by(|left, right| {
-            left.caller == right.caller
-                && left.site == right.site
+            left.site == right.site
                 && left.edge.to == right.edge.to
                 && left.edge.edge_kind == right.edge.edge_kind
                 && left.edge.precision == right.edge.precision
         });
     }
 
-    fn edges(&self, caller: FuncId, site: bonsai_common::Span) -> impl Iterator<Item = &IndexedCallEdge> {
-        let key = call_site_key(caller, site);
-        let start = self
-            .rows
-            .partition_point(|row| call_site_key(row.caller, row.site) < key);
-        let end =
-            self.rows[start..].partition_point(|row| call_site_key(row.caller, row.site) == key) + start;
-        self.rows[start..end].iter().map(|row| &row.edge)
+    fn rows_at_site(&self, site: bonsai_common::Span) -> &[IndexedCallSiteEdge] {
+        let key = call_site_key(site);
+        let start = self.rows.partition_point(|row| call_site_key(row.site) < key);
+        let end = self.rows[start..].partition_point(|row| call_site_key(row.site) == key) + start;
+        &self.rows[start..end]
     }
 
-    fn len(&self) -> usize {
-        self.rows.len()
+    fn edges(&self, site: bonsai_common::Span) -> impl Iterator<Item = &IndexedCallEdge> {
+        self.rows_at_site(site).iter().map(|row| &row.edge)
     }
 }
 
-fn call_site_key(caller: FuncId, site: bonsai_common::Span) -> (u32, u32, u64, u64) {
-    (caller.raw(), site.file.raw(), site.start, site.end)
+fn call_site_key(site: bonsai_common::Span) -> (u32, u64, u64) {
+    (site.file.raw(), site.start, site.end)
 }
 
-fn call_site_edge_sort_key(row: &IndexedCallSiteEdge) -> (u32, u32, u64, u64, u32, u8, u8) {
+fn caller_call_site_edge_sort_key(row: &IndexedCallSiteEdge) -> (u32, u64, u64, u32, u8, u8) {
     let edge_kind = match row.edge.edge_kind {
         bonsai_callgraph::EdgeKind::Direct => 0,
         bonsai_callgraph::EdgeKind::Virtual => 1,
@@ -307,7 +297,6 @@ fn call_site_edge_sort_key(row: &IndexedCallSiteEdge) -> (u32, u32, u64, u64, u3
         bonsai_callgraph::EdgeKind::Unknown => 3,
     };
     (
-        row.caller.raw(),
         row.site.file.raw(),
         row.site.start,
         row.site.end,
@@ -317,16 +306,25 @@ fn call_site_edge_sort_key(row: &IndexedCallSiteEdge) -> (u32, u32, u64, u64, u3
     )
 }
 
-fn call_edges_by_site_for_funcs(
+fn call_edges_for_caller(
     call_graph: &ResolvedCallGraph,
     global: &GlobalIndex,
     included_funcs: Option<&AHashMap<FuncId, SegmentId>>,
-) -> CallSiteEdgeIndex {
-    let mut out = CallSiteEdgeIndex::default();
-    for edge in &call_graph.inner().edges {
-        if included_funcs
-            .is_some_and(|funcs| !funcs.contains_key(&edge.from) || !funcs.contains_key(&edge.to))
-        {
+    caller: FuncId,
+) -> CallerCallSiteEdges {
+    let mut out = CallerCallSiteEdges {
+        caller,
+        rows: Vec::new(),
+    };
+    if included_funcs.is_some_and(|funcs| !funcs.contains_key(&caller)) {
+        return out;
+    }
+
+    let caller_symbol = bonsai_common::SymbolId::new(caller.raw());
+    let caller_decl = global.decl_of(caller_symbol);
+    let linkage_facts = global.linkage_facts(caller_symbol);
+    for edge in call_graph.callees_of(caller) {
+        if included_funcs.is_some_and(|funcs| !funcs.contains_key(&edge.to)) {
             continue;
         }
         let indexed = IndexedCallEdge {
@@ -334,50 +332,50 @@ fn call_edges_by_site_for_funcs(
             edge_kind: edge.kind,
             precision: edge.precision,
         };
-        let caller_symbol = bonsai_common::SymbolId::new(edge.from.raw());
-        let mapped_sites = if let Some(decl) = global.decl_of(caller_symbol) {
-            let target_decl = global.decl_of(bonsai_common::SymbolId::new(edge.to.raw()));
-            let target_name = target_decl.map(|target| target.name.as_str());
-            let target_is_constructor =
-                target_decl.is_some_and(|target| target.kind == DeclKind::Constructor);
-            if let Some(facts) = global.linkage_facts(caller_symbol) {
-                call_linkage_spans_matching_edge(&facts.calls, edge.span, target_name, target_is_constructor)
-            } else {
-                call_event_spans_matching_edge(
-                    &decl.flow_events,
-                    edge.span,
-                    target_name,
-                    target_is_constructor,
-                )
-            }
-        } else {
-            Vec::new()
-        };
+        let target_decl = global.decl_of(bonsai_common::SymbolId::new(edge.to.raw()));
+        let target_name = target_decl.map(|target| target.name.as_str());
+        let target_is_constructor = target_decl.is_some_and(|target| target.kind == DeclKind::Constructor);
+        let mapped_sites = caller_decl.map_or_else(Vec::new, |decl| {
+            linkage_facts.map_or_else(
+                || {
+                    call_event_spans_matching_edge(
+                        &decl.flow_events,
+                        edge.span,
+                        target_name,
+                        target_is_constructor,
+                    )
+                },
+                |facts| {
+                    call_linkage_spans_matching_edge(
+                        &facts.calls,
+                        edge.span,
+                        target_name,
+                        target_is_constructor,
+                    )
+                },
+            )
+        });
         if mapped_sites.is_empty() {
             // Some adapters intentionally omit a call event for a resolved
-            // graph edge. Preserve the resolver span as a fallback only when
-            // no AST event can own the edge.
-            push_call_edge_site(&mut out, edge.from, edge.span, indexed);
+            // graph edge. Preserve the resolver span only when no AST event
+            // can own the edge.
+            out.rows.push(IndexedCallSiteEdge {
+                site: edge.span,
+                edge: indexed,
+            });
         } else {
-            // Once the AST identifies an owning call event, indexing the raw
-            // resolver span as well is unsound: that span may cover a complete
-            // nested expression and therefore name a different host call.
-            for call_span in mapped_sites {
-                push_call_edge_site(&mut out, edge.from, call_span, indexed);
-            }
+            // Once the AST identifies an owning call event, the raw resolver
+            // span may cover a complete nested expression and must not also
+            // be attributed to its containing host call.
+            out.rows.extend(
+                mapped_sites
+                    .into_iter()
+                    .map(|site| IndexedCallSiteEdge { site, edge: indexed }),
+            );
         }
     }
     out.finish();
     out
-}
-
-fn push_call_edge_site(
-    out: &mut CallSiteEdgeIndex,
-    caller: FuncId,
-    site: bonsai_common::Span,
-    edge: IndexedCallEdge,
-) {
-    out.rows.push(IndexedCallSiteEdge { caller, site, edge });
 }
 
 fn call_event_spans_matching_edge(
@@ -598,9 +596,12 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         let mut out = Vec::new();
         let mut seen: ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind, bonsai_common::Precision)> =
             ahash::AHashSet::default();
-        let mut exact_edges = self.call_edges_by_site.edges(caller, site).peekable();
-        if exact_edges.peek().is_some() {
-            for edge in exact_edges {
+        let had_exact_edges = self.with_call_edges_at_site(caller, site, |exact_edges| {
+            if exact_edges.is_empty() {
+                return false;
+            }
+            for row in exact_edges {
+                let edge = row.edge;
                 if !edge.precision.is_semantic() {
                     continue;
                 }
@@ -630,7 +631,9 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                     Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.edge_kind, edge.precision);
                 }
             }
-        } else {
+            true
+        });
+        if !had_exact_edges {
             for edge in self.call_graph.callees_of(caller) {
                 if !call_site_spans_match(edge.span, site) {
                     continue;
@@ -848,6 +851,43 @@ impl WorkspaceCalleeResolver<'_> {
             .and_then(|file| self.file_to_directory.get(&file).map(String::as_str))
     }
 
+    /// Exact call-site ownership for one caller compiler unit.
+    ///
+    /// The stitcher consumes callers in function order, so retaining a
+    /// workspace-wide duplicate of every callgraph edge is unnecessary. The
+    /// cache is replaced when the caller changes; callback lookups may cause
+    /// an extra rebuild but never change the resolved fact set.
+    fn with_call_edges_at_site<R>(
+        &self,
+        caller: FuncId,
+        site: bonsai_common::Span,
+        visit: impl FnOnce(&[IndexedCallSiteEdge]) -> R,
+    ) -> R {
+        if let Some(hit) = self
+            .call_edge_site_cache
+            .read()
+            .as_ref()
+            .filter(|cache| cache.caller == caller)
+        {
+            return visit(hit.rows_at_site(site));
+        }
+
+        let rebuilt = self.call_edges_for_caller(caller);
+        let mut cache = self.call_edge_site_cache.write();
+        if cache.as_ref().is_none_or(|current| current.caller != caller) {
+            *cache = Some(rebuilt);
+        }
+        let rows = cache
+            .as_ref()
+            .filter(|cache| cache.caller == caller)
+            .map_or(&[][..], |cache| cache.rows_at_site(site));
+        visit(rows)
+    }
+
+    fn call_edges_for_caller(&self, caller: FuncId) -> CallerCallSiteEdges {
+        call_edges_for_caller(self.call_graph, self.global, Some(self.included_funcs), caller)
+    }
+
     fn callee_parent_is_declared_ancestor(&self, caller: FuncId, callee: FuncId) -> bool {
         let Some(caller_parent) = self
             .global
@@ -1009,23 +1049,21 @@ impl WorkspaceCalleeResolver<'_> {
             let Some(caller_decl) = self.global.decl_of(caller_symbol) else {
                 continue;
             };
+            let caller_edges = self.call_edges_for_caller(caller);
+            let site_targets_host = |span| caller_edges.edges(span).any(|edge| edge.to == host);
             let mut arg_spans = Vec::new();
             if let Some(facts) = self.global.linkage_facts(caller_symbol) {
                 collect_linkage_arg_spans_for_resolved_callee(
                     &facts.calls,
-                    caller,
-                    host,
                     param_idx as usize,
-                    self.call_edges_by_site,
+                    &site_targets_host,
                     &mut arg_spans,
                 );
             } else {
                 collect_arg_spans_for_resolved_callee(
                     &caller_decl.flow_events,
-                    caller,
-                    host,
                     param_idx as usize,
-                    self.call_edges_by_site,
+                    &site_targets_host,
                     &mut arg_spans,
                 );
             }
@@ -1965,20 +2003,15 @@ fn names_match_for_callee(decl_name: &str, event_name: &str) -> bool {
 /// source spelling is never reinterpreted as a symbol here.
 fn collect_arg_spans_for_resolved_callee(
     events: &[bonsai_lang_api::FlowEvent],
-    caller: FuncId,
-    host: FuncId,
     arg_idx: usize,
-    call_edges_by_site: &CallSiteEdgeIndex,
+    site_targets_host: &impl Fn(bonsai_common::Span) -> bool,
     out: &mut Vec<bonsai_common::Span>,
 ) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
             FlowEvent::Call { span, args, .. } => {
-                if call_edges_by_site
-                    .edges(caller, *span)
-                    .any(|edge| edge.to == host)
-                {
+                if site_targets_host(*span) {
                     if let Some(arg) = args.get(arg_idx) {
                         out.push(arg.span);
                     }
@@ -1989,22 +2022,8 @@ fn collect_arg_spans_for_resolved_callee(
                 else_events,
                 ..
             } => {
-                collect_arg_spans_for_resolved_callee(
-                    then_events,
-                    caller,
-                    host,
-                    arg_idx,
-                    call_edges_by_site,
-                    out,
-                );
-                collect_arg_spans_for_resolved_callee(
-                    else_events,
-                    caller,
-                    host,
-                    arg_idx,
-                    call_edges_by_site,
-                    out,
-                );
+                collect_arg_spans_for_resolved_callee(then_events, arg_idx, site_targets_host, out);
+                collect_arg_spans_for_resolved_callee(else_events, arg_idx, site_targets_host, out);
             }
             FlowEvent::Try {
                 body,
@@ -2012,26 +2031,12 @@ fn collect_arg_spans_for_resolved_callee(
                 finally_events,
                 ..
             } => {
-                collect_arg_spans_for_resolved_callee(body, caller, host, arg_idx, call_edges_by_site, out);
-                collect_arg_spans_for_resolved_callee(
-                    catch_events,
-                    caller,
-                    host,
-                    arg_idx,
-                    call_edges_by_site,
-                    out,
-                );
-                collect_arg_spans_for_resolved_callee(
-                    finally_events,
-                    caller,
-                    host,
-                    arg_idx,
-                    call_edges_by_site,
-                    out,
-                );
+                collect_arg_spans_for_resolved_callee(body, arg_idx, site_targets_host, out);
+                collect_arg_spans_for_resolved_callee(catch_events, arg_idx, site_targets_host, out);
+                collect_arg_spans_for_resolved_callee(finally_events, arg_idx, site_targets_host, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_arg_spans_for_resolved_callee(body, caller, host, arg_idx, call_edges_by_site, out);
+                collect_arg_spans_for_resolved_callee(body, arg_idx, site_targets_host, out);
             }
             _ => {}
         }
@@ -2040,17 +2045,12 @@ fn collect_arg_spans_for_resolved_callee(
 
 fn collect_linkage_arg_spans_for_resolved_callee(
     calls: &[CallLinkageFact],
-    caller: FuncId,
-    host: FuncId,
     arg_idx: usize,
-    call_edges_by_site: &CallSiteEdgeIndex,
+    site_targets_host: &impl Fn(bonsai_common::Span) -> bool,
     out: &mut Vec<bonsai_common::Span>,
 ) {
     for call in calls {
-        if call_edges_by_site
-            .edges(caller, call.span)
-            .any(|edge| edge.to == host)
-        {
+        if site_targets_host(call.span) {
             if let Some(arg_span) = call.arg_spans.get(arg_idx) {
                 out.push(*arg_span);
             }
@@ -2681,22 +2681,13 @@ where
         class_methods_by_parent.len(),
         class_method_count
     ));
-    let phase_started = Instant::now();
-    let call_edges_by_site = call_edges_by_site_for_funcs(call_graph, global, Some(&maps.func_to_seg));
-    let call_edge_site_count = call_edges_by_site.len();
-    idg_build_log(format_args!(
-        "call-edge site index: {:.3}s sites={} edges={}",
-        phase_started.elapsed().as_secs_f64(),
-        call_edges_by_site.len(),
-        call_edge_site_count
-    ));
     let resolver = WorkspaceCalleeResolver {
         call_graph,
         global,
         func_to_call_names: &func_to_call_names,
         funcs_by_callback_name: &maps.funcs_by_callback_name,
         file_to_directory: &maps.file_to_directory,
-        call_edges_by_site: &call_edges_by_site,
+        included_funcs: &maps.func_to_seg,
         file_to_language: &maps.file_to_language,
         class_symbols_by_name: &class_symbols_by_name,
         class_symbols_by_name_scope: &class_symbols_by_name_scope,
@@ -2704,6 +2695,7 @@ where
         class_constructors_by_parent: &class_constructors_by_parent,
         class_methods_by_parent: &class_methods_by_parent,
         local_callable_bindings: &local_callable_bindings,
+        call_edge_site_cache: RwLock::new(None),
         callback_cache: RwLock::new(AHashMap::new()),
         ancestor_dispatch_cache: RwLock::new(AHashMap::new()),
     };

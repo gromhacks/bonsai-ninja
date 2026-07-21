@@ -33,7 +33,9 @@ struct DeclDedupKey {
 pub struct FunctionLinkageFacts {
     pub calls: Vec<CallLinkageFact>,
     pub call_result_assignments: Vec<CallResultLinkageFact>,
+    pub returned_constructor_calls: Vec<ReturnedConstructorLinkageFact>,
     pub returned_projection_tails: Vec<Box<str>>,
+    pub has_summary_output: bool,
 }
 
 impl FunctionLinkageFacts {
@@ -41,7 +43,9 @@ impl FunctionLinkageFacts {
     pub fn is_empty(&self) -> bool {
         self.calls.is_empty()
             && self.call_result_assignments.is_empty()
+            && self.returned_constructor_calls.is_empty()
             && self.returned_projection_tails.is_empty()
+            && !self.has_summary_output
     }
 }
 
@@ -60,6 +64,16 @@ pub struct CallLinkageFact {
 pub struct CallResultLinkageFact {
     pub span: Span,
     pub has_explicit_args: bool,
+}
+
+/// A constructor expression proven by the adapter's AST lowering to feed a
+/// function return. Call resolution uses this compact compiler fact to type a
+/// later assignment without retaining the returned function body.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReturnedConstructorLinkageFact {
+    pub name: Box<str>,
+    pub receiver: Option<Box<str>>,
+    pub receiver_types: Box<[Box<str>]>,
 }
 
 impl From<&Decl> for DeclDedupKey {
@@ -173,11 +187,12 @@ impl GlobalIndex {
     /// needed while stitching a streamed IDG.
     ///
     /// Transfer still consumes the complete freshly lowered file body. The
-    /// retained facts are only calls, call-result assignment arity, and
-    /// returned projection tails: the exact information used for call-site
-    /// ownership, callback argument spans, receiver dispatch, and accessor
-    /// returns after per-function transfer outputs exist. No [`FlowEvent`]
-    /// body survives this compiler phase boundary.
+    /// retained facts are only calls, call-result assignment arity, returned
+    /// constructor identity, return presence, and returned projection tails:
+    /// the exact information used for call-site ownership, callback argument
+    /// spans, receiver dispatch, summary planning, and accessor returns after
+    /// per-function transfer outputs exist. No [`FlowEvent`] body survives
+    /// this compiler phase boundary.
     pub fn insert_linkage_header_preprocessed(&mut self, mut index: DeclIndex) {
         dedup_decl_index_defs(&mut index);
         let linkage = index
@@ -544,14 +559,93 @@ fn remap_decl_index_symbols(index: &mut DeclIndex, local_to_global: &AHashMap<Sy
 
 fn function_linkage_facts(events: &[FlowEvent]) -> FunctionLinkageFacts {
     let mut facts = FunctionLinkageFacts::default();
-    collect_function_linkage_facts(events, &mut facts);
+    let returned_call_sites = ReturnedCallSiteIndex::new(events);
+    collect_function_linkage_facts(events, &returned_call_sites, &mut facts);
     facts.calls.shrink_to_fit();
     facts.call_result_assignments.shrink_to_fit();
+    facts.returned_constructor_calls.sort_unstable();
+    facts.returned_constructor_calls.dedup();
+    facts.returned_constructor_calls.shrink_to_fit();
     facts.returned_projection_tails.shrink_to_fit();
     facts
 }
 
-fn collect_function_linkage_facts(events: &[FlowEvent], facts: &mut FunctionLinkageFacts) {
+struct ReturnedCallSiteRow {
+    span: Span,
+    prefix_max_end: u64,
+}
+
+struct ReturnedCallSiteIndex {
+    rows: Vec<ReturnedCallSiteRow>,
+}
+
+impl ReturnedCallSiteIndex {
+    fn new(events: &[FlowEvent]) -> Self {
+        let mut spans = Vec::new();
+        collect_return_call_sites(events, &mut spans);
+        spans.sort_unstable_by_key(|span| (span.file.raw(), span.start, span.end));
+        spans.dedup();
+
+        let mut rows = Vec::with_capacity(spans.len());
+        let mut current_file = None;
+        let mut prefix_max_end = 0;
+        for span in spans {
+            if current_file != Some(span.file) {
+                current_file = Some(span.file);
+                prefix_max_end = span.end;
+            } else {
+                prefix_max_end = prefix_max_end.max(span.end);
+            }
+            rows.push(ReturnedCallSiteRow { span, prefix_max_end });
+        }
+        Self { rows }
+    }
+
+    fn contains(&self, inner: Span) -> bool {
+        let file = inner.file.raw();
+        let file_start = self.rows.partition_point(|row| row.span.file.raw() < file);
+        let candidate_end = self.rows.partition_point(|row| {
+            row.span.file.raw() < file || (row.span.file == inner.file && row.span.start <= inner.start)
+        });
+        candidate_end > file_start && self.rows[candidate_end - 1].prefix_max_end >= inner.end
+    }
+}
+
+fn collect_return_call_sites(events: &[FlowEvent], out: &mut Vec<Span>) {
+    for event in events {
+        match event {
+            FlowEvent::Return { value_flow, .. } => out.extend(value_flow.call_sites.iter().copied()),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_return_call_sites(then_events, out);
+                collect_return_call_sites(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_return_call_sites(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_return_call_sites(body, out);
+                collect_return_call_sites(catch_events, out);
+                collect_return_call_sites(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_function_linkage_facts(
+    events: &[FlowEvent],
+    returned_call_sites: &ReturnedCallSiteIndex,
+    facts: &mut FunctionLinkageFacts,
+) {
     for event in events {
         match event {
             FlowEvent::Call {
@@ -560,18 +654,33 @@ fn collect_function_linkage_facts(events: &[FlowEvent], facts: &mut FunctionLink
                 receiver,
                 call_kind,
                 args,
-                ..
-            } => facts.calls.push(CallLinkageFact {
-                span: *span,
-                name: name.clone().into_boxed_str(),
-                receiver: receiver.as_deref().map(Box::<str>::from),
-                call_kind: *call_kind,
-                arg_spans: args
-                    .iter()
-                    .map(|arg| arg.span)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            }),
+                receiver_types,
+            } => {
+                facts.calls.push(CallLinkageFact {
+                    span: *span,
+                    name: name.clone().into_boxed_str(),
+                    receiver: receiver.as_deref().map(Box::<str>::from),
+                    call_kind: *call_kind,
+                    arg_spans: args
+                        .iter()
+                        .map(|arg| arg.span)
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                });
+                if matches!(call_kind, CallKind::Constructor) && returned_call_sites.contains(*span) {
+                    facts
+                        .returned_constructor_calls
+                        .push(ReturnedConstructorLinkageFact {
+                            name: name.clone().into_boxed_str(),
+                            receiver: receiver.as_deref().map(Box::<str>::from),
+                            receiver_types: receiver_types
+                                .iter()
+                                .map(|ty| ty.clone().into_boxed_str())
+                                .collect::<Vec<_>>()
+                                .into_boxed_slice(),
+                        });
+                }
+            }
             FlowEvent::Assign {
                 span,
                 source_call,
@@ -581,7 +690,18 @@ fn collect_function_linkage_facts(events: &[FlowEvent], facts: &mut FunctionLink
                 span: *span,
                 has_explicit_args: !source_call_args.is_empty(),
             }),
-            FlowEvent::Return { value_flow, .. } => {
+            FlowEvent::Return {
+                value_text,
+                value_name,
+                value_flow,
+                ..
+            } => {
+                facts.has_summary_output |= value_text
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    || value_name
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty());
                 if let Some(tail) = value_flow
                     .projection
                     .as_ref()
@@ -592,16 +712,21 @@ fn collect_function_linkage_facts(events: &[FlowEvent], facts: &mut FunctionLink
                         .push(tail.clone().into_boxed_str());
                 }
             }
+            FlowEvent::Yield { value_text, .. } => {
+                facts.has_summary_output |= value_text
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty());
+            }
             FlowEvent::Branch {
                 then_events,
                 else_events,
                 ..
             } => {
-                collect_function_linkage_facts(then_events, facts);
-                collect_function_linkage_facts(else_events, facts);
+                collect_function_linkage_facts(then_events, returned_call_sites, facts);
+                collect_function_linkage_facts(else_events, returned_call_sites, facts);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_function_linkage_facts(body, facts);
+                collect_function_linkage_facts(body, returned_call_sites, facts);
             }
             FlowEvent::Try {
                 body,
@@ -609,9 +734,9 @@ fn collect_function_linkage_facts(events: &[FlowEvent], facts: &mut FunctionLink
                 finally_events,
                 ..
             } => {
-                collect_function_linkage_facts(body, facts);
-                collect_function_linkage_facts(catch_events, facts);
-                collect_function_linkage_facts(finally_events, facts);
+                collect_function_linkage_facts(body, returned_call_sites, facts);
+                collect_function_linkage_facts(catch_events, returned_call_sites, facts);
+                collect_function_linkage_facts(finally_events, returned_call_sites, facts);
             }
             _ => {}
         }

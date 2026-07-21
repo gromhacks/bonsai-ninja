@@ -4761,6 +4761,20 @@ fn collect_constructed_return_type_names(
             push_unique_string(out, class_decl.name.clone());
         }
     }
+    if let Some(facts) = global.linkage_facts(decl.symbol) {
+        for returned in &facts.returned_constructor_calls {
+            for type_name in constructor_type_names_from_call_fact(
+                global,
+                decl,
+                alias_targets,
+                &returned.name,
+                returned.receiver.as_deref(),
+                &returned.receiver_types,
+            ) {
+                push_unique_string(out, type_name);
+            }
+        }
+    }
     let mut returned_call_sites = AHashSet::new();
     collect_return_expression_call_sites(&decl.flow_events, &mut returned_call_sites);
     collect_returned_constructor_type_names(
@@ -4903,14 +4917,18 @@ fn collect_returned_constructor_type_names(
     }
 }
 
-fn constructor_type_names_from_call_fact(
+fn constructor_type_names_from_call_fact<I, S>(
     global: &GlobalIndex,
     context_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     call_name: &str,
     receiver: Option<&str>,
-    receiver_types: &[String],
-) -> Vec<String> {
+    receiver_types: I,
+) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let Some(file) = caller_decl_file(global, context_decl) else {
         return Vec::new();
     };
@@ -4918,7 +4936,7 @@ fn constructor_type_names_from_call_fact(
     let mut class_symbols = Vec::new();
     let mut seen = AHashSet::new();
     for type_name in receiver_types {
-        for class_sym in resolve_class(global, type_name, &ctx) {
+        for class_sym in resolve_class(global, type_name.as_ref(), &ctx) {
             if seen.insert(class_sym) {
                 class_symbols.push(class_sym);
             }
@@ -5351,7 +5369,7 @@ fn collect_assigned_receiver_type_names(
                         alias_targets,
                         source_call,
                         None,
-                        &[],
+                        std::iter::empty::<&str>(),
                     ) {
                         push_assigned_receiver_type(out, best_distance, type_name, distance);
                     }

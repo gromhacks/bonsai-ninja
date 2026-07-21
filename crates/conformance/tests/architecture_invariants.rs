@@ -3034,7 +3034,11 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && function_body(&taint_idg, "build_resolved_call_graph_snapshot_scoped")
                 .contains("decl_index_remapped_to_headers")
             && !function_body(&taint_idg, "build_resolved_call_graph_snapshot_scoped")
-                .contains("global_index()"),
+                .contains("global_index()")
+            && function_body(&workspace, "source_reachable_resolved_call_graph")
+                .contains("build_with_file_semantics_for_files_streaming_with_context")
+            && function_body(&workspace, "source_reachable_resolved_call_graph")
+                .contains("decl_index_remapped_to_headers"),
         "callgraph construction must keep global declaration headers and stream exact per-file bodies"
     );
     assert!(
@@ -3044,7 +3048,14 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && function_body(&idg, "lower_transfer_segment_batch").contains("body_for_file")
             && function_body(&index, "insert_linkage_header_preprocessed")
                 .contains("decl.flow_events.clear()")
-            && function_body(&index, "insert_linkage_header_preprocessed").contains("function_linkage_facts"),
+            && function_body(&index, "insert_linkage_header_preprocessed").contains("function_linkage_facts")
+            && index.contains("pub has_summary_output: bool")
+            && index.contains("pub returned_constructor_calls: Vec<ReturnedConstructorLinkageFact>")
+            && function_body(&workspace, "has_summary_output").contains("linkage_facts")
+            && function_body(&workspace, "call_edge_passes_target_callback")
+                .contains("span_contains(*arg_span, *target_span)")
+            && !function_body(&workspace, "call_edge_passes_target_callback")
+                .contains("callable_reference_variants"),
         "IDG persistence must retain only linkage headers and lower exact file bodies at segment boundaries"
     );
     assert!(
@@ -3056,12 +3067,17 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         "symbolic IDG transforms must persist resolved AST argument/formal slots instead of reopening function bodies during queries"
     );
     assert!(
-        idg.contains("struct CallSiteEdgeIndex")
-            && function_body(&idg, "call_edges_by_site_for_funcs").contains("out.finish()")
-            && function_body(&idg, "edges").contains("partition_point")
+        idg.contains("struct CallerCallSiteEdges")
+            && idg.contains("call_edge_site_cache: RwLock<Option<CallerCallSiteEdges>>")
+            && function_body(&idg, "with_call_edges_at_site").contains("visit(hit.rows_at_site(site))")
+            && function_body(&idg, "call_edges_for_caller").contains("call_graph.callees_of(caller)")
+            && function_body(&idg, "call_edges_for_caller").contains("out.finish()")
+            && function_body(&idg, "rows_at_site").contains("partition_point")
+            && !idg.contains("struct CallSiteEdgeIndex")
+            && !idg.contains("call_edges_by_site_for_funcs")
             && !idg.contains("AHashMap<CallSiteEdgeKey")
             && !function_body(&idg, "finish").contains("shrink_to_fit"),
-        "exact call-site ownership must use one contiguous compiler index, not a heap allocation per call site"
+        "exact call-site ownership must be retained as a sorted compiler index for only the active caller unit"
     );
     let maps = struct_body(&idg, "WorkspaceMaps");
     for duplicate in [

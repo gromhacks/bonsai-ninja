@@ -248,9 +248,87 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
     assert_eq!(facts.call_result_assignments.len(), 1);
     assert!(facts.call_result_assignments[0].has_explicit_args);
     assert_eq!(&*facts.returned_projection_tails[0], "value");
+    assert!(facts.has_summary_output);
 
     global.remove_file(file);
     assert!(global.linkage_facts(symbol).is_none());
+}
+
+#[test]
+fn scalar_return_survives_as_a_compact_summary_fact() {
+    let file = FileId::new(23);
+    let mut function = decl(file, 1, "identity");
+    function.flow_events.push(FlowEvent::Return {
+        span: Span::new(file, 10, 22),
+        value_text: Some("input".to_string()),
+        value_name: Some("input".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("input"),
+    });
+
+    let mut global = GlobalIndex::new();
+    global.insert_linkage_header_preprocessed(DeclIndex {
+        file,
+        defs: vec![function],
+        ..DeclIndex::default()
+    });
+
+    let symbol = global.decls_in(file)[0].symbol;
+    let facts = global.linkage_facts(symbol).expect("scalar return linkage fact");
+    assert!(facts.has_summary_output);
+    assert!(facts.calls.is_empty());
+    assert!(facts.returned_projection_tails.is_empty());
+}
+
+#[test]
+fn returned_constructor_survives_as_a_compact_type_fact() {
+    let file = FileId::new(24);
+    let call_span = Span::new(file, 40, 43);
+    let return_span = Span::new(file, 40, 49);
+    let mut factory = decl(file, 1, "wrap");
+    factory.flow_events.extend([
+        FlowEvent::Call {
+            span: call_span,
+            name: "new".to_string(),
+            receiver: None,
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Constructor,
+            args: Vec::new(),
+        },
+        FlowEvent::Return {
+            span: return_span,
+            value_text: Some("new(data)".to_string()),
+            value_name: None,
+            value_flow: bonsai_lang_api::ExpressionFlow {
+                call_sites: vec![return_span],
+                ..Default::default()
+            },
+        },
+    ]);
+
+    let mut global = GlobalIndex::new();
+    global.insert_linkage_header_preprocessed(DeclIndex {
+        file,
+        defs: vec![factory],
+        ..DeclIndex::default()
+    });
+
+    let header = &global.decls_in(file)[0];
+    assert!(header.flow_events.is_empty());
+    let facts = global
+        .linkage_facts(header.symbol)
+        .expect("returned constructor linkage fact");
+    assert_eq!(facts.returned_constructor_calls.len(), 1);
+    let returned = &facts.returned_constructor_calls[0];
+    assert_eq!(&*returned.name, "new");
+    assert_eq!(returned.receiver, None);
+    assert_eq!(
+        returned
+            .receiver_types
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<&str>>(),
+        vec!["Repository"]
+    );
 }
 
 #[test]
