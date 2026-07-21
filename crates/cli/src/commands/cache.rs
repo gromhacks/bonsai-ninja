@@ -385,7 +385,7 @@ fn cache_rebuild(workspace: Option<std::path::PathBuf>, warm_export: bool) -> Re
     spin.finish();
 
     let spin = progress::ScopedSpinner::new("warming IDG sidecar");
-    let _ = workspace.build_and_seed_persisted_idg_service();
+    let _ = workspace.build_and_persist_idg_sidecar()?;
     spin.finish();
 
     let retrieval_sidecar = bonsai_retrieval::retrieval_sidecar_path(&workspace_root);

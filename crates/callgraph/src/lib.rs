@@ -1012,6 +1012,17 @@ fn sorted_slices_intersect(left: &[u32], right: &[u32]) -> bool {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ResolvedCallGraph {
     cg: CallGraph,
+    /// Deterministic metadata for graph endpoints. Persisting the node name
+    /// beside resolved edges lets later compiler phases consume a warm graph
+    /// without retaining or rebuilding every file's lowered declaration body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    nodes: Vec<CallGraphNode>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CallGraphNode {
+    func: FuncId,
+    name: Box<str>,
 }
 
 #[derive(Clone, Debug)]
@@ -1087,7 +1098,10 @@ impl ResolvedCallGraph {
     /// edge resolution from graph storage.
     #[must_use]
     pub fn from_call_graph(cg: CallGraph) -> Self {
-        Self { cg }
+        Self {
+            cg,
+            nodes: Vec::new(),
+        }
     }
 
     /// Build the workspace's resolved call graph from every decl's
@@ -1364,9 +1378,9 @@ impl ResolvedCallGraph {
                 Err(_) => file_infos.iter().flat_map(resolve_file).collect(),
             }
         };
-        Self {
-            cg: CallGraph::from_unique_edges(edges),
-        }
+        let cg = CallGraph::from_unique_edges(edges);
+        let nodes = callgraph_nodes(global, &cg);
+        Self { cg, nodes }
     }
 
     fn build_with_file_semantics_scoped<F, T, P, G, C>(
@@ -1418,6 +1432,39 @@ impl ResolvedCallGraph {
     pub fn inner(&self) -> &CallGraph {
         &self.cg
     }
+
+    /// Grammar-derived declaration name for a resolved graph endpoint.
+    ///
+    /// Production graphs persist this compact node table so consumers that
+    /// only need graph identity do not have to hydrate whole-file flow IR.
+    #[must_use]
+    pub fn node_name(&self, func: FuncId) -> Option<&str> {
+        self.nodes
+            .binary_search_by_key(&func.raw(), |node| node.func.raw())
+            .ok()
+            .map(|index| self.nodes[index].name.as_ref())
+    }
+}
+
+fn callgraph_nodes(global: &GlobalIndex, graph: &CallGraph) -> Vec<CallGraphNode> {
+    let mut funcs = Vec::with_capacity(graph.edges.len().saturating_mul(2));
+    for edge in &graph.edges {
+        funcs.push(edge.from);
+        funcs.push(edge.to);
+    }
+    funcs.sort_unstable_by_key(|func| func.raw());
+    funcs.dedup();
+    funcs
+        .into_iter()
+        .filter_map(|func| {
+            global
+                .decl_of(SymbolId::new(func.raw()))
+                .map(|decl| CallGraphNode {
+                    func,
+                    name: decl.name.clone().into_boxed_str(),
+                })
+        })
+        .collect()
 }
 
 fn callgraph_resolver_worker_count() -> usize {

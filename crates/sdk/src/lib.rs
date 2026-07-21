@@ -1870,7 +1870,7 @@ impl Cache<'_> {
         workspace.db().invalidate_idg_service();
         let _ = workspace.cached_resolved_call_graph();
         workspace.save_callgraph_sidecar(&self.project.root)?;
-        let _ = workspace.build_and_seed_persisted_idg_service();
+        let _ = workspace.build_and_persist_idg_sidecar()?;
         bonsai_retrieval::save_sidecar(workspace, &self.project.root)?;
         if warm_export {
             self.project.export().warm_default_json_cache()?;

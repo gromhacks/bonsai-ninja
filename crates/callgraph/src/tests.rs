@@ -403,6 +403,31 @@ fn typed_receiver_edges_carry_receiver_type_provenance() {
     assert!(edge.provenance.confidence() >= 80);
 }
 
+#[test]
+fn resolved_graph_persists_names_for_exact_edge_endpoints() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(file, 0, "entry", vec![call(file, "target")]),
+            decl(file, 1, "target", Vec::new()),
+        ],
+    );
+
+    let graph = build_graph(&global, |_| Some("fixture"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let target = FuncId::new(global.find_by_name("target")[0].raw());
+    assert_eq!(graph.node_name(entry), Some("entry"));
+    assert_eq!(graph.node_name(target), Some("target"));
+
+    let encoded = bonsai_common::wire::encode(&graph).expect("encode resolved graph");
+    let decoded: ResolvedCallGraph = bonsai_common::wire::decode(&encoded).expect("decode resolved graph");
+    assert_eq!(decoded.node_name(entry), Some("entry"));
+    assert_eq!(decoded.node_name(target), Some("target"));
+}
+
 fn func_id_by_name_and_parent(global: &GlobalIndex, name: &str, parent_name: &str) -> FuncId {
     let symbol = global
         .find_by_name(name)
