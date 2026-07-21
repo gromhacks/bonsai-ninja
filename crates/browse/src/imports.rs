@@ -134,7 +134,7 @@ impl WorkspaceModuleResolver {
             ahash::AHashMap::default();
         let mut path_by_file: ahash::AHashMap<bonsai_common::FileId, std::path::PathBuf> =
             ahash::AHashMap::default();
-        for file in ws.db().global_index().all_files() {
+        for file in ws.vfs().all_files() {
             let Ok(path) = ws.vfs().path(file) else { continue };
             path_by_file.insert(file, (*path).clone());
             let normalized = normalize_path_key(&path.to_string_lossy());
@@ -355,7 +355,7 @@ fn resolve_workspace_module_bindings(
             }
         }
     }
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     for file in resolved {
         for decl in global.decls_in(file) {
             if !matches!(
@@ -402,7 +402,7 @@ pub fn imports(ws: &Workspace, f: &ImportsFilters<'_>) -> Result<Vec<ImportOut>,
             {
                 return per_file.into_iter();
             }
-            let pairs: Vec<bonsai_lang_api::ImportSpec> = ws.db().imports_for(file_id);
+            let pairs: Vec<bonsai_lang_api::ImportSpec> = ws.db().imports_for_uncached(file_id);
             // Pre-index sibling ImportSpec entries by span so
             // Module-scope rows can carry every Local-scope binding
             // attached to the same import statement. JS / TS

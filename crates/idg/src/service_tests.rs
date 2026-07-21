@@ -251,6 +251,33 @@ fn empty_service_has_zero_segments() {
 }
 
 #[test]
+fn compact_function_node_lookup_is_exact_for_non_monotonic_node_insertion() {
+    let func = FuncId::new(7);
+    let mut segment = crate::segment::IdgSegment::new();
+    let param_zero = segment.intern_place(Place::Param { idx: 0 });
+    let return_place = segment.intern_place(Place::Return);
+    let param_one = segment.intern_place(Place::Param { idx: 1 });
+
+    // Deliberately intern nodes in a different order from their PlaceIds.
+    // Warm query lookup must derive ordering from compiler identities, not
+    // assume an adapter happened to emit nodes monotonically.
+    let return_node = segment.intern_node(func, return_place);
+    let param_one_node = segment.intern_node(func, param_one);
+    let param_zero_node = segment.intern_node(func, param_zero);
+    segment.record_func(func);
+
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+
+    assert_eq!(
+        service.param_nodes_of(func),
+        vec![WsNodeId(param_zero_node.0), WsNodeId(param_one_node.0)]
+    );
+    assert_eq!(service.return_node_of(func), Some(WsNodeId(return_node.0)));
+}
+
+#[test]
 fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges() {
     let caller = FuncId::new(1);
     let middle = FuncId::new(2);

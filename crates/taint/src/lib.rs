@@ -41,10 +41,11 @@ pub use reachable::{
     default_entry_taint_seed, entry_taint_call_records_from_idg, entry_taint_call_records_from_idg_query,
     entry_taint_graph_from_idg, entry_taint_graph_from_idg_query,
     inspect_entry_taint_graph_from_idg_with_target_funcs, merge_into, name_reachable_through_chain_kinded,
-    name_reachable_through_file_kinded, name_reachable_through_func_kinded,
-    source_seed_reaches_return_from_idg, source_seed_reaches_return_from_idg_query,
-    taint_facts_and_graph_for_entry, taint_facts_and_graph_for_entry_with_caches, taint_facts_for_entry,
-    EntryTaintGraph, FactKind, IdgSeedRequest, KindedTokens, TaintedCallEdge, TokenSet,
+    name_reachable_through_decl_kinded, name_reachable_through_file_kinded,
+    name_reachable_through_func_kinded, source_seed_reaches_return_from_idg,
+    source_seed_reaches_return_from_idg_query, taint_facts_and_graph_for_entry,
+    taint_facts_and_graph_for_entry_with_caches, taint_facts_for_entry, EntryTaintGraph, FactKind,
+    IdgSeedRequest, KindedTokens, TaintedCallEdge, TokenSet,
 };
 pub use value_flow::{
     value_flow_for_function, value_flow_for_function_with_caches, ProvenanceMarker, ProvenanceSet,

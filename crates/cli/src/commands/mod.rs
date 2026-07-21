@@ -95,25 +95,6 @@ pub(crate) fn open_project_dataflow_prewarm(root: &std::path::Path) -> Result<(P
     open_project_with_options(root, options)
 }
 
-pub(crate) fn open_project_semantic_prewarm(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
-    let probe = build_project_with_bonsai_and_options(
-        root,
-        bonsai_for_cli(),
-        bonsai_sdk::OpenOptions::sidecar_validation_only(),
-    )?;
-    if probe.cache().structural_sidecars_are_current()? {
-        probe.cache().warm_structural_sidecars()?;
-        return Ok((probe, WorkspaceFooter::new()));
-    }
-
-    // The semantic compiler phases below are themselves the exhaustive
-    // Tree-sitter validation/lowering passes. Reusing the snapshot-only probe
-    // avoids parsing every source file once merely to discard it before the
-    // header/callgraph/IDG passes parse their exact units.
-    probe.cache().warm_structural_sidecars()?;
-    Ok((probe, WorkspaceFooter::new()))
-}
-
 pub(crate) fn open_project_index_only(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
     open_project_with_options(root, bonsai_sdk::OpenOptions::query_only())
 }
@@ -193,6 +174,17 @@ pub(crate) fn open_project_streaming_parse_only(
     root: &std::path::Path,
 ) -> Result<(Project, WorkspaceFooter)> {
     open_project_with_options(root, bonsai_sdk::OpenOptions::streaming_parse_only())
+}
+
+/// Open only the compact workspace snapshot needed to validate or build one
+/// persisted semantic compiler phase. Internal semantic workers deliberately
+/// avoid a footer because the parent `index --semantic` command owns output.
+pub(crate) fn open_project_sidecar_validation_only(root: &std::path::Path) -> Result<Project> {
+    build_project_with_bonsai_and_options(
+        root,
+        bonsai_for_cli(),
+        bonsai_sdk::OpenOptions::sidecar_validation_only(),
+    )
 }
 
 pub(crate) fn open_project_index_only_with_rulepack(

@@ -41,8 +41,7 @@ pub(super) fn dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMat
     let entry = ws
         .enclosing_index()
         .enclosing_for(ws.db(), hit.span.file, hit.span.start)?;
-    let global = ws.db().global_index();
-    let decl = global.decl_of(entry.symbol)?;
+    let decl = ws.exact_decl(entry.symbol)?;
     let mut branches = Vec::new();
     collect_completed_branches_on_path(&decl.flow_events, hit.span, &mut branches);
     let guard = branches.into_iter().rev().find(|branch| {
@@ -105,8 +104,7 @@ pub(super) fn path_containment_guard_sanitizer(
     }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
     let file_index = ws.db().decl_index(snk.span.file)?;
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let mut branches = Vec::new();
     collect_following_branches_on_path(&decl.flow_events, snk.span, &mut branches);
     for branch in branches {
@@ -158,8 +156,7 @@ pub(super) fn python_compiled_regex_guard_sanitizer(
     if targets.is_empty() {
         return None;
     }
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
     let mut branches = Vec::new();
     collect_completed_branches_on_path(&decl.flow_events, snk.span, &mut branches);
@@ -350,8 +347,7 @@ fn path_containment_target_and_base(
     sink_rule: &Rule,
     guard: &PathContainmentGuardSemantics,
 ) -> Option<(String, String)> {
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let sink_target = sink_rule.match_spec.callee.as_ref()?;
     let target =
         containing_canonicalized_assignment_target(&decl.flow_events, snk.span, &guard.canonicalizer)?;
@@ -617,8 +613,7 @@ pub(super) fn python_lxml_parser_keyword_sanitizer(
     if snk.language != "python" || sink_rule.tag.as_deref() != Some("xxe") {
         return None;
     }
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let parser_arg = find_call_arg_named_at(&decl.flow_events, snk.span, "parser")?;
     let parser_var = clean_overwrite_target_key(&parser_arg.value_text)?;
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
@@ -677,8 +672,7 @@ pub(super) fn java_url_ssrf_guard_sanitizer(
     {
         return None;
     }
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
     let parsed_var = constructor_assignment_target_at(&decl.flow_events, snk.span)?;
     let mut branches = Vec::new();
@@ -770,8 +764,7 @@ pub(super) fn go_jwt_inline_keyfunc_algorithm_guard_sanitizer(
     {
         return None;
     }
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let mut calls = Vec::new();
     collect_structured_calls(&decl.flow_events, &mut calls);
     let parse_call = structured_call_at_match(&calls, snk.span, "parse")?;
@@ -906,8 +899,11 @@ pub(super) fn js_ts_local_html_escape_helper_sanitizer(
     {
         return None;
     }
-    let global = ws.db().global_index();
-    let sink_decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let file_index = ws.exact_decl_index(snk.span.file)?;
+    let sink_decl = file_index
+        .defs
+        .iter()
+        .find(|decl| decl.symbol == SymbolId::new(sink_func.raw()))?;
     let mut sink_calls = Vec::new();
     collect_structured_calls(&sink_decl.flow_events, &mut sink_calls);
     let sink_call = structured_call_at_match(&sink_calls, snk.span, "")?;
@@ -941,14 +937,13 @@ pub(super) fn js_ts_local_html_escape_helper_sanitizer(
         return None;
     }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let file_index = ws.db().decl_index(snk.span.file)?;
     let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&file_index.assignment_values);
-    let helper_decl = global
-        .decls_in(snk.span.file)
+    let helper_decl = file_index
+        .defs
         .iter()
         .find(|candidate| candidate.name == helper)?;
     let sanitizer_span = js_ts_html_escape_helper_span(
-        global.decls_in(snk.span.file),
+        &file_index.defs,
         helper_decl,
         &assignment_values,
         snapshot.text.as_ref(),
@@ -1066,8 +1061,11 @@ pub(super) fn java_local_html_escape_helper_return_sanitizer(
         return None;
     }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let file_index = ws.exact_decl_index(snk.span.file)?;
+    let decl = file_index
+        .defs
+        .iter()
+        .find(|decl| decl.symbol == SymbolId::new(sink_func.raw()))?;
     let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
     let targets: Vec<String> = sink_tainted_args
         .iter()
@@ -1079,8 +1077,8 @@ pub(super) fn java_local_html_escape_helper_return_sanitizer(
         else {
             continue;
         };
-        let Some((helper_decl, sanitizer_span)) = global
-            .decls_in(snk.span.file)
+        let Some((helper_decl, sanitizer_span)) = file_index
+            .defs
             .iter()
             .filter(|candidate| candidate.name == helper)
             .find_map(|candidate| java_html_sanitizer_return_span(candidate).map(|span| (candidate, span)))
@@ -1292,8 +1290,11 @@ pub(super) fn go_xml_decoder_hardening_sanitizer(
     {
         return None;
     }
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let file_index = ws.exact_decl_index(snk.span.file)?;
+    let decl = file_index
+        .defs
+        .iter()
+        .find(|decl| decl.symbol == SymbolId::new(sink_func.raw()))?;
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
     let decoder_var = assignment_target_for_source_call_at(&decl.flow_events, snk.span, "NewDecoder")?;
     let mut assignments = Vec::new();
@@ -1312,7 +1313,7 @@ pub(super) fn go_xml_decoder_hardening_sanitizer(
     let charset_assignment = assignments
         .iter()
         .find(|assignment| assignment.span.start > snk.span.start && assignment.target == charset_target)?;
-    let callback = global.decls_in(snk.span.file).iter().find(|candidate| {
+    let callback = file_index.defs.iter().find(|candidate| {
         candidate.span.start >= charset_assignment.span.start
             && candidate.span.end <= charset_assignment.span.end
             && candidate.params.len() >= 2
@@ -1915,9 +1916,11 @@ pub(super) fn local_ldap_escape_helper_sanitizer(
         return None;
     }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
-    let file_index = ws.db().decl_index(snk.span.file)?;
+    let file_index = ws.exact_decl_index(snk.span.file)?;
+    let decl = file_index
+        .defs
+        .iter()
+        .find(|decl| decl.symbol == SymbolId::new(sink_func.raw()))?;
     let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&file_index.assignment_values);
     let targets = ldap_tainted_filter_targets(sink_tainted_args);
     if targets.is_empty() {
@@ -1932,7 +1935,7 @@ pub(super) fn local_ldap_escape_helper_sanitizer(
                 continue;
             }
             if ldap_assignment_uses_verified_escape(
-                global.decls_in(snk.span.file),
+                &file_index.defs,
                 assignment,
                 &assignment_values,
                 snapshot.text.as_ref(),
@@ -2158,11 +2161,14 @@ pub(super) fn go_same_origin_redirect_helper_guard_sanitizer(
     if targets.is_empty() {
         return None;
     }
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let file_index = ws.exact_decl_index(snk.span.file)?;
+    let decl = file_index
+        .defs
+        .iter()
+        .find(|decl| decl.symbol == SymbolId::new(sink_func.raw()))?;
     let guard = find_go_same_origin_helper_guard(&decl.flow_events, snk.span, &targets)?;
-    let helper_decl = global
-        .decls_in(snk.span.file)
+    let helper_decl = file_index
+        .defs
         .iter()
         .find(|candidate| candidate.name == guard.helper)?;
     if !go_same_origin_helper_is_safe(helper_decl) {
@@ -2334,8 +2340,7 @@ pub(super) fn python_url_ssrf_guard_sanitizer(
         .filter(|arg| arg.index != usize::MAX)
         .find_map(|arg| clean_overwrite_target_key(&arg.value_text))?;
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let parsed_var = python_urlparse_assignment_var(&decl.flow_events, snk.span, &target)?;
     let mut branches = Vec::new();
     collect_all_structured_branches(&decl.flow_events, &mut branches);
@@ -2627,8 +2632,7 @@ pub(super) fn finite_literal_map_lookup_allowlist_sanitizer(
     let enclosing = ws
         .enclosing_index()
         .enclosing_for(ws.db(), sink.span.file, sink.span.start)?;
-    let global = ws.db().global_index();
-    let decl = global.decl_of(enclosing.symbol)?;
+    let decl = ws.exact_decl(enclosing.symbol)?;
     let mut file_assignments = Vec::new();
     for candidate in &file_index.defs {
         collect_structured_assignments_before(&candidate.flow_events, sink.span, &mut file_assignments);
@@ -2711,8 +2715,7 @@ pub(super) fn guarded_char_append_allowlist_sanitizer(
     if targets.is_empty() {
         return None;
     }
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     for target in targets {
         let mut scan = GuardedCharAppendScan::default();
         collect_guarded_char_append_writes(&decl.flow_events, sink.span, &target, None, &mut scan);

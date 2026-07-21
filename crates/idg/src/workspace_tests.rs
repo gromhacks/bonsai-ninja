@@ -225,6 +225,16 @@ fn save_load_round_trip_preserves_segments_and_indexes() {
     assert_eq!(restored.cross_file().len(), 1);
     assert_eq!(restored.cross_file().outgoing_from_segment(id_a).count(), 1);
     assert_eq!(restored.intra_edge_count(), 2);
+    let restored_a = restored.segment(id_a).expect("restored segment A");
+    let return_place = restored_a
+        .places
+        .lookup(&Place::Return)
+        .expect("compact canonical place lookup remains exact");
+    assert_eq!(
+        restored_a.nodes.lookup(FuncId::new(11), return_place),
+        Some(NodeId(1)),
+        "workspace sidecar lookups must remain exact without eager reverse hash tables"
+    );
 }
 
 #[test]

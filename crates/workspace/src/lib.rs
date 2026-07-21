@@ -35,7 +35,7 @@ use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
 use bonsai_hash::Hasher as StableHasher;
 use bonsai_index::GlobalIndex;
-use bonsai_lang_api::{Decl, DeclKind, FlowEvent, LanguageRegistry};
+use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FlowEvent, LanguageRegistry};
 use bonsai_taint::{InterTaintCaches, KindedTokens};
 use bonsai_trace::{finalize, FinalizeCtx, TraceQuery, TraceQueryKind, TraceResult};
 use bonsai_vfs::Vfs;
@@ -67,6 +67,25 @@ pub struct SourceReachableCallGraph {
     pub files: Vec<FileId>,
     pub funcs: Vec<FuncId>,
     pub reached_targets: usize,
+}
+
+/// One exact Tree-sitter-lowered declaration with ownership of its file IR.
+///
+/// The wrapper keeps the containing [`DeclIndex`] alive while exposing the
+/// selected declaration through [`std::ops::Deref`]. Compiler consumers can
+/// therefore inspect complete flow events without cloning a function body or
+/// retaining bodies for unrelated workspace files.
+pub struct ExactDecl {
+    file_index: DeclIndex,
+    position: usize,
+}
+
+impl std::ops::Deref for ExactDecl {
+    type Target = Decl;
+
+    fn deref(&self) -> &Self::Target {
+        &self.file_index.defs[self.position]
+    }
 }
 
 /// Conventional workspace IDG sidecar path under `<workspace>/.bonsai/`.
@@ -408,6 +427,12 @@ struct Inner {
     /// `dump callgraph` share the same instance instead of each
     /// rebuilding from scratch. Cleared on file edits.
     resolved_call_graph: parking_lot::RwLock<Option<Arc<bonsai_callgraph::ResolvedCallGraph>>>,
+    /// Compact declaration/type/linkage table for the current source snapshot.
+    /// This is the compiler's workspace symbol layer: exact file bodies are
+    /// lowered beside it and discarded after each consumer finishes. The IDG
+    /// owns the same table when present; this slot serves syntax/graph callers
+    /// that do not otherwise require an IDG. Cleared on file edits.
+    compiler_linkage: parking_lot::RwLock<Option<Arc<GlobalIndex>>>,
     /// Workspace-wide cache of `(source_func, seed_set) →
     /// EntryTaintGraph`. Lifted out of the per-invocation
     /// `build_findings_chain_aware` map so a second
@@ -764,6 +789,7 @@ impl Workspace {
                 value_flow: ValueFlowCache::new(),
                 inter_taint: Arc::new(InterTaintCaches::default()),
                 resolved_call_graph: parking_lot::RwLock::new(None),
+                compiler_linkage: parking_lot::RwLock::new(None),
                 taint_index: TaintGraphIndex::new(),
                 taint_analysis_serial: Mutex::new(()),
                 idg_default_build_serial: Mutex::new(()),
@@ -882,10 +908,12 @@ impl Workspace {
         if let Some(hit) = cached {
             return hit;
         }
-        let computed = Arc::new(bonsai_taint::name_reachable_through_func_kinded(
-            func,
-            &self.inner.db,
-        ));
+        let computed = Arc::new(
+            self.exact_decl(SymbolId::new(func.raw()))
+                .map_or_else(KindedTokens::default, |decl| {
+                    bonsai_taint::name_reachable_through_decl_kinded(&decl, &decl.file_index)
+                }),
+        );
         let mut map = self.inner.reachable_kinded.write();
         map.entry(func).or_insert(computed).clone()
     }
@@ -968,6 +996,54 @@ impl Workspace {
         callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, graph)
     }
 
+    /// Compact workspace-wide compiler linkage shared by call resolution and
+    /// the IDG. It contains stable declaration/type symbols and AST-derived
+    /// linkage summaries, but never retains every function body.
+    ///
+    /// Warm semantic commands reuse the linkage table already owned by the
+    /// validated IDG service. A caller without an IDG receives the same exact
+    /// table from a streamed Tree-sitter lowering pass.
+    #[must_use]
+    pub fn compiler_linkage_index(&self) -> Arc<GlobalIndex> {
+        if let Some(service) = self.inner.db.idg_service() {
+            return service.global_linkage_index();
+        }
+        if let Some(linkage) = self.inner.compiler_linkage.read().clone() {
+            return linkage;
+        }
+        let mut slot = self.inner.compiler_linkage.write();
+        if let Some(linkage) = slot.as_ref() {
+            return linkage.clone();
+        }
+        let linkage = self.inner.db.build_global_linkage_index();
+        *slot = Some(linkage.clone());
+        linkage
+    }
+
+    /// Re-lower one exact file body and bind its local declaration identities
+    /// to the stable workspace symbols in [`Self::compiler_linkage_index`].
+    #[must_use]
+    pub fn exact_decl_index(&self, file: FileId) -> Option<DeclIndex> {
+        let linkage = self.compiler_linkage_index();
+        self.inner
+            .db
+            .decl_index_remapped_to_headers(linkage.as_ref(), file)
+    }
+
+    /// Re-lower and return one exact declaration without materializing a
+    /// workspace-wide body index.
+    #[must_use]
+    pub fn exact_decl(&self, symbol: SymbolId) -> Option<ExactDecl> {
+        let linkage = self.compiler_linkage_index();
+        let file = linkage.declaring_file(symbol)?;
+        let file_index = self
+            .inner
+            .db
+            .decl_index_remapped_to_headers(linkage.as_ref(), file)?;
+        let position = file_index.defs.iter().position(|decl| decl.symbol == symbol)?;
+        Some(ExactDecl { file_index, position })
+    }
+
     /// Load the workspace IDG sidecar for `root` and seed the shared
     /// [`AnalyzerDb`] IDG service when the factstore is fresh. Returns
     /// the loaded segment count. Missing, stale, or version-mismatched
@@ -983,12 +1059,18 @@ impl Workspace {
             return Ok(None);
         }
         let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, Some(root));
+        // Build the compact AST/resolver linkage before hydrating the graph.
+        // Tree-sitter lowers one file at a time, but its C allocator may keep
+        // released parser arenas mapped. Loading a multi-gigabyte IDG first
+        // makes those transient frontend pages additive with the live graph.
+        // In this order the later IDG decode can reuse the released pages; the
+        // final service contains the exact same graph and linkage facts.
+        let global = self.compiler_linkage_index();
         let Some(loaded) = bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)?
         else {
             return Ok(None);
         };
         let segment_count = loaded.segment_count();
-        let global = self.inner.db.build_global_linkage_index();
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global));
         self.inner.db.set_idg_service(service);
         Ok(Some(segment_count))
@@ -1039,7 +1121,7 @@ impl Workspace {
         target_funcs: &[FuncId],
         max_precision: Option<Precision>,
     ) -> SourceReachableCallGraph {
-        let global = self.inner.db.build_global_linkage_index();
+        let global = self.compiler_linkage_index();
         let target_set: AHashSet<FuncId> = target_funcs.iter().copied().collect();
         let mut reached_funcs: AHashSet<FuncId> = source_funcs.iter().copied().collect();
         let mut reverse_output_funcs: AHashSet<FuncId> = source_funcs
@@ -1093,9 +1175,13 @@ impl Workspace {
             let batch_graph =
                 bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context(
                     global.as_ref(),
-                    |file| bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for(file)),
                     |file| {
-                        bonsai_lang_api::alias_map_from_import_specs(&self.inner.db.imports_for(file))
+                        bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for_uncached(file))
+                    },
+                    |file| {
+                        bonsai_lang_api::alias_map_from_import_specs(
+                            &self.inner.db.imports_for_uncached(file),
+                        )
                             .into_iter()
                             .collect()
                     },
@@ -1273,7 +1359,7 @@ impl Workspace {
         if let Some(svc) = self.inner.db.idg_service() {
             return svc;
         }
-        let global = self.inner.db.build_global_linkage_index();
+        let global = self.compiler_linkage_index();
         // The IDG references symbols by their global-index id, which
         // is content-derived: any file content change can renumber
         // ids in the new run. Folding a workspace-wide content
@@ -1380,7 +1466,7 @@ impl Workspace {
         let _build_guard = self.inner.idg_default_build_serial.lock();
         let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, Some(&root));
         let call_graph = self.cached_resolved_call_graph();
-        let global = self.inner.db.build_global_linkage_index();
+        let global = self.compiler_linkage_index();
         let transfer_options = default_workspace_idg_transfer_options(&self.inner.db);
         let semantics = bonsai_taint::compiler_idg_file_semantics(&self.inner.db);
         let workspace =
@@ -1418,7 +1504,7 @@ impl Workspace {
         if transfer_options.is_empty() {
             return self.build_and_seed_idg_service();
         }
-        let global = self.inner.db.global_index();
+        let global = self.compiler_linkage_index();
         let root_path = self.root_path();
         let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
         let pipeline_hash = idg_transfer_pipeline_hash(&self.inner.db, root_path.as_deref(), transfer_hash);
@@ -1447,11 +1533,16 @@ impl Workspace {
         let cg = self.cached_resolved_call_graph();
         let db = &self.inner.db;
         let semantics = bonsai_taint::compiler_idg_file_semantics(db);
-        let ws = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options(
+        let ws = bonsai_idg::workspace_adapter::build_streaming_with_file_semantics_and_options(
             global.as_ref(),
             cg.as_ref(),
             semantics,
             &transfer_options,
+            |file| {
+                self.inner
+                    .db
+                    .decl_index_remapped_to_headers(global.as_ref(), file)
+            },
         );
         if use_idg_sidecar {
             if let Some(root) = root_path.as_deref() {
@@ -1493,7 +1584,7 @@ impl Workspace {
         included_files: &[FileId],
     ) -> Arc<bonsai_idg::IdgQueryService> {
         let transfer_options = transfer_options.clone().canonicalized();
-        let global = self.inner.db.global_index();
+        let global = self.compiler_linkage_index();
         let root_path = self.root_path();
         let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
         let scope_hash = idg_file_scope_fingerprint(included_files);
@@ -1512,12 +1603,17 @@ impl Workspace {
         let cg = build_resolved_call_graph_snapshot_for_files(&self.inner.db, included_files);
         let db = &self.inner.db;
         let semantics = bonsai_taint::compiler_idg_file_semantics(db);
-        let ws = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options_for_files(
+        let ws = bonsai_idg::workspace_adapter::build_streaming_with_file_semantics_and_options_for_files(
             global.as_ref(),
             &cg,
             semantics,
             &transfer_options,
             included_files,
+            |file| {
+                self.inner
+                    .db
+                    .decl_index_remapped_to_headers(global.as_ref(), file)
+            },
         );
         if let Some(root) = root_path.as_deref() {
             let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
@@ -1570,16 +1666,21 @@ impl Workspace {
         call_graph: &bonsai_callgraph::ResolvedCallGraph,
     ) -> Arc<bonsai_idg::IdgQueryService> {
         let transfer_options = transfer_options.clone().canonicalized();
-        let global = self.inner.db.global_index();
+        let global = self.compiler_linkage_index();
         let db = &self.inner.db;
         let semantics = bonsai_taint::compiler_idg_file_semantics(db);
-        let ws = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options_for_files_and_funcs(
+        let ws = bonsai_idg::workspace_adapter::build_streaming_with_file_semantics_and_options_for_files_and_funcs(
             global.as_ref(),
             call_graph,
             semantics,
             &transfer_options,
             included_files,
             included_funcs,
+            |file| {
+                self.inner
+                    .db
+                    .decl_index_remapped_to_headers(global.as_ref(), file)
+            },
         );
         Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global))
     }
@@ -1664,6 +1765,7 @@ impl Workspace {
         self.delete_idg_sidecar();
         self.inner.inter_taint.clear();
         *self.inner.resolved_call_graph.write() = None;
+        *self.inner.compiler_linkage.write() = None;
         self.inner.taint_index.clear();
         self.inner.transitive_callers.clear();
         self.inner.class_members.clear();

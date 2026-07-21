@@ -21,9 +21,11 @@ pub(super) fn prototype_pollution_sink_is_guarded(
     {
         return false;
     }
-    let global = ws.db().global_index();
-    let Some(decl) = global
-        .decls_in(sink.span.file)
+    let Some(file_index) = ws.exact_decl_index(sink.span.file) else {
+        return false;
+    };
+    let Some(decl) = file_index
+        .defs
         .iter()
         .filter(|decl| span_contains(decl.body_span.unwrap_or(decl.span), sink.span))
         .min_by_key(|decl| decl.span.len())

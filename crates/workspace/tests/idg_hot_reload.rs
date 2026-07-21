@@ -31,6 +31,46 @@ fn write_file(dir: &Path, name: &str, content: &str) {
 }
 
 #[test]
+fn compiler_linkage_is_singleton_per_source_snapshot() {
+    let tmp = std::env::temp_dir().join(format!(
+        "bonsai-linkage-hot-reload-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp dir");
+    write_file(&tmp, "app.py", "def first(value):\n    return value\n");
+
+    let ws =
+        Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::query_only()).expect("open ws");
+    assert!(ws.db().idg_service().is_none());
+    let first = ws.compiler_linkage_index();
+    let reused = ws.compiler_linkage_index();
+    assert!(
+        Arc::ptr_eq(&first, &reused),
+        "compact compiler linkage must build once per unchanged snapshot"
+    );
+
+    write_file(
+        &tmp,
+        "app.py",
+        "def first(value):\n    return value\n\ndef second(value):\n    return first(value)\n",
+    );
+    ws.refresh_file_from_disk(&tmp.join("app.py")).expect("refresh");
+    let refreshed = ws.compiler_linkage_index();
+    assert!(
+        !Arc::ptr_eq(&first, &refreshed),
+        "a source edit must invalidate the compiler linkage snapshot"
+    );
+    assert!(refreshed.len() > first.len());
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn idg_service_invalidated_then_rebuilt_after_file_edit() {
     let tmp = std::env::temp_dir().join(format!(
         "bonsai-idg-hot-reload-{}-{}",

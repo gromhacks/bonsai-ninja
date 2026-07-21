@@ -2278,10 +2278,7 @@ where
         call_graph,
         semantics,
         transfer_options,
-        None,
-        None,
-        ReverseLookupRetention::Queryable,
-        None,
+        IdgBuildScope::queryable(None, None, None),
     )
 }
 
@@ -2303,10 +2300,7 @@ where
         call_graph,
         semantics,
         transfer_options,
-        None,
-        None,
-        ReverseLookupRetention::Queryable,
-        Some(&body_for_file),
+        IdgBuildScope::queryable(None, None, Some(&body_for_file)),
     )
 }
 
@@ -2332,10 +2326,7 @@ where
         call_graph,
         semantics,
         transfer_options,
-        None,
-        None,
-        ReverseLookupRetention::SidecarOnly,
-        None,
+        IdgBuildScope::sidecar(None),
     )
 }
 
@@ -2361,10 +2352,7 @@ where
         call_graph,
         semantics,
         transfer_options,
-        None,
-        None,
-        ReverseLookupRetention::SidecarOnly,
-        Some(&body_for_file),
+        IdgBuildScope::sidecar(Some(&body_for_file)),
     )
 }
 
@@ -2440,10 +2428,31 @@ where
         call_graph,
         semantics,
         transfer_options,
-        Some(&included_files),
-        None,
-        ReverseLookupRetention::Queryable,
-        None,
+        IdgBuildScope::queryable(Some(&included_files), None, None),
+    )
+}
+
+/// Build a file-scoped queryable IDG from compact workspace linkage and
+/// disposable exact file bodies.
+pub fn build_streaming_with_file_semantics_and_options_for_files<S, D>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    semantics: S,
+    transfer_options: &TransferOptions,
+    included_files: &[FileId],
+    body_for_file: D,
+) -> IdgWorkspace
+where
+    S: IdgFileSemanticsProvider,
+    D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+{
+    let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
+    build_with_file_info_and_options_scoped(
+        global,
+        call_graph,
+        semantics,
+        transfer_options,
+        IdgBuildScope::queryable(Some(&included_files), None, Some(&body_for_file)),
     )
 }
 
@@ -2496,28 +2505,86 @@ where
         call_graph,
         semantics,
         transfer_options,
-        Some(&included_files),
-        Some(&included_funcs),
-        ReverseLookupRetention::Queryable,
-        None,
+        IdgBuildScope::queryable(Some(&included_files), Some(&included_funcs), None),
+    )
+}
+
+/// Build a file/function-scoped queryable IDG from compact workspace linkage
+/// and disposable exact file bodies.
+#[allow(clippy::too_many_arguments)]
+pub fn build_streaming_with_file_semantics_and_options_for_files_and_funcs<S, D>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    semantics: S,
+    transfer_options: &TransferOptions,
+    included_files: &[FileId],
+    included_funcs: &[FuncId],
+    body_for_file: D,
+) -> IdgWorkspace
+where
+    S: IdgFileSemanticsProvider,
+    D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+{
+    let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
+    let included_funcs: AHashSet<FuncId> = included_funcs.iter().copied().collect();
+    build_with_file_info_and_options_scoped(
+        global,
+        call_graph,
+        semantics,
+        transfer_options,
+        IdgBuildScope::queryable(Some(&included_files), Some(&included_funcs), Some(&body_for_file)),
     )
 }
 
 type FileBodyProvider<'a> = dyn Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync + 'a;
+
+struct IdgBuildScope<'a> {
+    included_files: Option<&'a AHashSet<FileId>>,
+    included_funcs: Option<&'a AHashSet<FuncId>>,
+    reverse_lookup_retention: ReverseLookupRetention,
+    body_for_file: Option<&'a FileBodyProvider<'a>>,
+}
+
+impl<'a> IdgBuildScope<'a> {
+    fn queryable(
+        included_files: Option<&'a AHashSet<FileId>>,
+        included_funcs: Option<&'a AHashSet<FuncId>>,
+        body_for_file: Option<&'a FileBodyProvider<'a>>,
+    ) -> Self {
+        Self {
+            included_files,
+            included_funcs,
+            reverse_lookup_retention: ReverseLookupRetention::Queryable,
+            body_for_file,
+        }
+    }
+
+    fn sidecar(body_for_file: Option<&'a FileBodyProvider<'a>>) -> Self {
+        Self {
+            included_files: None,
+            included_funcs: None,
+            reverse_lookup_retention: ReverseLookupRetention::SidecarOnly,
+            body_for_file,
+        }
+    }
+}
 
 fn build_with_file_info_and_options_scoped<S>(
     global: &GlobalIndex,
     call_graph: &ResolvedCallGraph,
     mut semantics: S,
     transfer_options: &TransferOptions,
-    included_files: Option<&AHashSet<FileId>>,
-    included_funcs: Option<&AHashSet<FuncId>>,
-    reverse_lookup_retention: ReverseLookupRetention,
-    body_for_file: Option<&FileBodyProvider<'_>>,
+    scope: IdgBuildScope<'_>,
 ) -> IdgWorkspace
 where
     S: IdgFileSemanticsProvider,
 {
+    let IdgBuildScope {
+        included_files,
+        included_funcs,
+        reverse_lookup_retention,
+        body_for_file,
+    } = scope;
     let total_started = Instant::now();
     let phase_started = Instant::now();
     let maps =

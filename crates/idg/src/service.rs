@@ -615,6 +615,16 @@ impl IdgQueryService {
         self.workspace.segment_count()
     }
 
+    /// Compact Tree-sitter/resolver linkage retained with this query service.
+    ///
+    /// Broad compiler consumers can use these stable declaration/type headers
+    /// while streaming exact file bodies, instead of materializing a second
+    /// workspace-wide body index beside the IDG.
+    #[must_use]
+    pub fn global_linkage_index(&self) -> Arc<GlobalIndex> {
+        Arc::clone(&self.global)
+    }
+
     /// Number of intra-segment edges across all segments.
     #[must_use]
     pub fn intra_edge_count(&self) -> usize {
@@ -1191,7 +1201,7 @@ impl IdgQueryService {
                 continue;
             }
             let pid = crate::node::PlaceId(pid_idx as u32);
-            if let Some(local_node) = segment.nodes.lookup(func, pid) {
+            if let Some(local_node) = self.local_node_for(&unified, seg_id, func, pid) {
                 if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
                     out.push(ws_node);
                 }
@@ -1242,7 +1252,7 @@ impl IdgQueryService {
                 continue;
             };
             let pid = crate::node::PlaceId(pid_idx as u32);
-            let Some(local_node) = segment.nodes.lookup(func, pid) else {
+            let Some(local_node) = self.local_node_for(&unified, seg_id, func, pid) else {
                 continue;
             };
             let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) else {
@@ -1294,7 +1304,7 @@ impl IdgQueryService {
             let Some(pid) = segment.places.lookup(&place) else {
                 continue;
             };
-            let Some(local_node) = segment.nodes.lookup(func, pid) else {
+            let Some(local_node) = self.local_node_for(&unified, seg_id, func, pid) else {
                 continue;
             };
             if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
@@ -1322,7 +1332,7 @@ impl IdgQueryService {
                 continue;
             };
             let pid = crate::node::PlaceId(pid_idx as u32);
-            let Some(local_node) = segment.nodes.lookup(func, pid) else {
+            let Some(local_node) = self.local_node_for(&unified, seg_id, func, pid) else {
                 continue;
             };
             if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
@@ -1404,7 +1414,7 @@ impl IdgQueryService {
                 continue;
             }
             let pid = crate::node::PlaceId(pid_idx as u32);
-            if let Some(local_node) = segment.nodes.lookup(func, pid) {
+            if let Some(local_node) = self.local_node_for(&unified, seg_id, func, pid) {
                 if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
                     out.push(ws_node);
                     local_seeds.push(local_node);
@@ -1498,7 +1508,7 @@ impl IdgQueryService {
                 continue;
             }
             let pid = crate::node::PlaceId(pid_idx as u32);
-            if let Some(local_node) = segment.nodes.lookup(func, pid) {
+            if let Some(local_node) = self.local_node_for(&unified, seg_id, func, pid) {
                 if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
                     out.push(ws_node);
                 }
@@ -1729,7 +1739,7 @@ impl IdgQueryService {
                 continue;
             }
             let pid = crate::node::PlaceId(pid_idx as u32);
-            let local_node = segment.nodes.lookup(func, pid)?;
+            let local_node = self.local_node_for(&unified, seg_id, func, pid)?;
             return Self::ws_node_for(&unified, seg_id, local_node);
         }
         None
@@ -1757,7 +1767,7 @@ impl IdgQueryService {
                 continue;
             }
             let pid = crate::node::PlaceId(pid_idx as u32);
-            if let Some(local_node) = segment.nodes.lookup(func, pid) {
+            if let Some(local_node) = self.local_node_for(&unified, seg_id, func, pid) {
                 if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
                     out.push(ws_node);
                 }
@@ -1791,7 +1801,7 @@ impl IdgQueryService {
                 continue;
             }
             let pid = crate::node::PlaceId(pid_idx as u32);
-            ret_node = segment.nodes.lookup(func, pid);
+            ret_node = self.local_node_for(&unified, seg_id, func, pid);
             break;
         }
         let Some(ret_node) = ret_node else {
@@ -1911,7 +1921,7 @@ impl IdgQueryService {
                 continue;
             }
             let pid = crate::node::PlaceId(pid_idx as u32);
-            if let Some(local_node) = segment.nodes.lookup(func, pid) {
+            if let Some(local_node) = self.local_node_for(&unified, seg_id, func, pid) {
                 if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
                     out.push(ws_node);
                 }
@@ -1956,7 +1966,7 @@ impl IdgQueryService {
                 continue;
             }
             let pid = crate::node::PlaceId(pid_idx as u32);
-            if let Some(local) = segment.nodes.lookup(func, pid) {
+            if let Some(local) = self.local_node_for(&unified, seg_id, func, pid) {
                 name_source_local.insert(local);
             }
         }
@@ -2024,7 +2034,7 @@ impl IdgQueryService {
         let seg_id = self.workspace.segment_for_func(func)?;
         let segment = self.workspace.segment(seg_id)?;
         let pid = segment.places.lookup(&Place::Return)?;
-        let local_node = segment.nodes.lookup(func, pid)?;
+        let local_node = self.local_node_for(&unified, seg_id, func, pid)?;
         Self::ws_node_for(&unified, seg_id, local_node)
     }
 
@@ -2223,6 +2233,15 @@ impl IdgQueryService {
             }
         }
         segment_bases.push(u32::try_from(reverse.len()).expect("unified IDG node count exceeds u32"));
+        for nodes in nodes_by_func.values_mut() {
+            nodes.sort_unstable_by_key(|ws_node| {
+                let (segment_id, local_node) = reverse[ws_node.0 as usize];
+                self.workspace
+                    .segment(segment_id)
+                    .and_then(|segment| segment.nodes.get(local_node))
+                    .map_or(crate::node::PlaceId::SENTINEL, |node| node.place)
+            });
+        }
         let nodes_by_func = nodes_by_func
             .into_iter()
             .map(|(func, nodes)| (func, nodes.into_boxed_slice()))
@@ -2245,6 +2264,33 @@ impl IdgQueryService {
         let start = *unified.segment_bases.get(seg_idx)?;
         let end = *unified.segment_bases.get(seg_idx + 1)?;
         (local_node.0 < end.saturating_sub(start)).then(|| WsNodeId(start + local_node.0))
+    }
+
+    /// Resolve one compiler place inside a function without retaining the
+    /// build-side `(FuncId, PlaceId) -> NodeId` hash table for every file.
+    /// `build_unified` orders the already-required per-function node lists by
+    /// `PlaceId`, so warm sidecar queries stay exact and logarithmic while the
+    /// canonical node vector remains the single source of truth.
+    fn local_node_for(
+        &self,
+        unified: &UnifiedAddressSpace,
+        seg_id: SegmentId,
+        func: FuncId,
+        place: crate::node::PlaceId,
+    ) -> Option<NodeId> {
+        let nodes = unified.nodes_by_func.get(&func)?;
+        let index = nodes
+            .binary_search_by_key(&place, |ws_node| {
+                let (node_segment, local_node) = unified.reverse[ws_node.0 as usize];
+                debug_assert_eq!(node_segment, seg_id);
+                self.workspace
+                    .segment(node_segment)
+                    .and_then(|segment| segment.nodes.get(local_node))
+                    .map_or(crate::node::PlaceId::SENTINEL, |node| node.place)
+            })
+            .ok()?;
+        let (node_segment, local_node) = *unified.reverse.get(nodes[index].0 as usize)?;
+        (node_segment == seg_id).then_some(local_node)
     }
 
     fn ws_node_func(unified: &UnifiedAddressSpace, node: NodeId) -> Option<FuncId> {
@@ -2905,12 +2951,14 @@ impl IdgQueryService {
 
     fn build_symbolic_runtime_index(&self, unified: &UnifiedAddressSpace) -> SymbolicRuntimeIndex {
         let symbolic = self.workspace.symbolic_field();
-        let mut out = SymbolicRuntimeIndex::default();
-        out.cross_call_slots = symbolic
-            .transforms()
-            .iter()
-            .map(symbolic_cross_call_slots)
-            .collect();
+        let mut out = SymbolicRuntimeIndex {
+            cross_call_slots: symbolic
+                .transforms()
+                .iter()
+                .map(symbolic_cross_call_slots)
+                .collect(),
+            ..SymbolicRuntimeIndex::default()
+        };
         for (segment_id, segment) in self.workspace.segments() {
             for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
                 let Some(place) = segment.places.get(node.place) else {

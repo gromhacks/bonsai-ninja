@@ -346,6 +346,19 @@ fn real_main() -> Result<()> {
         })
         .unwrap_or(Theme::Moss);
     let _ = UI_CELL.set(Ui::new(cli.no_color, theme));
+    // Semantic compiler phases may run in child processes so the operating
+    // system can reclaim allocator arenas between workspace-scale phases.
+    // Mirror presentation flags into their standard environment forms before
+    // dispatch so workers preserve the parent's output contract.
+    if cli.no_color {
+        std::env::set_var("NO_COLOR", "1");
+    }
+    if cli.no_progress {
+        std::env::set_var("NO_PROGRESS", "1");
+    }
+    if cli.no_cache {
+        std::env::set_var("BONSAI_NO_CACHE", "1");
+    }
     let no_cache_env = std::env::var("BONSAI_NO_CACHE")
         .ok()
         .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
@@ -385,6 +398,7 @@ fn real_main() -> Result<()> {
             interval_ms,
             prewarm_dataflow,
             semantic,
+            semantic_worker,
             structural_only,
         } => cmd_index(
             &workspace,
@@ -393,6 +407,7 @@ fn real_main() -> Result<()> {
                 interval_ms,
                 prewarm_dataflow,
                 semantic,
+                semantic_worker,
                 structural_only,
             },
         ),

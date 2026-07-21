@@ -75,8 +75,7 @@ pub(super) fn same_function_clean_overwrite_kills_sink_arg(
     if src_func != sink_func || (tainted_args.is_empty() && tainted_receiver.is_none()) {
         return false;
     }
-    let global = policy.ws.db().global_index();
-    let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
+    let Some(decl) = policy.ws.exact_decl(SymbolId::new(sink_func.raw())) else {
         return false;
     };
     let mut targets: Vec<String> = tainted_args
@@ -138,8 +137,7 @@ fn propagation_record_clean_overwrite_kills_edge(
     if record.tainted_args.is_empty() {
         return false;
     }
-    let global = policy.ws.db().global_index();
-    let Some(decl) = global.decl_of(SymbolId::new(record.caller.raw())) else {
+    let Some(decl) = policy.ws.exact_decl(SymbolId::new(record.caller.raw())) else {
         return false;
     };
     if record.caller == src_func && source_span.file != record.call_span.file {
@@ -830,9 +828,11 @@ fn local_call_returns_clean_value(
     if callee_tail.is_empty() {
         return false;
     }
-    let global = policy.ws.db().global_index();
-    let candidates: Vec<_> = global
-        .decls_in(call_span.file)
+    let Some(file_index) = policy.ws.exact_decl_index(call_span.file) else {
+        return false;
+    };
+    let candidates: Vec<_> = file_index
+        .defs
         .iter()
         .filter(|decl| {
             clean_overwrite_callee_tail(&decl.name) == callee_tail
@@ -1247,9 +1247,8 @@ fn numeric_constant_assignments_before_span(ws: &Workspace, span: Span) -> AHash
     let Ok(snapshot) = ws.vfs().snapshot(span.file) else {
         return AHashMap::new();
     };
-    let global = ws.db().global_index();
-    let Some(decl) = global
-        .decls_in(span.file)
+    let Some(decl) = file_index
+        .defs
         .iter()
         .filter(|decl| span_contains(decl.body_span.unwrap_or(decl.span), span))
         .min_by_key(|decl| decl.span.len())

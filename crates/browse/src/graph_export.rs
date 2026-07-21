@@ -121,7 +121,7 @@ impl GraphProjection {
 pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjection {
     let mut graph = GraphProjection::default();
     let db = ws.db();
-    let global = db.global_index();
+    let global = ws.compiler_linkage_index();
     let workspace_id = "workspace".to_string();
 
     graph.node(
@@ -276,8 +276,11 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
         Some(GRAPH_EXPORT_SEMANTIC_MAX_PRECISION),
     );
 
-    for file in global.all_files() {
-        for decl in global.decls_in(file) {
+    for file in ws.vfs().all_files() {
+        let Some(index) = ws.exact_decl_index(file) else {
+            continue;
+        };
+        for decl in &index.defs {
             if !matches!(
                 decl.kind,
                 DeclKind::Function | DeclKind::Method | DeclKind::Constructor
