@@ -30,7 +30,7 @@ pub mod value_flow;
 pub mod value_flow_disk;
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, SymbolId};
+use bonsai_common::{FileId, FuncId, Precision, SymbolId};
 use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
 use bonsai_hash::Hasher as StableHasher;
@@ -97,6 +97,9 @@ fn has_summary_output(global: &bonsai_index::GlobalIndex, func: FuncId) -> bool 
     };
     matches!(decl.kind, DeclKind::Constructor)
         || !decl.receiver_field_writes.is_empty()
+        || global
+            .linkage_facts(SymbolId::new(func.raw()))
+            .is_some_and(|facts| facts.has_summary_output)
         || summary_output_shape(&decl.flow_events)
 }
 
@@ -200,8 +203,7 @@ fn extend_func_set_with_semantic_callback_dispatchers_impl<C>(
 ) where
     C: FnMut(FuncId) -> Vec<bonsai_callgraph::CallEdge>,
 {
-    let target_keys = function_reference_keys(global, target_funcs);
-    if target_keys.is_empty() {
+    if target_funcs.is_empty() {
         return;
     }
     let mut changed = true;
@@ -209,11 +211,24 @@ fn extend_func_set_with_semantic_callback_dispatchers_impl<C>(
         changed = false;
         let lineage: Vec<FuncId> = funcs.iter().copied().collect();
         for func in lineage {
-            for edge in callees_of(func) {
+            let outgoing = callees_of(func);
+            let callback_target_spans: Vec<bonsai_common::Span> = outgoing
+                .iter()
+                .filter(|edge| {
+                    edge.kind == bonsai_callgraph::EdgeKind::Indirect
+                        && target_funcs.contains(&edge.to)
+                        && max_precision.is_none_or(|max| edge.precision <= max)
+                })
+                .map(|edge| edge.span)
+                .collect();
+            if callback_target_spans.is_empty() {
+                continue;
+            }
+            for edge in outgoing {
                 if max_precision.is_some_and(|max| edge.precision > max) || funcs.contains(&edge.to) {
                     continue;
                 }
-                if !call_edge_passes_target_callback(global, edge.from, edge.span, &target_keys) {
+                if !call_edge_passes_target_callback(global, edge.from, edge.span, &callback_target_spans) {
                     continue;
                 }
                 funcs.insert(edge.to);
@@ -223,63 +238,43 @@ fn extend_func_set_with_semantic_callback_dispatchers_impl<C>(
     }
 }
 
-fn function_reference_keys(global: &GlobalIndex, funcs: &AHashSet<FuncId>) -> AHashSet<String> {
-    let mut out = AHashSet::new();
-    for func in funcs {
-        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
-            continue;
-        };
-        push_reference_key(&mut out, &decl.name);
-    }
-    out
-}
-
-fn push_reference_key(out: &mut AHashSet<String>, raw: &str) {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return;
-    }
-    out.insert(raw.to_string());
-    let tail = short_qualified_tail(raw);
-    if !tail.is_empty() {
-        out.insert(tail.to_string());
-    }
-    for variant in callable_reference_variants(raw) {
-        let variant = variant.trim();
-        if !variant.is_empty() {
-            out.insert(variant.to_string());
-            let tail = short_qualified_tail(variant);
-            if !tail.is_empty() {
-                out.insert(tail.to_string());
-            }
-        }
-    }
-}
-
 fn call_edge_passes_target_callback(
     global: &GlobalIndex,
     caller: FuncId,
     call_span: bonsai_common::Span,
-    target_keys: &AHashSet<String>,
+    callback_target_spans: &[bonsai_common::Span],
 ) -> bool {
+    let symbol = SymbolId::new(caller.raw());
+    if let Some(facts) = global.linkage_facts(symbol) {
+        return facts.calls.iter().any(|call| {
+            spans_overlap(call.span, call_span)
+                && call.arg_spans.iter().any(|arg_span| {
+                    callback_target_spans
+                        .iter()
+                        .any(|target_span| span_contains(*arg_span, *target_span))
+                })
+        });
+    }
     let Some(decl) = global.decl_of(SymbolId::new(caller.raw())) else {
         return false;
     };
-    call_event_at_span_passes_target_callback(&decl.flow_events, call_span, target_keys)
+    call_event_at_span_passes_target_callback(&decl.flow_events, call_span, callback_target_spans)
 }
 
 fn call_event_at_span_passes_target_callback(
     events: &[FlowEvent],
     call_span: bonsai_common::Span,
-    target_keys: &AHashSet<String>,
+    callback_target_spans: &[bonsai_common::Span],
 ) -> bool {
     for event in events {
         match event {
             FlowEvent::Call { span, args, .. } => {
                 if spans_overlap(*span, call_span)
-                    && args
-                        .iter()
-                        .any(|arg| call_arg_references_target(arg, target_keys))
+                    && args.iter().any(|arg| {
+                        callback_target_spans
+                            .iter()
+                            .any(|target_span| span_contains(arg.span, *target_span))
+                    })
                 {
                     return true;
                 }
@@ -289,14 +284,18 @@ fn call_event_at_span_passes_target_callback(
                 else_events,
                 ..
             } => {
-                if call_event_at_span_passes_target_callback(then_events, call_span, target_keys)
-                    || call_event_at_span_passes_target_callback(else_events, call_span, target_keys)
+                if call_event_at_span_passes_target_callback(then_events, call_span, callback_target_spans)
+                    || call_event_at_span_passes_target_callback(
+                        else_events,
+                        call_span,
+                        callback_target_spans,
+                    )
                 {
                     return true;
                 }
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if call_event_at_span_passes_target_callback(body, call_span, target_keys) {
+                if call_event_at_span_passes_target_callback(body, call_span, callback_target_spans) {
                     return true;
                 }
             }
@@ -306,9 +305,17 @@ fn call_event_at_span_passes_target_callback(
                 finally_events,
                 ..
             } => {
-                if call_event_at_span_passes_target_callback(body, call_span, target_keys)
-                    || call_event_at_span_passes_target_callback(catch_events, call_span, target_keys)
-                    || call_event_at_span_passes_target_callback(finally_events, call_span, target_keys)
+                if call_event_at_span_passes_target_callback(body, call_span, callback_target_spans)
+                    || call_event_at_span_passes_target_callback(
+                        catch_events,
+                        call_span,
+                        callback_target_spans,
+                    )
+                    || call_event_at_span_passes_target_callback(
+                        finally_events,
+                        call_span,
+                        callback_target_spans,
+                    )
                 {
                     return true;
                 }
@@ -323,29 +330,8 @@ fn spans_overlap(a: bonsai_common::Span, b: bonsai_common::Span) -> bool {
     a.file == b.file && a.start <= b.end && b.start <= a.end
 }
 
-fn call_arg_references_target(arg: &bonsai_lang_api::CallArg, target_keys: &AHashSet<String>) -> bool {
-    if raw_value_references_target(&arg.value_text, target_keys) {
-        return true;
-    }
-    if arg
-        .place
-        .as_deref()
-        .is_some_and(|place| raw_value_references_target(place, target_keys))
-    {
-        return true;
-    }
-    arg.source_names
-        .iter()
-        .any(|name| raw_value_references_target(name, target_keys))
-}
-
-fn raw_value_references_target(raw: &str, target_keys: &AHashSet<String>) -> bool {
-    if target_keys.contains(raw.trim()) {
-        return true;
-    }
-    callable_reference_variants(raw)
-        .into_iter()
-        .any(|variant| target_keys.contains(variant.trim()))
+fn span_contains(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
+    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
 }
 
 pub(crate) fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
@@ -1105,7 +1091,7 @@ impl Workspace {
             batch.dedup();
 
             let batch_graph =
-                bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_with_context(
+                bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context(
                     global.as_ref(),
                     |file| bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for(file)),
                     |file| {
@@ -1115,6 +1101,11 @@ impl Workspace {
                     },
                     &batch,
                     &callgraph_context,
+                    |file| {
+                        self.inner
+                            .db
+                            .decl_index_remapped_to_headers(global.as_ref(), file)
+                    },
                 );
             for edge in &batch_graph.inner().edges {
                 let Some(file) = global.declaring_file(SymbolId::new(edge.from.raw())) else {
@@ -3215,7 +3206,11 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // v43 (2026-07-20): persisted symbolic argument transforms carry the
     // exact AST argument and resolved formal slots established while
     // stitching, so query/export facades never need resident function bodies.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 43;
+    // v44 (2026-07-20): source-reachable planning streams exact bodies from
+    // compact headers and retains return/callback scope facts in the compiler
+    // linkage projection; cached taint graphs from the incomplete scope are
+    // therefore invalid.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 44;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 

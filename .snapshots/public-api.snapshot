@@ -165,7 +165,11 @@ pub use transfer::{
 pub use workspace::{CrossFileEdge, CrossFileEdges, FieldFlowLink, IdgWorkspace, SegmentId};
 
 === index ===
+pub struct CallLinkageFact {
+pub struct CallResultLinkageFact {
+pub struct FunctionLinkageFacts {
 pub struct GlobalIndex {
+pub struct ReturnedConstructorLinkageFact {
 
 === inspect ===
 pub fn chain_to_names(

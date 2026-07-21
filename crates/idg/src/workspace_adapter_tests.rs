@@ -201,11 +201,11 @@ fn nested_full_expression_edge_indexes_only_the_resolved_callee_event() {
     let caller_id = func_id(&idx, "caller");
     let field_id = func_id(&idx, "field");
     let graph = resolved_graph([(caller_id, field_id, outer_span)]);
-    let by_site = call_edges_by_site_for_funcs(&graph, &idx, None);
+    let by_site = call_edges_for_caller(&graph, &idx, None, caller_id);
 
-    assert!(by_site.edges(caller_id, inner_span).next().is_some());
+    assert!(by_site.edges(inner_span).next().is_some());
     assert!(
-        by_site.edges(caller_id, outer_span).next().is_none(),
+        by_site.edges(outer_span).next().is_none(),
         "a resolved inner edge must not also resolve the containing host call"
     );
 }

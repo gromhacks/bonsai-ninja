@@ -295,6 +295,117 @@ fn streamed_file_bodies_match_fully_resident_callgraph() {
     );
 }
 
+#[test]
+fn streamed_factory_return_types_preserve_receiver_dispatch() {
+    let file = FileId::new(92);
+    let mut repository = decl_with(file, 0, "Repository", DeclKind::Class, None, Vec::new());
+    repository.body_span = Some(Span::new(file, 0, 200));
+    let mut audited = decl_with(file, 1, "AuditedRepository", DeclKind::Class, None, Vec::new());
+    audited.body_span = Some(Span::new(file, 200, 400));
+    audited.bases = vec!["Repository".to_string()];
+
+    let returned_call = Span::new(file, 440, 443);
+    let returned_expression = Span::new(file, 440, 449);
+    let mut wrap = decl_with(
+        file,
+        2,
+        "wrap",
+        DeclKind::Method,
+        Some(0),
+        vec![
+            FlowEvent::Call {
+                span: returned_call,
+                name: "new".to_string(),
+                receiver: None,
+                receiver_types: vec!["Repository".to_string()],
+                call_kind: CallKind::Constructor,
+                args: Vec::new(),
+            },
+            FlowEvent::Return {
+                span: returned_expression,
+                value_text: Some("new()".to_string()),
+                value_name: None,
+                value_flow: bonsai_lang_api::ExpressionFlow {
+                    call_sites: vec![returned_expression],
+                    ..Default::default()
+                },
+            },
+        ],
+    );
+    wrap.body_span = Some(Span::new(file, 420, 460));
+
+    let base_run = decl_with(file, 3, "run", DeclKind::Method, Some(0), Vec::new());
+    let child_run = decl_with(file, 4, "run", DeclKind::Method, Some(1), Vec::new());
+    let assign_span = Span::new(file, 500, 540);
+    let mut persist = decl(
+        file,
+        5,
+        "persist",
+        vec![
+            FlowEvent::Assign {
+                span: assign_span,
+                target: "repo".to_string(),
+                source_name: None,
+                source_call: Some("AuditedRepository.wrap".to_string()),
+                source_call_args: Vec::new(),
+                source_names: vec!["AuditedRepository".to_string(), "wrap".to_string()],
+                declares_new_binding: false,
+                value_kind: Some(AssignValueKind::CallResult),
+            },
+            FlowEvent::Call {
+                span: Span::new(file, 510, 532),
+                name: "AuditedRepository.wrap".to_string(),
+                receiver: Some("AuditedRepository".to_string()),
+                receiver_types: vec!["AuditedRepository".to_string(), "Repository".to_string()],
+                call_kind: CallKind::Method,
+                args: Vec::new(),
+            },
+            FlowEvent::Call {
+                span: Span::new(file, 550, 558),
+                name: "repo.run".to_string(),
+                receiver: Some("repo".to_string()),
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Method,
+                args: Vec::new(),
+            },
+        ],
+    );
+    persist.body_span = Some(Span::new(file, 480, 580));
+    let index = DeclIndex {
+        file,
+        defs: vec![repository, audited, wrap, base_run, child_run, persist],
+        ..DeclIndex::default()
+    };
+
+    let mut headers = GlobalIndex::new();
+    headers.insert_linkage_header_preprocessed(index.clone());
+    headers.finalize_semantic_facts();
+    let graph = ResolvedCallGraph::build_with_file_semantics_streaming(
+        &headers,
+        CallGraphFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| AHashMap::new(),
+            |_| None,
+            |_| Some("test"),
+            |_| LanguageCapabilities::unsupported(),
+        ),
+        |requested| (requested == file).then(|| headers.remap_file_to_existing_symbols(index.clone())),
+    );
+
+    let persist = FuncId::new(headers.find_by_name("persist")[0].raw());
+    let base_run = func_id_by_name_and_parent(&headers, "run", "Repository");
+    let child_run = func_id_by_name_and_parent(&headers, "run", "AuditedRepository");
+    let targets = graph.callees_of(persist).map(|edge| edge.to).collect::<Vec<_>>();
+    assert!(
+        targets.contains(&base_run),
+        "factory result must type repo.run: {targets:?}"
+    );
+    assert!(
+        !targets.contains(&child_run),
+        "compact return typing must not fan out across an ambiguous method name: {targets:?}"
+    );
+}
+
 fn build_graph_with_paths(
     global: &GlobalIndex,
     path_for_file: impl Fn(FileId) -> Option<String>,
