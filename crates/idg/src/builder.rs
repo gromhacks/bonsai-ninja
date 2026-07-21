@@ -101,7 +101,6 @@ struct FieldArgStitch {
     caller_seg: SegmentId,
     callee: FuncId,
     callee_seg: SegmentId,
-    actual_arg_node: Option<NodeId>,
     actual_arg: String,
     param_name: String,
     call_span: Span,
@@ -119,7 +118,10 @@ static NORMALIZED_STORAGE_CACHE: LazyLock<parking_lot::RwLock<AHashMap<String, A
 #[derive(Default, Debug)]
 struct FieldArgSiteQueue {
     sites: Vec<Arc<FieldArgStitch>>,
+    deferred: Vec<Arc<FieldArgStitch>>,
     seen: AHashSet<Arc<FieldArgStitch>>,
+    current_caller: Option<FuncId>,
+    accepted: usize,
 }
 
 impl FieldArgSiteQueue {
@@ -132,31 +134,50 @@ impl FieldArgSiteQueue {
         if normalize_storage_base_cached(&site.actual_arg).is_empty() {
             return;
         }
+        reset_site_dedup_for_caller(site.caller, &mut self.current_caller, &mut self.seen);
         let site = Arc::new(site);
         if self.seen.insert(Arc::clone(&site)) {
             self.sites.push(site);
+            self.accepted = self.accepted.saturating_add(1);
         }
     }
 
-    fn into_sites(self) -> Vec<Arc<FieldArgStitch>> {
-        self.sites
+    fn take_current_sites(&mut self) -> Vec<Arc<FieldArgStitch>> {
+        self.seen.clear();
+        self.current_caller = None;
+        std::mem::take(&mut self.sites)
+    }
+
+    fn defer(&mut self, site: Arc<FieldArgStitch>) {
+        self.deferred.push(site);
+    }
+
+    fn into_sites(mut self) -> Vec<Arc<FieldArgStitch>> {
+        self.deferred.append(&mut self.sites);
+        self.deferred
     }
 
     fn len(&self) -> usize {
-        self.sites.len()
+        self.accepted
     }
 }
 
 #[derive(Default, Debug)]
 struct ReturnFieldSiteQueue {
     sites: Vec<Arc<ReturnFieldStitch>>,
+    deferred: Vec<Arc<ReturnFieldStitch>>,
     seen: AHashSet<Arc<ReturnFieldStitch>>,
+    current_caller: Option<FuncId>,
+    accepted: usize,
 }
 
 #[derive(Default, Debug)]
 struct ScalarReturnSiteQueue {
     sites: Vec<Arc<ScalarReturnStitch>>,
+    deferred: Vec<Arc<ScalarReturnStitch>>,
     seen: AHashSet<Arc<ScalarReturnStitch>>,
+    current_caller: Option<FuncId>,
+    accepted: usize,
 }
 
 impl ScalarReturnSiteQueue {
@@ -169,18 +190,31 @@ impl ScalarReturnSiteQueue {
         if normalize_storage_base_cached(&site.source_base).is_empty() {
             return;
         }
+        reset_site_dedup_for_caller(site.caller, &mut self.current_caller, &mut self.seen);
         let site = Arc::new(site);
         if self.seen.insert(Arc::clone(&site)) {
             self.sites.push(site);
+            self.accepted = self.accepted.saturating_add(1);
         }
     }
 
-    fn into_sites(self) -> Vec<Arc<ScalarReturnStitch>> {
-        self.sites
+    fn take_current_sites(&mut self) -> Vec<Arc<ScalarReturnStitch>> {
+        self.seen.clear();
+        self.current_caller = None;
+        std::mem::take(&mut self.sites)
+    }
+
+    fn defer(&mut self, site: Arc<ScalarReturnStitch>) {
+        self.deferred.push(site);
+    }
+
+    fn into_sites(mut self) -> Vec<Arc<ScalarReturnStitch>> {
+        self.deferred.append(&mut self.sites);
+        self.deferred
     }
 
     fn len(&self) -> usize {
-        self.sites.len()
+        self.accepted
     }
 }
 
@@ -192,25 +226,41 @@ impl ReturnFieldSiteQueue {
         if normalize_storage_base_cached(&site.source_base).is_empty() {
             return;
         }
+        reset_site_dedup_for_caller(site.caller, &mut self.current_caller, &mut self.seen);
         let site = Arc::new(site);
         if self.seen.insert(Arc::clone(&site)) {
             self.sites.push(site);
+            self.accepted = self.accepted.saturating_add(1);
         }
     }
 
-    fn into_sites(self) -> Vec<Arc<ReturnFieldStitch>> {
-        self.sites
+    fn take_current_sites(&mut self) -> Vec<Arc<ReturnFieldStitch>> {
+        self.seen.clear();
+        self.current_caller = None;
+        std::mem::take(&mut self.sites)
+    }
+
+    fn defer(&mut self, site: Arc<ReturnFieldStitch>) {
+        self.deferred.push(site);
+    }
+
+    fn into_sites(mut self) -> Vec<Arc<ReturnFieldStitch>> {
+        self.deferred.append(&mut self.sites);
+        self.deferred
     }
 
     fn len(&self) -> usize {
-        self.sites.len()
+        self.accepted
     }
 }
 
 #[derive(Default, Debug)]
 struct ConstructorReturnSiteQueue {
     sites: Vec<Arc<ConstructorReturnStitch>>,
+    deferred: Vec<Arc<ConstructorReturnStitch>>,
     seen: AHashSet<Arc<ConstructorReturnStitch>>,
+    current_caller: Option<FuncId>,
+    accepted: usize,
 }
 
 impl ConstructorReturnSiteQueue {
@@ -223,19 +273,50 @@ impl ConstructorReturnSiteQueue {
         if normalize_storage_base_cached(&site.receiver_param_name).is_empty() {
             return;
         }
+        reset_site_dedup_for_caller(site.caller, &mut self.current_caller, &mut self.seen);
         let site = Arc::new(site);
         if self.seen.insert(Arc::clone(&site)) {
             self.sites.push(site);
+            self.accepted = self.accepted.saturating_add(1);
         }
     }
 
-    fn into_sites(self) -> Vec<Arc<ConstructorReturnStitch>> {
-        self.sites
+    fn take_current_sites(&mut self) -> Vec<Arc<ConstructorReturnStitch>> {
+        self.seen.clear();
+        self.current_caller = None;
+        std::mem::take(&mut self.sites)
+    }
+
+    fn defer(&mut self, site: Arc<ConstructorReturnStitch>) {
+        self.deferred.push(site);
+    }
+
+    fn into_sites(mut self) -> Vec<Arc<ConstructorReturnStitch>> {
+        self.deferred.append(&mut self.sites);
+        self.deferred
     }
 
     fn len(&self) -> usize {
-        self.sites.len()
+        self.accepted
     }
+}
+
+fn reset_site_dedup_for_caller<T>(
+    caller: FuncId,
+    current_caller: &mut Option<FuncId>,
+    seen: &mut AHashSet<Arc<T>>,
+) where
+    T: Eq + std::hash::Hash,
+{
+    if *current_caller == Some(caller) {
+        return;
+    }
+    debug_assert!(
+        current_caller.is_none_or(|previous| previous.raw() < caller.raw()),
+        "field stitch sites must be emitted in caller order"
+    );
+    seen.clear();
+    *current_caller = Some(caller);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -558,16 +639,43 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
     symbolic_field_forwarding: bool,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
 ) -> IdgWorkspace {
-    let mut ws = IdgWorkspace::new();
-    let stitch_started = Instant::now();
-    // Group by segment so each segment gets a single `IdgSegment`
-    // built from its functions' transfer outputs. During the merge we
-    // reduce each heavy `TransferOutput` to only the metadata needed
-    // for call stitching, so places/nodes/edges/name pools can be
-    // dropped before the full workspace IDG is stitched.
     let mut by_seg = group_by_segment(outputs, f2s);
     let function_count: usize = by_seg.values().map(Vec::len).sum();
+    let mut sorted_by_seg: Vec<SegmentId> = by_seg.keys().copied().collect();
+    sorted_by_seg.sort_by_key(|segment| segment.0);
+    let grouped = sorted_by_seg.into_iter().map(|segment| {
+        let outputs = by_seg
+            .remove(&segment)
+            .expect("segment key collected from grouped outputs");
+        (segment, outputs)
+    });
+    stitch_idg_from_segment_batches(
+        std::iter::once(grouped),
+        function_count,
+        resolver,
+        include_field_argument_forwarding,
+        symbolic_field_forwarding,
+        symbolic_funcs,
+    )
+}
 
+/// Stitch lazily lowered segment batches without retaining every function's
+/// [`TransferOutput`] at once. The workspace compiler uses this entry point so
+/// RAM bounds affect only lowering concurrency, never graph scope or closure.
+pub(crate) fn stitch_idg_from_segment_batches<B, I>(
+    batches: B,
+    function_count: usize,
+    resolver: &dyn CalleeResolver,
+    include_field_argument_forwarding: bool,
+    symbolic_field_forwarding: bool,
+    symbolic_funcs: Option<&AHashSet<FuncId>>,
+) -> IdgWorkspace
+where
+    B: IntoIterator<Item = I>,
+    I: IntoIterator<Item = (SegmentId, Vec<TransferOutput>)>,
+{
+    let mut ws = IdgWorkspace::new();
+    let stitch_started = Instant::now();
     // Phase 3a: build each segment from its functions' transfers.
     // Track per-segment `(FuncId, local_node_id) → workspace_node_id`
     // remappings so cross-file edges can resolve their endpoints.
@@ -576,61 +684,35 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
     // the `IdgWorkspace`'s segment lookup.
     let mut seg_remaps: AHashMap<FuncId, (SegmentId, NodeRemap)> = AHashMap::with_capacity(function_count);
     let mut stitch_data: AHashMap<FuncId, FunctionStitchData> = AHashMap::with_capacity(function_count);
-    // Iterate placeholders in deterministic order — `AHashMap`
-    // iteration order is randomised per process, so registering
-    // segments in iteration order would assign different
-    // workspace `SegmentId`s on every run. That cascades into
-    // different ws_node ids, different `cross_call_edges_in_closure`
-    // ordering, different trace_ids, and ultimately different
-    // `F:`/`G:` ids on findings. Sort placeholders by their raw u32
-    // (placeholders are 1:1 with FileId, which is a stable workspace
-    // identifier) so segment registration is run-stable.
-    let mut sorted_by_seg: Vec<SegmentId> = by_seg.keys().copied().collect();
-    sorted_by_seg.sort_by_key(|s| s.0);
-    for seg_id_placeholder in sorted_by_seg {
-        // Register funcs in stable order too; per-segment node
-        // intern order depends on this and feeds into ws_node ids.
-        let mut sorted_outputs = by_seg
-            .remove(&seg_id_placeholder)
-            .expect("segment key collected from grouped outputs");
-        sorted_outputs.sort_by_key(|out| out.func.raw());
-        let mut place_capacity = 0usize;
-        let mut node_capacity = 0usize;
-        let mut edge_capacity = 0usize;
-        for out in &sorted_outputs {
-            place_capacity = place_capacity.saturating_add(out.places.len());
-            node_capacity = node_capacity.saturating_add(out.nodes.len());
-            edge_capacity = edge_capacity.saturating_add(out.edges.len());
-        }
-        let mut segment = IdgSegment::with_capacity(place_capacity, node_capacity, edge_capacity);
-        let mut local_remaps = Vec::with_capacity(sorted_outputs.len());
-        for out in sorted_outputs {
-            let remap = merge_transfer_into_segment(&mut segment, &out);
-            let TransferOutput {
-                func,
-                params,
-                receiver_param_index,
-                receiver_field_bases,
-                implicit_receiver_bases,
-                receiver_names,
-                return_field_projections,
-                return_passthrough_param_indices,
-                descendant_copies,
-                flow_control,
-                call_sites,
-                is_constructor,
-                has_return_event,
-                ..
-            } = out;
-            let param_count = params.len();
-            stitch_data.insert(
-                func,
-                FunctionStitchData {
+    // Callers emit placeholder segments in ascending order. This preserves
+    // stable workspace node ids while allowing each completed compiler batch
+    // to be consumed before the next batch is lowered.
+    let mut previous_placeholder = None;
+    for batch in batches {
+        for (seg_id_placeholder, mut sorted_outputs) in batch {
+            debug_assert!(
+                previous_placeholder.is_none_or(|previous| previous < seg_id_placeholder),
+                "segment transfer batches must be strictly ordered"
+            );
+            previous_placeholder = Some(seg_id_placeholder);
+            // Register funcs in stable order too; per-segment node
+            // intern order depends on this and feeds into ws_node ids.
+            sorted_outputs.sort_by_key(|out| out.func.raw());
+            let mut place_capacity = 0usize;
+            let mut node_capacity = 0usize;
+            let mut edge_capacity = 0usize;
+            for out in &sorted_outputs {
+                place_capacity = place_capacity.saturating_add(out.places.len());
+                node_capacity = node_capacity.saturating_add(out.nodes.len());
+                edge_capacity = edge_capacity.saturating_add(out.edges.len());
+            }
+            let mut segment = IdgSegment::with_capacity(place_capacity, node_capacity, edge_capacity);
+            let mut local_remaps = Vec::with_capacity(sorted_outputs.len());
+            for out in sorted_outputs {
+                let remap = merge_transfer_into_segment(&mut segment, &out);
+                let TransferOutput {
+                    func,
                     params,
-                    call_sites,
-                    param_count,
-                    is_constructor,
-                    has_return_event,
                     receiver_param_index,
                     receiver_field_bases,
                     implicit_receiver_bases,
@@ -639,14 +721,37 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
                     return_passthrough_param_indices,
                     descendant_copies,
                     flow_control,
-                },
-            );
-            local_remaps.push((func, remap));
-            segment.record_func(func);
-        }
-        let ws_id = ws.register_segment(segment);
-        for (func, remap) in local_remaps {
-            seg_remaps.insert(func, (ws_id, remap));
+                    call_sites,
+                    is_constructor,
+                    has_return_event,
+                    ..
+                } = out;
+                let param_count = params.len();
+                stitch_data.insert(
+                    func,
+                    FunctionStitchData {
+                        params,
+                        call_sites,
+                        param_count,
+                        is_constructor,
+                        has_return_event,
+                        receiver_param_index,
+                        receiver_field_bases,
+                        implicit_receiver_bases,
+                        receiver_names,
+                        return_field_projections,
+                        return_passthrough_param_indices,
+                        descendant_copies,
+                        flow_control,
+                    },
+                );
+                local_remaps.push((func, remap));
+                segment.record_func(func);
+            }
+            let ws_id = ws.register_segment(segment);
+            for (func, remap) in local_remaps {
+                seg_remaps.insert(func, (ws_id, remap));
+            }
         }
     }
     stitch_debug_log(format_args!(
@@ -678,6 +783,7 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
     let mut return_field_sites = ReturnFieldSiteQueue::default();
     let mut scalar_return_sites = ScalarReturnSiteQueue::default();
     let mut constructor_return_sites = ConstructorReturnSiteQueue::default();
+    let mut symbolic_field_graph = SymbolicFieldGraph::new();
     let mut receiver_mutation_sites: Vec<Arc<ReceiverMutationStitch>> = Vec::new();
     let mut passthrough_field_copy_sites: Vec<FieldCopySite> = Vec::new();
     for (&func, data) in &stitch_data {
@@ -737,6 +843,16 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
                 },
             );
         }
+        if symbolic_field_forwarding {
+            flush_symbolic_site_queues(
+                &mut field_arg_sites,
+                &mut return_field_sites,
+                &mut scalar_return_sites,
+                &mut constructor_return_sites,
+                &mut symbolic_field_graph,
+                symbolic_funcs,
+            );
+        }
     }
     dedup_receiver_mutation_sites(&mut receiver_mutation_sites);
     let field_arg_site_count = field_arg_sites.len();
@@ -753,9 +869,11 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
         constructor_return_site_count,
         receiver_mutation_site_count
     ));
-    // Drop the large hash-table dedup indexes before materializing field
-    // transforms. The vectors and transform table share each site record via
-    // `Arc`, so strings remain single-owner throughout the closure build.
+    // Drop caller-local dedup indexes before the closure phase. Complete AST
+    // field places were already lowered into compact symbolic transforms;
+    // these queues retain only sites involving adapters that cannot yet prove
+    // complete field-place syntax and therefore require explicit fallback
+    // edges.
     let field_arg_sites = field_arg_sites.into_sites();
     let return_field_sites = return_field_sites.into_sites();
     let scalar_return_sites = scalar_return_sites.into_sites();
@@ -774,6 +892,7 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
             &mut ws,
             symbolic_field_forwarding,
             symbolic_funcs,
+            symbolic_field_graph,
         );
     } else {
         stitch_debug_log(format_args!(
@@ -804,6 +923,7 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
         stats.callback_nanos as f64 / 1_000_000_000.0
     ));
 
+    release_storage_normalization_caches();
     ws
 }
 
@@ -1575,10 +1695,6 @@ fn stitch_candidate_receiver_inputs(
     // separate from positional args so explicit arguments keep
     // their source-language order.
     if matches!(site.call_kind, CallKind::Method) {
-        let receiver_call_arg = site
-            .receiver_arg_node
-            .map(|node| caller_remap.get(node))
-            .filter(|node| !node.is_sentinel());
         if let (Some(receiver_arg_node), Some(receiver_idx)) =
             (site.receiver_arg_node, endpoints.receiver_param_index)
         {
@@ -1625,7 +1741,6 @@ fn stitch_candidate_receiver_inputs(
                     site.site.0,
                     cand.precision,
                     cand.edge_kind,
-                    receiver_call_arg,
                     None,
                 );
                 push_nested_receiver_field_arg_sites(
@@ -1640,7 +1755,6 @@ fn stitch_candidate_receiver_inputs(
                     site.site.0,
                     cand.precision,
                     cand.edge_kind,
-                    receiver_call_arg,
                 );
                 if let Some(receiver_type) = resolver.receiver_type_for(cand.func) {
                     push_receiver_field_arg_site(
@@ -1654,7 +1768,6 @@ fn stitch_candidate_receiver_inputs(
                         site.site.0,
                         cand.precision,
                         cand.edge_kind,
-                        receiver_call_arg,
                         Some(receiver_type.as_str()),
                     );
                 }
@@ -1719,7 +1832,6 @@ fn stitch_candidate_receiver_inputs(
                         site.site.0,
                         cand.precision,
                         cand.edge_kind,
-                        receiver_call_arg,
                         None,
                     );
                 }
@@ -1808,7 +1920,6 @@ fn stitch_candidate_explicit_arguments(
                     caller_seg,
                     callee: cand.func,
                     callee_seg: endpoints.segment,
-                    actual_arg_node: Some(caller_call_arg),
                     actual_arg: actual_arg.trim().to_string(),
                     param_name: param_name.trim().to_string(),
                     call_span: site.site.0,
@@ -2640,7 +2751,6 @@ fn push_receiver_field_arg_site(
     call_span: Span,
     precision: Precision,
     call_kind: CallEdgeKind,
-    actual_arg_node: Option<NodeId>,
     receiver_type: Option<&str>,
 ) {
     if param_name.trim().is_empty() {
@@ -2658,7 +2768,6 @@ fn push_receiver_field_arg_site(
         caller_seg,
         callee,
         callee_seg,
-        actual_arg_node,
         actual_arg,
         param_name: param_name.trim().to_string(),
         call_span,
@@ -2681,7 +2790,6 @@ fn push_nested_receiver_field_arg_sites(
     call_span: Span,
     precision: Precision,
     call_kind: CallEdgeKind,
-    actual_arg_node: Option<NodeId>,
 ) {
     let projection_bases = return_projection_bases(endpoints);
     let nested_bases = endpoints
@@ -2707,7 +2815,6 @@ fn push_nested_receiver_field_arg_sites(
             caller_seg,
             callee,
             callee_seg,
-            actual_arg_node,
             actual_arg: actual_nested_base,
             param_name: nested_param_base.to_string(),
             call_span,
@@ -2762,7 +2869,6 @@ fn push_bare_implicit_member_field_arg_sites(
                 callee,
                 callee_seg,
                 actual_arg,
-                actual_arg_node: None,
                 param_name: nested_param_base.to_string(),
                 call_span,
                 precision,
@@ -2882,6 +2988,105 @@ fn named_arg_param_index(
         .map(|(idx, _)| idx)
 }
 
+fn symbolic_pair_supported(
+    source: FuncId,
+    target: FuncId,
+    symbolic_funcs: Option<&AHashSet<FuncId>>,
+) -> bool {
+    symbolic_funcs.is_none_or(|funcs| funcs.contains(&source) && funcs.contains(&target))
+}
+
+fn flush_symbolic_site_queues(
+    field_args: &mut FieldArgSiteQueue,
+    return_fields: &mut ReturnFieldSiteQueue,
+    scalar_returns: &mut ScalarReturnSiteQueue,
+    constructor_returns: &mut ConstructorReturnSiteQueue,
+    graph: &mut SymbolicFieldGraph,
+    symbolic_funcs: Option<&AHashSet<FuncId>>,
+) {
+    for site in field_args.take_current_sites() {
+        if !symbolic_pair_supported(site.caller, site.callee, symbolic_funcs) {
+            field_args.defer(site);
+            continue;
+        }
+        let source_base = normalize_storage_base(&site.actual_arg);
+        let source = graph.intern_base(site.caller_seg, site.caller, &source_base);
+        let target = graph.intern_base(site.callee_seg, site.callee, &site.param_name);
+        graph.push_transform(SymbolicFieldTransform {
+            source,
+            target,
+            exact_field: NO_SYMBOLIC_STRING,
+            call_span: site.call_span,
+            write_span: site.call_span,
+            precision: site.precision,
+            call_kind: site.call_kind,
+            kind: SymbolicFieldTransformKind::Argument,
+            allow_out_of_order_source: site.allow_out_of_order_source,
+        });
+    }
+    for site in return_fields.take_current_sites() {
+        if !symbolic_pair_supported(site.callee, site.caller, symbolic_funcs) {
+            return_fields.defer(site);
+            continue;
+        }
+        let source_base = normalize_storage_base(&site.source_base);
+        let source = graph.intern_base(site.callee_seg, site.callee, &source_base);
+        let target = graph.intern_base(site.caller_seg, site.caller, &site.target_base);
+        graph.push_transform(SymbolicFieldTransform {
+            source,
+            target,
+            exact_field: NO_SYMBOLIC_STRING,
+            call_span: site.call_span,
+            write_span: site.write_span,
+            precision: site.precision,
+            call_kind: site.call_kind,
+            kind: SymbolicFieldTransformKind::Return,
+            allow_out_of_order_source: true,
+        });
+    }
+    for site in scalar_returns.take_current_sites() {
+        if !symbolic_pair_supported(site.callee, site.caller, symbolic_funcs) {
+            scalar_returns.defer(site);
+            continue;
+        }
+        let source_base = normalize_storage_base(&site.source_base);
+        let source = graph.intern_base(site.callee_seg, site.callee, &source_base);
+        let target = graph.intern_base(site.caller_seg, site.caller, &site.target_base);
+        let exact_field = graph.intern_string(&site.source_field);
+        graph.push_transform(SymbolicFieldTransform {
+            source,
+            target,
+            exact_field,
+            call_span: site.call_span,
+            write_span: site.write_span,
+            precision: site.precision,
+            call_kind: site.call_kind,
+            kind: SymbolicFieldTransformKind::ScalarReturn,
+            allow_out_of_order_source: true,
+        });
+    }
+    for site in constructor_returns.take_current_sites() {
+        if !symbolic_pair_supported(site.callee, site.caller, symbolic_funcs) {
+            constructor_returns.defer(site);
+            continue;
+        }
+        let source_base = normalize_storage_base(&site.receiver_param_name);
+        let source = graph.intern_base(site.callee_seg, site.callee, &source_base);
+        let target = graph.intern_base(site.caller_seg, site.caller, &site.target_base);
+        graph.push_transform(SymbolicFieldTransform {
+            source,
+            target,
+            exact_field: NO_SYMBOLIC_STRING,
+            call_span: site.call_span,
+            write_span: site.write_span,
+            precision: site.precision,
+            call_kind: site.call_kind,
+            kind: SymbolicFieldTransformKind::ConstructorReturn,
+            allow_out_of_order_source: true,
+        });
+    }
+}
+
 struct FieldForwardingSites<'a> {
     field_args: &'a [Arc<FieldArgStitch>],
     return_fields: &'a [Arc<ReturnFieldStitch>],
@@ -2926,6 +3131,7 @@ fn stitch_field_argument_forwarding(
     ws: &mut IdgWorkspace,
     symbolic: bool,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
+    mut symbolic_field_graph: SymbolicFieldGraph,
 ) {
     let FieldForwardingSites {
         field_args: sites,
@@ -2969,6 +3175,7 @@ fn stitch_field_argument_forwarding(
         && constructor_return_sites.is_empty()
         && receiver_mutation_sites.is_empty()
         && copy_sites.is_empty()
+        && symbolic_field_graph.transforms().is_empty()
     {
         return;
     }
@@ -2980,22 +3187,22 @@ fn stitch_field_argument_forwarding(
         receiver_mutation_sites,
         &copy_sites,
     );
-    if symbolic {
+    let symbolic_field_graph = if symbolic {
         // Keep complete adapter AST places as a compact symbolic relation.
         // In a mixed-language workspace, transforms that cross an adapter
         // without complete field places remain on the eager compatibility
         // path.  This partition is capability-derived per function: a
         // single complete adapter must never disable field forwarding for a
         // peer adapter that cannot consume symbolic facts precisely.
-        ws.set_symbolic_field(build_symbolic_field_graph(&transforms, symbolic_funcs));
+        extend_symbolic_field_graph(&mut symbolic_field_graph, &transforms, symbolic_funcs);
         transforms.retain(|source, entries| {
             entries.retain(|transform| !field_transform_is_symbolic(source, transform, symbolic_funcs));
             !entries.is_empty()
         });
-        if transforms.is_empty() {
-            return;
-        }
-    }
+        Some(symbolic_field_graph)
+    } else {
+        None
+    };
     // Eager compatibility mode alone needs the concrete field universe and
     // synthetic-node indexes. Building them before the symbolic return made
     // demand-mode peak memory scale with the representation it deliberately
@@ -3031,6 +3238,9 @@ fn stitch_field_argument_forwarding(
     let phase_started = Instant::now();
     let before_edges = state.ws.total_edge_count();
     let mut fallback_edges = stitch_field_argument_fallbacks(sites, &mut state);
+    if let Some(graph) = symbolic_field_graph.as_ref() {
+        fallback_edges += stitch_symbolic_field_argument_fallbacks(graph, &mut state);
+    }
     fallback_edges += stitch_field_copy_fallbacks(&copy_sites, &inputs, &mut state);
     let mut processed = 0usize;
     let mut processed_transforms = 0usize;
@@ -3098,6 +3308,9 @@ fn stitch_field_argument_forwarding(
         state.ws.total_edge_count(),
         state.pending.len(),
     ));
+    if let Some(graph) = symbolic_field_graph {
+        ws.set_symbolic_field(graph);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3163,11 +3376,11 @@ fn build_field_write_transforms(
     out
 }
 
-fn build_symbolic_field_graph(
+fn extend_symbolic_field_graph(
+    graph: &mut SymbolicFieldGraph,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
-) -> SymbolicFieldGraph {
-    let mut graph = SymbolicFieldGraph::new();
+) {
     let mut source_keys: Vec<FieldPlaceKey> = transforms.keys().cloned().collect();
     sort_field_keys(&mut source_keys);
     for source_key in source_keys {
@@ -3255,7 +3468,6 @@ fn build_symbolic_field_graph(
             });
         }
     }
-    graph
 }
 
 fn field_transform_is_symbolic(
@@ -3790,50 +4002,116 @@ fn stitch_field_argument_fallbacks(
 ) -> usize {
     let mut added = 0usize;
     for site in sites {
-        let writers = state.field_index.field_writes_for_base_before_call(
-            state.inter_call_arg_entries,
-            site.caller_seg,
+        added += stitch_one_field_argument_fallback(
             site.caller,
+            site.caller_seg,
+            site.callee,
+            site.callee_seg,
             &site.actual_arg,
+            &site.param_name,
             site.call_span,
+            site.precision,
+            site.call_kind,
+            state,
         );
-        if !writers.is_empty() {
+    }
+    added
+}
+
+fn stitch_symbolic_field_argument_fallbacks(
+    graph: &SymbolicFieldGraph,
+    state: &mut FieldPropagationState<'_>,
+) -> usize {
+    let mut added = 0_usize;
+    for transform in graph
+        .transforms()
+        .iter()
+        .filter(|transform| transform.kind == SymbolicFieldTransformKind::Argument)
+    {
+        let Some(source) = graph.bases().get(transform.source as usize) else {
+            continue;
+        };
+        let Some(target) = graph.bases().get(transform.target as usize) else {
+            continue;
+        };
+        let (Some(actual_arg), Some(param_name)) =
+            (graph.string(source.storage), graph.string(target.storage))
+        else {
+            continue;
+        };
+        added += stitch_one_field_argument_fallback(
+            source.func,
+            source.segment,
+            target.func,
+            target.segment,
+            actual_arg,
+            param_name,
+            transform.call_span,
+            transform.precision,
+            transform.call_kind,
+            state,
+        );
+    }
+    added
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stitch_one_field_argument_fallback(
+    caller: FuncId,
+    caller_seg: SegmentId,
+    callee: FuncId,
+    callee_seg: SegmentId,
+    actual_arg: &str,
+    param_name: &str,
+    call_span: Span,
+    precision: Precision,
+    call_kind: CallEdgeKind,
+    state: &mut FieldPropagationState<'_>,
+) -> usize {
+    let writers = state.field_index.field_writes_for_base_before_call(
+        state.inter_call_arg_entries,
+        caller_seg,
+        caller,
+        actual_arg,
+        call_span,
+    );
+    if !writers.is_empty() {
+        return 0;
+    }
+    let readers = state
+        .field_index
+        .field_reads_for_base(callee_seg, callee, param_name);
+    let mut added = 0_usize;
+    for (field, reader) in readers {
+        if !is_forwardable_field(&field) {
             continue;
         }
-        let readers = state
-            .field_index
-            .field_reads_for_base(site.callee_seg, site.callee, &site.param_name);
-        for (field, reader) in readers {
-            if !is_forwardable_field(&field) {
-                continue;
-            }
-            // The source must be the matching projected Place. Linking the
-            // whole CallArg value here would collapse an object into every
-            // field demanded by the callee and taint unrelated siblings.
-            let Some(actual_field_read) =
-                ensure_field_read_node(state.ws, site.caller_seg, site.caller, &site.actual_arg, &field)
-            else {
-                continue;
-            };
-            let changed = place_inter_edge_if_absent(
-                site.caller_seg,
-                site.callee_seg,
-                IdgEdge {
-                    from: actual_field_read,
-                    to: reader,
-                    meta: crate::edge::EdgeMeta {
-                        precision: site.precision,
-                        kind: crate::edge::IdgEdgeKind::InterFieldCallArg,
-                        call_kind: site.call_kind,
-                        via_span: site.call_span,
-                    },
+        // The source must be the matching projected Place. Linking the whole
+        // CallArg value here would collapse an object into every field demanded
+        // by the callee and taint unrelated siblings.
+        let Some(actual_field_read) =
+            ensure_field_read_node(state.ws, caller_seg, caller, actual_arg, &field)
+        else {
+            continue;
+        };
+        let changed = place_inter_edge_if_absent(
+            caller_seg,
+            callee_seg,
+            IdgEdge {
+                from: actual_field_read,
+                to: reader,
+                meta: crate::edge::EdgeMeta {
+                    precision,
+                    kind: crate::edge::IdgEdgeKind::InterFieldCallArg,
+                    call_kind,
+                    via_span: call_span,
                 },
-                state.ws,
-                state.known_edges,
-            );
-            if changed {
-                added += 1;
-            }
+            },
+            state.ws,
+            state.known_edges,
+        );
+        if changed {
+            added += 1;
         }
     }
     added
@@ -4500,6 +4778,16 @@ fn normalize_storage_base_cached(base: &str) -> Arc<str> {
         .entry(base.to_string())
         .or_insert_with(|| normalized.clone());
     normalized
+}
+
+/// Storage normalization is a build-phase memo, not part of the compiler IR.
+/// Release its owned strings before persistence/query materialization so
+/// repeated analyses in one process do not retain a previous build's memory
+/// high-water mark. Clearing is semantics-neutral; a concurrent or later build
+/// simply recomputes the same AST-derived normalization.
+fn release_storage_normalization_caches() {
+    *STORAGE_SEGMENTS_CACHE.write() = AHashMap::new();
+    *NORMALIZED_STORAGE_CACHE.write() = AHashMap::new();
 }
 
 fn join_storage_parts(parts: &[String]) -> String {

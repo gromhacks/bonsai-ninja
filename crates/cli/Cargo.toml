@@ -32,6 +32,7 @@ once_cell = { workspace = true }
 rayon = { workspace = true }
 ignore = { workspace = true }
 dirs = { workspace = true }
+mimalloc = { workspace = true }
 owo-colors = "4"
 comfy-table = { version = "7", features = ["custom_styling"] }
 

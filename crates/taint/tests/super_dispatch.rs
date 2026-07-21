@@ -170,7 +170,7 @@ fn adapter_receiver_token_capabilities_match_language_syntax() {
         (
             "python",
             Arc::new(bonsai_lang_python::PythonAdapter::new()),
-            &["super"],
+            &["super", "super()"],
             &[],
         ),
         (

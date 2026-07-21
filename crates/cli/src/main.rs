@@ -16,6 +16,12 @@
 //!   All read from the same `GlobalIndex` + per-file `DeclIndex`, so
 //!   behavior is uniform across every supported language.
 
+// Large compiler phases repeatedly transfer ownership of AST/graph batches.
+// Mimalloc promptly makes pages freed at those boundaries eligible for purge
+// on Linux, macOS, and Windows, reducing retained RSS between compiler phases.
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::Result;
 use clap::Parser;
 use theme::Theme;
@@ -321,6 +327,12 @@ fn real_main() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    // Set the explicit process budget before any compiler phase asks the
+    // shared resource detector. The detector is cached after first use so SDK
+    // and CLI scheduling observe one stable contract for the whole run.
+    if let Some(memory_budget_mb) = cli.memory_budget_mb {
+        std::env::set_var("BONSAI_MEMORY_BUDGET_MB", memory_budget_mb.to_string());
+    }
     let theme = cli
         .theme
         .as_deref()

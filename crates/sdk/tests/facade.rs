@@ -282,6 +282,10 @@ fn facade_index_semantic_writes_structural_sidecars_and_query_hydrates_idg() {
         "SDK index should write IDG sidecar: {stats:#?}"
     );
     assert!(
+        indexed.workspace().db().idg_service().is_none(),
+        "sidecar-only semantic prewarm must release the resident IDG before building later artifacts"
+    );
+    assert!(
         stats.retrieval_sidecar_exists && stats.retrieval_sidecar_bytes > 0,
         "SDK index should write retrieval factstore: {stats:#?}"
     );

@@ -1853,7 +1853,7 @@ impl Cache<'_> {
                 if callgraph_is_current {
                     let _ = workspace.load_callgraph_sidecar(&self.project.root);
                 }
-                let _ = workspace.build_and_seed_persisted_idg_service();
+                let _ = workspace.build_and_persist_idg_sidecar()?;
             }
         }
         let _ = bonsai_retrieval::ensure_sidecar(workspace, &self.project.root)?;

@@ -103,6 +103,41 @@ fn add_owned_transfers_payload_and_preserves_bytes() {
 }
 
 #[test]
+fn add_streamed_writes_without_an_intermediate_payload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("v.bin");
+    let w = FactStoreWriter::create(&target, 3, 0xBEEF).expect("create");
+    w.add_streamed(9, 0xCAFE, |writer| writer.write_all(&[0x00, 0x7F, 0x80, 0xFF]))
+        .expect("streamed entry");
+    w.finish().expect("finish");
+
+    let r = FactStoreReader::open(&target, 3, 0xBEEF).expect("open");
+    let hit = r.get(9).expect("lookup").expect("entry");
+    assert_eq!(hit.body_hash, 0xCAFE);
+    assert_eq!(hit.payload, &[0x00, 0x7F, 0x80, 0xFF]);
+}
+
+#[test]
+fn failed_streamed_entry_never_publishes_a_partial_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("v.bin");
+    let writer = FactStoreWriter::create(&target, 3, 0xBEEF).expect("create");
+    let error = writer
+        .add_streamed(9, 0xCAFE, |output| {
+            output.write_all(&[1, 2, 3])?;
+            Err(std::io::Error::other("injected encoder failure"))
+        })
+        .expect_err("stream failure must be reported");
+    assert!(error.to_string().contains("injected encoder failure"));
+    drop(writer);
+
+    assert!(
+        !target.exists(),
+        "an encoder failure must leave the previously published target untouched"
+    );
+}
+
+#[test]
 fn finish_rejects_duplicate_keys_without_publishing_target() {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("v.bin");

@@ -26,9 +26,7 @@ use parking_lot::RwLock;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{path::Path, time::Instant};
 
-use crate::builder::{
-    stitch_idg_with_selective_field_forwarding_mode, CalleeResolver, FuncToSegment, ResolvedCallee,
-};
+use crate::builder::{stitch_idg_from_segment_batches, CalleeResolver, ResolvedCallee};
 use crate::transfer::{
     declared_receiver_names, receiver_name_matches, transfer_function_for_with_options_and_syntax_facts,
     TransferOptions, TransferOutput,
@@ -1978,17 +1976,6 @@ fn collect_arg_spans_for_resolved_callee(
     }
 }
 
-/// `FuncToSegment` view onto the precomputed [`WorkspaceMaps`].
-struct WorkspaceFuncToSegment<'a> {
-    func_to_seg: &'a AHashMap<FuncId, SegmentId>,
-}
-
-impl<'a> FuncToSegment for WorkspaceFuncToSegment<'a> {
-    fn segment_for(&self, func: FuncId) -> Option<SegmentId> {
-        self.func_to_seg.get(&func).copied()
-    }
-}
-
 /// Per-file compiler contract consumed by the language-neutral IDG builder.
 ///
 /// Production implementations obtain these facts from the registered
@@ -2528,9 +2515,6 @@ where
         callback_cache: RwLock::new(AHashMap::new()),
         ancestor_dispatch_cache: RwLock::new(AHashMap::new()),
     };
-    let f2s = WorkspaceFuncToSegment {
-        func_to_seg: &maps.func_to_seg,
-    };
     let symbolic_languages: AHashSet<&str> = transfer_options
         .symbolic_field_languages
         .iter()
@@ -2544,32 +2528,30 @@ where
                 .collect::<AHashSet<_>>()
         });
     // Transfer outputs are the largest transient compiler IR in this build.
-    // Construct every resolver index first so their creation cannot overlap
-    // the complete workspace's places, nodes, edges, and local string pools.
-    // The outputs now flow directly into stitching, which consumes them.
+    // Construct every resolver index first, then lower deterministic segment
+    // batches lazily. The stitcher consumes each batch before the next one is
+    // created, so project size no longer determines transient transfer RAM.
     let phase_started = Instant::now();
-    let outputs =
-        run_transfer_in_parallel_for_files(global, transfer_options, included_files, included_funcs);
-    if idg_build_enabled() {
-        let places: usize = outputs.iter().map(|out| out.places.len()).sum();
-        let nodes: usize = outputs.iter().map(|out| out.nodes.len()).sum();
-        let edges: usize = outputs.iter().map(|out| out.edges.len()).sum();
-        let calls: usize = outputs.iter().map(|out| out.call_sites.len()).sum();
-        idg_build_log(format_args!(
-            "transfer: {:.3}s funcs={} places={} nodes={} edges={} call_sites={}",
-            phase_started.elapsed().as_secs_f64(),
-            outputs.len(),
-            places,
-            nodes,
-            edges,
-            calls
-        ));
-    }
+    let transfer_inputs =
+        transfer_inputs_by_segment(global, &maps.func_to_seg, included_files, included_funcs);
+    let function_count = transfer_inputs.iter().map(|(_, funcs)| funcs.len()).sum();
+    let aggregate_layouts = unambiguous_aggregate_layouts(global);
+    let transfer_batch_width = idg_transfer_batch_segment_count();
+    idg_build_log(format_args!(
+        "transfer schedule: {:.3}s funcs={} segments={} batch_segments={}",
+        phase_started.elapsed().as_secs_f64(),
+        function_count,
+        transfer_inputs.len(),
+        transfer_batch_width
+    ));
     let phase_started = Instant::now();
-    let mut ws = stitch_idg_with_selective_field_forwarding_mode(
-        outputs,
+    let batches = transfer_inputs
+        .chunks(transfer_batch_width)
+        .map(|batch| lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch));
+    let mut ws = stitch_idg_from_segment_batches(
+        batches,
+        function_count,
         &resolver,
-        &f2s,
         transfer_options.include_field_argument_forwarding,
         transfer_options.symbolic_field_forwarding,
         symbolic_funcs.as_ref(),
@@ -4265,23 +4247,17 @@ fn ws_node_to_local(
     (local.0 < segment.nodes.len() as u32).then_some((seg_id, local))
 }
 
-/// Run the transfer pass on every function in the workspace, in
-/// parallel. Each function's transfer is independent (it only
-/// reads its own `Decl`), so this is embarrassingly parallel via
-/// rayon.
-fn run_transfer_in_parallel_for_files(
-    global: &GlobalIndex,
-    transfer_options: &TransferOptions,
+type SegmentTransferInputs<'a> = (SegmentId, Vec<(FileId, &'a bonsai_lang_api::Decl)>);
+
+/// Group lightweight declaration references by their deterministic segment.
+/// The heavy transfer outputs are deliberately absent from this schedule.
+fn transfer_inputs_by_segment<'a>(
+    global: &'a GlobalIndex,
+    func_to_segment: &AHashMap<FuncId, SegmentId>,
     included_files: Option<&AHashSet<FileId>>,
     included_funcs: Option<&AHashSet<FuncId>>,
-) -> Vec<TransferOutput> {
-    let aggregate_layouts = unambiguous_aggregate_layouts(global);
-    // Collect every (FileId, decl-index) pair so rayon can split
-    // them across threads. Each transfer call produces a
-    // `TransferOutput` with its own embedded name pool — the
-    // segment merge re-interns names into the segment-level pool,
-    // so per-call name spaces don't conflict.
-    let mut funcs: Vec<(FileId, &bonsai_lang_api::Decl)> = Vec::new();
+) -> Vec<SegmentTransferInputs<'a>> {
+    let mut grouped: AHashMap<SegmentId, Vec<(FileId, &'a bonsai_lang_api::Decl)>> = AHashMap::new();
     for file in global.all_files() {
         if included_files.is_some_and(|files| !files.contains(&file)) {
             continue;
@@ -4291,32 +4267,64 @@ fn run_transfer_in_parallel_for_files(
             if included_funcs.is_some_and(|funcs| !funcs.contains(&func)) {
                 continue;
             }
-            funcs.push((file, decl));
+            let Some(segment) = func_to_segment.get(&func).copied() else {
+                continue;
+            };
+            grouped.entry(segment).or_default().push((file, decl));
         }
     }
-    let lower = |(file, decl): (FileId, &bonsai_lang_api::Decl)| {
+    let mut grouped: Vec<_> = grouped.into_iter().collect();
+    grouped.sort_by_key(|(segment, _)| segment.0);
+    for (_, funcs) in &mut grouped {
+        funcs.sort_by_key(|(_, decl)| decl.symbol.raw());
+    }
+    grouped
+}
+
+/// Lower one resource-bounded segment batch in parallel, then restore segment
+/// order before handing it to the deterministic stitcher.
+fn lower_transfer_segment_batch(
+    global: &GlobalIndex,
+    transfer_options: &TransferOptions,
+    aggregate_layouts: &AHashMap<String, Vec<String>>,
+    batch: &[SegmentTransferInputs<'_>],
+) -> Vec<(SegmentId, Vec<TransferOutput>)> {
+    let funcs: Vec<_> = batch
+        .iter()
+        .enumerate()
+        .flat_map(|(batch_index, (_, funcs))| {
+            funcs.iter().map(move |(file, decl)| (batch_index, *file, *decl))
+        })
+        .collect();
+    let lower = |(batch_index, file, decl): (usize, FileId, &bonsai_lang_api::Decl)| {
         let file_index = global.file_index(file);
         let assignment_values = file_index.map_or(&[][..], |index| index.assignment_values.as_slice());
         let call_receivers = file_index.map_or(&[][..], |index| index.call_receivers.as_slice());
         if aggregate_layouts.is_empty() || !flow_events_contain_aggregate_assign(&decl.flow_events) {
-            return transfer_function_for_with_options_and_syntax_facts(
-                decl,
-                transfer_options,
-                assignment_values,
-                call_receivers,
+            return (
+                batch_index,
+                transfer_function_for_with_options_and_syntax_facts(
+                    decl,
+                    transfer_options,
+                    assignment_values,
+                    call_receivers,
+                ),
             );
         }
         let mut resolved = decl.clone();
         resolve_aggregate_assignments(
             &mut resolved.flow_events,
             &resolved.type_aliases,
-            &aggregate_layouts,
+            aggregate_layouts,
         );
-        transfer_function_for_with_options_and_syntax_facts(
-            &resolved,
-            transfer_options,
-            assignment_values,
-            call_receivers,
+        (
+            batch_index,
+            transfer_function_for_with_options_and_syntax_facts(
+                &resolved,
+                transfer_options,
+                assignment_values,
+                call_receivers,
+            ),
         )
     };
 
@@ -4328,11 +4336,39 @@ fn run_transfer_in_parallel_for_files(
     // serially on the owning worker in that case. Top-level compiler builds
     // retain the parallel path, and both branches run the identical AST-to-IDG
     // transfer with no semantic budget or depth limit.
-    if rayon::current_thread_index().is_some() {
+    let lowered: Vec<_> = if rayon::current_thread_index().is_some() {
         funcs.into_iter().map(lower).collect()
     } else {
         funcs.into_par_iter().map(lower).collect()
+    };
+    let mut outputs = vec![Vec::new(); batch.len()];
+    for (batch_index, output) in lowered {
+        outputs[batch_index].push(output);
     }
+    batch
+        .iter()
+        .zip(outputs)
+        .map(|((segment, _), outputs)| (*segment, outputs))
+        .collect()
+}
+
+fn idg_transfer_batch_segment_count() -> usize {
+    let cpu_workers = rayon::current_num_threads().max(1);
+    let requested = std::env::var("BONSAI_IDG_TRANSFER_BATCH_SEGMENTS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(cpu_workers)
+        .max(1)
+        .min(cpu_workers);
+    // This estimate bounds only concurrently lowered compiler IR. Persistent
+    // graph segments are consumed by the stitcher between batches.
+    const TRANSFER_BYTES_PER_SEGMENT: u64 = 512 * 1024 * 1024;
+    const TRANSFER_RESIDENT_RESERVE_BYTES: u64 = 1024 * 1024 * 1024;
+    bonsai_common::memory_bounded_worker_count(
+        requested,
+        TRANSFER_BYTES_PER_SEGMENT,
+        TRANSFER_RESIDENT_RESERVE_BYTES,
+    )
 }
 
 fn unambiguous_aggregate_layouts(global: &GlobalIndex) -> AHashMap<String, Vec<String>> {

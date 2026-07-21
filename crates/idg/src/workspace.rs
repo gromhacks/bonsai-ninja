@@ -213,6 +213,11 @@ impl CrossFileEdges {
             self.by_to_segment.entry(edge.to_segment).or_default().push(i);
         }
     }
+
+    fn release_indexes(&mut self) {
+        self.by_from_segment = AHashMap::new();
+        self.by_to_segment = AHashMap::new();
+    }
 }
 
 /// Workspace-level IDG. Holds per-file segments, the cross-file
@@ -371,110 +376,49 @@ impl IdgWorkspace {
     /// matcher-policy bump (or any consumer that wants the IDG
     /// invalidated together) naturally rejects a stale sidecar.
     pub fn save_to_disk(&self, path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<()> {
-        use bonsai_factstore::FactStoreWriter;
-        use rayon::prelude::*;
-        let cross_file_chunk_count = chunk_count(self.cross_file.edges.len(), IDG_WORKSPACE_EDGE_CHUNK_LEN);
-        let field_flow_chunk_count = chunk_count(self.field_flow.len(), IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN);
-        let symbolic_transform_chunk_count = chunk_count(
-            self.symbolic_field.transforms().len(),
-            IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN,
-        );
-        let entry_count = 1usize
-            .saturating_add(self.segments.len())
-            .saturating_add(cross_file_chunk_count)
-            .saturating_add(field_flow_chunk_count)
-            .saturating_add(1)
-            .saturating_add(symbolic_transform_chunk_count);
-        let writer = FactStoreWriter::create_with_capacity(
+        save_workspace_parts(
             path,
-            IDG_WORKSPACE_TABLE_ID,
             pipeline_hash,
-            entry_count,
-            entry_count.saturating_mul(64 * 1024),
-            entry_count.saturating_mul(64),
-        )?;
-        let metadata = IdgWorkspaceMetadata {
-            version: IDG_WORKSPACE_VERSION,
-            segment_count: self.segments.len() as u32,
-            cross_file_edge_count: self.cross_file.edges.len() as u64,
-            cross_file_chunk_count: cross_file_chunk_count as u32,
-            field_flow_count: self.field_flow.len() as u64,
-            field_flow_chunk_count: field_flow_chunk_count as u32,
-            symbolic_string_count: self.symbolic_field.strings().len() as u64,
-            symbolic_base_count: self.symbolic_field.bases().len() as u64,
-            symbolic_transform_count: self.symbolic_field.transforms().len() as u64,
-            symbolic_transform_chunk_count: symbolic_transform_chunk_count as u32,
-        };
-        let meta_bytes = wire::encode(&metadata)
-            .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-        writer.add_owned(0, IDG_WORKSPACE_VERSION as u64, meta_bytes)?;
-        // Segments are independent compiler artifacts. Encode one worker-width
-        // batch in parallel, then enqueue it in stable SegmentId order. This
-        // overlaps CPU encoding with the factstore writer without retaining a
-        // second whole-workspace byte image or making output order depend on
-        // worker scheduling.
-        let encoding_width = rayon::current_num_threads().max(1);
-        for (batch_idx, segments) in self.segments.chunks(encoding_width).enumerate() {
-            let encoded = segments
-                .par_iter()
-                .map(|segment| {
-                    wire::encode(segment).map_err(|e| {
-                        crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-                    })
-                })
-                .collect::<Vec<_>>();
-            let first_segment_idx = batch_idx * encoding_width;
-            for (offset, segment_bytes) in encoded.into_iter().enumerate() {
-                writer.add_owned(
-                    (first_segment_idx + offset + 1) as u64,
-                    IDG_WORKSPACE_VERSION as u64,
-                    segment_bytes?,
-                )?;
-            }
+            PersistSegments::Borrowed(&self.segments),
+            PersistSlice::Borrowed(&self.cross_file.edges),
+            PersistSlice::Borrowed(&self.field_flow),
+            PersistSymbolic::Borrowed(&self.symbolic_field),
+        )
+    }
+
+    /// Consume a completed compiler graph and persist its canonical wire
+    /// representation after releasing indexes that Serde does not encode.
+    ///
+    /// Explicit prewarming needs the sidecar, not a second live query graph.
+    /// Dropping build-side hash tables before encoding prevents persistence
+    /// memory from becoming additive with those tables on large workspaces.
+    /// Every node and edge remains in the canonical vectors written by
+    /// [`Self::save_to_disk`]; warm loads rebuild the reverse indexes.
+    pub fn save_into_disk(self, path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<()> {
+        let Self {
+            mut segments,
+            by_func,
+            mut cross_file,
+            field_flow,
+            mut symbolic_field,
+        } = self;
+        drop(by_func);
+        cross_file.release_indexes();
+        symbolic_field.release_indexes();
+        for segment in &mut segments {
+            segment.release_reverse_lookups();
         }
-        let cross_base = first_cross_file_chunk_key(self.segments.len() as u32);
-        for (idx, chunk) in self
-            .cross_file
-            .edges
-            .chunks(IDG_WORKSPACE_EDGE_CHUNK_LEN)
-            .enumerate()
-        {
-            let bytes = wire::encode(chunk)
-                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-            writer.add_owned(cross_base + idx as u64, IDG_WORKSPACE_VERSION as u64, bytes)?;
-        }
-        let field_base =
-            first_field_flow_chunk_key(self.segments.len() as u32, cross_file_chunk_count as u32);
-        for (idx, chunk) in self
-            .field_flow
-            .chunks(IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN)
-            .enumerate()
-        {
-            let bytes = wire::encode(chunk)
-                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-            writer.add_owned(field_base + idx as u64, IDG_WORKSPACE_VERSION as u64, bytes)?;
-        }
-        let symbolic_header = symbolic_field_header_key(
-            self.segments.len() as u32,
-            cross_file_chunk_count as u32,
-            field_flow_chunk_count as u32,
+        let cross_file_edges = std::sync::Arc::new(std::mem::take(&mut cross_file.edges));
+        drop(cross_file);
+        let result = save_workspace_parts(
+            path,
+            pipeline_hash,
+            PersistSegments::Owned(segments),
+            PersistSlice::Owned(cross_file_edges),
+            PersistSlice::Owned(std::sync::Arc::new(field_flow)),
+            PersistSymbolic::Owned(std::sync::Arc::new(symbolic_field)),
         );
-        let header_bytes = wire::encode(&(self.symbolic_field.strings(), self.symbolic_field.bases()))
-            .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-        writer.add_owned(symbolic_header, IDG_WORKSPACE_VERSION as u64, header_bytes)?;
-        let transform_base = symbolic_header + 1;
-        for (idx, chunk) in self
-            .symbolic_field
-            .transforms()
-            .chunks(IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN)
-            .enumerate()
-        {
-            let bytes = wire::encode(chunk)
-                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-            writer.add_owned(transform_base + idx as u64, IDG_WORKSPACE_VERSION as u64, bytes)?;
-        }
-        writer.finish()?;
-        Ok(())
+        result
     }
 
     /// Load a workspace IDG from `path`. Returns `Ok(None)` for missing
@@ -548,64 +492,69 @@ impl IdgWorkspace {
         // their local dictionaries in parallel, then install them in segment-id
         // order so persisted IDs remain deterministic. This is compiler
         // scheduling only: every segment is still decoded and validated.
-        let decoded_segments = (0..metadata.segment_count)
-            .into_par_iter()
-            .map(|idx| -> crate::IdgResult<Option<IdgSegment>> {
-                let Some(hit) = reader.get((idx + 1) as u64)? else {
-                    bonsai_diagnostics::debug_log!(
-                        "idg-build",
-                        "workspace sidecar miss: path={} reason=missing-segment segment={}",
-                        path.display(),
-                        idx
-                    );
+        let decode_width = idg_serialization_worker_count();
+        for batch_start in (0..metadata.segment_count).step_by(decode_width) {
+            let batch_end = metadata
+                .segment_count
+                .min(batch_start.saturating_add(decode_width as u32));
+            let decoded_segments = (batch_start..batch_end)
+                .into_par_iter()
+                .map(|idx| -> crate::IdgResult<Option<IdgSegment>> {
+                    let Some(hit) = reader.get((idx + 1) as u64)? else {
+                        bonsai_diagnostics::debug_log!(
+                            "idg-build",
+                            "workspace sidecar miss: path={} reason=missing-segment segment={}",
+                            path.display(),
+                            idx
+                        );
+                        return Ok(None);
+                    };
+                    let mut segment: IdgSegment = wire::decode(&hit.payload).map_err(|e| {
+                        crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                    })?;
+                    if segment.version != IDG_SEGMENT_VERSION {
+                        bonsai_diagnostics::debug_log!(
+                            "idg-build",
+                            "workspace sidecar miss: path={} reason=segment-version segment={} version={} expected={}",
+                            path.display(),
+                            idx,
+                            segment.version,
+                            IDG_SEGMENT_VERSION
+                        );
+                        return Ok(None);
+                    }
+                    segment.places.rebuild_lookup();
+                    segment.nodes.rebuild_lookup();
+                    segment.strings.rebuild_lookup();
+                    Ok(Some(segment))
+                })
+                .collect::<Vec<_>>();
+            for (offset, decoded) in decoded_segments.into_iter().enumerate() {
+                let Some(segment) = decoded? else {
                     return Ok(None);
                 };
-                let mut segment: IdgSegment = wire::decode(&hit.payload).map_err(|e| {
-                    crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-                })?;
-                if segment.version != IDG_SEGMENT_VERSION {
-                    bonsai_diagnostics::debug_log!(
-                        "idg-build",
-                        "workspace sidecar miss: path={} reason=segment-version segment={} version={} expected={}",
-                        path.display(),
-                        idx,
-                        segment.version,
-                        IDG_SEGMENT_VERSION
-                    );
-                    return Ok(None);
+                let idx = batch_start as usize + offset;
+                let seg_id = SegmentId(u32::try_from(idx).expect("segment index came from u32 metadata"));
+                for func_raw in &segment.funcs {
+                    ws.by_func.insert(*func_raw, seg_id);
                 }
-                segment.places.rebuild_lookup();
-                segment.nodes.rebuild_lookup();
-                segment.strings.rebuild_lookup();
-                Ok(Some(segment))
-            })
-            .collect::<Vec<_>>();
-        for (idx, decoded) in decoded_segments.into_iter().enumerate() {
-            let Some(segment) = decoded? else {
-                return Ok(None);
-            };
-            let seg_id = SegmentId(u32::try_from(idx).expect("segment index came from u32 metadata"));
-            for func_raw in &segment.funcs {
-                ws.by_func.insert(*func_raw, seg_id);
+                ws.segments.push(segment);
             }
-            ws.segments.push(segment);
         }
         let cross_base = first_cross_file_chunk_key(metadata.segment_count);
-        let Some(cross_chunks) = load_sidecar_chunks::<CrossFileEdge>(
+        ws.cross_file
+            .edges
+            .reserve(metadata.cross_file_edge_count.min(usize::MAX as u64) as usize);
+        let cross_complete = visit_sidecar_chunks::<CrossFileEdge, _>(
             &reader,
             path,
             cross_base,
             metadata.cross_file_chunk_count,
             "cross-file",
-        )?
-        else {
+            |chunk| ws.cross_file.edges.extend(chunk),
+        )?;
+        if !cross_complete {
             return Ok(None);
-        };
-        ws.cross_file
-            .edges
-            .reserve(metadata.cross_file_edge_count.min(usize::MAX as u64) as usize);
-        for chunk in cross_chunks {
-            ws.cross_file.edges.extend(chunk);
         }
         if ws.cross_file.len() as u64 != metadata.cross_file_edge_count {
             bonsai_diagnostics::debug_log!(
@@ -618,18 +567,16 @@ impl IdgWorkspace {
             return Ok(None);
         }
         let field_base = first_field_flow_chunk_key(metadata.segment_count, metadata.cross_file_chunk_count);
-        let Some(field_chunks) = load_sidecar_chunks::<FieldFlowLink>(
+        let field_complete = visit_sidecar_chunks::<FieldFlowLink, _>(
             &reader,
             path,
             field_base,
             metadata.field_flow_chunk_count,
             "field-flow",
-        )?
-        else {
+            |chunk| ws.field_flow.extend(chunk),
+        )?;
+        if !field_complete {
             return Ok(None);
-        };
-        for chunk in field_chunks {
-            ws.field_flow.extend(chunk);
         }
         if ws.field_flow.len() as u64 != metadata.field_flow_count {
             bonsai_diagnostics::debug_log!(
@@ -662,18 +609,16 @@ impl IdgWorkspace {
             return Ok(None);
         }
         let mut symbolic = SymbolicFieldGraph::from_parts(strings, bases, Vec::new());
-        let Some(transform_chunks) = load_sidecar_chunks::<SymbolicFieldTransform>(
+        let transforms_complete = visit_sidecar_chunks::<SymbolicFieldTransform, _>(
             &reader,
             path,
             symbolic_header + 1,
             metadata.symbolic_transform_chunk_count,
             "symbolic-transform",
-        )?
-        else {
+            |chunk| symbolic.extend_transforms(chunk),
+        )?;
+        if !transforms_complete {
             return Ok(None);
-        };
-        for chunk in transform_chunks {
-            symbolic.extend_transforms(chunk);
         }
         if symbolic.transforms().len() as u64 != metadata.symbolic_transform_count {
             return Ok(None);
@@ -764,6 +709,227 @@ impl IdgWorkspace {
     }
 }
 
+enum PersistSegments<'a> {
+    Borrowed(&'a [IdgSegment]),
+    Owned(Vec<IdgSegment>),
+}
+
+enum PersistSlice<'a, T> {
+    Borrowed(&'a [T]),
+    Owned(std::sync::Arc<Vec<T>>),
+}
+
+impl<T> PersistSlice<'_, T> {
+    fn as_slice(&self) -> &[T] {
+        match self {
+            Self::Borrowed(values) => values,
+            Self::Owned(values) => values,
+        }
+    }
+}
+
+enum PersistSymbolic<'a> {
+    Borrowed(&'a SymbolicFieldGraph),
+    Owned(std::sync::Arc<SymbolicFieldGraph>),
+}
+
+impl PersistSymbolic<'_> {
+    fn as_graph(&self) -> &SymbolicFieldGraph {
+        match self {
+            Self::Borrowed(graph) => graph,
+            Self::Owned(graph) => graph,
+        }
+    }
+}
+
+impl PersistSegments<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Borrowed(segments) => segments.len(),
+            Self::Owned(segments) => segments.len(),
+        }
+    }
+}
+
+fn encode_sidecar_value<T: serde::Serialize + ?Sized>(value: &T) -> crate::IdgResult<Vec<u8>> {
+    wire::encode(value)
+        .map_err(|err| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))
+}
+
+fn encode_sidecar_to_writer<T: serde::Serialize + ?Sized>(
+    writer: &mut dyn std::io::Write,
+    value: &T,
+) -> std::io::Result<()> {
+    wire::encode_to_writer(writer, value)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+}
+
+fn write_slice_chunks<T>(
+    writer: &bonsai_factstore::FactStoreWriter,
+    values: PersistSlice<'_, T>,
+    chunk_len: usize,
+    first_key: u64,
+) -> crate::IdgResult<()>
+where
+    T: serde::Serialize + Send + Sync + 'static,
+{
+    match values {
+        PersistSlice::Borrowed(values) => {
+            for (idx, chunk) in values.chunks(chunk_len).enumerate() {
+                writer.add_owned(
+                    first_key + idx as u64,
+                    IDG_WORKSPACE_VERSION as u64,
+                    encode_sidecar_value(chunk)?,
+                )?;
+            }
+        }
+        PersistSlice::Owned(values) => {
+            for (idx, start) in (0..values.len()).step_by(chunk_len).enumerate() {
+                let values = std::sync::Arc::clone(&values);
+                let end = values.len().min(start.saturating_add(chunk_len));
+                writer.add_streamed(first_key + idx as u64, IDG_WORKSPACE_VERSION as u64, move |out| {
+                    encode_sidecar_to_writer(out, &values[start..end])
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn save_workspace_parts(
+    path: &std::path::Path,
+    pipeline_hash: u64,
+    segments: PersistSegments<'_>,
+    cross_file_edges: PersistSlice<'_, CrossFileEdge>,
+    field_flow: PersistSlice<'_, FieldFlowLink>,
+    symbolic_field: PersistSymbolic<'_>,
+) -> crate::IdgResult<()> {
+    use bonsai_factstore::FactStoreWriter;
+    use rayon::prelude::*;
+
+    let segment_count = segments.len();
+    let cross_file_chunk_count = chunk_count(cross_file_edges.as_slice().len(), IDG_WORKSPACE_EDGE_CHUNK_LEN);
+    let field_flow_chunk_count = chunk_count(field_flow.as_slice().len(), IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN);
+    let symbolic = symbolic_field.as_graph();
+    let symbolic_transform_chunk_count = chunk_count(
+        symbolic.transforms().len(),
+        IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN,
+    );
+    // Segment payloads carry their own compact string dictionaries; the
+    // outer factstore string pool is intentionally empty. The writer retains
+    // only its byte-backpressured payload queue and small on-disk index.
+    let writer = FactStoreWriter::create(path, IDG_WORKSPACE_TABLE_ID, pipeline_hash)?;
+    let metadata = IdgWorkspaceMetadata {
+        version: IDG_WORKSPACE_VERSION,
+        segment_count: segment_count as u32,
+        cross_file_edge_count: cross_file_edges.as_slice().len() as u64,
+        cross_file_chunk_count: cross_file_chunk_count as u32,
+        field_flow_count: field_flow.as_slice().len() as u64,
+        field_flow_chunk_count: field_flow_chunk_count as u32,
+        symbolic_string_count: symbolic.strings().len() as u64,
+        symbolic_base_count: symbolic.bases().len() as u64,
+        symbolic_transform_count: symbolic.transforms().len() as u64,
+        symbolic_transform_chunk_count: symbolic_transform_chunk_count as u32,
+    };
+    writer.add_owned(0, IDG_WORKSPACE_VERSION as u64, encode_sidecar_value(&metadata)?)?;
+
+    // A borrowed query graph remains intact. A sidecar-only compiler prewarm
+    // transfers ownership here, so completed segment dictionaries and edge
+    // vectors are released batch by batch while the exact wire entries are
+    // streamed in deterministic SegmentId order.
+    let encoding_width = idg_serialization_worker_count();
+    match segments {
+        PersistSegments::Borrowed(segments) => {
+            for (batch_idx, batch) in segments.chunks(encoding_width).enumerate() {
+                let encoded = batch.par_iter().map(encode_sidecar_value).collect::<Vec<_>>();
+                let first_segment_idx = batch_idx * encoding_width;
+                for (offset, bytes) in encoded.into_iter().enumerate() {
+                    writer.add_owned(
+                        (first_segment_idx + offset + 1) as u64,
+                        IDG_WORKSPACE_VERSION as u64,
+                        bytes?,
+                    )?;
+                }
+            }
+        }
+        PersistSegments::Owned(segments) => {
+            for (idx, segment) in segments.into_iter().enumerate() {
+                writer.add_streamed((idx + 1) as u64, IDG_WORKSPACE_VERSION as u64, move |out| {
+                    encode_sidecar_to_writer(out, &segment)
+                })?;
+            }
+        }
+    }
+
+    let cross_base = first_cross_file_chunk_key(segment_count as u32);
+    write_slice_chunks(
+        &writer,
+        cross_file_edges,
+        IDG_WORKSPACE_EDGE_CHUNK_LEN,
+        cross_base,
+    )?;
+    let field_base = first_field_flow_chunk_key(segment_count as u32, cross_file_chunk_count as u32);
+    write_slice_chunks(
+        &writer,
+        field_flow,
+        IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN,
+        field_base,
+    )?;
+    let symbolic_header = symbolic_field_header_key(
+        segment_count as u32,
+        cross_file_chunk_count as u32,
+        field_flow_chunk_count as u32,
+    );
+    match &symbolic_field {
+        PersistSymbolic::Borrowed(graph) => writer.add_owned(
+            symbolic_header,
+            IDG_WORKSPACE_VERSION as u64,
+            encode_sidecar_value(&(graph.strings(), graph.bases()))?,
+        )?,
+        PersistSymbolic::Owned(graph) => {
+            let graph = std::sync::Arc::clone(graph);
+            writer.add_streamed(symbolic_header, IDG_WORKSPACE_VERSION as u64, move |out| {
+                encode_sidecar_to_writer(out, &(graph.strings(), graph.bases()))
+            })?;
+        }
+    }
+    let transform_base = symbolic_header + 1;
+    match symbolic_field {
+        PersistSymbolic::Borrowed(graph) => {
+            for (idx, chunk) in graph
+                .transforms()
+                .chunks(IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN)
+                .enumerate()
+            {
+                writer.add_owned(
+                    transform_base + idx as u64,
+                    IDG_WORKSPACE_VERSION as u64,
+                    encode_sidecar_value(chunk)?,
+                )?;
+            }
+        }
+        PersistSymbolic::Owned(graph) => {
+            for (idx, start) in (0..graph.transforms().len())
+                .step_by(IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN)
+                .enumerate()
+            {
+                let graph = std::sync::Arc::clone(&graph);
+                let end = graph
+                    .transforms()
+                    .len()
+                    .min(start.saturating_add(IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN));
+                writer.add_streamed(
+                    transform_base + idx as u64,
+                    IDG_WORKSPACE_VERSION as u64,
+                    move |out| encode_sidecar_to_writer(out, &graph.transforms()[start..end]),
+                )?;
+            }
+        }
+    }
+    writer.finish()?;
+    Ok(())
+}
+
 /// Per-workspace metadata written at entry 0 of the streamed IDG
 /// sidecar. Large edge/link payloads are stored in fixed-size chunks
 /// after the segment entries.
@@ -796,43 +962,53 @@ struct IdgWorkspaceMetadataOwned {
     symbolic_transform_chunk_count: u32,
 }
 
-/// Decode independent factstore chunks concurrently while preserving their
-/// key order in the returned vector. Missing entries fail closed with
-/// `Ok(None)` so callers rebuild the complete sidecar; decode/I/O failures
+/// Decode independent factstore chunks in resource-bounded batches and pass
+/// each completed chunk directly to its resident destination. Missing entries
+/// fail closed so callers rebuild the complete sidecar; decode/I/O failures
 /// retain their typed error.
-fn load_sidecar_chunks<T>(
+fn visit_sidecar_chunks<T, F>(
     reader: &bonsai_factstore::FactStoreReader,
     path: &std::path::Path,
     first_key: u64,
     chunk_count: u32,
     kind: &'static str,
-) -> crate::IdgResult<Option<Vec<Vec<T>>>>
+    mut visit: F,
+) -> crate::IdgResult<bool>
 where
     T: serde::de::DeserializeOwned + Send,
+    F: FnMut(Vec<T>),
 {
     use rayon::prelude::*;
 
-    let decoded = (0..chunk_count)
-        .into_par_iter()
-        .map(|chunk_idx| -> crate::IdgResult<Option<Vec<T>>> {
-            let Some(hit) = reader.get(first_key + u64::from(chunk_idx))? else {
-                bonsai_diagnostics::debug_log!(
-                    "idg-build",
-                    "workspace sidecar miss: path={} reason=missing-chunk kind={} chunk={}",
-                    path.display(),
-                    kind,
-                    chunk_idx
-                );
-                return Ok(None);
+    let decode_width = idg_serialization_worker_count();
+    for batch_start in (0..chunk_count).step_by(decode_width) {
+        let batch_end = chunk_count.min(batch_start.saturating_add(decode_width as u32));
+        let decoded = (batch_start..batch_end)
+            .into_par_iter()
+            .map(|chunk_idx| -> crate::IdgResult<Option<Vec<T>>> {
+                let Some(hit) = reader.get(first_key + u64::from(chunk_idx))? else {
+                    bonsai_diagnostics::debug_log!(
+                        "idg-build",
+                        "workspace sidecar miss: path={} reason=missing-chunk kind={} chunk={}",
+                        path.display(),
+                        kind,
+                        chunk_idx
+                    );
+                    return Ok(None);
+                };
+                wire::decode(&hit.payload)
+                    .map(Some)
+                    .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+            })
+            .collect::<Vec<_>>();
+        for chunk in decoded {
+            let Some(chunk) = chunk? else {
+                return Ok(false);
             };
-            wire::decode(&hit.payload)
-                .map(Some)
-                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .collect::<crate::IdgResult<Vec<_>>>()?;
-    Ok(decoded.into_iter().collect())
+            visit(chunk);
+        }
+    }
+    Ok(true)
 }
 
 /// Factstore table id for the workspace-wide IDG sidecar. Distinct
@@ -859,6 +1035,19 @@ const IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN: usize = 2;
 const IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN: usize = 100_000;
 #[cfg(test)]
 const IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN: usize = 2;
+
+fn idg_serialization_worker_count() -> usize {
+    let cpu_workers = rayon::current_num_threads().max(1);
+    // Keep most of the process budget available for the resident compiler
+    // graph. Only the remaining quarter may be occupied by concurrent wire
+    // buffers and decoded chunks. This affects throughput, never sidecar
+    // completeness or graph semantics.
+    let reserve = bonsai_common::effective_memory_limit_bytes()
+        .map(|limit| limit.saturating_sub(limit / 4))
+        .unwrap_or(1024 * 1024 * 1024);
+    const SERIALIZATION_BYTES_PER_WORKER: u64 = 256 * 1024 * 1024;
+    bonsai_common::memory_bounded_worker_count(cpu_workers, SERIALIZATION_BYTES_PER_WORKER, reserve)
+}
 
 fn chunk_count(len: usize, chunk_len: usize) -> usize {
     if len == 0 {

@@ -84,6 +84,7 @@ ignore = "0.4"
 lru = "0.16.3"
 tempfile = "3"
 dirs = "6"
+mimalloc = { version = "0.1.52", features = ["v2"] }
 
 # CLI / frontends
 clap = { version = "4", features = ["derive", "env"] }

@@ -133,6 +133,17 @@ impl StringPoolBuilder {
         }
     }
 
+    /// Release the build/query reverse index while retaining the canonical
+    /// serialized string vectors.
+    ///
+    /// This is useful at a compiler persistence boundary where the builder is
+    /// being consumed. The reverse map is deliberately skipped by Serde, so
+    /// dropping it cannot change the wire artifact; a subsequently decoded
+    /// pool rebuilds the same index through [`Self::rebuild_lookup`].
+    pub fn release_lookup(&mut self) {
+        self.by_str = AHashMap::new();
+    }
+
     /// Look up `name`, returning its id if already interned. O(1).
     /// Distinct from [`Self::intern`] which always inserts on miss.
     #[must_use]

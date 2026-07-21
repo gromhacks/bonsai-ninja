@@ -81,6 +81,7 @@ pub mod ids;
 pub mod names;
 pub mod policy;
 pub mod precision;
+pub mod resources;
 pub mod span;
 pub mod span_cache;
 pub mod wire;
@@ -89,6 +90,7 @@ pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, Ty
 pub use names::{
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;
+pub use resources::{effective_memory_limit_bytes, memory_bounded_worker_count};
 pub use span::{LineCol, Span, SpanMap};
 pub use span_cache::{cached_span_map, cached_span_map_arc};
 
