@@ -142,11 +142,50 @@ fn cross_file_rebuild_indexes_after_serde() {
     });
     let bytes = bonsai_common::wire::encode(&cfe).unwrap();
     let mut restored: CrossFileEdges = bonsai_common::wire::decode(&bytes).unwrap();
-    // After deserialize, by_from / by_to are empty.
-    assert_eq!(restored.outgoing_from_segment(SegmentId(1)).count(), 0);
+    // After deserialize, by_from / by_to are empty. Canonical-vector fallback
+    // keeps the public API exact until a mutable client requests indexes.
+    assert!(restored.by_from_segment.is_empty());
+    assert!(restored.by_to_segment.is_empty());
+    assert_eq!(restored.outgoing_from_segment(SegmentId(1)).count(), 1);
     restored.rebuild_indexes();
     assert_eq!(restored.outgoing_from_segment(SegmentId(1)).count(), 1);
     assert_eq!(restored.incoming_to_segment(SegmentId(2)).count(), 1);
+}
+
+#[test]
+fn sidecar_build_defers_cross_file_indexes_without_dropping_edges() {
+    let mut workspace = IdgWorkspace::new();
+    workspace.disable_cross_file_indexes();
+    workspace.cross_file_mut().push(CrossFileEdge {
+        from_segment: SegmentId(1),
+        to_segment: SegmentId(2),
+        edge: IdgEdge::inter_call_arg(
+            NodeId(0),
+            NodeId(1),
+            span(),
+            Precision::Exact,
+            CallEdgeKind::Direct,
+        ),
+    });
+
+    assert_eq!(workspace.cross_file().len(), 1);
+    assert!(!workspace.cross_file().maintain_indexes);
+    assert!(workspace.cross_file().by_from_segment.is_empty());
+    assert!(workspace.cross_file().by_to_segment.is_empty());
+    assert_eq!(
+        workspace.cross_file().outgoing_from_segment(SegmentId(1)).count(),
+        1
+    );
+
+    workspace.cross_file_mut().rebuild_indexes();
+    assert_eq!(
+        workspace.cross_file().outgoing_from_segment(SegmentId(1)).count(),
+        1
+    );
+    assert_eq!(
+        workspace.cross_file().incoming_to_segment(SegmentId(2)).count(),
+        1
+    );
 }
 
 #[test]

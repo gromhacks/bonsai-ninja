@@ -1603,12 +1603,19 @@ impl IdgQueryService {
                         .push(edge.from);
                 }
             }
-            for cross in self.workspace.cross_file().outgoing_from_segment(seg_id) {
-                if cross.edge.meta.kind == IdgEdgeKind::InterCallArg {
-                    evidence.resolved.insert(cross.edge.from);
-                }
-            }
             evidence_by_segment.insert(seg_id, evidence);
+        }
+        // Warm sidecars deliberately keep only the canonical cross-edge
+        // vector. Scan it once for the complete set of touched segments
+        // instead of rebuilding two workspace-wide directional indexes or
+        // rescanning the vector independently for every segment.
+        for cross in &self.workspace.cross_file().edges {
+            if cross.edge.meta.kind != IdgEdgeKind::InterCallArg {
+                continue;
+            }
+            if let Some(evidence) = evidence_by_segment.get_mut(&cross.from_segment) {
+                evidence.resolved.insert(cross.edge.from);
+            }
         }
         let mut out = Vec::new();
         for ws_node in closure {

@@ -95,6 +95,15 @@ struct FunctionStitchData {
     flow_control: FlowControlFacts,
 }
 
+/// Minimal function facts retained after its call sites have been stitched.
+/// The complete [`FunctionStitchData`] owns every call-site string and node
+/// list; keeping all of it until field propagation made transient compiler IR
+/// overlap the fully materialized cross-file graph on large workspaces.
+struct FunctionFieldContext {
+    receiver_names: Vec<String>,
+    flow_control: FlowControlFacts,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct FieldArgStitch {
     caller: FuncId,
@@ -685,6 +694,12 @@ where
     I: IntoIterator<Item = (SegmentId, Vec<TransferOutput>)>,
 {
     let mut ws = IdgWorkspace::new();
+    if reverse_lookup_retention == ReverseLookupRetention::SidecarOnly {
+        // A sidecar build is never queried in this process. Keep the exact,
+        // stable edge vector but defer its two directional indexes to the
+        // warm load, where they are built once for the query service.
+        ws.disable_cross_file_indexes();
+    }
     let stitch_started = Instant::now();
     // Phase 3a: build each segment from its functions' transfers.
     // Track per-segment `(FuncId, local_node_id) → workspace_node_id`
@@ -694,6 +709,7 @@ where
     // the `IdgWorkspace`'s segment lookup.
     let mut seg_remaps: AHashMap<FuncId, (SegmentId, NodeRemap)> = AHashMap::with_capacity(function_count);
     let mut stitch_data: AHashMap<FuncId, FunctionStitchData> = AHashMap::with_capacity(function_count);
+    let mut callee_endpoints: AHashMap<FuncId, CalleeEndpoints> = AHashMap::with_capacity(function_count);
     // Callers emit placeholder segments in ascending order. This preserves
     // stable workspace node ids while allowing each completed compiler batch
     // to be consumed before the next batch is lowered.
@@ -759,8 +775,27 @@ where
                 segment.record_func(func);
             }
             let ws_id = ws.register_segment(segment);
+            let mut segment_funcs = Vec::with_capacity(local_remaps.len());
             for (func, remap) in local_remaps {
+                segment_funcs.push(func);
                 seg_remaps.insert(func, (ws_id, remap));
+            }
+            extend_callee_endpoints_for_segment(
+                ws_id,
+                &segment_funcs,
+                &stitch_data,
+                &ws,
+                &mut callee_endpoints,
+            );
+            if reverse_lookup_retention == ReverseLookupRetention::SidecarOnly {
+                // Endpoint extraction is the last phase that needs this
+                // completed source file's full reverse dictionaries. Drop
+                // them here rather than after every project segment exists.
+                // Later fallback interning remains exact through canonical
+                // vector lookup plus the segment's small delta indexes.
+                if let Some(segment) = ws.segment_mut(ws_id) {
+                    segment.release_build_lookups();
+                }
             }
         }
     }
@@ -778,20 +813,10 @@ where
         seg_remaps.len()
     ));
 
-    let endpoint_started = Instant::now();
-    let callee_endpoints = build_callee_endpoints(&stitch_data, &seg_remaps, &ws);
     stitch_debug_log(format_args!(
-        "stitch endpoint-index: {:.3}s funcs={}",
-        endpoint_started.elapsed().as_secs_f64(),
+        "stitch endpoint-index: streamed funcs={}",
         callee_endpoints.len()
     ));
-    if reverse_lookup_retention == ReverseLookupRetention::SidecarOnly {
-        // Endpoint resolution is the last phase that needs every segment's
-        // O(1) reverse dictionaries simultaneously. Canonical place/node
-        // vectors remain authoritative; later uncommon lookups scan them
-        // exactly, while new fallback nodes use small delta indexes.
-        ws.release_segment_build_lookups();
-    }
 
     let call_started = Instant::now();
     let collect_stats = stitch_debug_enabled();
@@ -803,21 +828,6 @@ where
     let mut symbolic_field_graph = SymbolicFieldGraph::new();
     let mut receiver_mutation_sites: Vec<Arc<ReceiverMutationStitch>> = Vec::new();
     let mut passthrough_field_copy_sites: Vec<FieldCopySite> = Vec::new();
-    for (&func, data) in &stitch_data {
-        let Some((seg_id, _)) = seg_remaps.get(&func) else {
-            continue;
-        };
-        passthrough_field_copy_sites.extend(data.descendant_copies.iter().map(|copy| FieldCopySite {
-            seg_id: *seg_id,
-            func,
-            source_base: copy.source_base.clone(),
-            target_base: copy.target_base.clone(),
-            write_span: copy.span,
-            via_span: copy.span,
-            precision: Precision::Exact,
-            call_kind: CallEdgeKind::Direct,
-        }));
-    }
     // Phase 3b: stitch cross-function edges. `stitch_data` is an
     // AHashMap whose iteration order is randomised per process —
     // the cross-file edge index this loop appends to is read
@@ -828,11 +838,24 @@ where
     // every downstream content-hash are stable across runs.
     let mut callers_sorted: Vec<FuncId> = stitch_data.keys().copied().collect();
     callers_sorted.sort_by_key(|f| f.raw());
+    let mut field_contexts = AHashMap::with_capacity(stitch_data.len());
     for caller in callers_sorted {
-        let data = stitch_data.get(&caller).expect("just collected from stitch_data");
+        let data = stitch_data
+            .remove(&caller)
+            .expect("just collected from stitch_data");
         let Some((caller_seg, caller_remap)) = seg_remaps.get(&caller) else {
             continue;
         };
+        passthrough_field_copy_sites.extend(data.descendant_copies.iter().map(|copy| FieldCopySite {
+            seg_id: *caller_seg,
+            func: caller,
+            source_base: copy.source_base.clone(),
+            target_base: copy.target_base.clone(),
+            write_span: copy.span,
+            via_span: copy.span,
+            precision: Precision::Exact,
+            call_kind: CallEdgeKind::Direct,
+        }));
         for site in &data.call_sites {
             stitch_call_site(
                 CallStitchRequest {
@@ -870,6 +893,17 @@ where
                 symbolic_funcs,
             );
         }
+        field_contexts.insert(
+            caller,
+            FunctionFieldContext {
+                receiver_names: data.receiver_names,
+                flow_control: data.flow_control,
+            },
+        );
+        // This caller's transfer-local node ids cannot be referenced after
+        // its call sites are stitched. Release the remap while the canonical
+        // edge graph is still growing instead of at function return.
+        seg_remaps.remove(&caller);
     }
     dedup_receiver_mutation_sites(&mut receiver_mutation_sites);
     let field_arg_site_count = field_arg_sites.len();
@@ -905,7 +939,7 @@ where
                 receiver_mutations: &receiver_mutation_sites,
                 passthrough_copies: &passthrough_field_copy_sites,
             },
-            &stitch_data,
+            &field_contexts,
             &mut ws,
             symbolic_field_forwarding,
             symbolic_funcs,
@@ -944,24 +978,19 @@ where
     ws
 }
 
-fn build_callee_endpoints(
+fn extend_callee_endpoints_for_segment(
+    segment_id: SegmentId,
+    funcs: &[FuncId],
     stitch_data: &AHashMap<FuncId, FunctionStitchData>,
-    seg_remaps: &AHashMap<FuncId, (SegmentId, NodeRemap)>,
     ws: &IdgWorkspace,
-) -> AHashMap<FuncId, CalleeEndpoints> {
-    let mut out = AHashMap::with_capacity(stitch_data.len());
-    let mut yielded_nodes_by_segment: AHashMap<SegmentId, AHashSet<NodeId>> = AHashMap::new();
-    let mut returned_nodes_by_segment: AHashMap<SegmentId, AHashSet<NodeId>> = AHashMap::new();
-    let mut funcs: Vec<FuncId> = stitch_data.keys().copied().collect();
-    funcs.sort_by_key(|f| f.raw());
-    for func in funcs {
-        let Some((segment_id, _)) = seg_remaps.get(&func) else {
-            continue;
-        };
-        let segment_id = *segment_id;
-        let Some(segment) = ws.segment(segment_id) else {
-            continue;
-        };
+    out: &mut AHashMap<FuncId, CalleeEndpoints>,
+) {
+    let Some(segment) = ws.segment(segment_id) else {
+        return;
+    };
+    let yielded_nodes = collect_yield_value_nodes(segment);
+    let returned_nodes = collect_return_value_nodes(segment);
+    for &func in funcs {
         let param_count = stitch_data.get(&func).map(|data| data.param_count).unwrap_or(0);
         let mut params = Vec::with_capacity(param_count);
         for idx in 0..param_count {
@@ -981,12 +1010,6 @@ fn build_callee_endpoints(
             .places
             .lookup(&Place::Yield)
             .and_then(|pid| segment.nodes.lookup(func, pid));
-        let yielded_nodes = yielded_nodes_by_segment
-            .entry(segment_id)
-            .or_insert_with(|| collect_yield_value_nodes(segment));
-        let returned_nodes = returned_nodes_by_segment
-            .entry(segment_id)
-            .or_insert_with(|| collect_return_value_nodes(segment));
         // A function that both yields and returns (notably Ruby methods
         // invoking a block) still assigns its explicit return value at the
         // call site. Treat Yield as the result endpoint only for generator-
@@ -1046,7 +1069,6 @@ fn build_callee_endpoints(
             },
         );
     }
-    out
 }
 
 fn collect_unrooted_scalar_reads(segment: &IdgSegment, func: FuncId) -> Vec<(String, NodeId)> {
@@ -3131,7 +3153,7 @@ struct FieldForwardingSites<'a> {
 
 struct FieldPropagationInputs<'a> {
     transforms: &'a AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    stitch_data: &'a AHashMap<FuncId, FunctionStitchData>,
+    field_contexts: &'a AHashMap<FuncId, FunctionFieldContext>,
 }
 
 struct FieldPropagationState<'a> {
@@ -3160,7 +3182,7 @@ struct OutboundFieldWrite<'a> {
 
 fn stitch_field_argument_forwarding(
     sites: FieldForwardingSites<'_>,
-    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
+    field_contexts: &AHashMap<FuncId, FunctionFieldContext>,
     ws: &mut IdgWorkspace,
     symbolic: bool,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
@@ -3174,7 +3196,7 @@ fn stitch_field_argument_forwarding(
         receiver_mutations: receiver_mutation_sites,
         passthrough_copies: passthrough_field_copy_sites,
     } = sites;
-    let mut copy_sites = collect_field_copy_sites(ws, stitch_data);
+    let mut copy_sites = collect_field_copy_sites(ws, field_contexts);
     copy_sites.extend_from_slice(passthrough_field_copy_sites);
     copy_sites.sort_by(|a, b| {
         (
@@ -3259,7 +3281,7 @@ fn stitch_field_argument_forwarding(
     seed_field_write_worklist(&field_index, &transforms, &mut pending, &mut enqueued);
     let inputs = FieldPropagationInputs {
         transforms: &transforms,
-        stitch_data,
+        field_contexts,
     };
     let mut state = FieldPropagationState {
         inter_call_arg_entries: &mut inter_call_arg_entries,
@@ -3770,7 +3792,10 @@ fn field_transform_source_may_apply(
             site,
             state.synthetic_field_writes,
             state.inter_call_arg_entries,
-            inputs.stitch_data.get(&site.func).map(|data| &data.flow_control),
+            inputs
+                .field_contexts
+                .get(&site.func)
+                .map(|data| &data.flow_control),
         ),
         FieldWriteTransform::Return(_)
         | FieldWriteTransform::ConstructorReturn(_)
@@ -3991,7 +4016,10 @@ fn apply_intra_field_copy_write(
         site,
         state.synthetic_field_writes,
         state.inter_call_arg_entries,
-        inputs.stitch_data.get(&site.func).map(|data| &data.flow_control),
+        inputs
+            .field_contexts
+            .get(&site.func)
+            .map(|data| &data.flow_control),
     ) {
         return;
     }
@@ -4370,7 +4398,7 @@ fn field_forwarding_base_allowed(base: &str) -> bool {
 
 fn collect_field_copy_sites(
     ws: &IdgWorkspace,
-    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
+    field_contexts: &AHashMap<FuncId, FunctionFieldContext>,
 ) -> Vec<FieldCopySite> {
     let mut out = Vec::new();
     for (seg_id, segment) in ws.segments() {
@@ -4407,7 +4435,7 @@ fn collect_field_copy_sites(
                 || source_base == target_base
                 || !is_container_copy_target(
                     &target_base,
-                    stitch_data
+                    field_contexts
                         .get(&from_node.func)
                         .map(|data| data.receiver_names.as_slice())
                         .unwrap_or_default(),
