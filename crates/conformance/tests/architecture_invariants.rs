@@ -3060,16 +3060,19 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 .contains("callable_reference_variants"),
         "IDG persistence must retain only linkage headers and lower exact file bodies at segment boundaries"
     );
-    let stitch = function_body(&idg_builder, "stitch_idg_from_segment_batches");
+    let stitch = function_body(&idg_builder, "stitch_idg_from_relowered_segment_batches");
     assert!(
         stitch.contains("extend_callee_endpoints_for_segment")
             && stitch.contains("segment.release_build_lookups()")
-            && stitch.contains("let data = stitch_data")
-            && stitch.contains(".remove(&caller)")
-            && stitch.contains("seg_remaps.remove(&caller)")
+            && stitch.contains("segment.rebuild_build_lookups()")
+            && stitch.contains("remap_transfer_into_segment")
+            && stitch.contains("canonical_function_count")
+            && stitch.contains("stitched_function_count")
             && stitch.contains("disable_cross_file_indexes()")
+            && function_body(&idg, "build_with_file_info_and_options_scoped")
+                .contains("stitch_idg_from_relowered_segment_batches")
             && function_body(&idg_workspace, "rebuild_indexes").contains("self.maintain_indexes = true"),
-        "sidecar IDG builds must release exact per-segment and per-caller compiler indexes at their last use and defer query-only edge indexes to warm load"
+        "sidecar IDG builds must re-lower every compiler unit, release transient indexes at segment boundaries, and defer query-only edge indexes to warm load"
     );
     assert!(
         symbolic.contains("pub arg_idx: u32")

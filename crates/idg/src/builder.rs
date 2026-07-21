@@ -95,6 +95,44 @@ struct FunctionStitchData {
     flow_control: FlowControlFacts,
 }
 
+fn take_function_stitch_data(out: TransferOutput) -> (FuncId, FunctionStitchData) {
+    let TransferOutput {
+        func,
+        params,
+        receiver_param_index,
+        receiver_field_bases,
+        implicit_receiver_bases,
+        receiver_names,
+        return_field_projections,
+        return_passthrough_param_indices,
+        descendant_copies,
+        flow_control,
+        call_sites,
+        is_constructor,
+        has_return_event,
+        ..
+    } = out;
+    let param_count = params.len();
+    (
+        func,
+        FunctionStitchData {
+            params,
+            call_sites,
+            param_count,
+            is_constructor,
+            has_return_event,
+            receiver_param_index,
+            receiver_field_bases,
+            implicit_receiver_bases,
+            receiver_names,
+            return_field_projections,
+            return_passthrough_param_indices,
+            descendant_copies,
+            flow_control,
+        },
+    )
+}
+
 /// Minimal function facts retained after its call sites have been stitched.
 /// The complete [`FunctionStitchData`] owns every call-site string and node
 /// list; keeping all of it until field propagation made transient compiler IR
@@ -667,7 +705,6 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
         include_field_argument_forwarding,
         symbolic_field_forwarding,
         symbolic_funcs,
-        ReverseLookupRetention::Queryable,
     )
 }
 
@@ -677,9 +714,194 @@ pub(crate) enum ReverseLookupRetention {
     SidecarOnly,
 }
 
-/// Stitch lazily lowered segment batches without retaining every function's
-/// [`TransferOutput`] at once. The workspace compiler uses this entry point so
-/// RAM bounds affect only lowering concurrency, never graph scope or closure.
+struct WorkspaceStitchState {
+    call_started: Instant,
+    collect_stats: bool,
+    stats: StitchStats,
+    field_arg_sites: FieldArgSiteQueue,
+    return_field_sites: ReturnFieldSiteQueue,
+    scalar_return_sites: ScalarReturnSiteQueue,
+    constructor_return_sites: ConstructorReturnSiteQueue,
+    symbolic_field_graph: SymbolicFieldGraph,
+    receiver_mutation_sites: Vec<Arc<ReceiverMutationStitch>>,
+    passthrough_field_copy_sites: Vec<FieldCopySite>,
+    field_contexts: AHashMap<FuncId, FunctionFieldContext>,
+}
+
+struct WorkspaceCallerStitch<'a> {
+    caller: FuncId,
+    caller_seg: SegmentId,
+    caller_remap: &'a NodeRemap,
+    data: FunctionStitchData,
+    resolver: &'a dyn CalleeResolver,
+    callee_endpoints: &'a AHashMap<FuncId, CalleeEndpoints>,
+    symbolic_field_forwarding: bool,
+    symbolic_funcs: Option<&'a AHashSet<FuncId>>,
+}
+
+impl WorkspaceStitchState {
+    fn new(function_count: usize) -> Self {
+        Self {
+            call_started: Instant::now(),
+            collect_stats: stitch_debug_enabled(),
+            stats: StitchStats::default(),
+            field_arg_sites: FieldArgSiteQueue::default(),
+            return_field_sites: ReturnFieldSiteQueue::default(),
+            scalar_return_sites: ScalarReturnSiteQueue::default(),
+            constructor_return_sites: ConstructorReturnSiteQueue::default(),
+            symbolic_field_graph: SymbolicFieldGraph::new(),
+            receiver_mutation_sites: Vec::new(),
+            passthrough_field_copy_sites: Vec::new(),
+            field_contexts: AHashMap::with_capacity(function_count),
+        }
+    }
+
+    fn stitch_caller(&mut self, ws: &mut IdgWorkspace, request: WorkspaceCallerStitch<'_>) {
+        let WorkspaceCallerStitch {
+            caller,
+            caller_seg,
+            caller_remap,
+            data,
+            resolver,
+            callee_endpoints,
+            symbolic_field_forwarding,
+            symbolic_funcs,
+        } = request;
+        self.passthrough_field_copy_sites
+            .extend(data.descendant_copies.iter().map(|copy| FieldCopySite {
+                seg_id: caller_seg,
+                func: caller,
+                source_base: copy.source_base.clone(),
+                target_base: copy.target_base.clone(),
+                write_span: copy.span,
+                via_span: copy.span,
+                precision: Precision::Exact,
+                call_kind: CallEdgeKind::Direct,
+            }));
+        for site in &data.call_sites {
+            stitch_call_site(
+                CallStitchRequest {
+                    caller,
+                    caller_seg,
+                    caller_remap,
+                    site,
+                    caller_params: &data.params,
+                    caller_is_constructor: data.is_constructor,
+                    caller_receiver_param_index: data.receiver_param_index,
+                    caller_implicit_receiver_bases: &data.implicit_receiver_bases,
+                    caller_receiver_names: &data.receiver_names,
+                    resolver,
+                    callee_endpoints,
+                },
+                CallStitchOutputs {
+                    ws,
+                    field_arg_sites: &mut self.field_arg_sites,
+                    return_field_sites: &mut self.return_field_sites,
+                    scalar_return_sites: &mut self.scalar_return_sites,
+                    constructor_return_sites: &mut self.constructor_return_sites,
+                    receiver_mutation_sites: &mut self.receiver_mutation_sites,
+                    passthrough_field_copy_sites: &mut self.passthrough_field_copy_sites,
+                    stats: self.collect_stats.then_some(&mut self.stats),
+                },
+            );
+        }
+        if symbolic_field_forwarding {
+            flush_symbolic_site_queues(
+                &mut self.field_arg_sites,
+                &mut self.return_field_sites,
+                &mut self.scalar_return_sites,
+                &mut self.constructor_return_sites,
+                &mut self.symbolic_field_graph,
+                symbolic_funcs,
+            );
+        }
+        self.field_contexts.insert(
+            caller,
+            FunctionFieldContext {
+                receiver_names: data.receiver_names,
+                flow_control: data.flow_control,
+            },
+        );
+    }
+
+    fn finish(
+        mut self,
+        mut ws: IdgWorkspace,
+        include_field_argument_forwarding: bool,
+        symbolic_field_forwarding: bool,
+        symbolic_funcs: Option<&AHashSet<FuncId>>,
+    ) -> IdgWorkspace {
+        dedup_receiver_mutation_sites(&mut self.receiver_mutation_sites);
+        let field_arg_site_count = self.field_arg_sites.len();
+        let return_field_site_count = self.return_field_sites.len();
+        let scalar_return_site_count = self.scalar_return_sites.len();
+        let constructor_return_site_count = self.constructor_return_sites.len();
+        let receiver_mutation_site_count = self.receiver_mutation_sites.len();
+        stitch_debug_log(format_args!(
+            "stitch call-sites-wired: {:.3}s field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={}",
+            self.call_started.elapsed().as_secs_f64(),
+            field_arg_site_count,
+            return_field_site_count,
+            scalar_return_site_count,
+            constructor_return_site_count,
+            receiver_mutation_site_count
+        ));
+        let field_arg_sites = self.field_arg_sites.into_sites();
+        let return_field_sites = self.return_field_sites.into_sites();
+        let scalar_return_sites = self.scalar_return_sites.into_sites();
+        let constructor_return_sites = self.constructor_return_sites.into_sites();
+        if include_field_argument_forwarding {
+            stitch_field_argument_forwarding(
+                FieldForwardingSites {
+                    field_args: &field_arg_sites,
+                    return_fields: &return_field_sites,
+                    scalar_returns: &scalar_return_sites,
+                    constructor_returns: &constructor_return_sites,
+                    receiver_mutations: &self.receiver_mutation_sites,
+                    passthrough_copies: &self.passthrough_field_copy_sites,
+                },
+                &self.field_contexts,
+                &mut ws,
+                symbolic_field_forwarding,
+                symbolic_funcs,
+                self.symbolic_field_graph,
+            );
+        } else {
+            stitch_debug_log(format_args!(
+                "field-forward worklist: skipped eager closure field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={}",
+                field_arg_site_count,
+                return_field_site_count,
+                scalar_return_site_count,
+                constructor_return_site_count,
+                receiver_mutation_site_count
+            ));
+        }
+        stitch_debug_log(format_args!(
+            "stitch calls: {:.3}s sites={} candidates={} callback_lookups={} callback_candidates={} wired_candidates={} inter_edges={} passthrough_edges={} field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={} resolve={:.3}s callback={:.3}s",
+            self.call_started.elapsed().as_secs_f64(),
+            self.stats.sites,
+            self.stats.resolved_candidates,
+            self.stats.callback_lookups,
+            self.stats.callback_candidates,
+            self.stats.wired_candidates,
+            self.stats.inter_edges,
+            self.stats.passthrough_edges,
+            field_arg_site_count,
+            return_field_site_count,
+            scalar_return_site_count,
+            constructor_return_site_count,
+            receiver_mutation_site_count,
+            self.stats.resolve_nanos as f64 / 1_000_000_000.0,
+            self.stats.callback_nanos as f64 / 1_000_000_000.0
+        ));
+        release_storage_normalization_caches();
+        ws
+    }
+}
+
+/// Stitch lazily lowered segment batches for an in-process query graph.
+/// Persistence builds use [`stitch_idg_from_relowered_segment_batches`] so
+/// caller IR never accumulates across source-file segments.
 pub(crate) fn stitch_idg_from_segment_batches<B, I>(
     batches: B,
     function_count: usize,
@@ -687,19 +909,12 @@ pub(crate) fn stitch_idg_from_segment_batches<B, I>(
     include_field_argument_forwarding: bool,
     symbolic_field_forwarding: bool,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
-    reverse_lookup_retention: ReverseLookupRetention,
 ) -> IdgWorkspace
 where
     B: IntoIterator<Item = I>,
     I: IntoIterator<Item = (SegmentId, Vec<TransferOutput>)>,
 {
     let mut ws = IdgWorkspace::new();
-    if reverse_lookup_retention == ReverseLookupRetention::SidecarOnly {
-        // A sidecar build is never queried in this process. Keep the exact,
-        // stable edge vector but defer its two directional indexes to the
-        // warm load, where they are built once for the query service.
-        ws.disable_cross_file_indexes();
-    }
     let stitch_started = Instant::now();
     // Phase 3a: build each segment from its functions' transfers.
     // Track per-segment `(FuncId, local_node_id) → workspace_node_id`
@@ -736,41 +951,8 @@ where
             let mut local_remaps = Vec::with_capacity(sorted_outputs.len());
             for out in sorted_outputs {
                 let remap = merge_transfer_into_segment(&mut segment, &out);
-                let TransferOutput {
-                    func,
-                    params,
-                    receiver_param_index,
-                    receiver_field_bases,
-                    implicit_receiver_bases,
-                    receiver_names,
-                    return_field_projections,
-                    return_passthrough_param_indices,
-                    descendant_copies,
-                    flow_control,
-                    call_sites,
-                    is_constructor,
-                    has_return_event,
-                    ..
-                } = out;
-                let param_count = params.len();
-                stitch_data.insert(
-                    func,
-                    FunctionStitchData {
-                        params,
-                        call_sites,
-                        param_count,
-                        is_constructor,
-                        has_return_event,
-                        receiver_param_index,
-                        receiver_field_bases,
-                        implicit_receiver_bases,
-                        receiver_names,
-                        return_field_projections,
-                        return_passthrough_param_indices,
-                        descendant_copies,
-                        flow_control,
-                    },
-                );
+                let (func, data) = take_function_stitch_data(out);
+                stitch_data.insert(func, data);
                 local_remaps.push((func, remap));
                 segment.record_func(func);
             }
@@ -787,16 +969,6 @@ where
                 &ws,
                 &mut callee_endpoints,
             );
-            if reverse_lookup_retention == ReverseLookupRetention::SidecarOnly {
-                // Endpoint extraction is the last phase that needs this
-                // completed source file's full reverse dictionaries. Drop
-                // them here rather than after every project segment exists.
-                // Later fallback interning remains exact through canonical
-                // vector lookup plus the segment's small delta indexes.
-                if let Some(segment) = ws.segment_mut(ws_id) {
-                    segment.release_build_lookups();
-                }
-            }
         }
     }
     stitch_debug_log(format_args!(
@@ -818,16 +990,7 @@ where
         callee_endpoints.len()
     ));
 
-    let call_started = Instant::now();
-    let collect_stats = stitch_debug_enabled();
-    let mut stats = StitchStats::default();
-    let mut field_arg_sites = FieldArgSiteQueue::default();
-    let mut return_field_sites = ReturnFieldSiteQueue::default();
-    let mut scalar_return_sites = ScalarReturnSiteQueue::default();
-    let mut constructor_return_sites = ConstructorReturnSiteQueue::default();
-    let mut symbolic_field_graph = SymbolicFieldGraph::new();
-    let mut receiver_mutation_sites: Vec<Arc<ReceiverMutationStitch>> = Vec::new();
-    let mut passthrough_field_copy_sites: Vec<FieldCopySite> = Vec::new();
+    let mut state = WorkspaceStitchState::new(stitch_data.len());
     // Phase 3b: stitch cross-function edges. `stitch_data` is an
     // AHashMap whose iteration order is randomised per process —
     // the cross-file edge index this loop appends to is read
@@ -838,7 +1001,6 @@ where
     // every downstream content-hash are stable across runs.
     let mut callers_sorted: Vec<FuncId> = stitch_data.keys().copied().collect();
     callers_sorted.sort_by_key(|f| f.raw());
-    let mut field_contexts = AHashMap::with_capacity(stitch_data.len());
     for caller in callers_sorted {
         let data = stitch_data
             .remove(&caller)
@@ -846,58 +1008,17 @@ where
         let Some((caller_seg, caller_remap)) = seg_remaps.get(&caller) else {
             continue;
         };
-        passthrough_field_copy_sites.extend(data.descendant_copies.iter().map(|copy| FieldCopySite {
-            seg_id: *caller_seg,
-            func: caller,
-            source_base: copy.source_base.clone(),
-            target_base: copy.target_base.clone(),
-            write_span: copy.span,
-            via_span: copy.span,
-            precision: Precision::Exact,
-            call_kind: CallEdgeKind::Direct,
-        }));
-        for site in &data.call_sites {
-            stitch_call_site(
-                CallStitchRequest {
-                    caller,
-                    caller_seg: *caller_seg,
-                    caller_remap,
-                    site,
-                    caller_params: &data.params,
-                    caller_is_constructor: data.is_constructor,
-                    caller_receiver_param_index: data.receiver_param_index,
-                    caller_implicit_receiver_bases: &data.implicit_receiver_bases,
-                    caller_receiver_names: &data.receiver_names,
-                    resolver,
-                    callee_endpoints: &callee_endpoints,
-                },
-                CallStitchOutputs {
-                    ws: &mut ws,
-                    field_arg_sites: &mut field_arg_sites,
-                    return_field_sites: &mut return_field_sites,
-                    scalar_return_sites: &mut scalar_return_sites,
-                    constructor_return_sites: &mut constructor_return_sites,
-                    receiver_mutation_sites: &mut receiver_mutation_sites,
-                    passthrough_field_copy_sites: &mut passthrough_field_copy_sites,
-                    stats: if collect_stats { Some(&mut stats) } else { None },
-                },
-            );
-        }
-        if symbolic_field_forwarding {
-            flush_symbolic_site_queues(
-                &mut field_arg_sites,
-                &mut return_field_sites,
-                &mut scalar_return_sites,
-                &mut constructor_return_sites,
-                &mut symbolic_field_graph,
+        state.stitch_caller(
+            &mut ws,
+            WorkspaceCallerStitch {
+                caller,
+                caller_seg: *caller_seg,
+                caller_remap,
+                data,
+                resolver,
+                callee_endpoints: &callee_endpoints,
+                symbolic_field_forwarding,
                 symbolic_funcs,
-            );
-        }
-        field_contexts.insert(
-            caller,
-            FunctionFieldContext {
-                receiver_names: data.receiver_names,
-                flow_control: data.flow_control,
             },
         );
         // This caller's transfer-local node ids cannot be referenced after
@@ -905,77 +1026,171 @@ where
         // edge graph is still growing instead of at function return.
         seg_remaps.remove(&caller);
     }
-    dedup_receiver_mutation_sites(&mut receiver_mutation_sites);
-    let field_arg_site_count = field_arg_sites.len();
-    let return_field_site_count = return_field_sites.len();
-    let scalar_return_site_count = scalar_return_sites.len();
-    let constructor_return_site_count = constructor_return_sites.len();
-    let receiver_mutation_site_count = receiver_mutation_sites.len();
-    stitch_debug_log(format_args!(
-        "stitch call-sites-wired: {:.3}s field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={}",
-        call_started.elapsed().as_secs_f64(),
-        field_arg_site_count,
-        return_field_site_count,
-        scalar_return_site_count,
-        constructor_return_site_count,
-        receiver_mutation_site_count
-    ));
-    // Drop caller-local dedup indexes before the closure phase. Complete AST
-    // field places were already lowered into compact symbolic transforms;
-    // these queues retain only sites involving adapters that cannot yet prove
-    // complete field-place syntax and therefore require explicit fallback
-    // edges.
-    let field_arg_sites = field_arg_sites.into_sites();
-    let return_field_sites = return_field_sites.into_sites();
-    let scalar_return_sites = scalar_return_sites.into_sites();
-    let constructor_return_sites = constructor_return_sites.into_sites();
-    if include_field_argument_forwarding {
-        stitch_field_argument_forwarding(
-            FieldForwardingSites {
-                field_args: &field_arg_sites,
-                return_fields: &return_field_sites,
-                scalar_returns: &scalar_return_sites,
-                constructor_returns: &constructor_return_sites,
-                receiver_mutations: &receiver_mutation_sites,
-                passthrough_copies: &passthrough_field_copy_sites,
-            },
-            &field_contexts,
-            &mut ws,
-            symbolic_field_forwarding,
-            symbolic_funcs,
-            symbolic_field_graph,
-        );
-    } else {
-        stitch_debug_log(format_args!(
-            "field-forward worklist: skipped eager closure field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={}",
-            field_arg_site_count,
-            return_field_site_count,
-            scalar_return_site_count,
-            constructor_return_site_count,
-            receiver_mutation_site_count
-        ));
+    state.finish(
+        ws,
+        include_field_argument_forwarding,
+        symbolic_field_forwarding,
+        symbolic_funcs,
+    )
+}
+
+/// Build a persistence graph with two deterministic lowering passes.
+///
+/// The first pass creates canonical per-file segments and the compact callee
+/// endpoint index. It intentionally discards every function's call-site IR and
+/// local-node remap at the segment boundary. The second pass re-lowers the same
+/// AST facts one segment at a time, maps its stable local ids onto the existing
+/// segment dictionaries, stitches calls, and discards that transient state.
+/// This is a compiler memory-lifetime boundary, not a semantic budget: both
+/// passes cover every scheduled function and all closure phases still run.
+pub(crate) fn stitch_idg_from_relowered_segment_batches<B1, I1, B2, I2>(
+    canonical_batches: B1,
+    stitch_batches: B2,
+    function_count: usize,
+    resolver: &dyn CalleeResolver,
+    include_field_argument_forwarding: bool,
+    symbolic_field_forwarding: bool,
+    symbolic_funcs: Option<&AHashSet<FuncId>>,
+) -> IdgWorkspace
+where
+    B1: IntoIterator<Item = I1>,
+    I1: IntoIterator<Item = (SegmentId, Vec<TransferOutput>)>,
+    B2: IntoIterator<Item = I2>,
+    I2: IntoIterator<Item = (SegmentId, Vec<TransferOutput>)>,
+{
+    let started = Instant::now();
+    let mut ws = IdgWorkspace::new();
+    ws.disable_cross_file_indexes();
+    let mut callee_endpoints: AHashMap<FuncId, CalleeEndpoints> = AHashMap::with_capacity(function_count);
+    let mut previous_placeholder = None;
+    let mut canonical_function_count = 0usize;
+
+    for batch in canonical_batches {
+        for (placeholder, mut outputs) in batch {
+            debug_assert!(
+                previous_placeholder.is_none_or(|previous| previous < placeholder),
+                "canonical segment batches must be strictly ordered"
+            );
+            previous_placeholder = Some(placeholder);
+            outputs.sort_by_key(|out| out.func.raw());
+            let place_capacity = outputs.iter().map(|out| out.places.len()).sum();
+            let node_capacity = outputs.iter().map(|out| out.nodes.len()).sum();
+            let edge_capacity = outputs.iter().map(|out| out.edges.len()).sum();
+            let mut segment = IdgSegment::with_capacity(place_capacity, node_capacity, edge_capacity);
+            let mut data_by_func = AHashMap::with_capacity(outputs.len());
+            let mut segment_funcs = Vec::with_capacity(outputs.len());
+            for out in outputs {
+                merge_transfer_into_segment(&mut segment, &out);
+                let (func, data) = take_function_stitch_data(out);
+                segment.record_func(func);
+                segment_funcs.push(func);
+                data_by_func.insert(func, data);
+            }
+            canonical_function_count = canonical_function_count.saturating_add(segment_funcs.len());
+            let segment_id = ws.register_segment(segment);
+            assert_eq!(
+                segment_id, placeholder,
+                "canonical segment schedule must match registered segment ids"
+            );
+            extend_callee_endpoints_for_segment(
+                segment_id,
+                &segment_funcs,
+                &data_by_func,
+                &ws,
+                &mut callee_endpoints,
+            );
+            if let Some(segment) = ws.segment_mut(segment_id) {
+                segment.release_build_lookups();
+            }
+        }
     }
+    assert_eq!(
+        canonical_function_count, function_count,
+        "canonical lowering pass must cover the complete function schedule"
+    );
     stitch_debug_log(format_args!(
-        "stitch calls: {:.3}s sites={} candidates={} callback_lookups={} callback_candidates={} wired_candidates={} inter_edges={} passthrough_edges={} field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={} resolve={:.3}s callback={:.3}s",
-        call_started.elapsed().as_secs_f64(),
-        stats.sites,
-        stats.resolved_candidates,
-        stats.callback_lookups,
-        stats.callback_candidates,
-        stats.wired_candidates,
-        stats.inter_edges,
-        stats.passthrough_edges,
-        field_arg_site_count,
-        return_field_site_count,
-        scalar_return_site_count,
-        constructor_return_site_count,
-        receiver_mutation_site_count,
-        stats.resolve_nanos as f64 / 1_000_000_000.0,
-        stats.callback_nanos as f64 / 1_000_000_000.0
+        "stitch canonical-pass: {:.3}s segments={} funcs={} endpoints={}",
+        started.elapsed().as_secs_f64(),
+        ws.segment_count(),
+        canonical_function_count,
+        callee_endpoints.len()
     ));
 
-    release_storage_normalization_caches();
-    ws
+    let stitch_started = Instant::now();
+    let mut state = WorkspaceStitchState::new(function_count);
+    let mut stitched_function_count = 0usize;
+    let mut previous_placeholder = None;
+    for batch in stitch_batches {
+        for (segment_id, mut outputs) in batch {
+            debug_assert!(
+                previous_placeholder.is_none_or(|previous| previous < segment_id),
+                "stitch segment batches must be strictly ordered"
+            );
+            previous_placeholder = Some(segment_id);
+            outputs.sort_by_key(|out| out.func.raw());
+            let Some(segment) = ws.segment_mut(segment_id) else {
+                panic!("stitch pass referenced missing segment {}", segment_id.0);
+            };
+            segment.rebuild_build_lookups();
+            for out in outputs {
+                let before = ws
+                    .segment(segment_id)
+                    .expect("active stitch segment")
+                    .dimensions();
+                let remap = remap_transfer_into_segment(
+                    ws.segment_mut(segment_id).expect("active stitch segment"),
+                    &out,
+                );
+                let after = ws
+                    .segment(segment_id)
+                    .expect("active stitch segment")
+                    .dimensions();
+                assert_eq!(
+                    before, after,
+                    "deterministic stitch re-lowering must reuse every canonical dictionary id"
+                );
+                let (caller, data) = take_function_stitch_data(out);
+                assert_eq!(
+                    ws.segment_for_func(caller),
+                    Some(segment_id),
+                    "stitch caller must remain in its canonical segment"
+                );
+                state.stitch_caller(
+                    &mut ws,
+                    WorkspaceCallerStitch {
+                        caller,
+                        caller_seg: segment_id,
+                        caller_remap: &remap,
+                        data,
+                        resolver,
+                        callee_endpoints: &callee_endpoints,
+                        symbolic_field_forwarding,
+                        symbolic_funcs,
+                    },
+                );
+                stitched_function_count = stitched_function_count.saturating_add(1);
+            }
+            if let Some(segment) = ws.segment_mut(segment_id) {
+                segment.release_build_lookups();
+            }
+        }
+    }
+    assert_eq!(
+        stitched_function_count, function_count,
+        "stitch lowering pass must cover the complete function schedule"
+    );
+    stitch_debug_log(format_args!(
+        "stitch relower-pass: {:.3}s segments={} funcs={}",
+        stitch_started.elapsed().as_secs_f64(),
+        ws.segment_count(),
+        stitched_function_count
+    ));
+    state.finish(
+        ws,
+        include_field_argument_forwarding,
+        symbolic_field_forwarding,
+        symbolic_funcs,
+    )
 }
 
 fn extend_callee_endpoints_for_segment(
@@ -1288,6 +1503,23 @@ impl NodeRemap {
 /// `StrId`s in the segment's pool's id space, and rewrites the
 /// Place values accordingly.
 fn merge_transfer_into_segment(segment: &mut IdgSegment, out: &TransferOutput) -> NodeRemap {
+    let remap = remap_transfer_into_segment(segment, out);
+    // Append remapped intra-procedural edges only on the canonical lowering
+    // pass. Persistence builds re-lower later to recover disposable call-site
+    // IR; that pass reuses this remap but must not duplicate canonical edges.
+    for edge in &out.edges {
+        segment.add_edge(IdgEdge {
+            from: remap.get(edge.from),
+            to: remap.get(edge.to),
+            meta: edge.meta,
+        });
+    }
+    remap
+}
+
+/// Map a deterministically re-lowered transfer onto an existing segment.
+/// Existing dictionaries return the original stable ids; no edge is appended.
+fn remap_transfer_into_segment(segment: &mut IdgSegment, out: &TransferOutput) -> NodeRemap {
     let mut remap = NodeRemap::with_capacity(out.nodes.len());
     // Build per-function StrId remap by walking every interned
     // string in the source pool and re-interning it in the segment
@@ -1310,14 +1542,6 @@ fn merge_transfer_into_segment(segment: &mut IdgSegment, out: &TransferOutput) -
         });
         let global_nid = segment.intern_node(node.func, pid);
         remap.set(NodeId(local_nid_idx as u32), global_nid);
-    }
-    // 2. Append remapped edges.
-    for edge in &out.edges {
-        segment.add_edge(IdgEdge {
-            from: remap.get(edge.from),
-            to: remap.get(edge.to),
-            meta: edge.meta,
-        });
     }
     remap
 }
