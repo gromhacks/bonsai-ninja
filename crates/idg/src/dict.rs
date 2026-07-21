@@ -96,6 +96,10 @@ impl PlaceDict {
             self.by_place.insert(place.clone(), id);
         }
     }
+
+    pub(crate) fn release_lookup(&mut self) {
+        self.by_place = AHashMap::new();
+    }
 }
 
 /// Build-side node interner. Hands out stable `NodeId`s for
@@ -177,6 +181,10 @@ impl NodeDict {
             let id = NodeId(i as u32);
             self.by_node.insert(*node, id);
         }
+    }
+
+    pub(crate) fn release_lookup(&mut self) {
+        self.by_node = AHashMap::new();
     }
 }
 

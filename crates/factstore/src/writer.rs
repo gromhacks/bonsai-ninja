@@ -93,6 +93,11 @@ pub struct FactStoreWriter {
     /// item bound alone is insufficient because one encoded graph can be
     /// orders of magnitude larger than another.
     byte_budget: Arc<ByteBudget>,
+    /// A streamed entry may own an arbitrarily large compiler artifact inside
+    /// its encoder closure. Serialize these calls so concurrent producers
+    /// cannot queue several such artifacts outside the byte-accounted payload
+    /// pipeline.
+    stream_serial: parking_lot::Mutex<()>,
     /// Joined by [`Self::finish`] (or `Drop` if `finish` is skipped)
     /// to release the OS thread handle synchronously. `Option` so
     /// `finish` can take it out of the field; `Mutex` so `&self` Drop
@@ -113,6 +118,8 @@ impl std::fmt::Debug for FactStoreWriter {
     }
 }
 
+type StreamEncoder = Box<dyn FnOnce(&mut dyn Write) -> std::io::Result<()> + Send>;
+
 /// Command shipped from worker → writer thread.
 enum WriteCmd {
     /// Append one entry's payload to the streamed file and record an
@@ -124,6 +131,14 @@ enum WriteCmd {
         /// Releases the payload's byte charge after the writer consumes (or
         /// drops) this command.
         _permit: BytePermit,
+    },
+    /// Encode one consumed compiler artifact directly into the payload
+    /// section without first materializing an encoded `Vec<u8>`.
+    StreamEntry {
+        key: u64,
+        body_hash: u64,
+        encode: StreamEncoder,
+        reply: Sender<std::io::Result<()>>,
     },
     /// Drain queue, finalize the file (string pool, index, header,
     /// fsync, rename), and reply with the entry count.
@@ -213,6 +228,30 @@ struct PendingIndexEntry {
     payload_len: u32,
 }
 
+struct EntryWriter<'a> {
+    inner: &'a mut BufWriter<File>,
+    written: u64,
+}
+
+impl Write for EntryWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let next = self.written.saturating_add(bytes.len() as u64);
+        if next > u64::from(u32::MAX) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "payload exceeds 4 GiB",
+            ));
+        }
+        let written = self.inner.write(bytes)?;
+        self.written = self.written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 impl FactStoreWriter {
     /// Open a writer that streams payloads into a temp file next to
     /// `target` and atomically renames on [`Self::finish`]. Spawns a
@@ -255,6 +294,7 @@ impl FactStoreWriter {
             string_pool: parking_lot::Mutex::new(StringPoolBuilder::new()),
             sender,
             byte_budget,
+            stream_serial: parking_lot::Mutex::new(()),
             writer_thread: parking_lot::Mutex::new(Some(handle)),
             finish_reply: parking_lot::Mutex::new(Some(finish_reply_rx)),
         })
@@ -322,6 +362,40 @@ impl FactStoreWriter {
                     "factstore writer thread is no longer accepting entries",
                 ))
             })
+    }
+
+    /// Serialize one owned artifact directly on the writer thread.
+    ///
+    /// The call waits until encoding and writing finish, so at most one
+    /// streamed artifact is in flight and failures are reported at the exact
+    /// entry boundary. This is the low-memory path for consumed compiler
+    /// graphs whose encoded form may itself be gigabytes in aggregate.
+    pub fn add_streamed<F>(&self, key: u64, body_hash: u64, encode: F) -> FactStoreResult<()>
+    where
+        F: FnOnce(&mut dyn Write) -> std::io::Result<()> + Send + 'static,
+    {
+        let _stream_guard = self.stream_serial.lock();
+        let (reply_tx, reply_rx) = bounded(1);
+        self.sender
+            .send(WriteCmd::StreamEntry {
+                key,
+                body_hash,
+                encode: Box::new(encode),
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                FactStoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "factstore writer thread is no longer accepting entries",
+                ))
+            })?;
+        reply_rx.recv().map_err(|_| {
+            FactStoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "factstore writer exited during streamed entry",
+            ))
+        })??;
+        Ok(())
     }
 
     /// Number of unique strings interned so far.
@@ -495,6 +569,37 @@ fn run_writer_thread(
                     payload_len,
                 });
                 next_payload_offset += payload.len() as u64;
+            }
+            Ok(WriteCmd::StreamEntry {
+                key,
+                body_hash,
+                encode,
+                reply,
+            }) => {
+                let mut entry = EntryWriter {
+                    inner: &mut buf,
+                    written: 0,
+                };
+                if let Err(err) = encode(&mut entry) {
+                    let _ = reply.send(Err(err));
+                    drop(buf);
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Ok(());
+                }
+                let payload_len = u32::try_from(entry.written).map_err(|_| {
+                    FactStoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "payload exceeds 4 GiB",
+                    ))
+                })?;
+                entries.push(PendingIndexEntry {
+                    key,
+                    body_hash,
+                    payload_offset: next_payload_offset,
+                    payload_len,
+                });
+                next_payload_offset = next_payload_offset.saturating_add(entry.written);
+                let _ = reply.send(Ok(()));
             }
             Ok(WriteCmd::Finish {
                 string_bytes,

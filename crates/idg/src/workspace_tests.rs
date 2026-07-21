@@ -239,8 +239,12 @@ fn parallel_workspace_save_is_byte_deterministic() {
     let dir = tempfile::tempdir().expect("tempdir");
     let first = dir.path().join("first.factstore");
     let second = dir.path().join("second.factstore");
+    let consuming = dir.path().join("consuming.factstore");
     workspace.save_to_disk(&first, 0xCAFE).expect("first save");
     workspace.save_to_disk(&second, 0xCAFE).expect("second save");
+    workspace
+        .save_into_disk(&consuming, 0xCAFE)
+        .expect("consuming save");
 
     assert_eq!(
         IdgWorkspace::validate_sidecar_layout_with_pipeline(&first, 0xCAFE).expect("current layout"),
@@ -255,6 +259,11 @@ fn parallel_workspace_save_is_byte_deterministic() {
         std::fs::read(first).expect("read first sidecar"),
         std::fs::read(second).expect("read second sidecar"),
         "parallel segment encoding must preserve canonical sidecar bytes"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("first.factstore")).expect("read first sidecar"),
+        std::fs::read(consuming).expect("read consuming sidecar"),
+        "releasing non-serialized indexes must not alter canonical sidecar bytes"
     );
 }
 

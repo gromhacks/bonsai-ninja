@@ -245,6 +245,20 @@ pub(crate) struct Cli {
     #[arg(long = "parse-timeout", global = true, value_name = "MS")]
     pub(crate) parse_timeout_ms: Option<u64>,
 
+    /// Memory budget in MiB used to schedule compiler work. The analyzer
+    /// remains exhaustive: lower budgets reduce parser/lowering/serialization
+    /// concurrency and use smaller streaming batches; they do not cap files,
+    /// graph depth, fixed-point iterations, or results. This is not an OS hard
+    /// RSS limit. When omitted, bonsai detects physical/container memory
+    /// automatically. Also respects `BONSAI_MEMORY_BUDGET_MB`.
+    #[arg(
+        long = "memory-budget",
+        global = true,
+        value_name = "MIB",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub(crate) memory_budget_mb: Option<u64>,
+
     /// Enable categorised debug logging on stderr. Pass a
     /// comma-separated list of category names, or `*` for all.
     /// Available categories include `idg-closure` (per-source seed /

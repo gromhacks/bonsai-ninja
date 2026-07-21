@@ -142,6 +142,12 @@ impl IdgSegment {
         (self.places.len(), self.nodes.len(), self.edges.len())
     }
 
+    pub(crate) fn release_reverse_lookups(&mut self) {
+        self.places.release_lookup();
+        self.nodes.release_lookup();
+        self.strings.release_lookup();
+    }
+
     /// True iff the segment carries no edges (and so contributes
     /// nothing to the workspace IDG even if its dictionaries are
     /// populated).

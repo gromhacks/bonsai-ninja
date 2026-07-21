@@ -1365,6 +1365,40 @@ impl Workspace {
         Some(self.build_and_seed_idg_service())
     }
 
+    /// Build and persist the complete default workspace IDG without retaining
+    /// it in the live query-service cache.
+    ///
+    /// Explicit compiler prewarm only needs a validated sidecar for future
+    /// processes. Keeping the multi-gigabyte graph resident while subsequent
+    /// callgraph/retrieval artifacts are written makes peak memory additive.
+    /// Query paths continue to use [`Self::build_and_seed_persisted_idg_service`]
+    /// and load the exact same sidecar when they need an in-process service.
+    pub fn build_and_persist_idg_sidecar(&self) -> bonsai_idg::IdgResult<Option<usize>> {
+        if !self.is_complete_workspace_index() {
+            tracing::debug!("skipping workspace IDG persistence because the workspace index is scoped");
+            return Ok(None);
+        }
+        let Some(root) = self.root_path() else {
+            return Ok(None);
+        };
+        let _build_guard = self.inner.idg_default_build_serial.lock();
+        let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, Some(&root));
+        let call_graph = self.cached_resolved_call_graph();
+        let global = self.inner.db.global_index();
+        let transfer_options = default_workspace_idg_transfer_options(&self.inner.db);
+        let semantics = bonsai_taint::compiler_idg_file_semantics(&self.inner.db);
+        let workspace = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options(
+            global.as_ref(),
+            call_graph.as_ref(),
+            semantics,
+            &transfer_options,
+        );
+        let segment_count = workspace.segment_count();
+        let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
+        workspace.save_into_disk(&sidecar, pipeline_hash)?;
+        Ok(Some(segment_count))
+    }
+
     /// Build a workspace IDG with caller-supplied transfer options and cache
     /// it under those exact semantics.
     ///
@@ -2024,15 +2058,11 @@ impl Workspace {
             let cg = ws.cached_resolved_call_graph();
             ws.inner.dataflow.seed_call_graph(cg.clone());
             ws.inner.flow_ids.seed_call_graph(cg);
-            // Build the workspace IDG once the call graph and global
-            // index are available, but only when the result can be
-            // persisted for later commands. On very large workspaces
-            // the sidecar gate intentionally disables the global IDG
-            // artifact; eagerly constructing it here would spend
-            // minutes materializing a whole-workspace object-field
-            // closure that the short-lived index process then drops.
-            // Commands that need semantic flow still build their exact
-            // requested scope on demand.
+            // Build the complete workspace IDG once the call graph and global
+            // index are available. Complete workspaces always persist the
+            // exact sidecar regardless of file count; scoped query workspaces
+            // deliberately avoid publishing a partial artifact under the
+            // full-workspace cache key.
             let _ = ws.build_and_seed_persisted_idg_service();
             // Seed the dataflow cache with the workspace's
             // InterTaintCaches singleton so the engine's resolver
@@ -2915,19 +2945,27 @@ fn workspace_parse_worker_count() -> usize {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
         .max(1);
-    if let Some(requested) = std::env::var("BONSAI_PARSE_JOBS")
+    let requested = std::env::var("BONSAI_PARSE_JOBS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
-    {
-        return requested.max(1);
-    }
-    if let Some(requested) = std::env::var("RAYON_NUM_THREADS")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-    {
-        return requested.max(1);
-    }
-    available
+        .or_else(|| {
+            std::env::var("RAYON_NUM_THREADS")
+                .ok()
+                .and_then(|raw| raw.parse::<usize>().ok())
+        })
+        .unwrap_or(available)
+        .max(1);
+    // Tree-sitter itself is incremental, but a cold workspace parse owns a
+    // parser stack, CST, lowered declaration index, and source buffer per
+    // worker. Limit only concurrency under constrained RAM; every file is
+    // still parsed and indexed to completion.
+    const PARSE_TRANSIENT_BYTES_PER_WORKER: u64 = 256 * 1024 * 1024;
+    const PARSE_RESIDENT_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+    bonsai_common::memory_bounded_worker_count(
+        requested.min(available),
+        PARSE_TRANSIENT_BYTES_PER_WORKER,
+        PARSE_RESIDENT_RESERVE_BYTES,
+    )
 }
 
 fn workspace_parse_worker_stack_bytes() -> usize {

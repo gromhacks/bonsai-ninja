@@ -240,6 +240,12 @@ impl SymbolicFieldGraph {
         }
     }
 
+    pub(crate) fn release_indexes(&mut self) {
+        self.string_ids = AHashMap::new();
+        self.base_ids = AHashMap::new();
+        self.outgoing_by_source = Vec::new();
+    }
+
     pub(crate) fn from_parts(
         strings: Vec<String>,
         bases: Vec<SymbolicFieldBase>,
