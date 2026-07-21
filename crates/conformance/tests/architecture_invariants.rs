@@ -3278,6 +3278,11 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
         "cmd_index must keep default/structural-only runs parse-only and route explicit semantic warming through the cache facade"
     );
     assert!(
+        function_body(&commands_mod, "open_project_semantic_prewarm")
+            .contains("OpenOptions::streaming_parse_only()"),
+        "one-shot semantic prewarm must release file-local compiler IR instead of retaining every lowered unit"
+    );
+    assert!(
         main.contains("structural_only,")
             && main.contains("prewarm_dataflow,")
             && main.contains("semantic,")

@@ -317,7 +317,7 @@ impl Bonsai {
     /// per-entry value-flow projection; those compatibility documents are
     /// derived from the IDG on demand.
     pub fn index_semantic(&self, root: impl AsRef<Path>) -> Result<Project> {
-        let project = self.open_with_options(root, WorkspaceOpenOptions::parse_only())?;
+        let project = self.open_with_options(root, WorkspaceOpenOptions::streaming_parse_only())?;
         project.cache().warm_structural_sidecars()?;
         Ok(project)
     }
@@ -328,8 +328,11 @@ impl Bonsai {
     where
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
-        let project =
-            self.open_with_options_and_progress(root, WorkspaceOpenOptions::parse_only(), on_event)?;
+        let project = self.open_with_options_and_progress(
+            root,
+            WorkspaceOpenOptions::streaming_parse_only(),
+            on_event,
+        )?;
         project.cache().warm_structural_sidecars()?;
         Ok(project)
     }

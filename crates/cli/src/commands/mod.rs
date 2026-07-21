@@ -107,11 +107,11 @@ pub(crate) fn open_project_semantic_prewarm(root: &std::path::Path) -> Result<(P
     }
     drop(probe);
 
-    // A cold semantic build reuses the eagerly lowered declaration/import IR
-    // across callgraph, IDG, and retrieval phases. The global index consumes
-    // declarations at its phase boundary; imports remain available to the
-    // resolver without reparsing every source unit.
-    let (project, footer) = open_project_with_options(root, bonsai_sdk::OpenOptions::parse_only())?;
+    // A cold one-shot semantic build validates every Tree-sitter unit, then
+    // releases its file-local IR. Later compiler phases re-lower exact units
+    // through their bounded lifecycle instead of retaining the whole project
+    // merely to avoid a second parse.
+    let (project, footer) = open_project_with_options(root, bonsai_sdk::OpenOptions::streaming_parse_only())?;
     project.cache().warm_structural_sidecars()?;
     Ok((project, footer))
 }
