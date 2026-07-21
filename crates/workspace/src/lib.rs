@@ -2958,7 +2958,7 @@ fn workspace_parse_worker_count() -> usize {
     // This is cache scheduling only: every file is still parsed and indexed.
     // The shared compiler profile keeps this earliest Tree-sitter phase from
     // overcommitting memory before downstream exact analyses begin.
-    bonsai_common::compiler_worker_count(requested.min(available))
+    bonsai_common::syntax_worker_count(requested.min(available))
 }
 
 fn workspace_parse_worker_stack_bytes() -> usize {
