@@ -2949,14 +2949,47 @@ fn retrieval_streams_callgraph_candidates_by_compiler_unit() {
     );
     assert!(
         build.contains("edge_indices.remove(file)")
+            && build.contains("syntax_indexes_uncached(file)")
+            && build.contains("release_global_index()")
             && build.contains("builder.push(doc)")
-            && !build.contains("build_edge_candidate_groups"),
-        "retrieval must consume and intern each file's exact candidates instead of retaining a second callgraph projection"
+            && !build.contains("build_edge_candidate_groups")
+            && !build.contains("db().global_index()"),
+        "retrieval must consume and intern each exact per-file compiler unit instead of retaining a global declaration body or second callgraph projection"
     );
     assert!(
         batch_width.contains("memory_bounded_worker_count"),
         "retrieval compiler-unit concurrency must honor the process memory budget without limiting semantic facts"
     );
+}
+
+#[test]
+fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
+    let root = repo_root();
+    let db = read(&root.join("crates/db/src/lib.rs"));
+    let callgraph = read(&root.join("crates/callgraph/src/lib.rs"));
+    let idg = read(&root.join("crates/idg/src/workspace_adapter.rs"));
+    for (phase, body) in [
+        ("frontend", function_body(&db, "global_index_worker_count")),
+        (
+            "callgraph",
+            function_body(&callgraph, "callgraph_resolver_worker_count"),
+        ),
+        (
+            "IDG transfer",
+            function_body(&idg, "idg_transfer_batch_segment_count"),
+        ),
+    ] {
+        assert!(
+            body.contains("memory_bounded_worker_count"),
+            "{phase} concurrency must honor the effective process memory budget"
+        );
+        for forbidden in [".take(", ".truncate(", "max_files", "max_edges", "max_segments"] {
+            assert!(
+                !body.contains(forbidden),
+                "{phase} memory policy must not impose semantic scope through `{forbidden}`"
+            );
+        }
+    }
 }
 
 #[test]
@@ -3283,7 +3316,7 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
         cache_cmd.contains("Open structurally, then refresh reusable")
             && cache_cmd.contains("Do not route through a full")
             && cache_cmd.contains("workspace prewarm path here")
-            && cache_cmd.contains("build_and_seed_persisted_idg_service()"),
+            && cache_cmd.contains("build_and_persist_idg_sidecar()"),
         "cache rebuild must not regress to full-workspace taint/value-flow/flow-id prewarm"
     );
 }

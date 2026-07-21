@@ -621,6 +621,18 @@ impl AnalyzerDb {
         arc
     }
 
+    /// Evict the workspace-global lowered declaration cache at a completed
+    /// compiler phase boundary.
+    ///
+    /// This never changes semantic state: existing [`Arc`] readers remain
+    /// valid and a later query reconstructs the exact index from the current
+    /// VFS snapshots. Semantic prewarm uses this after persisting callgraph /
+    /// IDG artifacts so a subsequent per-file phase does not add its working
+    /// set to every lowered body in the project.
+    pub fn release_global_index(&self) {
+        self.inner.cache.write().global_index = None;
+    }
+
     fn build_global_index_uncached(&self) -> Arc<GlobalIndex> {
         let files = self.inner.vfs.all_files();
         let consume_decl_index_cache = should_consume_decl_index_cache_for_global();
@@ -882,19 +894,28 @@ fn global_index_worker_count() -> usize {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
         .max(1);
-    if let Some(requested) = std::env::var("BONSAI_GLOBAL_INDEX_JOBS")
+    let requested = std::env::var("BONSAI_GLOBAL_INDEX_JOBS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
-    {
-        return requested.max(1);
-    }
-    if let Some(requested) = std::env::var("RAYON_NUM_THREADS")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-    {
-        return requested.max(1);
-    }
-    available
+        .or_else(|| {
+            std::env::var("RAYON_NUM_THREADS")
+                .ok()
+                .and_then(|raw| raw.parse::<usize>().ok())
+        })
+        .unwrap_or(available)
+        .max(1)
+        .min(available);
+    // One frontend worker can temporarily own a Tree-sitter CST, adapter
+    // scratch state, and a completed declaration unit before the deterministic
+    // global merge consumes it. A constrained machine lowers the identical
+    // file set serially; memory affects scheduling, never syntax coverage.
+    const FRONTEND_BYTES_PER_WORKER: u64 = 1024 * 1024 * 1024;
+    const FRONTEND_RESIDENT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    bonsai_common::memory_bounded_worker_count(
+        requested,
+        FRONTEND_BYTES_PER_WORKER,
+        FRONTEND_RESIDENT_RESERVE_BYTES,
+    )
 }
 
 fn global_index_worker_stack_bytes() -> usize {

@@ -761,15 +761,12 @@ fn finish_file_candidate_groups(
     }
 }
 
-fn index_semantic_edges_by_file(
-    call_graph: &ResolvedCallGraph,
-    global: &bonsai_index::GlobalIndex,
-) -> AHashMap<FileId, Vec<usize>> {
+fn index_semantic_edges_by_file(call_graph: &ResolvedCallGraph) -> AHashMap<FileId, Vec<usize>> {
     let mut edge_indices = AHashMap::default();
     for (index, edge) in call_graph.inner().edges.iter().enumerate() {
         if edge.precision.is_semantic()
-            && global.decl_of(SymbolId::new(edge.from.raw())).is_some()
-            && global.decl_of(SymbolId::new(edge.to.raw())).is_some()
+            && call_graph.node_name(edge.from).is_some()
+            && call_graph.node_name(edge.to).is_some()
         {
             edge_indices
                 .entry(edge.span.file)
@@ -782,7 +779,6 @@ fn index_semantic_edges_by_file(
 
 fn collect_edge_candidate_terms(
     ws: &Workspace,
-    global: &bonsai_index::GlobalIndex,
     call_graph: &ResolvedCallGraph,
     groups: &mut AHashMap<String, FileCandidateTerms>,
     edge_indices: &[usize],
@@ -793,24 +789,24 @@ fn collect_edge_candidate_terms(
         // violation as corruption rather than silently omitting a compiler
         // fact from the candidate projection.
         let edge = &call_graph.inner().edges[index];
-        let caller = global
-            .decl_of(SymbolId::new(edge.from.raw()))
-            .expect("indexed retrieval caller must remain in the immutable global index");
-        let callee = global
-            .decl_of(SymbolId::new(edge.to.raw()))
-            .expect("indexed retrieval callee must remain in the immutable global index");
+        let caller = call_graph
+            .node_name(edge.from)
+            .expect("indexed retrieval caller must remain in the immutable callgraph node table");
+        let callee = call_graph
+            .node_name(edge.to)
+            .expect("indexed retrieval callee must remain in the immutable callgraph node table");
         let edges = candidate_terms(groups, "edge");
-        edges.add(&caller.name);
-        edges.add(&callee.name);
-        edges.add(&format!("{} -> {}", caller.name, callee.name));
+        edges.add(caller);
+        edges.add(callee);
+        edges.add(&format!("{caller} -> {callee}"));
         let file_path = ws
             .vfs()
             .path(edge.span.file)
             .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
         let (span, _) = span_doc_fields(ws, edge.span);
         edges.add_stable_id(edge_id_for_parts(
-            &caller.name,
-            &callee.name,
+            caller,
+            callee,
             &file_path,
             span.line,
             span.column,
@@ -864,7 +860,6 @@ fn collect_import_candidate_terms(groups: &mut AHashMap<String, FileCandidateTer
 }
 
 fn collect_index_candidate_terms(
-    ws: &Workspace,
     groups: &mut AHashMap<String, FileCandidateTerms>,
     index: &bonsai_lang_api::DeclIndex,
 ) {
@@ -879,7 +874,7 @@ fn collect_index_candidate_terms(
         candidate_terms(groups, kind).add(&reference.name);
     }
     for string in &index.strings {
-        let enclosing_function = enclosing_function_for_span(ws, string.span);
+        let enclosing_function = enclosing_function_in_index(index, string.span);
         let strings = candidate_terms(groups, "string");
         strings.add(&string.text);
         strings.add(&format!("{:?}", string.category).to_lowercase());
@@ -888,7 +883,7 @@ fn collect_index_candidate_terms(
         }
     }
     for comment in &index.comments {
-        let enclosing_function = enclosing_function_for_span(ws, comment.span);
+        let enclosing_function = enclosing_function_in_index(index, comment.span);
         let comments = candidate_terms(groups, "comment");
         comments.add(&comment.text);
         comments.add(&format!("{:?}", comment.kind).to_lowercase());
@@ -898,15 +893,28 @@ fn collect_index_candidate_terms(
     }
 }
 
+struct FileCandidateInput<'a> {
+    file: FileId,
+    file_path: &'a str,
+    pipeline: u64,
+    edge_indices: &'a [usize],
+    index: Option<&'a bonsai_lang_api::DeclIndex>,
+    imports: &'a [ImportSpec],
+}
+
 fn build_file_candidate_docs(
     ws: &Workspace,
-    global: &bonsai_index::GlobalIndex,
     call_graph: &ResolvedCallGraph,
-    file: FileId,
-    file_path: &str,
-    pipeline: u64,
-    edge_indices: &[usize],
+    input: FileCandidateInput<'_>,
 ) -> Vec<FactDoc> {
+    let FileCandidateInput {
+        file,
+        file_path,
+        pipeline,
+        edge_indices,
+        index,
+        imports,
+    } = input;
     let language = ws
         .db()
         .adapter_for(file)
@@ -946,16 +954,16 @@ fn build_file_candidate_docs(
         files.add(language);
     }
 
-    for decl in global.decls_in(file) {
-        collect_decl_candidate_terms(&mut groups, decl);
+    if let Some(index) = index {
+        for decl in &index.defs {
+            collect_decl_candidate_terms(&mut groups, decl);
+        }
+        collect_index_candidate_terms(&mut groups, index);
     }
-    for import in import_specs_for_retrieval(ws, file) {
-        collect_import_candidate_terms(&mut groups, &import);
+    for import in imports {
+        collect_import_candidate_terms(&mut groups, import);
     }
-    if let Some(index) = global.file_index(file) {
-        collect_index_candidate_terms(ws, &mut groups, index);
-    }
-    collect_edge_candidate_terms(ws, global, call_graph, &mut groups, edge_indices);
+    collect_edge_candidate_terms(ws, call_graph, &mut groups, edge_indices);
     let mut docs = Vec::with_capacity(groups.len());
     finish_file_candidate_groups(
         &mut docs,
@@ -989,10 +997,13 @@ fn retrieval_file_batch_width() -> usize {
 /// width is a scheduling choice only and never limits files or facts.
 fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
     let pipeline = pipeline_hash_for_workspace(ws);
-    let global = ws.db().global_index();
     let call_graph = ws.cached_resolved_call_graph();
-    let mut edge_indices = index_semantic_edges_by_file(&call_graph, &global);
-    let mut file_ids: Vec<_> = global.all_files().collect();
+    let mut edge_indices = index_semantic_edges_by_file(&call_graph);
+    // The graph carries the compact endpoint identity this phase needs. Drop
+    // the heavyweight workspace declaration-body cache before re-lowering
+    // bounded file units; later queries can reconstruct it exactly.
+    ws.db().release_global_index();
+    let mut file_ids = ws.vfs().all_files();
     file_ids.extend(edge_indices.keys().copied());
     file_ids.sort_unstable_by_key(|file| file.raw());
     file_ids.dedup();
@@ -1024,7 +1035,20 @@ fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
         let lowered: Vec<Vec<FactDoc>> = inputs
             .into_par_iter()
             .map(|(file, path, edges)| {
-                build_file_candidate_docs(ws, &global, &call_graph, file, path, pipeline, &edges)
+                let (index, imports) = ws.db().syntax_indexes_uncached(file);
+                let imports = imports.map_or_else(Vec::new, |index| index.imports);
+                build_file_candidate_docs(
+                    ws,
+                    &call_graph,
+                    FileCandidateInput {
+                        file,
+                        file_path: path,
+                        pipeline,
+                        edge_indices: &edges,
+                        index: index.as_ref(),
+                        imports: &imports,
+                    },
+                )
             })
             .collect();
         for docs in lowered {
@@ -2136,8 +2160,15 @@ fn class_name_for_decl(ws: &Workspace, decl: &Decl) -> Option<String> {
 
 fn enclosing_function_for_span(ws: &Workspace, span: Span) -> Option<String> {
     let global = ws.db().global_index();
-    global
-        .decls_in(span.file)
+    enclosing_function_in_decls(global.decls_in(span.file), span)
+}
+
+fn enclosing_function_in_index(index: &bonsai_lang_api::DeclIndex, span: Span) -> Option<String> {
+    enclosing_function_in_decls(&index.defs, span)
+}
+
+fn enclosing_function_in_decls(decls: &[Decl], span: Span) -> Option<String> {
+    decls
         .iter()
         .filter(|decl| {
             matches!(

@@ -4402,10 +4402,14 @@ fn idg_transfer_batch_segment_count() -> usize {
         .unwrap_or(cpu_workers)
         .max(1)
         .min(cpu_workers);
-    // This estimate bounds only concurrently lowered compiler IR. Persistent
-    // graph segments are consumed by the stitcher between batches.
-    const TRANSFER_BYTES_PER_SEGMENT: u64 = 512 * 1024 * 1024;
-    const TRANSFER_RESIDENT_RESERVE_BYTES: u64 = 1024 * 1024 * 1024;
+    // This estimate bounds only concurrently lowered compiler IR. A transfer
+    // worker can temporarily own the lowered events, local edge vectors, and
+    // an encoded segment at once; Elasticsearch-scale measurement showed that
+    // treating that footprint as 512 MiB materially under-scheduled memory.
+    // Persistent graph segments are consumed by the stitcher between batches.
+    // These values affect concurrency only, never segments or facts.
+    const TRANSFER_BYTES_PER_SEGMENT: u64 = 1024 * 1024 * 1024;
+    const TRANSFER_RESIDENT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
     bonsai_common::memory_bounded_worker_count(
         requested,
         TRANSFER_BYTES_PER_SEGMENT,
