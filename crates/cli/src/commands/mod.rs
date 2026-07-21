@@ -105,15 +105,13 @@ pub(crate) fn open_project_semantic_prewarm(root: &std::path::Path) -> Result<(P
         probe.cache().warm_structural_sidecars()?;
         return Ok((probe, WorkspaceFooter::new()));
     }
-    drop(probe);
 
-    // A cold one-shot semantic build validates every Tree-sitter unit, then
-    // releases its file-local IR. Later compiler phases re-lower exact units
-    // through their bounded lifecycle instead of retaining the whole project
-    // merely to avoid a second parse.
-    let (project, footer) = open_project_with_options(root, bonsai_sdk::OpenOptions::streaming_parse_only())?;
-    project.cache().warm_structural_sidecars()?;
-    Ok((project, footer))
+    // The semantic compiler phases below are themselves the exhaustive
+    // Tree-sitter validation/lowering passes. Reusing the snapshot-only probe
+    // avoids parsing every source file once merely to discard it before the
+    // header/callgraph/IDG passes parse their exact units.
+    probe.cache().warm_structural_sidecars()?;
+    Ok((probe, WorkspaceFooter::new()))
 }
 
 pub(crate) fn open_project_index_only(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {

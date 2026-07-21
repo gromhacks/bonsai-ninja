@@ -100,6 +100,12 @@ pub struct SymbolicFieldTransform {
     pub call_kind: CallEdgeKind,
     /// Transform operation.
     pub kind: SymbolicFieldTransformKind,
+    /// AST argument slot for an explicit argument transform, or `u32::MAX`
+    /// for receiver/synthetic/non-argument transforms.
+    pub arg_idx: u32,
+    /// Resolved callee formal slot for an explicit argument transform, or
+    /// `u32::MAX` when the relation does not target a formal parameter.
+    pub param_idx: u32,
     /// Whether structural control flow permits a lexically later source.
     pub allow_out_of_order_source: bool,
 }

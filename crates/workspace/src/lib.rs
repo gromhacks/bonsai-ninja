@@ -1002,7 +1002,7 @@ impl Workspace {
             return Ok(None);
         };
         let segment_count = loaded.segment_count();
-        let global = self.inner.db.global_index();
+        let global = self.inner.db.build_global_linkage_index();
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global));
         self.inner.db.set_idg_service(service);
         Ok(Some(segment_count))
@@ -1053,7 +1053,7 @@ impl Workspace {
         target_funcs: &[FuncId],
         max_precision: Option<Precision>,
     ) -> SourceReachableCallGraph {
-        let global = self.inner.db.global_index();
+        let global = self.inner.db.build_global_linkage_index();
         let target_set: AHashSet<FuncId> = target_funcs.iter().copied().collect();
         let mut reached_funcs: AHashSet<FuncId> = source_funcs.iter().copied().collect();
         let mut reverse_output_funcs: AHashSet<FuncId> = source_funcs
@@ -1282,7 +1282,7 @@ impl Workspace {
         if let Some(svc) = self.inner.db.idg_service() {
             return svc;
         }
-        let global = self.inner.db.global_index();
+        let global = self.inner.db.build_global_linkage_index();
         // The IDG references symbols by their global-index id, which
         // is content-derived: any file content change can renumber
         // ids in the new run. Folding a workspace-wide content
@@ -1323,11 +1323,16 @@ impl Workspace {
         // alias-rewritten call sites.
         let db = &self.inner.db;
         let semantics = bonsai_taint::compiler_idg_file_semantics(db);
-        let ws = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options(
+        let ws = bonsai_idg::workspace_adapter::build_streaming_with_file_semantics_and_options(
             global.as_ref(),
             cg.as_ref(),
             semantics,
             &transfer_options,
+            |file| {
+                self.inner
+                    .db
+                    .decl_index_remapped_to_headers(global.as_ref(), file)
+            },
         );
         // Persist before constructing the query service so a subsequent
         // open warm-starts. Failures (read-only filesystem, full disk)
@@ -1384,15 +1389,21 @@ impl Workspace {
         let _build_guard = self.inner.idg_default_build_serial.lock();
         let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, Some(&root));
         let call_graph = self.cached_resolved_call_graph();
-        let global = self.inner.db.global_index();
+        let global = self.inner.db.build_global_linkage_index();
         let transfer_options = default_workspace_idg_transfer_options(&self.inner.db);
         let semantics = bonsai_taint::compiler_idg_file_semantics(&self.inner.db);
-        let workspace = bonsai_idg::workspace_adapter::build_for_persistence_with_file_semantics_and_options(
-            global.as_ref(),
-            call_graph.as_ref(),
-            semantics,
-            &transfer_options,
-        );
+        let workspace =
+            bonsai_idg::workspace_adapter::build_for_persistence_streaming_with_file_semantics_and_options(
+                global.as_ref(),
+                call_graph.as_ref(),
+                semantics,
+                &transfer_options,
+                |file| {
+                    self.inner
+                        .db
+                        .decl_index_remapped_to_headers(global.as_ref(), file)
+                },
+            );
         let segment_count = workspace.segment_count();
         let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
         workspace.save_into_disk(&sidecar, pipeline_hash)?;
@@ -3201,7 +3212,10 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // provenance. Unresolved/external consumers retain scalar argument
     // evidence, while resolved local boundaries render only exact projected
     // field stitching instead of promoting sibling fields.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 42;
+    // v43 (2026-07-20): persisted symbolic argument transforms carry the
+    // exact AST argument and resolved formal slots established while
+    // stitching, so query/export facades never need resident function bodies.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 43;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 

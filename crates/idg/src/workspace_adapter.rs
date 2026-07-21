@@ -20,10 +20,10 @@
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::{callable_reference_variants, FileId, FuncId};
-use bonsai_index::GlobalIndex;
+use bonsai_index::{CallLinkageFact, GlobalIndex};
 use bonsai_lang_api::{DeclKind, FlowEvent, ModulePath};
 use parking_lot::RwLock;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{path::Path, time::Instant};
 
 use crate::builder::{
@@ -358,7 +358,7 @@ struct WorkspaceCalleeResolver<'a> {
     func_to_scope: &'a AHashMap<FuncId, LocalScopeKey>,
     symbol_to_scope: &'a AHashMap<bonsai_common::SymbolId, LocalScopeKey>,
     symbol_to_directory: &'a AHashMap<bonsai_common::SymbolId, String>,
-    call_edges_by_site: &'a AHashMap<CallSiteEdgeKey, Vec<IndexedCallEdge>>,
+    call_edges_by_site: &'a CallSiteEdgeIndex,
     file_to_language: &'a AHashMap<FileId, &'static str>,
     class_symbols_by_name: &'a AHashMap<String, Vec<bonsai_common::SymbolId>>,
     class_symbols_by_name_scope: &'a AHashMap<(String, LocalScopeKey), Vec<bonsai_common::SymbolId>>,
@@ -383,10 +383,11 @@ struct WorkspaceCalleeResolver<'a> {
     ancestor_dispatch_cache: RwLock<AHashMap<(FuncId, FuncId), bool>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct CallSiteEdgeKey {
+#[derive(Clone, Copy, Debug)]
+struct IndexedCallSiteEdge {
     caller: FuncId,
     site: bonsai_common::Span,
+    edge: IndexedCallEdge,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -396,12 +397,73 @@ struct IndexedCallEdge {
     precision: bonsai_common::Precision,
 }
 
+/// Flat, sorted compiler index over exact AST call sites.
+///
+/// A hash map with one heap-allocated `Vec` per call site costs several
+/// times the edge payload on large projects. The immutable IDG build only
+/// needs exact-key lookup, so contiguous rows provide the same semantics with
+/// binary search and no per-site allocation.
+#[derive(Default)]
+struct CallSiteEdgeIndex {
+    rows: Vec<IndexedCallSiteEdge>,
+}
+
+impl CallSiteEdgeIndex {
+    fn finish(&mut self) {
+        self.rows.sort_unstable_by_key(call_site_edge_sort_key);
+        self.rows.dedup_by(|left, right| {
+            left.caller == right.caller
+                && left.site == right.site
+                && left.edge.to == right.edge.to
+                && left.edge.edge_kind == right.edge.edge_kind
+                && left.edge.precision == right.edge.precision
+        });
+        self.rows.shrink_to_fit();
+    }
+
+    fn edges(&self, caller: FuncId, site: bonsai_common::Span) -> impl Iterator<Item = &IndexedCallEdge> {
+        let key = call_site_key(caller, site);
+        let start = self
+            .rows
+            .partition_point(|row| call_site_key(row.caller, row.site) < key);
+        let end =
+            self.rows[start..].partition_point(|row| call_site_key(row.caller, row.site) == key) + start;
+        self.rows[start..end].iter().map(|row| &row.edge)
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+fn call_site_key(caller: FuncId, site: bonsai_common::Span) -> (u32, u32, u64, u64) {
+    (caller.raw(), site.file.raw(), site.start, site.end)
+}
+
+fn call_site_edge_sort_key(row: &IndexedCallSiteEdge) -> (u32, u32, u64, u64, u32, u8, u8) {
+    let edge_kind = match row.edge.edge_kind {
+        bonsai_callgraph::EdgeKind::Direct => 0,
+        bonsai_callgraph::EdgeKind::Virtual => 1,
+        bonsai_callgraph::EdgeKind::Indirect => 2,
+        bonsai_callgraph::EdgeKind::Unknown => 3,
+    };
+    (
+        row.caller.raw(),
+        row.site.file.raw(),
+        row.site.start,
+        row.site.end,
+        row.edge.to.raw(),
+        edge_kind,
+        row.edge.precision.rank(),
+    )
+}
+
 fn call_edges_by_site_for_funcs(
     call_graph: &ResolvedCallGraph,
     global: &GlobalIndex,
     included_funcs: Option<&AHashSet<FuncId>>,
-) -> AHashMap<CallSiteEdgeKey, Vec<IndexedCallEdge>> {
-    let mut out: AHashMap<CallSiteEdgeKey, Vec<IndexedCallEdge>> = AHashMap::new();
+) -> CallSiteEdgeIndex {
+    let mut out = CallSiteEdgeIndex::default();
     for edge in &call_graph.inner().edges {
         if included_funcs.is_some_and(|funcs| !funcs.contains(&edge.from) || !funcs.contains(&edge.to)) {
             continue;
@@ -411,12 +473,22 @@ fn call_edges_by_site_for_funcs(
             edge_kind: edge.kind,
             precision: edge.precision,
         };
-        let mapped_sites = if let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(edge.from.raw())) {
+        let caller_symbol = bonsai_common::SymbolId::new(edge.from.raw());
+        let mapped_sites = if let Some(decl) = global.decl_of(caller_symbol) {
             let target_decl = global.decl_of(bonsai_common::SymbolId::new(edge.to.raw()));
             let target_name = target_decl.map(|target| target.name.as_str());
             let target_is_constructor =
                 target_decl.is_some_and(|target| target.kind == DeclKind::Constructor);
-            call_event_spans_matching_edge(&decl.flow_events, edge.span, target_name, target_is_constructor)
+            if let Some(facts) = global.linkage_facts(caller_symbol) {
+                call_linkage_spans_matching_edge(&facts.calls, edge.span, target_name, target_is_constructor)
+            } else {
+                call_event_spans_matching_edge(
+                    &decl.flow_events,
+                    edge.span,
+                    target_name,
+                    target_is_constructor,
+                )
+            }
         } else {
             Vec::new()
         };
@@ -434,21 +506,17 @@ fn call_edges_by_site_for_funcs(
             }
         }
     }
+    out.finish();
     out
 }
 
 fn push_call_edge_site(
-    out: &mut AHashMap<CallSiteEdgeKey, Vec<IndexedCallEdge>>,
+    out: &mut CallSiteEdgeIndex,
     caller: FuncId,
     site: bonsai_common::Span,
     edge: IndexedCallEdge,
 ) {
-    let rows = out.entry(CallSiteEdgeKey { caller, site }).or_default();
-    if !rows.iter().any(|existing| {
-        existing.to == edge.to && existing.edge_kind == edge.edge_kind && existing.precision == edge.precision
-    }) {
-        rows.push(edge);
-    }
+    out.rows.push(IndexedCallSiteEdge { caller, site, edge });
 }
 
 fn call_event_spans_matching_edge(
@@ -482,6 +550,49 @@ fn call_event_spans_matching_edge(
         );
     }
 
+    finalize_call_span_candidates(candidates, edge_span)
+}
+
+fn call_linkage_spans_matching_edge(
+    calls: &[CallLinkageFact],
+    edge_span: bonsai_common::Span,
+    target_name: Option<&str>,
+    target_is_constructor: bool,
+) -> Vec<bonsai_common::Span> {
+    let collect = |include_arg_spans: bool| {
+        calls
+            .iter()
+            .filter(|call| {
+                call_site_spans_match(edge_span, call.span)
+                    || (include_arg_spans
+                        && call
+                            .arg_spans
+                            .iter()
+                            .any(|arg_span| call_site_spans_match(edge_span, *arg_span)))
+            })
+            .map(|call| {
+                let name_matches =
+                    target_name.is_some_and(|target| names_match_for_callee(target, &call.name));
+                let constructor_matches =
+                    target_is_constructor && call.call_kind == bonsai_lang_api::CallKind::Constructor;
+                CallEventSpanCandidate {
+                    span: call.span,
+                    target_matches: name_matches || constructor_matches,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut candidates = collect(false);
+    if candidates.is_empty() {
+        candidates = collect(true);
+    }
+    finalize_call_span_candidates(candidates, edge_span)
+}
+
+fn finalize_call_span_candidates(
+    mut candidates: Vec<CallEventSpanCandidate>,
+    edge_span: bonsai_common::Span,
+) -> Vec<bonsai_common::Span> {
     // A callgraph span can cover a complete nested expression while adapter
     // Call events deliberately point at each callee token. Select the event
     // whose syntax name agrees with the resolved declaration before applying
@@ -626,9 +737,9 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         let mut out = Vec::new();
         let mut seen: ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind, bonsai_common::Precision)> =
             ahash::AHashSet::default();
-        let exact_key = CallSiteEdgeKey { caller, site };
-        if let Some(edges) = self.call_edges_by_site.get(&exact_key) {
-            for edge in edges {
+        let mut exact_edges = self.call_edges_by_site.edges(caller, site).peekable();
+        if exact_edges.peek().is_some() {
+            for edge in exact_edges {
                 if !edge.precision.is_semantic() {
                     continue;
                 }
@@ -993,18 +1104,30 @@ impl WorkspaceCalleeResolver<'_> {
             if !seen_callers.insert(caller) {
                 continue;
             }
-            let Some(caller_decl) = self.global.decl_of(bonsai_common::SymbolId::new(caller.raw())) else {
+            let caller_symbol = bonsai_common::SymbolId::new(caller.raw());
+            let Some(caller_decl) = self.global.decl_of(caller_symbol) else {
                 continue;
             };
             let mut arg_spans = Vec::new();
-            collect_arg_spans_for_resolved_callee(
-                &caller_decl.flow_events,
-                caller,
-                host,
-                param_idx as usize,
-                self.call_edges_by_site,
-                &mut arg_spans,
-            );
+            if let Some(facts) = self.global.linkage_facts(caller_symbol) {
+                collect_linkage_arg_spans_for_resolved_callee(
+                    &facts.calls,
+                    caller,
+                    host,
+                    param_idx as usize,
+                    self.call_edges_by_site,
+                    &mut arg_spans,
+                );
+            } else {
+                collect_arg_spans_for_resolved_callee(
+                    &caller_decl.flow_events,
+                    caller,
+                    host,
+                    param_idx as usize,
+                    self.call_edges_by_site,
+                    &mut arg_spans,
+                );
+            }
             for arg_span in arg_spans {
                 for candidate in self.callable_args_in_span_indexed(caller, arg_span) {
                     if self.funcs_share_language(host, candidate.func) && seen.insert(candidate.func) {
@@ -1595,17 +1718,39 @@ fn call_site_spans_match(edge_span: bonsai_common::Span, event_span: bonsai_comm
 }
 
 fn call_site_has_no_explicit_args(global: &GlobalIndex, func: FuncId, span: bonsai_common::Span) -> bool {
-    let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
+    let symbol = bonsai_common::SymbolId::new(func.raw());
+    let Some(decl) = global.decl_of(symbol) else {
         return false;
     };
     let mut saw_empty_match = false;
     let mut saw_non_empty_match = false;
-    scan_call_site_arg_presence(
-        &decl.flow_events,
-        span,
-        &mut saw_empty_match,
-        &mut saw_non_empty_match,
-    );
+    if let Some(facts) = global.linkage_facts(symbol) {
+        for call in &facts.calls {
+            if call_site_spans_match(span, call.span) {
+                if call.arg_spans.is_empty() {
+                    saw_empty_match = true;
+                } else {
+                    saw_non_empty_match = true;
+                }
+            }
+        }
+        for assignment in &facts.call_result_assignments {
+            if call_site_spans_match(span, assignment.span) {
+                if assignment.has_explicit_args {
+                    saw_non_empty_match = true;
+                } else {
+                    saw_empty_match = true;
+                }
+            }
+        }
+    } else {
+        scan_call_site_arg_presence(
+            &decl.flow_events,
+            span,
+            &mut saw_empty_match,
+            &mut saw_non_empty_match,
+        );
+    }
     saw_empty_match && !saw_non_empty_match
 }
 
@@ -1907,17 +2052,16 @@ fn collect_arg_spans_for_resolved_callee(
     caller: FuncId,
     host: FuncId,
     arg_idx: usize,
-    call_edges_by_site: &AHashMap<CallSiteEdgeKey, Vec<IndexedCallEdge>>,
+    call_edges_by_site: &CallSiteEdgeIndex,
     out: &mut Vec<bonsai_common::Span>,
 ) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
             FlowEvent::Call { span, args, .. } => {
-                let key = CallSiteEdgeKey { caller, site: *span };
                 if call_edges_by_site
-                    .get(&key)
-                    .is_some_and(|edges| edges.iter().any(|edge| edge.to == host))
+                    .edges(caller, *span)
+                    .any(|edge| edge.to == host)
                 {
                     if let Some(arg) = args.get(arg_idx) {
                         out.push(arg.span);
@@ -1974,6 +2118,26 @@ fn collect_arg_spans_for_resolved_callee(
                 collect_arg_spans_for_resolved_callee(body, caller, host, arg_idx, call_edges_by_site, out);
             }
             _ => {}
+        }
+    }
+}
+
+fn collect_linkage_arg_spans_for_resolved_callee(
+    calls: &[CallLinkageFact],
+    caller: FuncId,
+    host: FuncId,
+    arg_idx: usize,
+    call_edges_by_site: &CallSiteEdgeIndex,
+    out: &mut Vec<bonsai_common::Span>,
+) {
+    for call in calls {
+        if call_edges_by_site
+            .edges(caller, call.span)
+            .any(|edge| edge.to == host)
+        {
+            if let Some(arg_span) = call.arg_spans.get(arg_idx) {
+                out.push(*arg_span);
+            }
         }
     }
 }
@@ -2201,6 +2365,32 @@ where
         None,
         None,
         ReverseLookupRetention::Queryable,
+        None,
+    )
+}
+
+/// Build a queryable exact IDG from compact workspace linkage headers and
+/// disposable per-file transfer bodies.
+pub fn build_streaming_with_file_semantics_and_options<S, D>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    semantics: S,
+    transfer_options: &TransferOptions,
+    body_for_file: D,
+) -> IdgWorkspace
+where
+    S: IdgFileSemanticsProvider,
+    D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+{
+    build_with_file_info_and_options_scoped(
+        global,
+        call_graph,
+        semantics,
+        transfer_options,
+        None,
+        None,
+        ReverseLookupRetention::Queryable,
+        Some(&body_for_file),
     )
 }
 
@@ -2229,6 +2419,36 @@ where
         None,
         None,
         ReverseLookupRetention::SidecarOnly,
+        None,
+    )
+}
+
+/// Build a complete exact IDG for persistence from compact workspace linkage
+/// headers and disposable per-file transfer bodies.
+///
+/// `body_for_file` returns a declaration index already rebound to `global`'s
+/// stable symbols. Each file is lowered and dropped at its segment boundary;
+/// no source file, function, edge, or fixed-point step is omitted.
+pub fn build_for_persistence_streaming_with_file_semantics_and_options<S, D>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    semantics: S,
+    transfer_options: &TransferOptions,
+    body_for_file: D,
+) -> IdgWorkspace
+where
+    S: IdgFileSemanticsProvider,
+    D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+{
+    build_with_file_info_and_options_scoped(
+        global,
+        call_graph,
+        semantics,
+        transfer_options,
+        None,
+        None,
+        ReverseLookupRetention::SidecarOnly,
+        Some(&body_for_file),
     )
 }
 
@@ -2307,6 +2527,7 @@ where
         Some(&included_files),
         None,
         ReverseLookupRetention::Queryable,
+        None,
     )
 }
 
@@ -2362,8 +2583,11 @@ where
         Some(&included_files),
         Some(&included_funcs),
         ReverseLookupRetention::Queryable,
+        None,
     )
 }
+
+type FileBodyProvider<'a> = dyn Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync + 'a;
 
 fn build_with_file_info_and_options_scoped<S>(
     global: &GlobalIndex,
@@ -2373,6 +2597,7 @@ fn build_with_file_info_and_options_scoped<S>(
     included_files: Option<&AHashSet<FileId>>,
     included_funcs: Option<&AHashSet<FuncId>>,
     reverse_lookup_retention: ReverseLookupRetention,
+    body_for_file: Option<&FileBodyProvider<'_>>,
 ) -> IdgWorkspace
 where
     S: IdgFileSemanticsProvider,
@@ -2481,10 +2706,23 @@ where
     // Mirror the alias-rename treatment: every local binding
     // surfaced anywhere in the workspace contributes its lhs as an
     // additional call-name for the callable's FuncId.
-    let local_callable_bindings =
-        bonsai_callgraph::collect_workspace_local_callable_bindings(global, |file| {
-            semantics.module_path_syntax(file)
-        });
+    let mut local_callable_bindings: AHashMap<FuncId, AHashMap<String, FuncId>> = AHashMap::new();
+    for (caller, alias, target) in call_graph.local_callable_bindings() {
+        local_callable_bindings
+            .entry(caller)
+            .or_default()
+            .insert(alias.to_string(), target);
+    }
+    // Graphs assembled directly by tests/importers predate the compact
+    // binding table. Preserve the resident API contract there; production
+    // compiler graphs always carry the exact bindings resolved while their
+    // streamed bodies are live.
+    if local_callable_bindings.is_empty() {
+        local_callable_bindings =
+            bonsai_callgraph::collect_workspace_local_callable_bindings(global, |file| {
+                semantics.module_path_syntax(file)
+            });
+    }
     for bindings in local_callable_bindings.values() {
         for (alias, func) in bindings {
             if !maps.func_to_seg.contains_key(func) {
@@ -2522,7 +2760,7 @@ where
     let phase_started = Instant::now();
     let resolver_funcs: AHashSet<FuncId> = maps.func_to_seg.keys().copied().collect();
     let call_edges_by_site = call_edges_by_site_for_funcs(call_graph, global, Some(&resolver_funcs));
-    let call_edge_site_count: usize = call_edges_by_site.values().map(Vec::len).sum();
+    let call_edge_site_count = call_edges_by_site.len();
     idg_build_log(format_args!(
         "call-edge site index: {:.3}s sites={} edges={}",
         phase_started.elapsed().as_secs_f64(),
@@ -2575,7 +2813,7 @@ where
     let phase_started = Instant::now();
     let transfer_inputs =
         transfer_inputs_by_segment(global, &maps.func_to_seg, included_files, included_funcs);
-    let function_count = transfer_inputs.iter().map(|(_, funcs)| funcs.len()).sum();
+    let function_count = transfer_inputs.iter().map(|(_, _, funcs)| funcs.len()).sum();
     let aggregate_layouts = unambiguous_aggregate_layouts(global);
     let transfer_batch_width = idg_transfer_batch_segment_count();
     idg_build_log(format_args!(
@@ -2586,9 +2824,9 @@ where
         transfer_batch_width
     ));
     let phase_started = Instant::now();
-    let batches = transfer_inputs
-        .chunks(transfer_batch_width)
-        .map(|batch| lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch));
+    let batches = transfer_inputs.chunks(transfer_batch_width).map(|batch| {
+        lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch, body_for_file)
+    });
     let mut ws = stitch_idg_from_segment_batches(
         batches,
         function_count,
@@ -3435,14 +3673,24 @@ fn receiver_accessor_return_nodes(
     func: FuncId,
     field_names: &ahash::AHashSet<String>,
 ) -> Vec<crate::WsNodeId> {
-    let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
+    let symbol = bonsai_common::SymbolId::new(func.raw());
+    let Some(decl) = global.decl_of(symbol) else {
         return Vec::new();
     };
     let accessor_name = canonical_field_component(&decl.name);
     if accessor_name.is_empty() || !field_names.contains(&accessor_name) {
         return Vec::new();
     }
-    if !function_returns_accessor_named(&decl.flow_events, &accessor_name) {
+    let returns_accessor = global.linkage_facts(symbol).map_or_else(
+        || function_returns_accessor_named(&decl.flow_events, &accessor_name),
+        |facts| {
+            facts
+                .returned_projection_tails
+                .iter()
+                .any(|tail| canonical_field_component(tail) == accessor_name)
+        },
+    );
+    if !returns_accessor {
         return Vec::new();
     }
     collect_return_nodes(ws, offsets, func)
@@ -3540,10 +3788,40 @@ fn callee_body_delegates_to_ancestor(
         return false;
     };
     let receiver_names = declared_receiver_names(decl);
+    let linkage = resolver
+        .global
+        .linkage_facts(bonsai_common::SymbolId::new(callee.raw()));
     call_graph.callees_of(callee).any(|edge| {
         resolver.is_ancestor_dispatch(callee, edge.to)
-            && call_site_uses_declared_receiver(&decl.flow_events, edge.span, &receiver_names)
+            && linkage.map_or_else(
+                || call_site_uses_declared_receiver(&decl.flow_events, edge.span, &receiver_names),
+                |facts| {
+                    facts
+                        .calls
+                        .iter()
+                        .any(|call| linkage_call_uses_declared_receiver(call, edge.span, &receiver_names))
+                },
+            )
     })
+}
+
+fn linkage_call_uses_declared_receiver(
+    call: &CallLinkageFact,
+    site: bonsai_common::Span,
+    receiver_names: &[String],
+) -> bool {
+    if call.span != site {
+        return false;
+    }
+    if call
+        .receiver
+        .as_deref()
+        .is_some_and(|receiver| receiver_name_matches(receiver, receiver_names))
+    {
+        return true;
+    }
+    let head_end = call.name.find(['.', '(', ':']).unwrap_or(call.name.len());
+    receiver_name_matches(&call.name[..head_end], receiver_names)
 }
 
 fn call_site_uses_declared_receiver(
@@ -4289,17 +4567,17 @@ fn ws_node_to_local(
     (local.0 < segment.nodes.len() as u32).then_some((seg_id, local))
 }
 
-type SegmentTransferInputs<'a> = (SegmentId, Vec<(FileId, &'a bonsai_lang_api::Decl)>);
+type SegmentTransferInputs = (SegmentId, FileId, Vec<FuncId>);
 
 /// Group lightweight declaration references by their deterministic segment.
 /// The heavy transfer outputs are deliberately absent from this schedule.
-fn transfer_inputs_by_segment<'a>(
-    global: &'a GlobalIndex,
+fn transfer_inputs_by_segment(
+    global: &GlobalIndex,
     func_to_segment: &AHashMap<FuncId, SegmentId>,
     included_files: Option<&AHashSet<FileId>>,
     included_funcs: Option<&AHashSet<FuncId>>,
-) -> Vec<SegmentTransferInputs<'a>> {
-    let mut grouped: AHashMap<SegmentId, Vec<(FileId, &'a bonsai_lang_api::Decl)>> = AHashMap::new();
+) -> Vec<SegmentTransferInputs> {
+    let mut grouped: AHashMap<SegmentId, (FileId, Vec<FuncId>)> = AHashMap::new();
     for file in global.all_files() {
         if included_files.is_some_and(|files| !files.contains(&file)) {
             continue;
@@ -4312,13 +4590,18 @@ fn transfer_inputs_by_segment<'a>(
             let Some(segment) = func_to_segment.get(&func).copied() else {
                 continue;
             };
-            grouped.entry(segment).or_default().push((file, decl));
+            let entry = grouped.entry(segment).or_insert_with(|| (file, Vec::new()));
+            debug_assert_eq!(entry.0, file, "one IDG segment must belong to one file");
+            entry.1.push(func);
         }
     }
-    let mut grouped: Vec<_> = grouped.into_iter().collect();
-    grouped.sort_by_key(|(segment, _)| segment.0);
-    for (_, funcs) in &mut grouped {
-        funcs.sort_by_key(|(_, decl)| decl.symbol.raw());
+    let mut grouped: Vec<_> = grouped
+        .into_iter()
+        .map(|(segment, (file, funcs))| (segment, file, funcs))
+        .collect();
+    grouped.sort_by_key(|(segment, _, _)| segment.0);
+    for (_, _, funcs) in &mut grouped {
+        funcs.sort_by_key(|func| func.raw());
     }
     grouped
 }
@@ -4329,45 +4612,66 @@ fn lower_transfer_segment_batch(
     global: &GlobalIndex,
     transfer_options: &TransferOptions,
     aggregate_layouts: &AHashMap<String, Vec<String>>,
-    batch: &[SegmentTransferInputs<'_>],
+    batch: &[SegmentTransferInputs],
+    body_for_file: Option<&FileBodyProvider<'_>>,
 ) -> Vec<(SegmentId, Vec<TransferOutput>)> {
-    let funcs: Vec<_> = batch
-        .iter()
-        .enumerate()
-        .flat_map(|(batch_index, (_, funcs))| {
-            funcs.iter().map(move |(file, decl)| (batch_index, *file, *decl))
-        })
-        .collect();
-    let lower = |(batch_index, file, decl): (usize, FileId, &bonsai_lang_api::Decl)| {
-        let file_index = global.file_index(file);
-        let assignment_values = file_index.map_or(&[][..], |index| index.assignment_values.as_slice());
-        let call_receivers = file_index.map_or(&[][..], |index| index.call_receivers.as_slice());
-        if aggregate_layouts.is_empty() || !flow_events_contain_aggregate_assign(&decl.flow_events) {
-            return (
-                batch_index,
+    let lower = |(segment, file, funcs): &SegmentTransferInputs| {
+        let streamed;
+        let file_index = if let Some(provider) = body_for_file {
+            streamed = provider(*file)
+                .unwrap_or_else(|| panic!("missing streamed compiler body for indexed file {}", file.raw()));
+            &streamed
+        } else {
+            global
+                .file_index(*file)
+                .unwrap_or_else(|| panic!("missing resident compiler body for indexed file {}", file.raw()))
+        };
+        let assignment_values = file_index.assignment_values.as_slice();
+        let call_receivers = file_index.call_receivers.as_slice();
+        let decls_by_func: AHashMap<FuncId, &bonsai_lang_api::Decl> = file_index
+            .defs
+            .iter()
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                )
+            })
+            .map(|decl| (FuncId::new(decl.symbol.raw()), decl))
+            .collect();
+        let outputs = funcs
+            .iter()
+            .map(|func| {
+                let decl = decls_by_func.get(func).copied().unwrap_or_else(|| {
+                    panic!(
+                        "streamed compiler body for file {} is missing function {}",
+                        file.raw(),
+                        func.raw()
+                    )
+                });
+                if aggregate_layouts.is_empty() || !flow_events_contain_aggregate_assign(&decl.flow_events) {
+                    return transfer_function_for_with_options_and_syntax_facts(
+                        decl,
+                        transfer_options,
+                        assignment_values,
+                        call_receivers,
+                    );
+                }
+                let mut resolved = decl.clone();
+                resolve_aggregate_assignments(
+                    &mut resolved.flow_events,
+                    &resolved.type_aliases,
+                    aggregate_layouts,
+                );
                 transfer_function_for_with_options_and_syntax_facts(
-                    decl,
+                    &resolved,
                     transfer_options,
                     assignment_values,
                     call_receivers,
-                ),
-            );
-        }
-        let mut resolved = decl.clone();
-        resolve_aggregate_assignments(
-            &mut resolved.flow_events,
-            &resolved.type_aliases,
-            aggregate_layouts,
-        );
-        (
-            batch_index,
-            transfer_function_for_with_options_and_syntax_facts(
-                &resolved,
-                transfer_options,
-                assignment_values,
-                call_receivers,
-            ),
-        )
+                )
+            })
+            .collect();
+        (*segment, outputs)
     };
 
     // A cold IDG may be requested by a caller that is already executing a
@@ -4379,19 +4683,11 @@ fn lower_transfer_segment_batch(
     // retain the parallel path, and both branches run the identical AST-to-IDG
     // transfer with no semantic budget or depth limit.
     let lowered: Vec<_> = if rayon::current_thread_index().is_some() {
-        funcs.into_iter().map(lower).collect()
+        batch.iter().map(lower).collect()
     } else {
-        funcs.into_par_iter().map(lower).collect()
+        batch.par_iter().map(lower).collect()
     };
-    let mut outputs = vec![Vec::new(); batch.len()];
-    for (batch_index, output) in lowered {
-        outputs[batch_index].push(output);
-    }
-    batch
-        .iter()
-        .zip(outputs)
-        .map(|((segment, _), outputs)| (*segment, outputs))
-        .collect()
+    lowered
 }
 
 fn idg_transfer_batch_segment_count() -> usize {

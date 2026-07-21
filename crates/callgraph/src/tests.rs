@@ -246,6 +246,55 @@ fn build_graph_with_capabilities(
     )
 }
 
+#[test]
+fn streamed_file_bodies_match_fully_resident_callgraph() {
+    let target_file = FileId::new(90);
+    let caller_file = FileId::new(91);
+    let target_index = DeclIndex {
+        file: target_file,
+        defs: vec![decl(target_file, 0, "target", Vec::new())],
+        ..DeclIndex::default()
+    };
+    let caller_index = DeclIndex {
+        file: caller_file,
+        defs: vec![decl(caller_file, 0, "caller", vec![call(caller_file, "target")])],
+        ..DeclIndex::default()
+    };
+
+    let mut resident = GlobalIndex::new();
+    resident.insert_preprocessed(target_index.clone());
+    resident.insert_preprocessed(caller_index.clone());
+    resident.finalize_semantic_facts();
+    let expected = build_graph(&resident, |_| Some("test"));
+
+    let mut headers = GlobalIndex::new();
+    headers.insert_header_preprocessed(target_index.clone());
+    headers.insert_header_preprocessed(caller_index.clone());
+    headers.finalize_semantic_facts();
+    let bodies = AHashMap::from([(target_file, target_index), (caller_file, caller_index)]);
+    let actual = ResolvedCallGraph::build_with_file_semantics_streaming(
+        &headers,
+        CallGraphFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| AHashMap::new(),
+            |_| None,
+            |_| Some("test"),
+            |_| LanguageCapabilities::unsupported(),
+        ),
+        |file| {
+            bodies
+                .get(&file)
+                .cloned()
+                .map(|index| headers.remap_file_to_existing_symbols(index))
+        },
+    );
+
+    assert_eq!(
+        bonsai_common::wire::encode(&actual).expect("encode streamed callgraph"),
+        bonsai_common::wire::encode(&expected).expect("encode resident callgraph")
+    );
+}
+
 fn build_graph_with_paths(
     global: &GlobalIndex,
     path_for_file: impl Fn(FileId) -> Option<String>,

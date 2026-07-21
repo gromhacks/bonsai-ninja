@@ -142,6 +142,118 @@ fn insert_merges_duplicate_declaration_facts() {
 }
 
 #[test]
+fn compiler_headers_rebind_streamed_bodies_to_stable_symbols() {
+    let first_file = FileId::new(20);
+    let body_file = FileId::new(21);
+    let mut first = decl(first_file, 0, "first");
+    first.flow_events.push(FlowEvent::Return {
+        span: first.span,
+        value_text: Some("value".to_string()),
+        value_name: Some("value".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("value"),
+    });
+    let mut body = decl(body_file, 7, "body");
+    body.flow_events.push(FlowEvent::Return {
+        span: body.span,
+        value_text: Some("input".to_string()),
+        value_name: Some("input".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("input"),
+    });
+    let body_index = DeclIndex {
+        file: body_file,
+        defs: vec![body],
+        ..DeclIndex::default()
+    };
+
+    let mut global = GlobalIndex::new();
+    global.insert_header_preprocessed(DeclIndex {
+        file: first_file,
+        defs: vec![first],
+        ..DeclIndex::default()
+    });
+    global.insert_header_preprocessed(body_index.clone());
+    global.finalize_semantic_facts();
+
+    let header = global.decls_in(body_file).first().expect("header");
+    assert!(header.flow_events.is_empty());
+    assert_eq!(header.symbol, SymbolId::new(1));
+
+    let rebound = global.remap_file_to_existing_symbols(body_index);
+    assert_eq!(rebound.defs[0].symbol, header.symbol);
+    assert_eq!(rebound.defs[0].flow_events.len(), 1);
+}
+
+#[test]
+fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
+    let file = FileId::new(22);
+    let call_span = Span::new(file, 20, 35);
+    let arg_span = Span::new(file, 30, 34);
+    let return_span = Span::new(file, 40, 57);
+    let mut function = decl(file, 9, "value");
+    function.flow_events.push(FlowEvent::Branch {
+        span: Span::new(file, 10, 60),
+        condition: Some("ready".to_string()),
+        then_events: vec![
+            FlowEvent::Call {
+                span: call_span,
+                name: "receiver.run".to_string(),
+                receiver: Some("receiver".to_string()),
+                receiver_types: vec!["Runner".to_string()],
+                call_kind: bonsai_lang_api::CallKind::Method,
+                args: vec![bonsai_lang_api::CallArg {
+                    span: arg_span,
+                    passing_mode: bonsai_lang_api::ArgumentPassingMode::Value,
+                    name: None,
+                    value_text: "input".to_string(),
+                    place: Some("input".to_string()),
+                    source_names: vec!["input".to_string()],
+                }],
+            },
+            FlowEvent::Assign {
+                span: call_span,
+                target: "output".to_string(),
+                source_name: None,
+                source_call: Some("run".to_string()),
+                source_call_args: vec!["input".to_string()],
+                source_names: Vec::new(),
+                declares_new_binding: true,
+                value_kind: None,
+            },
+            FlowEvent::Return {
+                span: return_span,
+                value_text: Some("self.value".to_string()),
+                value_name: None,
+                value_flow: bonsai_lang_api::ExpressionFlow::from_place("self.value"),
+            },
+        ],
+        else_events: Vec::new(),
+    });
+
+    let mut global = GlobalIndex::new();
+    global.insert_linkage_header_preprocessed(DeclIndex {
+        file,
+        defs: vec![function],
+        ..DeclIndex::default()
+    });
+
+    let header = global.decls_in(file).first().expect("linkage header");
+    assert!(header.flow_events.is_empty());
+    let symbol = header.symbol;
+    let facts = global.linkage_facts(symbol).expect("compact linkage facts");
+    assert_eq!(facts.calls.len(), 1);
+    assert_eq!(facts.calls[0].span, call_span);
+    assert_eq!(&*facts.calls[0].name, "receiver.run");
+    assert_eq!(facts.calls[0].receiver.as_deref(), Some("receiver"));
+    assert_eq!(&*facts.calls[0].arg_spans, &[arg_span]);
+    assert_eq!(facts.call_result_assignments.len(), 1);
+    assert!(facts.call_result_assignments[0].has_explicit_args);
+    assert_eq!(&*facts.returned_projection_tails[0], "value");
+
+    global.remove_file(file);
+    assert!(global.linkage_facts(symbol).is_none());
+}
+
+#[test]
 fn reinserting_file_replaces_name_lookup_entries() {
     let file = FileId::new(3);
     let mut index = GlobalIndex::new();

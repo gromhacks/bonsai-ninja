@@ -2968,6 +2968,10 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
     let db = read(&root.join("crates/db/src/lib.rs"));
     let callgraph = read(&root.join("crates/callgraph/src/lib.rs"));
     let idg = read(&root.join("crates/idg/src/workspace_adapter.rs"));
+    let idg_service = read(&root.join("crates/idg/src/service.rs"));
+    let symbolic = read(&root.join("crates/idg/src/symbolic.rs"));
+    let index = read(&root.join("crates/index/src/lib.rs"));
+    let taint_idg = read(&root.join("crates/taint/src/idg_build.rs"));
     let workspace = read(&root.join("crates/workspace/src/lib.rs"));
     for (phase, body, scheduler) in [
         (
@@ -3002,6 +3006,39 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             );
         }
     }
+    assert!(
+        function_body(&db, "build_global_header_index").contains("insert_header_preprocessed")
+            && function_body(&taint_idg, "build_resolved_call_graph_snapshot_scoped")
+                .contains("decl_index_remapped_to_headers")
+            && !function_body(&taint_idg, "build_resolved_call_graph_snapshot_scoped")
+                .contains("global_index()"),
+        "callgraph construction must keep global declaration headers and stream exact per-file bodies"
+    );
+    assert!(
+        function_body(&workspace, "build_and_persist_idg_sidecar").contains("build_global_linkage_index")
+            && function_body(&workspace, "build_and_persist_idg_sidecar")
+                .contains("build_for_persistence_streaming_with_file_semantics_and_options")
+            && function_body(&idg, "lower_transfer_segment_batch").contains("body_for_file")
+            && function_body(&index, "insert_linkage_header_preprocessed")
+                .contains("decl.flow_events.clear()")
+            && function_body(&index, "insert_linkage_header_preprocessed").contains("function_linkage_facts"),
+        "IDG persistence must retain only linkage headers and lower exact file bodies at segment boundaries"
+    );
+    assert!(
+        symbolic.contains("pub arg_idx: u32")
+            && symbolic.contains("pub param_idx: u32")
+            && function_body(&idg_service, "symbolic_cross_call_slots")
+                .contains("(transform.arg_idx, transform.param_idx)")
+            && !idg_service.contains("fn symbolic_call_shape"),
+        "symbolic IDG transforms must persist resolved AST argument/formal slots instead of reopening function bodies during queries"
+    );
+    assert!(
+        idg.contains("struct CallSiteEdgeIndex")
+            && function_body(&idg, "call_edges_by_site_for_funcs").contains("out.finish()")
+            && function_body(&idg, "edges").contains("partition_point")
+            && !idg.contains("AHashMap<CallSiteEdgeKey"),
+        "exact call-site ownership must use one contiguous compiler index, not a heap allocation per call site"
+    );
 }
 
 #[test]
@@ -3286,8 +3323,9 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
     );
     assert!(
         function_body(&commands_mod, "open_project_semantic_prewarm")
-            .contains("OpenOptions::streaming_parse_only()"),
-        "one-shot semantic prewarm must release file-local compiler IR instead of retaining every lowered unit"
+            .contains("OpenOptions::sidecar_validation_only()")
+            && commands_mod.contains("warm_structural_sidecars()?"),
+        "one-shot semantic prewarm must ingest immutable snapshots once and let bounded compiler phases validate exact file units"
     );
     assert!(
         main.contains("structural_only,")

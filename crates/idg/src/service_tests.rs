@@ -106,9 +106,11 @@ fn symbolic_call_provenance_uses_ast_argument_and_formal_slots() {
         precision: Precision::Exact,
         call_kind: EdgeKind::Direct,
         kind: SymbolicFieldTransformKind::Argument,
+        arg_idx: 0,
+        param_idx: 0,
         allow_out_of_order_source: false,
     };
-    let (arg_idx, param_idx) = symbolic_cross_call_slots(&global, &graph, &transform, &mut AHashMap::new());
+    let (arg_idx, param_idx) = symbolic_cross_call_slots(&transform);
 
     assert_eq!(arg_idx, 0);
     assert_eq!(param_idx, 0);
@@ -314,6 +316,8 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
         precision: Precision::Exact,
         call_kind: EdgeKind::Direct,
         kind: SymbolicFieldTransformKind::Argument,
+        arg_idx: 0,
+        param_idx: 0,
         allow_out_of_order_source: false,
     });
     symbolic.push_transform(SymbolicFieldTransform {
@@ -325,6 +329,8 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
         precision: Precision::Exact,
         call_kind: EdgeKind::Direct,
         kind: SymbolicFieldTransformKind::Argument,
+        arg_idx: 0,
+        param_idx: 0,
         allow_out_of_order_source: false,
     });
     workspace.set_symbolic_field(symbolic);
@@ -899,6 +905,8 @@ fn symbolic_return_summary_matches_the_originating_call_site() {
             precision: Precision::Exact,
             call_kind: EdgeKind::Direct,
             kind: SymbolicFieldTransformKind::Argument,
+            arg_idx: 0,
+            param_idx: 0,
             allow_out_of_order_source: false,
         });
     }

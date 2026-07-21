@@ -16,6 +16,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// v16 (2026-07-20): graph payloads retain compiler-resolved local callable
+// bindings so the IDG does not keep assignment bodies resident.
 // v15 (2026-07-20): graph payloads include a deterministic compact endpoint
 // name table so later phases can release whole-file declaration bodies.
 // v14 (2026-07-20): graph payloads stream directly and contain only compact
@@ -23,7 +25,7 @@ use std::sync::Arc;
 // v13 (2026-07-18): metadata and graph payloads are independent factstore
 // entries, so freshness checks do not recursively decode millions of edges.
 // v12 (2026-07-16): MessagePack replaced the retired binary codec.
-pub const CALLGRAPH_CACHE_VERSION: u32 = 15;
+pub const CALLGRAPH_CACHE_VERSION: u32 = 16;
 
 const CALLGRAPH_TABLE_ID: u32 = 102;
 const METADATA_KEY: u64 = 0;
@@ -262,7 +264,7 @@ fn validate_metadata(path: &Path, metadata: &CallgraphMetadata) -> std::io::Resu
 
 fn metadata_pipeline_hash(metadata: &CallgraphMetadata) -> u64 {
     let mut hasher = bonsai_hash::Hasher::new();
-    hasher.absorb(b"bonsai-callgraph-sidecar-v15");
+    hasher.absorb(b"bonsai-callgraph-sidecar-v16");
     hasher.absorb_separator();
     hasher.absorb(&metadata.version.to_le_bytes());
     hasher.absorb(&metadata.matcher_policy_fingerprint.to_le_bytes());
