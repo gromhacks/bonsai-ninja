@@ -2991,6 +2991,8 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
     let db = read(&root.join("crates/db/src/lib.rs"));
     let callgraph = read(&root.join("crates/callgraph/src/lib.rs"));
     let idg = read(&root.join("crates/idg/src/workspace_adapter.rs"));
+    let idg_builder = read(&root.join("crates/idg/src/builder.rs"));
+    let idg_workspace = read(&root.join("crates/idg/src/workspace.rs"));
     let idg_service = read(&root.join("crates/idg/src/service.rs"));
     let symbolic = read(&root.join("crates/idg/src/symbolic.rs"));
     let index = read(&root.join("crates/index/src/lib.rs"));
@@ -3057,6 +3059,17 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && !function_body(&workspace, "call_edge_passes_target_callback")
                 .contains("callable_reference_variants"),
         "IDG persistence must retain only linkage headers and lower exact file bodies at segment boundaries"
+    );
+    let stitch = function_body(&idg_builder, "stitch_idg_from_segment_batches");
+    assert!(
+        stitch.contains("extend_callee_endpoints_for_segment")
+            && stitch.contains("segment.release_build_lookups()")
+            && stitch.contains("let data = stitch_data")
+            && stitch.contains(".remove(&caller)")
+            && stitch.contains("seg_remaps.remove(&caller)")
+            && stitch.contains("disable_cross_file_indexes()")
+            && function_body(&idg_workspace, "rebuild_indexes").contains("self.maintain_indexes = true"),
+        "sidecar IDG builds must release exact per-segment and per-caller compiler indexes at their last use and defer query-only edge indexes to warm load"
     );
     assert!(
         symbolic.contains("pub arg_idx: u32")
@@ -3472,10 +3485,12 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     let load = function_body(&idg_workspace, "load_from_disk");
     assert!(
         load.contains("dictionary lookups fall back to an")
+            && load.contains("disable_cross_file_indexes()")
+            && !load.contains("cross_file.rebuild_indexes()")
             && !load.contains("segment.places.rebuild_lookup()")
             && !load.contains("segment.nodes.rebuild_lookup()")
             && !load.contains("segment.strings.rebuild_lookup()"),
-        "warm IDG loads must keep canonical per-segment vectors and avoid eager workspace-wide reverse dictionaries"
+        "warm IDG loads must keep canonical segment/cross-edge vectors and avoid eager workspace-wide reverse dictionaries"
     );
     let unified = function_body(&idg_service, "build_unified");
     let local_lookup = function_body(&idg_service, "local_node_for");

@@ -90,21 +90,39 @@ pub struct FieldFlowLink {
     pub precision: bonsai_common::Precision,
 }
 
-/// Cross-file edges, indexed for both forward (from-side) and
-/// backward (to-side) lookup. Built once during workspace IDG
-/// construction.
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+/// Canonical cross-file edges with optional forward/backward indexes.
+/// Query-built workspaces maintain both indexes as edges are appended;
+/// persisted builds and warm loads defer them to avoid duplicating a
+/// whole-workspace relation in memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossFileEdges {
     /// Every cross-file edge, in stable insertion order. Indexed by
     /// CrossFileEdgeId (a `usize` cast).
     pub edges: Vec<CrossFileEdge>,
     /// `caller_segment → indices into edges` for forward queries.
-    /// Skipped in serde; rebuilt from `edges` after deserialise.
+    /// Skipped in serde; canonical-vector lookup remains exact when empty.
     #[serde(skip)]
     by_from_segment: AHashMap<SegmentId, Vec<u32>>,
     /// `callee_segment → indices into edges` for backward queries.
     #[serde(skip)]
     by_to_segment: AHashMap<SegmentId, Vec<u32>>,
+    /// Sidecar-only compiler builds persist the canonical edge vector and do
+    /// not answer queries in-process. Avoid retaining two additional edge-id
+    /// vectors while that canonical graph is growing. Warm loads keep the
+    /// canonical representation and service-owned compact views.
+    #[serde(skip)]
+    maintain_indexes: bool,
+}
+
+impl Default for CrossFileEdges {
+    fn default() -> Self {
+        Self {
+            edges: Vec::new(),
+            by_from_segment: AHashMap::new(),
+            by_to_segment: AHashMap::new(),
+            maintain_indexes: true,
+        }
+    }
 }
 
 impl CrossFileEdges {
@@ -114,33 +132,56 @@ impl CrossFileEdges {
         Self::default()
     }
 
-    /// Append a cross-file edge. Updates both directional indexes.
+    /// Append a cross-file edge. Updates both directional indexes when this
+    /// workspace is live/queryable; sidecar-only builds retain only `edges`.
     pub fn push(&mut self, edge: CrossFileEdge) {
-        let idx = u32::try_from(self.edges.len()).expect("cross-file edge index overflow: > 2^32 edges");
-        self.by_from_segment
-            .entry(edge.from_segment)
-            .or_default()
-            .push(idx);
-        self.by_to_segment.entry(edge.to_segment).or_default().push(idx);
+        if self.maintain_indexes {
+            let idx = u32::try_from(self.edges.len()).expect("cross-file edge index overflow: > 2^32 edges");
+            self.by_from_segment
+                .entry(edge.from_segment)
+                .or_default()
+                .push(idx);
+            self.by_to_segment.entry(edge.to_segment).or_default().push(idx);
+        }
         self.edges.push(edge);
     }
 
     /// Iterate every cross-file edge whose source is in `seg`.
     pub fn outgoing_from_segment(&self, seg: SegmentId) -> impl Iterator<Item = &CrossFileEdge> + '_ {
-        self.by_from_segment
+        let indexed = self.maintain_indexes;
+        let mut indices = self
+            .by_from_segment
             .get(&seg)
-            .into_iter()
-            .flatten()
-            .filter_map(move |idx| self.edges.get(*idx as usize))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter();
+        let mut canonical = self.edges.iter();
+        std::iter::from_fn(move || {
+            if indexed {
+                indices.find_map(|idx| self.edges.get(*idx as usize))
+            } else {
+                canonical.find(|edge| edge.from_segment == seg)
+            }
+        })
     }
 
     /// Iterate every cross-file edge whose destination is in `seg`.
     pub fn incoming_to_segment(&self, seg: SegmentId) -> impl Iterator<Item = &CrossFileEdge> + '_ {
-        self.by_to_segment
+        let indexed = self.maintain_indexes;
+        let mut indices = self
+            .by_to_segment
             .get(&seg)
-            .into_iter()
-            .flatten()
-            .filter_map(move |idx| self.edges.get(*idx as usize))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter();
+        let mut canonical = self.edges.iter();
+        std::iter::from_fn(move || {
+            if indexed {
+                indices.find_map(|idx| self.edges.get(*idx as usize))
+            } else {
+                canonical.find(|edge| edge.to_segment == seg)
+            }
+        })
     }
 
     /// Number of cross-file edges in the index.
@@ -160,6 +201,13 @@ impl CrossFileEdges {
     /// callers re-stitch the new edges after this call. Returns the
     /// number of edges dropped.
     pub fn invalidate_from_segment(&mut self, seg: SegmentId) -> usize {
+        if !self.maintain_indexes {
+            let before = self.edges.len();
+            self.edges.retain(|edge| edge.from_segment != seg);
+            let dropped = before.saturating_sub(self.edges.len());
+            self.rebuild_indexes();
+            return dropped;
+        }
         let to_drop: ahash::AHashSet<u32> = self
             .by_from_segment
             .remove(&seg)
@@ -205,6 +253,7 @@ impl CrossFileEdges {
 
     /// Rebuild reverse-lookup indexes after deserialisation.
     pub fn rebuild_indexes(&mut self) {
+        self.maintain_indexes = true;
         self.by_from_segment.clear();
         self.by_to_segment.clear();
         for (idx, edge) in self.edges.iter().enumerate() {
@@ -217,6 +266,7 @@ impl CrossFileEdges {
     fn release_indexes(&mut self) {
         self.by_from_segment = AHashMap::new();
         self.by_to_segment = AHashMap::new();
+        self.maintain_indexes = false;
     }
 }
 
@@ -421,17 +471,17 @@ impl IdgWorkspace {
         result
     }
 
-    pub(crate) fn release_segment_build_lookups(&mut self) {
-        for segment in &mut self.segments {
-            segment.release_build_lookups();
-        }
+    pub(crate) fn disable_cross_file_indexes(&mut self) {
+        self.cross_file.release_indexes();
     }
 
     /// Load a workspace IDG from `path`. Returns `Ok(None)` for missing
     /// files, version drift, or `pipeline_hash` mismatch — the caller
     /// rebuilds in those cases. Returns `Err` for genuine I/O / decode
-    /// errors. After load, rebuilds the `FuncId → SegmentId` lookup
-    /// and each segment's reverse-lookup dictionaries.
+    /// errors. After load, rebuilds only the compact `FuncId → SegmentId`
+    /// lookup. Segment and cross-edge queries use exact canonical-vector
+    /// fallbacks or service-owned compact views instead of eagerly duplicating
+    /// every persisted dictionary.
     pub fn load_from_disk(path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<Option<Self>> {
         use rayon::prelude::*;
 
@@ -494,6 +544,7 @@ impl IdgWorkspace {
             field_flow: Vec::with_capacity(metadata.field_flow_count.min(usize::MAX as u64) as usize),
             symbolic_field: SymbolicFieldGraph::new(),
         };
+        ws.disable_cross_file_indexes();
         // Segment entries are independent positioned reads. Decode them in
         // parallel, then install them in segment-id order so persisted IDs
         // remain deterministic. The canonical vectors are the query-time
@@ -631,7 +682,6 @@ impl IdgWorkspace {
             return Ok(None);
         }
         ws.symbolic_field = symbolic;
-        ws.cross_file.rebuild_indexes();
         bonsai_diagnostics::debug_log!(
             "idg-build",
             "workspace sidecar loaded: path={} segments={} funcs={} total_edges={} field_links={}",
