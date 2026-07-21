@@ -8,6 +8,8 @@ use std::sync::OnceLock;
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
+const SYNTAX_UNIT_TRANSIENT_BYTES: u64 = 768 * BYTES_PER_MIB;
+const SYNTAX_RESIDENT_RESERVE_BYTES: u64 = 512 * BYTES_PER_MIB;
 const COMPILER_UNIT_TRANSIENT_BYTES: u64 = BYTES_PER_GIB;
 const COMPILER_RESIDENT_RESERVE_BYTES: u64 = 2 * BYTES_PER_GIB;
 
@@ -55,11 +57,32 @@ pub fn compiler_worker_count(cpu_workers: usize) -> usize {
     compiler_worker_count_for_limit(cpu_workers, effective_memory_limit_bytes())
 }
 
+/// Bound the lighter Tree-sitter validation/lowering frontend.
+///
+/// Syntax validation releases each completed file unit immediately and does
+/// not retain the semantic resolver/graph state covered by
+/// [`compiler_worker_count`]. Its separately measured profile permits useful
+/// parallel parsing on constrained machines while remaining governed by the
+/// same detected process budget and exact-work contract.
+#[must_use]
+pub fn syntax_worker_count(cpu_workers: usize) -> usize {
+    syntax_worker_count_for_limit(cpu_workers, effective_memory_limit_bytes())
+}
+
 fn compiler_worker_count_for_limit(cpu_workers: usize, limit: Option<u64>) -> usize {
     worker_count_for_limit(
         cpu_workers,
         COMPILER_UNIT_TRANSIENT_BYTES,
         COMPILER_RESIDENT_RESERVE_BYTES,
+        limit,
+    )
+}
+
+fn syntax_worker_count_for_limit(cpu_workers: usize, limit: Option<u64>) -> usize {
+    worker_count_for_limit(
+        cpu_workers,
+        SYNTAX_UNIT_TRANSIENT_BYTES,
+        SYNTAX_RESIDENT_RESERVE_BYTES,
         limit,
     )
 }
@@ -169,7 +192,10 @@ fn min_present(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compiler_worker_count_for_limit, min_present, worker_count_for_limit, BYTES_PER_GIB};
+    use super::{
+        compiler_worker_count_for_limit, min_present, syntax_worker_count_for_limit, worker_count_for_limit,
+        BYTES_PER_GIB,
+    };
 
     #[test]
     fn configured_budget_cannot_raise_a_detected_machine_limit() {
@@ -198,5 +224,12 @@ mod tests {
         assert_eq!(compiler_worker_count_for_limit(32, Some(3 * BYTES_PER_GIB)), 1);
         assert_eq!(compiler_worker_count_for_limit(32, Some(8 * BYTES_PER_GIB)), 6);
         assert_eq!(compiler_worker_count_for_limit(2, None), 2);
+    }
+
+    #[test]
+    fn three_gib_budget_keeps_measured_syntax_parallelism() {
+        assert_eq!(syntax_worker_count_for_limit(32, Some(3 * BYTES_PER_GIB)), 3);
+        assert_eq!(syntax_worker_count_for_limit(2, Some(3 * BYTES_PER_GIB)), 2);
+        assert_eq!(syntax_worker_count_for_limit(32, Some(BYTES_PER_GIB)), 1);
     }
 }
