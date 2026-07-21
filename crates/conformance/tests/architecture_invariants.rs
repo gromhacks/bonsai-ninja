@@ -103,6 +103,29 @@ fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
     panic!("unterminated body for {name}");
 }
 
+fn struct_body<'a>(source: &'a str, name: &str) -> &'a str {
+    let needle = format!("struct {name}");
+    let start = source.find(&needle).unwrap_or_else(|| panic!("missing {name}"));
+    let open = source[start..]
+        .find('{')
+        .map(|idx| start + idx)
+        .unwrap_or_else(|| panic!("missing body for {name}"));
+    let mut depth = 0usize;
+    for (offset, ch) in source[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[open..=open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated body for {name}")
+}
+
 fn live_code(source: &str) -> String {
     source
         .lines()
@@ -3036,9 +3059,29 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         idg.contains("struct CallSiteEdgeIndex")
             && function_body(&idg, "call_edges_by_site_for_funcs").contains("out.finish()")
             && function_body(&idg, "edges").contains("partition_point")
-            && !idg.contains("AHashMap<CallSiteEdgeKey"),
+            && !idg.contains("AHashMap<CallSiteEdgeKey")
+            && !function_body(&idg, "finish").contains("shrink_to_fit"),
         "exact call-site ownership must use one contiguous compiler index, not a heap allocation per call site"
     );
+    let maps = struct_body(&idg, "WorkspaceMaps");
+    for duplicate in [
+        "func_to_name",
+        "func_to_language",
+        "func_to_module",
+        "func_to_directory",
+        "func_to_file",
+        "func_to_scope",
+        "symbol_to_scope",
+        "symbol_to_directory",
+        "funcs_by_callback_name_module",
+        "funcs_by_callback_name_directory",
+        "funcs_by_callback_name_file",
+    ] {
+        assert!(
+            !maps.contains(duplicate),
+            "WorkspaceMaps must derive `{duplicate}` from GlobalIndex/file facts instead of cloning it per symbol"
+        );
+    }
 }
 
 #[test]
