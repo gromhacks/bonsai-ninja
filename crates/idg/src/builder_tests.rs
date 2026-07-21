@@ -268,7 +268,10 @@ fn relowered_sidecar_preserves_cross_segment_calls_byte_for_byte() {
     let batches = || {
         vec![vec![
             (SegmentId(0), vec![caller_out.clone()]),
-            (SegmentId(1), vec![callee_out.clone()]),
+            // Compiler schedules are keyed by source-file segment and may
+            // contain gaps for files without functions. Workspace segment ids
+            // remain dense and must be translated explicitly on pass two.
+            (SegmentId(2), vec![callee_out.clone()]),
         ]]
     };
     let mut resolver = MockResolver::new();
