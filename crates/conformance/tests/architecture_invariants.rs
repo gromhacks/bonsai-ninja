@@ -2928,6 +2928,38 @@ fn production_callgraph_consumers_share_the_workspace_graph() {
 }
 
 #[test]
+fn retrieval_streams_callgraph_candidates_by_compiler_unit() {
+    let root = repo_root();
+    let retrieval = read(&root.join("crates/retrieval/src/lib.rs"));
+    let index = function_body(&retrieval, "index_semantic_edges_by_file");
+    let collect = function_body(&retrieval, "collect_edge_candidate_terms");
+    let build = function_body(&retrieval, "build_persisted_candidate_snapshot");
+    let batch_width = function_body(&retrieval, "retrieval_file_batch_width");
+
+    assert!(
+        retrieval.contains(") -> AHashMap<FileId, Vec<usize>> {")
+            && index.contains("edges.iter().enumerate()")
+            && index.contains(".push(index)")
+            && !index.contains("FileCandidateTerms"),
+        "retrieval may index the shared callgraph by compact ordinals, but must not materialize whole-workspace candidate strings"
+    );
+    assert!(
+        retrieval.contains("edge_indices: &[usize]") && collect.contains("candidate_terms(groups, \"edge\")"),
+        "retrieval must derive semantic edge terms while processing one compiler unit"
+    );
+    assert!(
+        build.contains("edge_indices.remove(file)")
+            && build.contains("builder.push(doc)")
+            && !build.contains("build_edge_candidate_groups"),
+        "retrieval must consume and intern each file's exact candidates instead of retaining a second callgraph projection"
+    );
+    assert!(
+        batch_width.contains("memory_bounded_worker_count"),
+        "retrieval compiler-unit concurrency must honor the process memory budget without limiting semantic facts"
+    );
+}
+
+#[test]
 fn first_class_path_and_slice_use_syntax_derived_indexes_only() {
     let root = repo_root();
     let paths_rs = read(&root.join("crates/browse/src/paths.rs"));

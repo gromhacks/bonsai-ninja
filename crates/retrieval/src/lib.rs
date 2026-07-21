@@ -7,7 +7,8 @@
 //! before rendering public analysis facts.
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{cached_span_map_arc, wire, workspace_bonsai_dir, Precision, Span, SymbolId};
+use bonsai_callgraph::ResolvedCallGraph;
+use bonsai_common::{cached_span_map_arc, wire, workspace_bonsai_dir, FileId, Precision, Span, SymbolId};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter, LookupHit};
 use bonsai_hash::{fnv1a_bytes64, fnv1a_str_slice64, Hasher as StableHasher};
 use bonsai_lang_api::{
@@ -760,66 +761,61 @@ fn finish_file_candidate_groups(
     }
 }
 
-fn build_edge_candidate_groups(
+fn index_semantic_edges_by_file(
+    call_graph: &ResolvedCallGraph,
+    global: &bonsai_index::GlobalIndex,
+) -> AHashMap<FileId, Vec<usize>> {
+    let mut edge_indices = AHashMap::default();
+    for (index, edge) in call_graph.inner().edges.iter().enumerate() {
+        if edge.precision.is_semantic()
+            && global.decl_of(SymbolId::new(edge.from.raw())).is_some()
+            && global.decl_of(SymbolId::new(edge.to.raw())).is_some()
+        {
+            edge_indices
+                .entry(edge.span.file)
+                .or_insert_with(Vec::new)
+                .push(index);
+        }
+    }
+    edge_indices
+}
+
+fn collect_edge_candidate_terms(
     ws: &Workspace,
     global: &bonsai_index::GlobalIndex,
-) -> AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>> {
-    let call_graph = ws.cached_resolved_call_graph();
-    call_graph
-        .inner()
-        .edges
-        .par_iter()
-        .fold(AHashMap::default, |mut edge_groups, edge| {
-            if !edge.precision.is_semantic() {
-                return edge_groups;
-            }
-            let Some(caller) = global.decl_of(SymbolId::new(edge.from.raw())) else {
-                return edge_groups;
-            };
-            let Some(callee) = global.decl_of(SymbolId::new(edge.to.raw())) else {
-                return edge_groups;
-            };
-            let groups = edge_groups.entry(edge.span.file).or_default();
-            let edges = candidate_terms(groups, "edge");
-            edges.add(&caller.name);
-            edges.add(&callee.name);
-            edges.add(&format!("{} -> {}", caller.name, callee.name));
-            let file_path = ws
-                .vfs()
-                .path(edge.span.file)
-                .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
-            let (span, _) = span_doc_fields(ws, edge.span);
-            edges.add_stable_id(edge_id_for_parts(
-                &caller.name,
-                &callee.name,
-                &file_path,
-                span.line,
-                span.column,
-            ));
-            edge_groups
-        })
-        .reduce(AHashMap::default, merge_edge_candidate_group_maps)
-}
-
-fn merge_candidate_groups(
-    target: &mut AHashMap<String, FileCandidateTerms>,
-    source: AHashMap<String, FileCandidateTerms>,
+    call_graph: &ResolvedCallGraph,
+    groups: &mut AHashMap<String, FileCandidateTerms>,
+    edge_indices: &[usize],
 ) {
-    for (kind, source) in source {
-        let target = target.entry(kind).or_default();
-        target.terms.extend(source.terms);
-        target.stable_ids.extend(source.stable_ids);
+    for &index in edge_indices {
+        // These ordinals and endpoints were validated against the same
+        // immutable graph/index immediately before file batching. Treat a
+        // violation as corruption rather than silently omitting a compiler
+        // fact from the candidate projection.
+        let edge = &call_graph.inner().edges[index];
+        let caller = global
+            .decl_of(SymbolId::new(edge.from.raw()))
+            .expect("indexed retrieval caller must remain in the immutable global index");
+        let callee = global
+            .decl_of(SymbolId::new(edge.to.raw()))
+            .expect("indexed retrieval callee must remain in the immutable global index");
+        let edges = candidate_terms(groups, "edge");
+        edges.add(&caller.name);
+        edges.add(&callee.name);
+        edges.add(&format!("{} -> {}", caller.name, callee.name));
+        let file_path = ws
+            .vfs()
+            .path(edge.span.file)
+            .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
+        let (span, _) = span_doc_fields(ws, edge.span);
+        edges.add_stable_id(edge_id_for_parts(
+            &caller.name,
+            &callee.name,
+            &file_path,
+            span.line,
+            span.column,
+        ));
     }
-}
-
-fn merge_edge_candidate_group_maps(
-    mut target: AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>>,
-    source: AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>>,
-) -> AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>> {
-    for (file, groups) in source {
-        merge_candidate_groups(target.entry(file).or_default(), groups);
-    }
-    target
 }
 
 fn collect_decl_candidate_terms(groups: &mut AHashMap<String, FileCandidateTerms>, decl: &Decl) {
@@ -905,10 +901,11 @@ fn collect_index_candidate_terms(
 fn build_file_candidate_docs(
     ws: &Workspace,
     global: &bonsai_index::GlobalIndex,
-    file: bonsai_common::FileId,
+    call_graph: &ResolvedCallGraph,
+    file: FileId,
     file_path: &str,
     pipeline: u64,
-    edge_groups: Option<AHashMap<String, FileCandidateTerms>>,
+    edge_indices: &[usize],
 ) -> Vec<FactDoc> {
     let language = ws
         .db()
@@ -958,9 +955,7 @@ fn build_file_candidate_docs(
     if let Some(index) = global.file_index(file) {
         collect_index_candidate_terms(ws, &mut groups, index);
     }
-    if let Some(edge_groups) = edge_groups {
-        merge_candidate_groups(&mut groups, edge_groups);
-    }
+    collect_edge_candidate_terms(ws, global, call_graph, &mut groups, edge_indices);
     let mut docs = Vec::with_capacity(groups.len());
     finish_file_candidate_groups(
         &mut docs,
@@ -974,17 +969,31 @@ fn build_file_candidate_docs(
     docs
 }
 
+fn retrieval_file_batch_width() -> usize {
+    // Candidate terms temporarily duplicate strings from one lowered compiler
+    // unit. The estimate controls concurrency only: every file and semantic
+    // edge is still processed when constrained machines choose one worker.
+    const TRANSIENT_BYTES_PER_FILE: u64 = 1024 * 1024 * 1024;
+    const RESIDENT_COMPILER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    bonsai_common::memory_bounded_worker_count(
+        rayon::current_num_threads().max(1),
+        TRANSIENT_BYTES_PER_FILE,
+        RESIDENT_COMPILER_BYTES,
+    )
+}
+
 /// Build the persisted candidate-only projection used to narrow files before
-/// canonical hydration. File-local lowering is parallel, while each completed
-/// compiler batch is interned immediately so transient documents never grow
-/// with workspace size. The batch width follows the active Rayon pool rather
-/// than imposing a project or semantic limit.
+/// canonical hydration. The callgraph is indexed by compact edge ordinals;
+/// candidate strings are derived and interned one bounded file batch at a
+/// time instead of materializing a second whole-workspace graph. The batch
+/// width is a scheduling choice only and never limits files or facts.
 fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
     let pipeline = pipeline_hash_for_workspace(ws);
     let global = ws.db().global_index();
-    let mut edge_groups = build_edge_candidate_groups(ws, &global);
+    let call_graph = ws.cached_resolved_call_graph();
+    let mut edge_indices = index_semantic_edges_by_file(&call_graph, &global);
     let mut file_ids: Vec<_> = global.all_files().collect();
-    file_ids.extend(edge_groups.keys().copied());
+    file_ids.extend(edge_indices.keys().copied());
     file_ids.sort_unstable_by_key(|file| file.raw());
     file_ids.dedup();
     let mut files: Vec<_> = file_ids
@@ -1000,15 +1009,23 @@ fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
     files.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
     let mut builder = CompactFactSnapshotBuilder::new(RETRIEVAL_SCHEMA_VERSION, pipeline);
-    let batch_width = rayon::current_num_threads().max(1);
+    let batch_width = retrieval_file_batch_width();
     for batch in files.chunks(batch_width) {
         let inputs: Vec<_> = batch
             .iter()
-            .map(|(path, file)| (*file, path.as_str(), edge_groups.remove(file)))
+            .map(|(path, file)| {
+                (
+                    *file,
+                    path.as_str(),
+                    edge_indices.remove(file).unwrap_or_default(),
+                )
+            })
             .collect();
         let lowered: Vec<Vec<FactDoc>> = inputs
             .into_par_iter()
-            .map(|(file, path, edges)| build_file_candidate_docs(ws, &global, file, path, pipeline, edges))
+            .map(|(file, path, edges)| {
+                build_file_candidate_docs(ws, &global, &call_graph, file, path, pipeline, &edges)
+            })
             .collect();
         for docs in lowered {
             for doc in docs {

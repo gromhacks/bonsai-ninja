@@ -679,6 +679,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "bonsai_adapters",
+ "bonsai_callgraph",
  "bonsai_common",
  "bonsai_factstore",
  "bonsai_hash",
