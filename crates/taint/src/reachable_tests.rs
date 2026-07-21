@@ -31,8 +31,17 @@ fn call_summary_cache_for(
     let mut spans = by_span.keys().copied().collect::<Vec<_>>();
     spans.sort_by_key(|span| (span.file.raw(), span.start, std::cmp::Reverse(span.end)));
     CallEventSummaryCache {
-        by_func: AHashMap::from_iter([(func, Arc::new(FunctionCallEventSummaries { by_span, spans }))]),
+        by_func: AHashMap::from_iter([(
+            func,
+            Arc::new(FunctionCallEventSummaries {
+                by_span,
+                spans,
+                return_spans: Vec::new(),
+                writes: Vec::new(),
+            }),
+        )]),
         shared: None,
+        db: None,
     }
 }
 
@@ -1274,7 +1283,9 @@ fn collect_tainted_writes_requires_structured_carrier_match() {
     }];
 
     let mut out: Vec<crate::idg_api::TaintedCall> = Vec::new();
-    collect_tainted_writes(&events, FuncId::new(0), &tainted_names, None, &mut out);
+    let mut writes = Vec::new();
+    collect_write_event_summaries(&events, &mut writes);
+    collect_tainted_writes(&writes, FuncId::new(0), &tainted_names, None, &mut out);
     assert!(
         out.is_empty(),
         "rendered text and substrings (`id` in `uuid`/`valid`/`hidden`) must not fabricate a Write row; got {out:#?}"
@@ -1300,7 +1311,9 @@ fn collect_tainted_writes_keeps_whole_identifier_and_dotted_member() {
     }];
 
     let mut out: Vec<crate::idg_api::TaintedCall> = Vec::new();
-    collect_tainted_writes(&events, FuncId::new(0), &tainted_names, None, &mut out);
+    let mut writes = Vec::new();
+    collect_write_event_summaries(&events, &mut writes);
+    collect_tainted_writes(&writes, FuncId::new(0), &tainted_names, None, &mut out);
     assert_eq!(
         out.len(),
         1,

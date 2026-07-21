@@ -20,6 +20,15 @@ use crate::help_theme::{
     themed_subcommand_long_about,
 };
 
+/// Internal exact-semantic compiler phase used to give workspace-scale
+/// frontends an operating-system memory reclamation boundary. This is hidden
+/// from the public CLI because `index --semantic` orchestrates it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum SemanticWorkerPhase {
+    Frontend,
+    Idg,
+}
+
 /// Default row cap for every browse command's text renderer. Chosen
 /// so the footer's `~estimated tokens` stays under the 10K-token
 /// shoulder of typical LLM context windows even on monster repos
@@ -340,6 +349,9 @@ pub(crate) enum Cmd {
         /// query commands. Does not run the compatibility all-entry dataflow prewarm.
         #[arg(long, conflicts_with_all = ["prewarm_dataflow", "structural_only"])]
         semantic: bool,
+        /// Internal worker phase for exact semantic prewarm.
+        #[arg(long, hide = true, requires = "semantic")]
+        semantic_worker: Option<SemanticWorkerPhase>,
         /// Parse and structurally index only; do not warm semantic sidecars.
         #[arg(long)]
         structural_only: bool,

@@ -169,17 +169,36 @@ fn plan_source_work<'a>(
             .push(SourceForFunction { index, source });
     }
     let mut ordered_groups: Vec<_> = sources_by_func.into_iter().collect();
-    ordered_groups.sort_by_key(|(_, sources)| {
-        sources
-            .iter()
-            .map(|source| source.index)
-            .min()
-            .unwrap_or(usize::MAX)
+    ordered_groups.sort_by_key(|(func, sources)| {
+        (
+            global
+                .declaring_file(SymbolId::new(func.raw()))
+                .map_or(u32::MAX, FileId::raw),
+            sources
+                .iter()
+                .map(|source| source.index)
+                .min()
+                .unwrap_or(usize::MAX),
+        )
     });
 
     let mut indexed_items = Vec::new();
+    let mut active_file = None;
+    let mut active_index = None;
     for (source_func, sources) in ordered_groups {
-        let Some(source_decl) = global.decl_of(SymbolId::new(source_func.raw())) else {
+        let Some(file) = global.declaring_file(SymbolId::new(source_func.raw())) else {
+            continue;
+        };
+        if active_file != Some(file) {
+            active_index = ws.exact_decl_index(file);
+            active_file = Some(file);
+        }
+        let Some(source_decl) = active_index.as_ref().and_then(|index| {
+            index
+                .defs
+                .iter()
+                .find(|decl| decl.symbol.raw() == source_func.raw())
+        }) else {
             continue;
         };
         for source in sources {
@@ -373,9 +392,9 @@ where
     source_funcs.sort_by_key(|func| func.raw());
     let resolved_call_graph = request.ws.cached_resolved_call_graph();
     let callback_targets = configured_source_callback_targets_by_source(
+        request.ws,
         request.source_work,
         request.pack,
-        request.global.as_ref(),
         resolved_call_graph.as_ref(),
     );
     let mut graph_source_funcs = source_funcs.clone();
@@ -1136,7 +1155,7 @@ where
         on_progress,
     } = request;
     // ---- Phase 1: resolve rule matches to enclosing FuncIds ----
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     // Run-scoped memo for the workspace-wide receiver→base-type map. Sink
     // constraint re-checks (`rule_match_passes_constraints_with_taint_view`)
     // run once per candidate; without this the whole-workspace scan that
@@ -1452,9 +1471,9 @@ fn coarse_corridor_for_source<'a>(
 }
 
 fn configured_source_callback_targets_by_source(
+    ws: &Workspace,
     source_work: &[SourceWorkItem<'_>],
     pack: &Rulepack,
-    global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
 ) -> AHashMap<FuncId, AHashSet<FuncId>> {
     if source_work.is_empty() {
@@ -1464,7 +1483,7 @@ fn configured_source_callback_targets_by_source(
     for item in source_work {
         let src = item.source;
         let src_func_id = item.source_func;
-        let Some(src_decl) = global.decl_of(SymbolId::new(src_func_id.raw())) else {
+        let Some(src_decl) = ws.exact_decl(SymbolId::new(src_func_id.raw())) else {
             continue;
         };
         let Some(rule) = pack.find_rule_by_id(&src.rule_id) else {
@@ -1649,66 +1668,9 @@ fn summary_dependency_provider(global: &GlobalIndex, func: FuncId) -> bool {
     };
     matches!(decl.kind, DeclKind::Constructor)
         || !decl.receiver_field_writes.is_empty()
-        || summary_event_outputs(&decl.flow_events)
-}
-
-fn summary_event_outputs(events: &[FlowEvent]) -> bool {
-    for event in events {
-        match event {
-            FlowEvent::Return {
-                value_text,
-                value_name,
-                ..
-            } => {
-                if value_text
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-                    || value_name
-                        .as_deref()
-                        .is_some_and(|value| !value.trim().is_empty())
-                {
-                    return true;
-                }
-            }
-            FlowEvent::Yield { value_text, .. } => {
-                if value_text
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-                {
-                    return true;
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                if summary_event_outputs(then_events) || summary_event_outputs(else_events) {
-                    return true;
-                }
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if summary_event_outputs(body) {
-                    return true;
-                }
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                if summary_event_outputs(body)
-                    || summary_event_outputs(catch_events)
-                    || summary_event_outputs(finally_events)
-                {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
+        || global
+            .linkage_facts(SymbolId::new(func.raw()))
+            .is_some_and(|facts| facts.has_summary_output)
 }
 
 pub(super) struct SinkTargetNodes {
@@ -1818,6 +1780,15 @@ fn source_index_sink_corridor(
         idg,
     );
     if seed_nodes.is_empty() {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "empty source seed rule={} func={} names={:?} anchor={:?} output_args={:?}",
+            src.rule_id,
+            source_func.raw(),
+            seeds.iter().collect::<Vec<_>>(),
+            anchor.map(|span| (span.start, span.end)),
+            output_arg_names
+        );
         return None;
     }
     apply_configured_transfer_fixpoint(
@@ -2344,8 +2315,7 @@ fn source_is_sink_call_argument(
     source_span: Span,
     sink_span: Span,
 ) -> bool {
-    let global = ws.db().global_index();
-    let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
+    let Some(decl) = ws.exact_decl(SymbolId::new(sink_func.raw())) else {
         return false;
     };
     source_is_sink_call_argument_in_events(&decl.flow_events, source_span, sink_span)

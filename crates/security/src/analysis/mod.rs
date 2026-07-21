@@ -624,10 +624,10 @@ fn taint_analysis_incomplete_reasons(
 }
 
 fn unresolved_workspace_call_site_count(ws: &Workspace, resolution: &ResolutionCoverage) -> usize {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let mut unresolved = AHashSet::new();
     for &caller in &resolution.analyzed_funcs {
-        let Some(decl) = global.decl_of(SymbolId::new(caller.raw())) else {
+        let Some(decl) = ws.exact_decl(SymbolId::new(caller.raw())) else {
             continue;
         };
         if !matches!(
@@ -1517,12 +1517,31 @@ fn schedule_source_graph_groups(
     }
 
     let mut hits_by_func: Vec<_> = hits_by_func.into_iter().collect();
-    hits_by_func.sort_by_key(|(_, hits)| hits.first().map(|hit| hit.index).unwrap_or(usize::MAX));
+    hits_by_func.sort_by_key(|(func, hits)| {
+        (
+            global
+                .declaring_file(SymbolId::new(func.raw()))
+                .map_or(u32::MAX, FileId::raw),
+            hits.first().map(|hit| hit.index).unwrap_or(usize::MAX),
+        )
+    });
     let source_function_count = hits_by_func.len();
 
     let mut source_jobs = Vec::new();
+    let mut active_file = None;
+    let mut active_index = None;
     for (start, hits) in hits_by_func {
-        let Some(decl) = global.decl_of(SymbolId::new(start.raw())) else {
+        let Some(file) = global.declaring_file(SymbolId::new(start.raw())) else {
+            continue;
+        };
+        if active_file != Some(file) {
+            active_index = ws.exact_decl_index(file);
+            active_file = Some(file);
+        }
+        let Some(decl) = active_index
+            .as_ref()
+            .and_then(|index| index.defs.iter().find(|decl| decl.symbol.raw() == start.raw()))
+        else {
             continue;
         };
         for hit in hits {
@@ -1711,6 +1730,7 @@ where
 
 struct SourceLineageEnumerationContext<'a> {
     ws: &'a Workspace,
+    global: &'a bonsai_index::GlobalIndex,
     idg: &'a bonsai_idg::IdgQueryService,
     graph_config: &'a InterTaintConfig,
     caches: &'a InterTaintCaches,
@@ -1738,6 +1758,7 @@ fn build_source_group_candidates(
                     context.ws.db(),
                     context.idg,
                 )
+                .with_global_index(context.global)
                 .with_transfers(bonsai_taint::IdgTaintTransfers {
                     call_result_passthroughs: &context.graph_config.call_result_passthroughs,
                     call_results_materialized: true,
@@ -2056,7 +2077,7 @@ where
         detail: format!("source-analysis source_matches={}", source_hits.len()),
     });
 
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let transfer_languages = workspace_languages(ws);
     let source_graph_config = InterTaintConfig {
         clean_output_overwrites: clean_output_overwrites_from_rulepack_for_languages(
@@ -2132,6 +2153,7 @@ where
         SourceLineageGraph::Compiled { idg, .. } => enumerate_source_candidates(
             &SourceLineageEnumerationContext {
                 ws,
+                global: global.as_ref(),
                 idg,
                 graph_config: &source_graph_config,
                 caches: source_graph_caches,
@@ -2911,7 +2933,7 @@ fn func_id_for_match(ws: &Workspace, hit: &RuleMatch) -> Option<FuncId> {
     }
 
     let name = expected_name?;
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let decls = global.decls_in(hit.span.file);
     let mut best_containing: Option<(u64, FuncId)> = None;
     let mut unique_named: Option<FuncId> = None;
@@ -3210,10 +3232,8 @@ fn build_call_evidence<'a>(
         return None;
     }
     let chain_names = chain_names_for_path(ws, &chain_funcs)?;
-    let global = ws.db().global_index();
-    let sink_events = global
-        .decl_of(SymbolId::new(call.caller.raw()))
-        .map(|decl| decl.flow_events.as_slice());
+    let sink_decl = ws.exact_decl(SymbolId::new(call.caller.raw()));
+    let sink_events = sink_decl.as_deref().map(|decl| decl.flow_events.as_slice());
     let mut sink_tainted_args: Vec<TaintedArgInfo> = call
         .tainted_args
         .iter()
@@ -3811,15 +3831,14 @@ fn merge_taint_report_step(previous: &mut TaintPropagationStep, next: TaintPropa
 }
 
 fn func_display_name(ws: &Workspace, func: FuncId) -> String {
-    ws.db()
-        .global_index()
+    ws.compiler_linkage_index()
         .decl_of(SymbolId::new(func.raw()))
         .map(|decl| decl.name.clone())
         .unwrap_or_else(|| format!("func#{}", func.raw()))
 }
 
 fn func_display_name_with_site(ws: &Workspace, func: FuncId) -> String {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
         return format!("func#{}", func.raw());
     };
@@ -3952,7 +3971,7 @@ fn taint_path_has_excluded_file(
 }
 
 fn func_file_path(ws: &Workspace, func: FuncId) -> Option<String> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let decl = global.decl_of(SymbolId::new(func.raw()))?;
     ws.vfs()
         .path(decl.span.file)
@@ -4177,7 +4196,7 @@ fn merge_source_lineage_status(current: &mut SourceLineageStatus, incoming: Sour
 }
 
 fn chain_names_for_path(ws: &Workspace, path: &[FuncId]) -> Option<Vec<String>> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let named_funcs: Option<Vec<(FuncId, String)>> = path
         .iter()
         .map(|func| {
@@ -5258,8 +5277,7 @@ fn merge_finding_matches(dst: &mut Vec<FindingMatch>, src: Vec<FindingMatch>) {
 /// flows as "backwards in time". Detecting a shared enclosing loop restores
 /// them without loosening the strict forward-order rule elsewhere.
 fn spans_share_enclosing_loop(ws: &Workspace, sink_func: FuncId, source_span: Span, sink_span: Span) -> bool {
-    let global = ws.db().global_index();
-    let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
+    let Some(decl) = ws.exact_decl(SymbolId::new(sink_func.raw())) else {
         return false;
     };
     spans_share_enclosing_loop_in_events(&decl.flow_events, source_span, sink_span)
@@ -5369,8 +5387,7 @@ fn sanitizer_is_nested_in_tainted_sink_arg(
     if san.span.file != snk.span.file || sink_tainted_args.is_empty() {
         return false;
     }
-    let global = ws.db().global_index();
-    let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
+    let Some(decl) = ws.exact_decl(SymbolId::new(sink_func.raw())) else {
         return false;
     };
     let Some(FlowEvent::Call {
@@ -5487,8 +5504,7 @@ fn builder_created_from_factory_before_sink(
     if san_span.file != sink_span.file || san_span.end > sink_span.start {
         return false;
     }
-    let global = ws.db().global_index();
-    let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
+    let Some(decl) = ws.exact_decl(SymbolId::new(sink_func.raw())) else {
         return false;
     };
     builder_available_at_sink(
@@ -5743,8 +5759,7 @@ fn sanitizer_assignment_output_feeds_sink_arg(
     if target_keys.is_empty() {
         return false;
     }
-    let global = ws.db().global_index();
-    let Some(decl) = global.decl_of(SymbolId::new(sanitizer_func.raw())) else {
+    let Some(decl) = ws.exact_decl(SymbolId::new(sanitizer_func.raw())) else {
         return false;
     };
     sanitizer_assignment_output_feeds_sink_arg_in_events(&decl.flow_events, san, &target_keys)
@@ -5937,8 +5952,7 @@ fn sanitizer_guard_feeds_sink_arg(
     if target_keys.is_empty() {
         return false;
     }
-    let global = ws.db().global_index();
-    let Some(decl) = global.decl_of(SymbolId::new(sanitizer_func.raw())) else {
+    let Some(decl) = ws.exact_decl(SymbolId::new(sanitizer_func.raw())) else {
         return false;
     };
     let mut guarded = sanitizer_guard_variables_in_events(&decl.flow_events, san, tag);

@@ -7,14 +7,16 @@
 use anyhow::Result;
 use serde_json::json;
 use std::io::Write as _;
+use std::process::Command;
 use std::time::Duration;
 
+use crate::args::SemanticWorkerPhase;
 use crate::cli_println;
 use crate::progress;
 
 use super::{
     not_found_with_suggestions, open_project_dataflow_prewarm, open_project_index_only,
-    open_project_parse_only, open_project_semantic_prewarm, open_project_streaming_parse_only,
+    open_project_parse_only, open_project_sidecar_validation_only, open_project_streaming_parse_only,
     open_workspace_syntax_only,
 };
 
@@ -24,15 +26,21 @@ pub(crate) struct IndexCommandOptions {
     pub(crate) interval_ms: u64,
     pub(crate) prewarm_dataflow: bool,
     pub(crate) semantic: bool,
+    pub(crate) semantic_worker: Option<SemanticWorkerPhase>,
     pub(crate) structural_only: bool,
 }
 
 pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) -> Result<()> {
     let _ = options.structural_only;
+    if options.semantic {
+        if let Some(phase) = options.semantic_worker {
+            return run_semantic_worker(root, phase);
+        }
+        run_semantic_workers(root)?;
+        return Ok(());
+    }
     let (project, _footer) = if options.prewarm_dataflow {
         open_project_dataflow_prewarm(root)?
-    } else if options.semantic {
-        open_project_semantic_prewarm(root)?
     } else if options.watch {
         open_project_parse_only(root)?
     } else {
@@ -72,6 +80,52 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
                 }))?
             );
             flush_stdout()?;
+        }
+    }
+}
+
+/// Execute exact semantic compiler phases in separate processes. Dropping a
+/// Rust value releases its allocations logically, but Tree-sitter's C
+/// allocator and the process allocator may retain those pages indefinitely.
+/// A worker exit is the portable hard reclamation boundary: every phase still
+/// sees the complete AST-derived compiler input and emits the same sidecars,
+/// while their peak resident sets cannot become additive.
+fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
+    let executable = std::env::current_exe()?;
+    for phase in [SemanticWorkerPhase::Frontend, SemanticWorkerPhase::Idg] {
+        let phase_name = match phase {
+            SemanticWorkerPhase::Frontend => "frontend",
+            SemanticWorkerPhase::Idg => "idg",
+        };
+        let mut command = Command::new(&executable);
+        command
+            .arg("index")
+            .arg("--semantic")
+            .arg("--semantic-worker")
+            .arg(phase_name)
+            .arg(root);
+        if let Some(timeout_ms) = crate::PARSE_TIMEOUT_MS.get().copied().flatten() {
+            command.arg("--parse-timeout").arg(timeout_ms.to_string());
+        }
+        let status = command.status()?;
+        if !status.success() {
+            anyhow::bail!("semantic {phase_name} worker exited with {status}");
+        }
+    }
+    Ok(())
+}
+
+fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Result<()> {
+    let project = open_project_sidecar_validation_only(root)?;
+    match phase {
+        SemanticWorkerPhase::Frontend => project.cache().warm_retrieval_and_callgraph_sidecars(),
+        SemanticWorkerPhase::Idg => {
+            project.cache().warm_idg_sidecar_and_manifest()?;
+            let stage = progress::ScopedSpinner::new("collecting index stats");
+            let stats = project.stats();
+            stage.finish();
+            cli_println!("{}", serde_json::to_string_pretty(&stats)?);
+            flush_stdout()
         }
     }
 }

@@ -1840,14 +1840,37 @@ impl Cache<'_> {
     /// explicitly need an independent cache audit can subsequently call
     /// [`Self::stats`].
     pub fn warm_structural_sidecars(&self) -> Result<()> {
+        self.warm_retrieval_and_callgraph_sidecars()?;
+        self.warm_idg_sidecar_and_manifest()
+    }
+
+    /// Warm the exact retrieval and resolved-callgraph compiler artifacts.
+    ///
+    /// This is a distinct lifecycle phase because Tree-sitter and allocator
+    /// arenas released by the frontend are not guaranteed to be returned to
+    /// the operating system immediately. Process-oriented frontends can run
+    /// this phase in one worker and the IDG phase in another, giving the OS a
+    /// hard reclamation boundary without changing analyzed files or facts.
+    pub fn warm_retrieval_and_callgraph_sidecars(&self) -> Result<()> {
+        let workspace = &self.project.workspace;
+        let _ = bonsai_retrieval::ensure_sidecar(workspace, &self.project.root)?;
+        if !workspace.callgraph_sidecar_is_current(&self.project.root) {
+            let _ = workspace.cached_resolved_call_graph();
+            workspace.save_callgraph_sidecar(&self.project.root)?;
+        }
+        Ok(())
+    }
+
+    /// Warm the exact workspace IDG after the frontend sidecars are durable,
+    /// then commit the semantic manifest.
+    ///
+    /// The method remains correct when called directly: a missing callgraph is
+    /// rebuilt rather than weakening IDG resolution. CLI semantic prewarm runs
+    /// it in a fresh worker process so released frontend arenas cannot inflate
+    /// the graph phase's resident set on constrained machines.
+    pub fn warm_idg_sidecar_and_manifest(&self) -> Result<()> {
         let cache = self.workspace_cache();
         let workspace = &self.project.workspace;
-        // Retrieval streams exact syntax units but retains a compact candidate
-        // snapshot until its factstore is committed. Build it before the IDG:
-        // the allocator can then reuse those pages for the graph, and the
-        // one-shot prewarm exits immediately after IDG persistence instead of
-        // stacking a second workspace-scale phase on released graph arenas.
-        let _ = bonsai_retrieval::ensure_sidecar(workspace, &self.project.root)?;
         let callgraph_is_current = workspace.callgraph_sidecar_is_current(&self.project.root);
         if !callgraph_is_current {
             let _ = workspace.cached_resolved_call_graph();

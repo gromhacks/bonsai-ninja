@@ -494,10 +494,14 @@ impl IdgWorkspace {
             field_flow: Vec::with_capacity(metadata.field_flow_count.min(usize::MAX as u64) as usize),
             symbolic_field: SymbolicFieldGraph::new(),
         };
-        // Segment entries are independent positioned reads. Decode and rebuild
-        // their local dictionaries in parallel, then install them in segment-id
-        // order so persisted IDs remain deterministic. This is compiler
-        // scheduling only: every segment is still decoded and validated.
+        // Segment entries are independent positioned reads. Decode them in
+        // parallel, then install them in segment-id order so persisted IDs
+        // remain deterministic. The canonical vectors are the query-time
+        // representation: deserialization deliberately leaves the skipped
+        // reverse hash maps incomplete, and dictionary lookups fall back to an
+        // exact per-segment scan. Rebuilding three hash tables for every file
+        // can add gigabytes to a large warm graph even though each query only
+        // touches a small fraction of those dictionaries.
         let decode_width = idg_serialization_worker_count();
         for batch_start in (0..metadata.segment_count).step_by(decode_width) {
             let batch_end = metadata
@@ -515,7 +519,7 @@ impl IdgWorkspace {
                         );
                         return Ok(None);
                     };
-                    let mut segment: IdgSegment = wire::decode(&hit.payload).map_err(|e| {
+                    let segment: IdgSegment = wire::decode(&hit.payload).map_err(|e| {
                         crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
                     })?;
                     if segment.version != IDG_SEGMENT_VERSION {
@@ -529,9 +533,6 @@ impl IdgWorkspace {
                         );
                         return Ok(None);
                     }
-                    segment.places.rebuild_lookup();
-                    segment.nodes.rebuild_lookup();
-                    segment.strings.rebuild_lookup();
                     Ok(Some(segment))
                 })
                 .collect::<Vec<_>>();

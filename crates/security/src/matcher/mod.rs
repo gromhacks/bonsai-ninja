@@ -567,17 +567,25 @@ fn call_rule_match_passes_constraints_at_expected_hit(
     receiver_base_map_cell: &OnceLock<AHashMap<String, Vec<String>>>,
 ) -> bool {
     let file = expected.span.file;
-    let global = ws.db().global_index();
-    let file_packages =
-        file_package_set_with_workspace_context(ws, file, prepared.needs_workspace_package_context());
-    let bundle = decl_match_facts_for(ws, file, factory);
+    let global = streaming_global_linkage(ws);
+    let Some(file_index) = ws.db().decl_index_remapped_to_headers(global.as_ref(), file) else {
+        return false;
+    };
+    let file_packages = file_package_set_with_workspace_context_and_retention(
+        ws,
+        file,
+        prepared.needs_workspace_package_context(),
+        FactRetention::Transient,
+    );
+    let bundle =
+        decl_match_facts_for_retention(ws, file, Some(&file_index), factory, FactRetention::Transient);
     let empty_receiver_base_map = AHashMap::new();
     // Initialise the workspace scan lazily and exactly once across every
     // candidate that reaches this path (see the cell's owner). Candidates
     // whose rule doesn't consult receiver types skip the scan entirely.
     let receiver_base_map: &AHashMap<String, Vec<String>> = if prepared_rule_needs_receiver_base_map(prepared)
     {
-        receiver_base_map_cell.get_or_init(|| workspace_receiver_base_map(ws, FactRetention::Cached))
+        receiver_base_map_cell.get_or_init(|| workspace_receiver_base_map(global.as_ref()))
     } else {
         &empty_receiver_base_map
     };
@@ -587,7 +595,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
         AHashSet::new()
     };
 
-    for decl in global.decls_in(file) {
+    for decl in &file_index.defs {
         if expected
             .enclosing_fn
             .as_ref()
@@ -664,20 +672,22 @@ fn write_rule_match_passes_constraints_at_expected_hit(
     taint_view: &InterTaintView<'_>,
 ) -> bool {
     let file = expected.span.file;
-    let global = ws.db().global_index();
-    let file_index = global.file_index(file);
-    let nested_ast_values = file_index
-        .map(|index| NestedAstValueIndex::new(&index.defs))
-        .unwrap_or_default();
-    let assignment_values = file_index
-        .map(|index| AssignmentValueIndex::new(&index.assignment_values))
-        .unwrap_or_default();
+    let global = streaming_global_linkage(ws);
+    let Some(file_index) = ws.db().decl_index_remapped_to_headers(global.as_ref(), file) else {
+        return false;
+    };
+    let nested_ast_values = NestedAstValueIndex::new(&file_index.defs);
+    let assignment_values = AssignmentValueIndex::new(&file_index.assignment_values);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
-    let file_packages =
-        file_package_set_with_workspace_context(ws, file, prepared.needs_workspace_package_context());
-    let alias_map = file_alias_map(ws, file);
+    let file_packages = file_package_set_with_workspace_context_and_retention(
+        ws,
+        file,
+        prepared.needs_workspace_package_context(),
+        FactRetention::Transient,
+    );
+    let alias_map = file_alias_map_with_retention(ws, file, FactRetention::Transient);
 
-    for decl in global.decls_in(file) {
+    for decl in &file_index.defs {
         if expected
             .enclosing_fn
             .as_ref()
@@ -729,10 +739,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
         }
     }
 
-    let Some(idx) = file_index else {
-        return false;
-    };
-    for r in &idx.refs {
+    for r in &file_index.refs {
         if r.kind != RefKind::Write || r.span != expected.span {
             continue;
         }
@@ -776,7 +783,7 @@ pub(crate) fn rule_example_has_arg_index(ws: &Workspace, rule: &Rule, wanted_ind
     };
     let wanted_index = wanted_index as usize;
     let db = ws.db();
-    let global = db.global_index();
+    let global = streaming_global_linkage(ws);
     let constructor_names = if rule.match_spec.kind == MatchKind::New {
         collect_constructor_names(global.as_ref())
     } else {
@@ -790,14 +797,24 @@ pub(crate) fn rule_example_has_arg_index(ws: &Workspace, rule: &Rule, wanted_ind
         if adapter.language_id().as_str() != rule.language {
             continue;
         }
+        let Some(file_index) = db.decl_index_remapped_to_headers(global.as_ref(), file) else {
+            continue;
+        };
         match rule.match_spec.kind {
             MatchKind::Call | MatchKind::New => {
-                if matching_call_has_arg_index(ws, file, &prepared, &constructor_names, wanted_index) {
+                if matching_call_has_arg_index(
+                    ws,
+                    file,
+                    &file_index,
+                    &prepared,
+                    &constructor_names,
+                    wanted_index,
+                ) {
                     return true;
                 }
             }
             MatchKind::Write => {
-                if wanted_index == 0 && matching_write_exists(ws, file, &prepared) {
+                if wanted_index == 0 && matching_write_exists(&file_index, &prepared) {
                     return true;
                 }
             }
@@ -901,8 +918,9 @@ where
     // workspace-global syntax facts. Build them once before the file-level
     // Rayon scan so workers borrow the canonical compiler IR instead of
     // racing to construct it or rebuilding per-file declarations afterward.
-    let global_file_indexes = ws.db().global_index();
-    let receiver_base_map = workspace_receiver_base_map_if_needed(ws, &prepared, mode, retention);
+    let global_file_indexes = matcher_global_headers(ws, retention);
+    let receiver_base_map =
+        workspace_receiver_base_map_if_needed(&prepared, mode, global_file_indexes.as_ref());
     let debug_security_phase = bonsai_diagnostics::debug::is_enabled("security-phase");
     let needs_constructor_names = prepared
         .iter()
@@ -1225,17 +1243,33 @@ fn scan_decl_index<'a>(
     file: FileId,
     retention: FactRetention,
 ) -> Option<ScanDeclIndex<'a>> {
-    if let Some(index) = global.decl_index_in(file) {
-        return Some(ScanDeclIndex::Global(index));
-    }
     match retention {
-        FactRetention::Cached => ws.db().decl_index(file).map(ScanDeclIndex::Cached),
+        FactRetention::Cached => global
+            .decl_index_in(file)
+            .map(ScanDeclIndex::Global)
+            .or_else(|| ws.db().decl_index(file).map(ScanDeclIndex::Cached)),
         FactRetention::Transient => ws
             .db()
-            .decl_index_uncached(file)
+            .decl_index_remapped_to_headers(global, file)
             .map(Box::new)
             .map(ScanDeclIndex::Transient),
     }
+}
+
+fn matcher_global_headers(ws: &Workspace, retention: FactRetention) -> Arc<bonsai_index::GlobalIndex> {
+    if retention == FactRetention::Cached {
+        return ws.db().global_index();
+    }
+    streaming_global_linkage(ws)
+}
+
+/// Return the compact, workspace-wide compiler linkage table shared with the
+/// IDG. Broad security phases use this for stable symbols and cross-file
+/// resolution, then re-lower exact Tree-sitter bodies one file at a time.
+/// Keeping those two lifetimes separate prevents a second whole-project body
+/// index from becoming resident beside the IDG on large workspaces.
+fn streaming_global_linkage(ws: &Workspace) -> Arc<bonsai_index::GlobalIndex> {
+    ws.compiler_linkage_index()
 }
 
 struct FileScanContext<'a, 'taint> {
@@ -1277,10 +1311,9 @@ struct CallFact {
 }
 
 fn workspace_receiver_base_map_if_needed(
-    ws: &Workspace,
     rules: &[PreparedRule<'_>],
     mode: ConstraintMode,
-    retention: FactRetention,
+    global: &bonsai_index::GlobalIndex,
 ) -> AHashMap<String, Vec<String>> {
     if matches!(mode, ConstraintMode::SinkInventory) {
         return AHashMap::new();
@@ -1288,12 +1321,11 @@ fn workspace_receiver_base_map_if_needed(
     if !rules.iter().any(prepared_rule_needs_receiver_base_map) {
         return AHashMap::new();
     }
-    workspace_receiver_base_map(ws, retention)
+    workspace_receiver_base_map(global)
 }
 
-fn workspace_receiver_base_map(ws: &Workspace, _retention: FactRetention) -> AHashMap<String, Vec<String>> {
+fn workspace_receiver_base_map(global: &bonsai_index::GlobalIndex) -> AHashMap<String, Vec<String>> {
     let mut out: AHashMap<String, Vec<String>> = AHashMap::new();
-    let global = ws.db().global_index();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
             if !matches!(
@@ -3295,7 +3327,7 @@ fn missing_target_in_reachable_callees(
     if max_depth == 0 {
         return false;
     }
-    let global = ws.db().global_index();
+    let global = streaming_global_linkage(ws);
     let mut visited: AHashSet<bonsai_common::SymbolId> = AHashSet::new();
     let mut frontier: AHashSet<bonsai_common::SymbolId> = AHashSet::new();
 
@@ -3327,7 +3359,7 @@ fn missing_target_in_reachable_callees(
             if !visited.insert(*symbol) {
                 continue;
             }
-            let Some(callee_decl) = global.decl_of(*symbol) else {
+            let Some(callee_header) = global.decl_of(*symbol) else {
                 continue;
             };
             // Per-callee aliases / packages so child resolutions
@@ -3340,7 +3372,16 @@ fn missing_target_in_reachable_callees(
             // `enrich_call_fact_receiver_types` per callee
             // collapses Missing-rule BFS cost to one cache hit
             // per (file, decl) pair across the whole search.
-            let callee_file = global.declaring_file(callee_decl.symbol).unwrap_or(file);
+            let callee_file = global.declaring_file(callee_header.symbol).unwrap_or(file);
+            let Some(callee_file_index) = ws
+                .db()
+                .decl_index_remapped_to_headers(global.as_ref(), callee_file)
+            else {
+                continue;
+            };
+            let Some(callee_decl) = callee_file_index.defs.iter().find(|decl| decl.symbol == *symbol) else {
+                continue;
+            };
             let callee_file_packages = file_package_set_with_workspace_context_and_retention(
                 ws,
                 callee_file,
@@ -3348,8 +3389,13 @@ fn missing_target_in_reachable_callees(
                 retention,
             );
             let empty_factory = empty_factory_returns();
-            let callee_bundle =
-                decl_match_facts_for_retention(ws, callee_file, None, empty_factory.as_ref(), retention);
+            let callee_bundle = decl_match_facts_for_retention(
+                ws,
+                callee_file,
+                Some(&callee_file_index),
+                empty_factory.as_ref(),
+                retention,
+            );
             // Bundle covers every decl in the file; index by
             // span. Fallback: if the cache layer didn't
             // materialise this decl (rare — adapters that emit
@@ -3420,15 +3466,19 @@ fn missing_target_in_reachable_callees(
 fn matching_call_has_arg_index(
     ws: &Workspace,
     file: FileId,
+    file_index: &DeclIndex,
     prepared: &PreparedRule<'_>,
     constructor_names: &AHashSet<String>,
     wanted_index: usize,
 ) -> bool {
-    let global = ws.db().global_index();
-    let file_packages =
-        file_package_set_with_workspace_context(ws, file, prepared.needs_workspace_package_context());
-    let import_aliases = file_alias_map(ws, file);
-    for decl in global.decls_in(file) {
+    let file_packages = file_package_set_with_workspace_context_and_retention(
+        ws,
+        file,
+        prepared.needs_workspace_package_context(),
+        FactRetention::Transient,
+    );
+    let import_aliases = file_alias_map_with_retention(ws, file, FactRetention::Transient);
+    for decl in &file_index.defs {
         let mut alias_map = import_aliases.clone();
         extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
         bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
@@ -3533,19 +3583,6 @@ struct WorkspaceImportPackageContext {
 /// against the rule's signal needles (exact, `.h`-stripped, and
 /// progressive `/`, `.`, `:`, `\`-separated prefixes) so the
 /// match-time gate can do `set.contains(rule_signal)` in O(1).
-fn file_package_set_with_workspace_context(
-    ws: &Workspace,
-    file: FileId,
-    include_workspace_context: bool,
-) -> Arc<AHashSet<String>> {
-    file_package_set_with_workspace_context_and_retention(
-        ws,
-        file,
-        include_workspace_context,
-        FactRetention::Cached,
-    )
-}
-
 fn file_package_set_with_workspace_context_and_retention(
     ws: &Workspace,
     file: FileId,
@@ -3553,7 +3590,7 @@ fn file_package_set_with_workspace_context_and_retention(
     retention: FactRetention,
 ) -> Arc<AHashSet<String>> {
     let workspace_imports = if include_workspace_context {
-        workspace_import_package_context(ws, file)
+        workspace_import_package_context(ws, file, retention)
     } else {
         Arc::new(WorkspaceImportPackageContext::default())
     };
@@ -3632,11 +3669,22 @@ fn build_file_package_set(
     if let Some(imports) = imports {
         insert_file_import_packages(ws, file, &imports, retention, &mut out);
     }
-    if file_flow_references_place(ws, file, "req.files") {
+    let file_index = match retention {
+        FactRetention::Cached => ws.db().decl_index(file).map(ScanDeclIndex::Cached),
+        FactRetention::Transient => ws
+            .db()
+            .decl_index_uncached(file)
+            .map(Box::new)
+            .map(ScanDeclIndex::Transient),
+    };
+    let decls = file_index
+        .as_ref()
+        .map_or(&[][..], |index| index.as_ref().defs.as_slice());
+    if file_flow_references_place(decls, "req.files") {
         out.insert(FILE_USES_REQ_FILES_MARKER.to_string());
         insert_import_target_prefixes(&mut out, "express-fileupload");
     }
-    if routed_controller_request_context(ws, file) {
+    if routed_controller_request_context(ws, file, decls) {
         insert_import_target_prefixes(&mut out, "express");
     }
     out.extend(
@@ -3651,11 +3699,11 @@ fn build_file_package_set(
     Arc::new(out)
 }
 
-fn routed_controller_request_context(ws: &Workspace, file: FileId) -> bool {
+fn routed_controller_request_context(ws: &Workspace, file: FileId, decls: &[Decl]) -> bool {
     if !file_path_has_route_controller_segment(ws, file) {
         return false;
     }
-    ws.db().global_index().decls_in(file).iter().any(|decl| {
+    decls.iter().any(|decl| {
         let request_pair = decl.params.windows(2).any(|pair| {
             matches!(pair, [request, response] if
                 (request == "req" && response == "res")
@@ -3668,10 +3716,8 @@ fn routed_controller_request_context(ws: &Workspace, file: FileId) -> bool {
     })
 }
 
-fn file_flow_references_place(ws: &Workspace, file: FileId, wanted: &str) -> bool {
-    ws.db()
-        .global_index()
-        .decls_in(file)
+fn file_flow_references_place(decls: &[Decl], wanted: &str) -> bool {
+    decls
         .iter()
         .any(|decl| flow_events_reference_place(&decl.flow_events, wanted))
 }
@@ -3779,7 +3825,11 @@ fn file_path_has_route_controller_segment(ws: &Workspace, file: FileId) -> bool 
     })
 }
 
-fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<WorkspaceImportPackageContext> {
+fn workspace_import_package_context(
+    ws: &Workspace,
+    file: FileId,
+    retention: FactRetention,
+) -> Arc<WorkspaceImportPackageContext> {
     let Some(adapter) = ws.db().adapter_for(file) else {
         return Arc::new(WorkspaceImportPackageContext::default());
     };
@@ -3818,7 +3868,14 @@ fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<Workspa
                 .wrapping_add(snapshot.version)
                 .wrapping_add(package_cache_content_hash(snapshot.text.as_bytes()));
         }
-        if let Some(imports) = ws.db().import_index(candidate_file) {
+        let imports = match retention {
+            FactRetention::Cached => ws
+                .db()
+                .import_index(candidate_file)
+                .map(|imports| (*imports).clone()),
+            FactRetention::Transient => ws.db().import_index_uncached(candidate_file),
+        };
+        if let Some(imports) = imports {
             for spec in &imports.imports {
                 insert_import_target_prefixes(&mut context.packages, &spec.module);
             }
@@ -4270,10 +4327,6 @@ static DECL_FACTS_CACHE: std::sync::LazyLock<parking_lot::RwLock<FileDeclFactsMa
 /// so source edits — and a change of factory-return map — naturally
 /// invalidate. `factory_fp` is 0 when the pack ships no `returns_type`
 /// rules, keeping the key (and behavior) identical to a no-factory run.
-fn decl_match_facts_for(ws: &Workspace, file: FileId, factory: &FactoryReturns) -> Arc<FileDeclFactsBundle> {
-    decl_match_facts_for_retention(ws, file, None, factory, FactRetention::Cached)
-}
-
 fn decl_match_facts_for_retention(
     ws: &Workspace,
     file: FileId,
@@ -5384,9 +5437,8 @@ fn scan_ref_writes_batch(
     }
 }
 
-fn matching_write_exists(ws: &Workspace, file: FileId, prepared: &PreparedRule<'_>) -> bool {
-    let global = ws.db().global_index();
-    for decl in global.decls_in(file) {
+fn matching_write_exists(file_index: &DeclIndex, prepared: &PreparedRule<'_>) -> bool {
+    for decl in &file_index.defs {
         for write in collect_writes(&decl.flow_events) {
             if callee_matches(
                 &write.target,
@@ -5399,10 +5451,7 @@ fn matching_write_exists(ws: &Workspace, file: FileId, prepared: &PreparedRule<'
         }
     }
 
-    let Some(idx) = global.file_index(file) else {
-        return false;
-    };
-    for r in &idx.refs {
+    for r in &file_index.refs {
         if r.kind == RefKind::Write
             && callee_matches(
                 &r.name,
@@ -7116,7 +7165,7 @@ fn resolve_span(ws: &Workspace, file: FileId, span: Span) -> (String, u32, u32) 
 ///   not from parameter-name conventions.
 #[must_use]
 pub fn infer_entry_point_sources(ws: &Workspace) -> Vec<RuleMatch> {
-    let files = ws.db().global_index().all_files().collect::<Vec<_>>();
+    let files = ws.db().vfs().all_files();
     infer_entry_point_sources_for_files_with_progress(ws, &files, || {})
 }
 
@@ -7129,7 +7178,7 @@ where
     F: FnMut(),
 {
     let db = ws.db();
-    let global = db.global_index();
+    let global = streaming_global_linkage(ws);
     let mut files = scan_files.to_vec();
     files.sort_by_key(|file| file.raw());
     files.dedup();
@@ -7137,38 +7186,23 @@ where
         return Vec::new();
     }
     // Build a set of "has in-workspace callers" to detect leaf functions
-    // that look like entry points (unreferenced public decls). This uses
-    // the same scoped resolved-callgraph primitive as trace/taint instead
-    // of resolving every call name directly from the matcher. On large
-    // copied package trees, direct global lookup turns inferred-source
-    // generation into the dominant runtime; the callgraph builder keeps
-    // resolution local/module/receiver scoped and parallel.
+    // that look like entry points (unreferenced public decls). Reuse the
+    // canonical resolved callgraph and filter it by caller file; cold graph
+    // construction already streams exact per-file bodies, while warm queries
+    // reuse the validated sidecar.
     let infer_debug = bonsai_diagnostics::debug::is_enabled("security-phase");
     let started = infer_debug.then(Instant::now);
-    let callees_seen = collect_called_symbols_for_files(ws, &files);
+    let (callees_seen, class_field_writes) =
+        collect_entry_point_support_for_files(ws, &files, global.as_ref());
     log_inferred_subphase(
         infer_debug,
-        "called-symbol collection",
+        "called-symbol and class-field collection",
         started,
-        format_args!("symbols={}", callees_seen.len()),
-    );
-
-    // G3 cross-method field-taint: build a per-class set of
-    // receiver-field writes sourced from that method's params
-    // (`this.cmd = token` / `self.cmd = x`). Every sibling method
-    // of the class inherits those fields as synthetic sources so
-    // `constructor(t) { this.cmd = t }` + `run() { sink(this.cmd) }`
-    // produces a finding without the interprocedural pass needing
-    // to model object-state between method invocations on the same
-    // receiver. Keyed on the class decl's symbol — derived purely
-    // from tree-sitter-emitted DeclKind / parent / FlowEvent facts.
-    let started = infer_debug.then(Instant::now);
-    let class_field_writes = collect_class_field_taints_for_files(&global, &files);
-    log_inferred_subphase(
-        infer_debug,
-        "class-field taint collection",
-        started,
-        format_args!("classes={}", class_field_writes.len()),
+        format_args!(
+            "symbols={} classes={}",
+            callees_seen.len(),
+            class_field_writes.len()
+        ),
     );
 
     let mut out = Vec::new();
@@ -7180,7 +7214,11 @@ where
             continue;
         };
         let language = adapter.language_id().as_str().to_string();
-        for decl in global.decls_in(file) {
+        let Some(file_index) = db.decl_index_remapped_to_headers(global.as_ref(), file) else {
+            on_file_done();
+            continue;
+        };
+        for decl in &file_index.defs {
             if !matches!(
                 decl.kind,
                 DeclKind::Function | DeclKind::Method | DeclKind::Constructor
@@ -7189,7 +7227,7 @@ where
             }
             scanned_decls = scanned_decls.saturating_add(1);
             let has_callers = callees_seen.contains(&decl.symbol);
-            let decorator_kind = detect_framework_decorator(ws, file, decl.span, decl.name_span);
+            let decorator_kind = detect_framework_decorator(ws, file, &file_index, decl.span, decl.name_span);
             // Entry-point heuristic:
             //   - has a framework decorator → definitely entry
             //   - OR has no in-workspace caller AND is top-level / public
@@ -7275,61 +7313,54 @@ where
     out
 }
 
-fn collect_called_symbols_for_files(ws: &Workspace, files: &[FileId]) -> ahash::AHashSet<SymbolId> {
-    let db = ws.db();
-    let global = db.global_index();
+fn collect_entry_point_support_for_files(
+    ws: &Workspace,
+    files: &[FileId],
+    global: &bonsai_index::GlobalIndex,
+) -> (
+    ahash::AHashSet<SymbolId>,
+    ahash::AHashMap<SymbolId, ahash::AHashSet<String>>,
+) {
     let infer_debug = bonsai_diagnostics::debug::is_enabled("security-phase");
+    let included_files: AHashSet<FileId> = files.iter().copied().collect();
     let started = infer_debug.then(Instant::now);
-    let call_graph = bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files(
-        global.as_ref(),
-        bonsai_callgraph::CallGraphFileSemantics::new(
-            |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
-            |file| {
-                bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
-                    .into_iter()
-                    .collect()
-            },
-            |file| {
-                db.vfs()
-                    .path(file)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
-            },
-            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-            |file| {
-                db.adapter_for(file)
-                    .map(|adapter| adapter.capabilities())
-                    .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
-            },
-        ),
-        files,
-    );
-    log_inferred_subphase(
-        infer_debug,
-        "resolved callgraph",
-        started,
-        format_args!("edges={}", call_graph.inner().edges.len()),
-    );
+    let call_graph = ws.cached_resolved_call_graph();
     let mut out: ahash::AHashSet<SymbolId> = call_graph
         .inner()
         .edges
         .iter()
+        .filter(|edge| {
+            global
+                .declaring_file(SymbolId::new(edge.from.raw()))
+                .is_some_and(|file| included_files.contains(&file))
+        })
         .map(|edge| SymbolId::new(edge.to.raw()))
         .collect();
-    let before_assignment_refs = out.len();
-    let started = infer_debug.then(Instant::now);
-    collect_assignment_referenced_callable_symbols(ws, files, global.as_ref(), &mut out);
     log_inferred_subphase(
         infer_debug,
-        "assignment callable references",
+        "resolved callgraph",
         started,
         format_args!(
-            "symbols={} added={}",
-            out.len(),
-            out.len().saturating_sub(before_assignment_refs)
+            "edges={} called_symbols={}",
+            call_graph.inner().edges.len(),
+            out.len()
         ),
     );
-    out
+    let before_assignment_refs = out.len();
+    let started = infer_debug.then(Instant::now);
+    let class_field_writes = collect_assignment_references_and_class_fields(ws, files, global, &mut out);
+    log_inferred_subphase(
+        infer_debug,
+        "streamed body support facts",
+        started,
+        format_args!(
+            "symbols={} added={} classes={}",
+            out.len(),
+            out.len().saturating_sub(before_assignment_refs),
+            class_field_writes.len()
+        ),
+    );
+    (out, class_field_writes)
 }
 
 fn log_inferred_subphase(
@@ -7434,46 +7465,6 @@ fn flow_read_token_span(events: &[FlowEvent], token: &str) -> Option<Span> {
     None
 }
 
-/// Scan every class's methods for `Assign { target: receiver_field_name,
-/// source: this-method's param }` writes. Returns a map
-/// `class_symbol → set of receiver-field names` so sibling methods
-/// can inherit field taint (G3 cross-method field-taint).
-///
-/// Class→method relationship is semantic: adapters populate
-/// `Decl.parent` from AST ownership before the matcher runs. The
-/// matcher does not infer membership from source-span containment,
-/// because nested/local functions can live inside the same spans but
-/// are not class methods.
-fn collect_class_field_taints_for_files(
-    global: &bonsai_index::GlobalIndex,
-    files: &[FileId],
-) -> ahash::AHashMap<bonsai_common::SymbolId, ahash::AHashSet<String>> {
-    let mut out: ahash::AHashMap<bonsai_common::SymbolId, ahash::AHashSet<String>> =
-        ahash::AHashMap::default();
-    for &file in files {
-        let decls = global.decls_in(file);
-        for decl in decls.iter() {
-            if !matches!(
-                decl.kind,
-                DeclKind::Method | DeclKind::Constructor | DeclKind::Function
-            ) {
-                continue;
-            }
-            let class_symbol = decl.parent;
-            let Some(class_symbol) = class_symbol else {
-                continue;
-            };
-            let entry = out.entry(class_symbol).or_default();
-            entry.extend(
-                decl.receiver_field_writes
-                    .iter()
-                    .map(|write| write.target.clone()),
-            );
-        }
-    }
-    out
-}
-
 fn is_synthetic_anonymous_callable(decl: &bonsai_lang_api::Decl) -> bool {
     decl.name.starts_with("<lambda@") && decl.name.ends_with('>')
 }
@@ -7503,12 +7494,11 @@ impl EntryKind {
 fn detect_framework_decorator(
     ws: &Workspace,
     file: FileId,
+    file_index: &DeclIndex,
     decl_span: Span,
     decl_name_span: Span,
 ) -> Option<EntryKind> {
-    let global = ws.db().global_index();
-    let idx = global.file_index(file)?;
-    (!decl_decorator_names(ws, file, idx, decl_span, decl_name_span).is_empty())
+    (!decl_decorator_names(ws, file, file_index, decl_span, decl_name_span).is_empty())
         .then_some(EntryKind::Decorator)
 }
 
@@ -7522,23 +7512,30 @@ fn detect_framework_decorator(
 /// export assignments such as `exports.handler = handler`: these
 /// functions are referenced by the workspace even if the assignment
 /// itself is not an invocation.
-fn collect_assignment_referenced_callable_symbols(
+fn collect_assignment_references_and_class_fields(
     ws: &Workspace,
     files: &[FileId],
     global: &bonsai_index::GlobalIndex,
     out: &mut ahash::AHashSet<SymbolId>,
-) {
+) -> ahash::AHashMap<SymbolId, ahash::AHashSet<String>> {
     let local_callable_index = AssignmentCallableReferenceIndex::build(global);
     let mut resolve_cache: AHashMap<AssignmentResolveKey, Vec<SymbolId>> = AHashMap::default();
     let mut stats = AssignmentReferenceStats::default();
+    let mut class_field_writes: AHashMap<SymbolId, AHashSet<String>> = AHashMap::default();
     for &file in files {
-        let alias_map: AHashMap<String, AliasTarget> = file_alias_map(ws, file).into_iter().collect();
+        let Some(file_index) = ws.db().decl_index_remapped_to_headers(global, file) else {
+            continue;
+        };
+        let alias_map: AHashMap<String, AliasTarget> =
+            file_alias_map_with_retention(ws, file, FactRetention::Transient)
+                .into_iter()
+                .collect();
         let export_aliases = ws
             .db()
             .adapter_for(file)
             .map(|adapter| adapter.capabilities().module_export_aliases)
             .unwrap_or(&[]);
-        for decl in global.decls_in(file) {
+        for decl in &file_index.defs {
             if !matches!(
                 decl.kind,
                 DeclKind::Function | DeclKind::Method | DeclKind::Constructor
@@ -7557,6 +7554,17 @@ fn collect_assignment_referenced_callable_symbols(
                 &mut stats,
                 out,
             );
+            // G3 cross-method field taint is adapter-authored compiler IR:
+            // class ownership comes from `Decl.parent`, and the writes come
+            // from the exact Tree-sitter-lowered body. Accumulate only the
+            // compact class-to-field relation while that body is resident.
+            if let Some(class_symbol) = decl.parent {
+                class_field_writes.entry(class_symbol).or_default().extend(
+                    decl.receiver_field_writes
+                        .iter()
+                        .map(|write| write.target.clone()),
+                );
+            }
         }
     }
     if bonsai_diagnostics::debug::is_enabled("security-phase") {
@@ -7590,6 +7598,7 @@ fn collect_assignment_referenced_callable_symbols(
             );
         }
     }
+    class_field_writes
 }
 
 #[derive(Default)]

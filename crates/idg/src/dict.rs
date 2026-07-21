@@ -7,7 +7,8 @@
 //! Both deduplicate during construction (interning) and serialise as
 //! flat `Vec`s indexed by id. Lookups use `AHashMap` while an interner is
 //! active and fall back to the canonical vectors after a compiler phase
-//! releases its reverse indexes. Warm readers rebuild the maps once.
+//! releases its reverse indexes. Workspace sidecar readers keep that compact
+//! canonical form; standalone mutable segment readers may rebuild the maps.
 
 use ahash::AHashMap;
 use bonsai_common::FuncId;
@@ -24,7 +25,8 @@ pub struct PlaceDict {
     /// `Place` for `PlaceId(id)`.
     pub places: Vec<Place>,
     /// Hash-based reverse lookup. Skipped at serialise time
-    /// (`#[serde(skip)]`); warm readers rebuild it after decoding.
+    /// (`#[serde(skip)]`); mutable standalone readers may rebuild it after
+    /// decoding, while workspace query readers use the exact vector fallback.
     #[serde(skip)]
     by_place: AHashMap<Place, PlaceId>,
     /// Whether `by_place` covers every canonical place. When false it is a
@@ -119,8 +121,8 @@ impl PlaceDict {
         self.places.is_empty()
     }
 
-    /// Rebuild the reverse-lookup index from the canonical `places`
-    /// vec. Called after deserialisation since `by_place` is skipped.
+    /// Rebuild the reverse-lookup index from the canonical `places` vec for a
+    /// mutable/build-oriented segment reader.
     pub fn rebuild_lookup(&mut self) {
         self.by_place.clear();
         self.by_place.reserve(self.places.len());
@@ -236,8 +238,8 @@ impl NodeDict {
         self.nodes.is_empty()
     }
 
-    /// Rebuild the reverse-lookup index from the canonical `nodes`
-    /// vec. Called after deserialisation.
+    /// Rebuild the reverse-lookup index from the canonical `nodes` vec for a
+    /// mutable/build-oriented segment reader.
     pub fn rebuild_lookup(&mut self) {
         self.by_node.clear();
         self.by_node.reserve(self.nodes.len());

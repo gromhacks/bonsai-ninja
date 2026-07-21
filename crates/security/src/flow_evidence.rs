@@ -207,8 +207,7 @@ fn annotate_line(lines: &mut [FlowSourceLine], line: u32, role: FlowRole, step: 
 }
 
 fn build_cached_function_body(ws: &Workspace, func: FuncId) -> Option<CachedFunctionBody> {
-    let global = ws.db().global_index();
-    let decl = global.decl_of(SymbolId::new(func.raw()))?;
+    let decl = ws.exact_decl(SymbolId::new(func.raw()))?;
     let file = decl.span.file;
     let snapshot = ws.vfs().snapshot(file).ok()?;
     let src = snapshot.text.as_ref();

@@ -9,6 +9,7 @@ use crate::reachable::TokenSet;
 use ahash::AHashSet;
 use bonsai_common::{FuncId, Precision};
 use bonsai_db::AnalyzerDb;
+use bonsai_index::GlobalIndex;
 
 /// Describes how a taint query obtains its initial IDG nodes.
 ///
@@ -110,6 +111,11 @@ pub struct IdgTaintQuery<'a> {
     pub targets: IdgTaintTargets<'a>,
     pub max_precision: Option<Precision>,
     pub db: &'a AnalyzerDb,
+    /// Compiler linkage/body facts supplied by a workspace-scale caller.
+    /// When absent, standalone compatibility APIs lower the exact global
+    /// index from `db`; broad security passes provide their compact linkage
+    /// so the live IDG never gains a second whole-workspace body index.
+    pub global: Option<&'a GlobalIndex>,
     pub idg: &'a bonsai_idg::IdgQueryService,
     pub caches: Option<&'a crate::idg_api::InterTaintCaches>,
 }
@@ -127,6 +133,7 @@ impl<'a> IdgTaintQuery<'a> {
             targets: IdgTaintTargets::all_reachable(),
             max_precision: Some(Precision::Narrowed),
             db,
+            global: None,
             idg,
             caches: None,
         }
@@ -155,6 +162,12 @@ impl<'a> IdgTaintQuery<'a> {
         self.caches = Some(caches);
         self
     }
+
+    #[must_use]
+    pub const fn with_global_index(mut self, global: &'a GlobalIndex) -> Self {
+        self.global = Some(global);
+        self
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -163,6 +176,7 @@ pub struct IdgReturnQuery<'a> {
     pub receiver_state: &'a [crate::idg_api::ReceiverStatePropagation],
     pub max_precision: Option<Precision>,
     pub db: &'a AnalyzerDb,
+    pub global: Option<&'a GlobalIndex>,
     pub idg: &'a bonsai_idg::IdgQueryService,
 }
 
@@ -179,6 +193,7 @@ impl<'a> IdgReturnQuery<'a> {
             receiver_state,
             max_precision: Some(Precision::Narrowed),
             db,
+            global: None,
             idg,
         }
     }
@@ -186,6 +201,12 @@ impl<'a> IdgReturnQuery<'a> {
     #[must_use]
     pub const fn with_max_precision(mut self, max_precision: Option<Precision>) -> Self {
         self.max_precision = max_precision;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_global_index(mut self, global: &'a GlobalIndex) -> Self {
+        self.global = Some(global);
         self
     }
 }

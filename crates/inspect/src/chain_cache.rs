@@ -208,10 +208,7 @@ impl<'a> ChainCache<'a> {
                 return hit.clone();
             }
         }
-        let computed = Arc::new(bonsai_taint::name_reachable_through_func_kinded(
-            func,
-            self.ws.db(),
-        ));
+        let computed = self.ws.name_reachable_kinded_for(func);
         if !self.disabled {
             self.per_func_tokens_r.lock().insert(func, computed.clone());
         }

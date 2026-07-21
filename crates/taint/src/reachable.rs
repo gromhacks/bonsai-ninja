@@ -267,24 +267,35 @@ pub fn name_reachable_through_chain_kinded(chain: &[FuncId], db: &AnalyzerDb) ->
 /// once per inspect invocation.
 #[must_use]
 pub fn name_reachable_through_func_kinded(func: FuncId, db: &AnalyzerDb) -> KindedTokens {
-    let mut kinded = KindedTokens::default();
     let global = db.global_index();
     let symbol = SymbolId::new(func.raw());
     let Some(decl) = global.decl_of(symbol) else {
-        return kinded;
+        return KindedTokens::default();
     };
+    let Some(file) = global.declaring_file(decl.symbol) else {
+        return KindedTokens::default();
+    };
+    let Some(file_index) = global.file_index(file) else {
+        return KindedTokens::default();
+    };
+    name_reachable_through_decl_kinded(decl, file_index)
+}
+
+/// Collect per-function reachability facts from one exact compiler body.
+/// Workspace-scale callers use this with a disposable file [`DeclIndex`]
+/// beside compact global linkage, avoiding a resident workspace body index.
+#[must_use]
+pub fn name_reachable_through_decl_kinded(
+    decl: &bonsai_lang_api::Decl,
+    file_index: &bonsai_lang_api::DeclIndex,
+) -> KindedTokens {
+    let mut kinded = KindedTokens::default();
     kinded.insert(FactKind::Decl, &decl.name);
     for param_name in &decl.params {
         kinded.insert(FactKind::Decl, param_name);
     }
     collect_flow_event_tokens_kinded(&decl.flow_events, &mut kinded);
 
-    let Some(file) = global.declaring_file(decl.symbol) else {
-        return kinded;
-    };
-    let Some(file_index) = global.file_index(file) else {
-        return kinded;
-    };
     for string_literal in &file_index.strings {
         if span_contains(decl.span, string_literal.span) {
             kinded.insert(FactKind::StringLit, &string_literal.text);
@@ -1495,6 +1506,7 @@ pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) ->
         receiver_state,
         max_precision,
         db,
+        global,
         idg,
     } = request;
     let IdgTaintSource {
@@ -1502,14 +1514,17 @@ pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) ->
         tokens: seeds,
         seed,
     } = source;
-    let global = db.global_index();
+    let owned_global = global.is_none().then(|| db.global_index());
+    let global = global
+        .or(owned_global.as_deref())
+        .expect("taint return query must have compiler linkage");
     let mut seed_nodes = match seed {
         IdgTaintSeed::RuleMatch {
             source_anchor,
             output_arg_names,
         } => compose_idg_seed_nodes(
             IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
-            global.as_ref(),
+            global,
             idg,
         ),
         IdgTaintSeed::Precomposed(nodes) => nodes.to_vec(),
@@ -1518,14 +1533,7 @@ pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) ->
         return false;
     }
     if !receiver_state.is_empty() {
-        apply_receiver_state_fixpoint(
-            &mut seed_nodes,
-            receiver_state,
-            global.as_ref(),
-            idg,
-            max_precision,
-            None,
-        );
+        apply_receiver_state_fixpoint(&mut seed_nodes, receiver_state, global, idg, max_precision, None);
     }
     let Some(return_node) = idg.return_node_of(source_func) else {
         return false;
@@ -1823,15 +1831,17 @@ fn materialize_call_records<'a>(
     source_func: FuncId,
     cross_calls: &[bonsai_idg::CrossCallEdge],
     global: &GlobalIndex,
+    db: &'a AnalyzerDb,
     caches: Option<&'a crate::idg_api::InterTaintCaches>,
 ) -> CallRecordCompilation<'a> {
     let mut next_trace_id = 1u64;
     let mut first_inflow = ahash::AHashMap::new();
     let mut records = Vec::with_capacity(cross_calls.len());
     let mut precision = Precision::Exact;
-    let mut summary_cache = caches.map_or_else(CallEventSummaryCache::default, |caches| {
-        CallEventSummaryCache::shared(caches.attribution_caches())
-    });
+    let mut summary_cache = CallEventSummaryCache::for_query(
+        caches.map(crate::idg_api::InterTaintCaches::attribution_caches),
+        db,
+    );
     for edge in cross_calls {
         let trace_id = next_trace_id;
         next_trace_id = next_trace_id.saturating_add(1);
@@ -1975,6 +1985,7 @@ fn materialize_direct_tainted_calls(
 fn materialize_synthetic_tainted_calls(
     context: &TaintedCallCompilationContext<'_>,
     tainted_names_by_caller: &mut ahash::AHashMap<FuncId, AHashSet<String>>,
+    call_summary_cache: &mut CallEventSummaryCache<'_>,
 ) -> Vec<crate::idg_api::TaintedCall> {
     let mut tainted_calls = Vec::new();
     for func in context
@@ -1987,13 +1998,10 @@ fn materialize_synthetic_tainted_calls(
         {
             continue;
         }
-        let Some(decl) = context.global.decl_of(SymbolId::new(func.raw())) else {
+        let Some(summaries) = cached_function_attribution(func, context.global, call_summary_cache) else {
             continue;
         };
-        let mut return_spans = Vec::new();
-        collect_return_spans(&decl.flow_events, &mut return_spans);
-        return_spans.sort_by_key(|span| (span.start, span.end));
-        return_spans.dedup();
+        let return_spans = summaries.return_spans.clone();
         let parent_trace_id = context.first_inflow.get(&func).copied();
         for call_span in return_spans {
             tainted_calls.push(crate::idg_api::TaintedCall {
@@ -2023,9 +2031,10 @@ fn materialize_synthetic_tainted_calls(
         {
             continue;
         }
-        let Some(decl) = context.global.decl_of(SymbolId::new(func.raw())) else {
+        let Some(summaries) = cached_function_attribution(func, context.global, call_summary_cache) else {
             continue;
         };
+        let writes = summaries.writes.clone();
         let names = tainted_names_by_caller
             .entry(func)
             .or_insert_with(|| {
@@ -2036,7 +2045,7 @@ fn materialize_synthetic_tainted_calls(
             continue;
         }
         collect_tainted_writes(
-            &decl.flow_events,
+            &writes,
             func,
             &names,
             context.first_inflow.get(&func).copied(),
@@ -2142,6 +2151,7 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
         targets,
         max_precision,
         db,
+        global,
         idg,
         caches,
     } = request;
@@ -2161,14 +2171,17 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
         funcs: target_funcs,
         lineage_funcs,
     } = targets;
-    let global = db.global_index();
+    let owned_global = global.is_none().then(|| db.global_index());
+    let global = global
+        .or(owned_global.as_deref())
+        .expect("taint query must have compiler linkage");
     let mut graph = EntryTaintGraph::default();
 
-    let composed = compose_idg_taint_query_seeds(source_func, seeds, seed, global.as_ref(), idg);
+    let composed = compose_idg_taint_query_seeds(source_func, seeds, seed, global, idg);
     if composed.nodes.is_empty() {
         return graph;
     }
-    log_idg_taint_seed(source_func, seeds, &composed, global.as_ref(), idg, max_precision);
+    log_idg_taint_seed(source_func, seeds, &composed, global, idg, max_precision);
     let seed_nodes = composed.nodes;
     let TaintClosureCompilation {
         nodes: closure_nodes,
@@ -2186,7 +2199,7 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
             lineage_funcs,
         },
         honor_node_targets: false,
-        global: global.as_ref(),
+        global,
         idg,
         max_precision,
     });
@@ -2198,7 +2211,7 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
         lineage_funcs,
         idg,
     );
-    let compiled = materialize_call_records(source_func, &cross_calls, global.as_ref(), caches);
+    let compiled = materialize_call_records(source_func, &cross_calls, global, db, caches);
     graph.call_records = compiled.records;
     graph.precision = compiled.precision;
     graph.pairs_analyzed = u32::try_from(cross_calls.len()).unwrap_or(u32::MAX);
@@ -2239,6 +2252,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         targets,
         max_precision,
         db,
+        global,
         idg,
         caches,
     } = request;
@@ -2258,12 +2272,15 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         funcs: target_funcs,
         lineage_funcs,
     } = targets;
-    let global = db.global_index();
+    let owned_global = global.is_none().then(|| db.global_index());
+    let global = global
+        .or(owned_global.as_deref())
+        .expect("taint query must have compiler linkage");
     let mut graph = EntryTaintGraph::default();
 
     // A precomposed source uses exactly its caller-selected AST/IDG nodes.
     // Rule matches compose their source span and declared output carriers.
-    let composed = compose_idg_taint_query_seeds(source_func, seeds, seed, global.as_ref(), idg);
+    let composed = compose_idg_taint_query_seeds(source_func, seeds, seed, global, idg);
     if composed.nodes.is_empty() {
         return graph;
     }
@@ -2285,7 +2302,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         })
         .collect();
 
-    log_idg_taint_seed(source_func, seeds, &composed, global.as_ref(), idg, max_precision);
+    log_idg_taint_seed(source_func, seeds, &composed, global, idg, max_precision);
     let seed_nodes = composed.nodes;
     let TaintClosureCompilation {
         nodes: closure_nodes,
@@ -2303,7 +2320,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
             lineage_funcs,
         },
         honor_node_targets: true,
-        global: global.as_ref(),
+        global,
         idg,
         max_precision,
     });
@@ -2331,7 +2348,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         first_inflow,
         precision: worst,
         summary_cache: mut call_summary_cache,
-    } = materialize_call_records(source_func, &cross_calls, global.as_ref(), caches);
+    } = materialize_call_records(source_func, &cross_calls, global, db, caches);
 
     let mut tainted_names_by_caller: ahash::AHashMap<FuncId, ahash::AHashSet<String>> =
         ahash::AHashMap::new();
@@ -2345,20 +2362,21 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         emission_target_funcs,
         source_call_spans: &source_call_spans,
         call_result_passthroughs,
-        global: global.as_ref(),
+        global,
         idg,
     };
     let mut tainted_calls = materialize_direct_tainted_calls(&tainted_call_context, &mut call_summary_cache);
     tainted_calls.extend(materialize_synthetic_tainted_calls(
         &tainted_call_context,
         &mut tainted_names_by_caller,
+        &mut call_summary_cache,
     ));
     sort_tainted_calls(&mut tainted_calls);
     graph.call_records = call_records;
     graph.tainted_calls = tainted_calls;
     graph.precision = worst;
     graph.pairs_analyzed = u32::try_from(cross_calls.len()).unwrap_or(u32::MAX);
-    log_entry_taint_graph(source_func, &graph, global.as_ref());
+    log_entry_taint_graph(source_func, &graph, global);
     graph
 }
 
@@ -2445,22 +2463,49 @@ pub fn apply_configured_transfer_fixpoint(
     }
 }
 
-/// Walk a function's flow events and collect every `Return`
-/// event's source span. Recurses through structural events
-/// (Branch / Loop / Try / Defer / Using) so nested returns are
-/// found.
-/// Walk `events`, find every Assign whose RHS reads a name in
-/// `tainted_names`, and emit a TaintedCallKind::Write row attributed
-/// to `func` at the assignment's span. Recurses through control-flow
-/// containers so nested writes (inside if / try / loop) still
-/// surface for the matcher's `MatchKind::Write` sink scan.
+/// Convert distilled AST assignment facts whose RHS is reachable into
+/// synthetic write evidence for the security matcher's `MatchKind::Write`
+/// surface.
 fn collect_tainted_writes(
-    events: &[bonsai_lang_api::FlowEvent],
+    writes: &[WriteEventSummary],
     func: FuncId,
     tainted_names: &ahash::AHashSet<String>,
     parent_trace_id: Option<u64>,
     out: &mut Vec<crate::idg_api::TaintedCall>,
 ) {
+    for write in writes {
+        if write.target.is_empty() {
+            continue;
+        }
+        let mut tainted_args: Vec<crate::idg_api::TaintedArgAtCall> = Vec::new();
+        for value in &write.source_names {
+            if value.is_empty() || !structured_storage_fact_matches_tainted(value, tainted_names) {
+                continue;
+            }
+            if tainted_args.iter().any(|arg| arg.value_text == *value) {
+                continue;
+            }
+            tainted_args.push(crate::idg_api::TaintedArgAtCall {
+                index: tainted_args.len(),
+                value_text: value.clone(),
+            });
+        }
+        if tainted_args.is_empty() {
+            continue;
+        }
+        out.push(crate::idg_api::TaintedCall {
+            parent_trace_id,
+            caller: func,
+            name: write.target.clone(),
+            call_span: write.span,
+            tainted_args,
+            tainted_receiver: None,
+            kind: crate::idg_api::TaintedCallKind::Write,
+        });
+    }
+}
+
+fn collect_write_event_summaries(events: &[bonsai_lang_api::FlowEvent], out: &mut Vec<WriteEventSummary>) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
@@ -2471,46 +2516,12 @@ fn collect_tainted_writes(
                 span,
                 ..
             } => {
-                if target.is_empty() {
-                    continue;
-                }
-                let mut tainted_args: Vec<crate::idg_api::TaintedArgAtCall> = Vec::new();
-                let push_if_tainted = |value: &str, args: &mut Vec<crate::idg_api::TaintedArgAtCall>| {
-                    if value.is_empty() {
-                        return;
-                    }
-                    // `source_name` and `source_names` are Tree-sitter
-                    // carrier facts. Compare their normalized storage
-                    // components; never re-lex rendered RHS text here.
-                    if !structured_storage_fact_matches_tainted(value, tainted_names) {
-                        return;
-                    }
-                    if args.iter().any(|a| a.value_text == value) {
-                        return;
-                    }
-                    let index = args.len();
-                    args.push(crate::idg_api::TaintedArgAtCall {
-                        index,
-                        value_text: value.to_string(),
-                    });
-                };
-                if let Some(name) = source_name {
-                    push_if_tainted(name, &mut tainted_args);
-                }
-                for n in source_names {
-                    push_if_tainted(n, &mut tainted_args);
-                }
-                if tainted_args.is_empty() {
-                    continue;
-                }
-                out.push(crate::idg_api::TaintedCall {
-                    parent_trace_id,
-                    caller: func,
-                    name: target.clone(),
-                    call_span: *span,
-                    tainted_args,
-                    tainted_receiver: None,
-                    kind: crate::idg_api::TaintedCallKind::Write,
+                let mut sources = source_name.iter().cloned().collect::<Vec<_>>();
+                sources.extend(source_names.iter().cloned());
+                out.push(WriteEventSummary {
+                    target: target.clone(),
+                    source_names: sources,
+                    span: *span,
                 });
             }
             FlowEvent::Branch {
@@ -2518,11 +2529,11 @@ fn collect_tainted_writes(
                 else_events,
                 ..
             } => {
-                collect_tainted_writes(then_events, func, tainted_names, parent_trace_id, out);
-                collect_tainted_writes(else_events, func, tainted_names, parent_trace_id, out);
+                collect_write_event_summaries(then_events, out);
+                collect_write_event_summaries(else_events, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_tainted_writes(body, func, tainted_names, parent_trace_id, out);
+                collect_write_event_summaries(body, out);
             }
             FlowEvent::Try {
                 body,
@@ -2530,15 +2541,17 @@ fn collect_tainted_writes(
                 finally_events,
                 ..
             } => {
-                collect_tainted_writes(body, func, tainted_names, parent_trace_id, out);
-                collect_tainted_writes(catch_events, func, tainted_names, parent_trace_id, out);
-                collect_tainted_writes(finally_events, func, tainted_names, parent_trace_id, out);
+                collect_write_event_summaries(body, out);
+                collect_write_event_summaries(catch_events, out);
+                collect_write_event_summaries(finally_events, out);
             }
             _ => {}
         }
     }
 }
 
+/// Walk a function's flow events and collect every `Return` event's source
+/// span, including nested control-flow regions.
 fn collect_return_spans(events: &[bonsai_lang_api::FlowEvent], out: &mut Vec<bonsai_common::Span>) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
@@ -3691,6 +3704,13 @@ struct CallEventSummary {
     receiver_types: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+struct WriteEventSummary {
+    target: String,
+    source_names: Vec<String>,
+    span: bonsai_common::Span,
+}
+
 #[derive(Debug)]
 struct FunctionCallEventSummaries {
     by_span: ahash::AHashMap<bonsai_common::Span, CallEventSummary>,
@@ -3698,6 +3718,8 @@ struct FunctionCallEventSummaries {
     /// syntax lookup into a binary-search range query instead of a full scan
     /// of every call in a generated function for every tainted argument.
     spans: Vec<bonsai_common::Span>,
+    return_spans: Vec<bonsai_common::Span>,
+    writes: Vec<WriteEventSummary>,
 }
 
 /// Immutable AST call summaries shared by every source query in one analysis
@@ -3718,6 +3740,7 @@ impl IdgAttributionCaches {
 struct CallEventSummaryCache<'a> {
     by_func: ahash::AHashMap<FuncId, std::sync::Arc<FunctionCallEventSummaries>>,
     shared: Option<&'a IdgAttributionCaches>,
+    db: Option<&'a AnalyzerDb>,
 }
 
 impl Default for CallEventSummaryCache<'_> {
@@ -3725,15 +3748,26 @@ impl Default for CallEventSummaryCache<'_> {
         Self {
             by_func: ahash::AHashMap::default(),
             shared: None,
+            db: None,
         }
     }
 }
 
 impl<'a> CallEventSummaryCache<'a> {
+    #[cfg(test)]
     fn shared(shared: &'a IdgAttributionCaches) -> Self {
         Self {
             by_func: ahash::AHashMap::default(),
             shared: Some(shared),
+            db: None,
+        }
+    }
+
+    fn for_query(shared: Option<&'a IdgAttributionCaches>, db: &'a AnalyzerDb) -> Self {
+        Self {
+            by_func: ahash::AHashMap::default(),
+            shared,
+            db: Some(db),
         }
     }
 }
@@ -4197,10 +4231,11 @@ fn tainted_arg_is_clean_nested_call_return(
     }
 
     for (callee, tainted_params) in tainted_params_by_callee {
-        let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(callee.raw())) else {
-            return false;
-        };
-        if decl.flow_events.is_empty() {
+        if global
+            .decl_of(bonsai_common::SymbolId::new(callee.raw()))
+            .is_none()
+            || idg.return_node_of(callee).is_none()
+        {
             return false;
         }
         let summary = function_summary_cache
@@ -4285,33 +4320,114 @@ fn cached_call_event_summaries_for_func<'a>(
     global: &GlobalIndex,
     cache: &'a mut CallEventSummaryCache<'_>,
 ) -> Option<&'a ahash::AHashMap<bonsai_common::Span, CallEventSummary>> {
+    cached_function_attribution(func, global, cache).map(|summaries| &summaries.by_span)
+}
+
+fn cached_function_attribution<'a>(
+    func: FuncId,
+    global: &GlobalIndex,
+    cache: &'a mut CallEventSummaryCache<'_>,
+) -> Option<&'a FunctionCallEventSummaries> {
     if !cache.by_func.contains_key(&func) {
         let shared_hit = cache
             .shared
             .and_then(|shared| shared.call_events.read().get(&func).cloned());
-        let summaries = shared_hit.unwrap_or_else(|| {
-            let mut by_span: ahash::AHashMap<bonsai_common::Span, CallEventSummary> =
-                ahash::AHashMap::default();
-            if let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) {
-                let receiver_facts = global
-                    .file_index(decl.span.file)
-                    .map(|index| index.call_receivers.as_slice())
-                    .unwrap_or_default();
-                collect_call_event_summaries(&decl.flow_events, receiver_facts, &mut by_span);
+        if let Some(summaries) = shared_hit {
+            cache.by_func.insert(func, summaries);
+        } else {
+            // Compact compiler linkage intentionally drops recursive flow
+            // bodies. Re-lower one exact Tree-sitter file when attribution
+            // first needs it, distill every function in that file into call
+            // summaries, then release the body. This keeps source rendering
+            // exact without materialising a second workspace-wide body index.
+            let symbol = bonsai_common::SymbolId::new(func.raw());
+            let exact_file = global
+                .decl_of(symbol)
+                .filter(|decl| decl.flow_events.is_empty())
+                .and(cache.db)
+                .and_then(|db| {
+                    let file = global.declaring_file(symbol)?;
+                    db.decl_index_remapped_to_headers(global, file)
+                });
+            if let Some(file_index) = exact_file {
+                let built = file_index
+                    .defs
+                    .iter()
+                    .map(|decl| {
+                        (
+                            FuncId::new(decl.symbol.raw()),
+                            build_function_call_event_summaries(decl, &file_index.call_receivers),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(shared) = cache.shared {
+                    let mut write = shared.call_events.write();
+                    for (built_func, summaries) in built {
+                        write.entry(built_func).or_insert(summaries);
+                    }
+                    if let Some(summaries) = write.get(&func).cloned() {
+                        cache.by_func.insert(func, summaries);
+                    }
+                } else {
+                    cache.by_func.extend(built);
+                }
             }
-            let mut spans = by_span.keys().copied().collect::<Vec<_>>();
-            spans.sort_by_key(|span| (span.file.raw(), span.start, std::cmp::Reverse(span.end)));
-            let built = std::sync::Arc::new(FunctionCallEventSummaries { by_span, spans });
-            if let Some(shared) = cache.shared {
-                let mut write = shared.call_events.write();
-                std::sync::Arc::clone(write.entry(func).or_insert_with(|| std::sync::Arc::clone(&built)))
-            } else {
-                built
+
+            // Full-index compatibility callers already carry exact bodies.
+            // Empty functions also land here as an explicit negative cache.
+            if !cache.by_func.contains_key(&func) {
+                let built = global
+                    .decl_of(bonsai_common::SymbolId::new(func.raw()))
+                    .map(|decl| {
+                        let receiver_facts = global
+                            .file_index(decl.span.file)
+                            .map(|index| index.call_receivers.as_slice())
+                            .unwrap_or_default();
+                        build_function_call_event_summaries(decl, receiver_facts)
+                    })
+                    .unwrap_or_else(|| {
+                        std::sync::Arc::new(FunctionCallEventSummaries {
+                            by_span: ahash::AHashMap::default(),
+                            spans: Vec::new(),
+                            return_spans: Vec::new(),
+                            writes: Vec::new(),
+                        })
+                    });
+                if let Some(shared) = cache.shared {
+                    let mut write = shared.call_events.write();
+                    let summaries = std::sync::Arc::clone(
+                        write.entry(func).or_insert_with(|| std::sync::Arc::clone(&built)),
+                    );
+                    cache.by_func.insert(func, summaries);
+                } else {
+                    cache.by_func.insert(func, built);
+                }
             }
-        });
-        cache.by_func.insert(func, summaries);
+        }
     }
-    Some(&cache.by_func.get(&func)?.by_span)
+    cache.by_func.get(&func).map(std::sync::Arc::as_ref)
+}
+
+fn build_function_call_event_summaries(
+    decl: &bonsai_lang_api::Decl,
+    receiver_facts: &[bonsai_lang_api::CallReceiverFact],
+) -> std::sync::Arc<FunctionCallEventSummaries> {
+    let mut by_span: ahash::AHashMap<bonsai_common::Span, CallEventSummary> = ahash::AHashMap::default();
+    collect_call_event_summaries(&decl.flow_events, receiver_facts, &mut by_span);
+    let mut spans = by_span.keys().copied().collect::<Vec<_>>();
+    spans.sort_by_key(|span| (span.file.raw(), span.start, std::cmp::Reverse(span.end)));
+    let mut return_spans = Vec::new();
+    collect_return_spans(&decl.flow_events, &mut return_spans);
+    return_spans.sort_by_key(|span| (span.start, span.end));
+    return_spans.dedup();
+    let mut writes = Vec::new();
+    collect_write_event_summaries(&decl.flow_events, &mut writes);
+    std::sync::Arc::new(FunctionCallEventSummaries {
+        by_span,
+        spans,
+        return_spans,
+        writes,
+    })
 }
 
 fn cached_nested_call_event_summary(

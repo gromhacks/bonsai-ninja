@@ -3042,7 +3042,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         "callgraph construction must keep global declaration headers and stream exact per-file bodies"
     );
     assert!(
-        function_body(&workspace, "build_and_persist_idg_sidecar").contains("build_global_linkage_index")
+        function_body(&workspace, "build_and_persist_idg_sidecar").contains("compiler_linkage_index()")
             && function_body(&workspace, "build_and_persist_idg_sidecar")
                 .contains("build_for_persistence_streaming_with_file_semantics_and_options")
             && function_body(&idg, "lower_transfer_segment_batch").contains("body_for_file")
@@ -3372,19 +3372,21 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
     assert!(
         diagnostics.contains("struct IndexCommandOptions")
             && diagnostics.contains("structural_only: bool")
+            && diagnostics.contains("semantic_worker: Option<SemanticWorkerPhase>")
+            && index_body.contains("if options.semantic")
+            && index_body.contains("run_semantic_workers(root)?")
             && index_body.contains("if options.prewarm_dataflow")
             && index_body.contains("open_project_dataflow_prewarm(root)?")
-            && index_body.contains("else if options.semantic")
-            && index_body.contains("open_project_semantic_prewarm(root)?")
             && index_body.contains("open_project_parse_only(root)?")
-            && commands_mod.contains("warm_structural_sidecars()?"),
-        "cmd_index must keep default/structural-only runs parse-only and route explicit semantic warming through the cache facade"
+            && function_body(&diagnostics, "run_semantic_workers").contains("std::env::current_exe()")
+            && function_body(&diagnostics, "run_semantic_workers").contains("SemanticWorkerPhase::Frontend")
+            && function_body(&diagnostics, "run_semantic_workers").contains("SemanticWorkerPhase::Idg"),
+        "cmd_index must keep default/structural-only runs parse-only and isolate exact semantic phases in worker processes"
     );
     assert!(
-        function_body(&commands_mod, "open_project_semantic_prewarm")
-            .contains("OpenOptions::sidecar_validation_only()")
-            && commands_mod.contains("warm_structural_sidecars()?"),
-        "one-shot semantic prewarm must ingest immutable snapshots once and let bounded compiler phases validate exact file units"
+        function_body(&commands_mod, "open_project_sidecar_validation_only")
+            .contains("OpenOptions::sidecar_validation_only()"),
+        "semantic workers must open immutable snapshots without hydrating unrelated semantic graphs"
     );
     assert!(
         main.contains("structural_only,")
@@ -3436,21 +3438,187 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
 }
 
 #[test]
-fn semantic_prewarm_orders_workspace_phases_by_peak_memory() {
+fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     let sdk = read(&repo_root().join("crates/sdk/src/lib.rs"));
-    for function in ["warm_structural_sidecars", "rebuild_structural_with_export"] {
-        let body = function_body(&sdk, function);
-        let retrieval = body
-            .find("bonsai_retrieval::")
-            .unwrap_or_else(|| panic!("{function} must persist retrieval candidates"));
-        let idg = body
-            .find("build_and_persist_idg_sidecar")
-            .unwrap_or_else(|| panic!("{function} must persist the exact IDG"));
+    let diagnostics = read(&repo_root().join("crates/cli/src/commands/diagnostics.rs"));
+    let idg_workspace = read(&repo_root().join("crates/idg/src/workspace.rs"));
+    let idg_service = read(&repo_root().join("crates/idg/src/service.rs"));
+    let workspace = read(&repo_root().join("crates/workspace/src/lib.rs"));
+    let warm = function_body(&sdk, "warm_structural_sidecars");
+    assert!(
+        warm.contains("warm_retrieval_and_callgraph_sidecars()?")
+            && warm.contains("warm_idg_sidecar_and_manifest()"),
+        "SDK semantic warming must expose the same explicit compiler phase boundary"
+    );
+    let frontend = function_body(&sdk, "warm_retrieval_and_callgraph_sidecars");
+    let idg = function_body(&sdk, "warm_idg_sidecar_and_manifest");
+    assert!(
+        frontend.contains("bonsai_retrieval::ensure_sidecar")
+            && frontend.contains("save_callgraph_sidecar")
+            && !frontend.contains("build_and_persist_idg_sidecar")
+            && idg.contains("build_and_persist_idg_sidecar")
+            && idg.contains("write_manifest"),
+        "frontend/callgraph and IDG persistence must be independently executable exact phases"
+    );
+    let workers = function_body(&diagnostics, "run_semantic_workers");
+    assert!(
+        workers.contains("Command::new(&executable)")
+            && workers.contains("SemanticWorkerPhase::Frontend")
+            && workers.contains("SemanticWorkerPhase::Idg")
+            && workers.contains("command.status()?")
+            && workers.contains("if !status.success()"),
+        "CLI semantic prewarm must run exact phases sequentially across OS-reclaimed process boundaries"
+    );
+    let load = function_body(&idg_workspace, "load_from_disk");
+    assert!(
+        load.contains("dictionary lookups fall back to an")
+            && !load.contains("segment.places.rebuild_lookup()")
+            && !load.contains("segment.nodes.rebuild_lookup()")
+            && !load.contains("segment.strings.rebuild_lookup()"),
+        "warm IDG loads must keep canonical per-segment vectors and avoid eager workspace-wide reverse dictionaries"
+    );
+    let unified = function_body(&idg_service, "build_unified");
+    let local_lookup = function_body(&idg_service, "local_node_for");
+    assert!(
+        unified.contains("nodes.sort_unstable_by_key")
+            && local_lookup.contains("binary_search_by_key")
+            && !idg_service.contains("segment.nodes.lookup(func, pid)"),
+        "warm query lookup must use compact exact per-function ordering, not linear segment scans or full reverse hash tables"
+    );
+    let hydrate = function_body(&workspace, "load_idg_sidecar");
+    assert!(
+        hydrate
+            .find("compiler_linkage_index()")
+            .is_some_and(|linkage| hydrate
+                .find("IdgWorkspace::load_from_disk")
+                .is_some_and(|idg| linkage < idg)),
+        "warm query open must finish streamed Tree-sitter linkage before hydrating the live IDG"
+    );
+}
+
+#[test]
+fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
+    let matcher = read(&repo_root().join("crates/security/src/matcher/mod.rs"));
+    let workspace = read(&repo_root().join("crates/workspace/src/lib.rs"));
+    let headers = function_body(&matcher, "streaming_global_linkage");
+    assert!(
+        headers.contains("compiler_linkage_index()"),
+        "broad security phases must reuse compact IDG compiler linkage with an exact compact-header fallback"
+    );
+    let compiler_linkage = function_body(&workspace, "compiler_linkage_index");
+    assert!(
+        compiler_linkage.contains("idg_service()")
+            && compiler_linkage.contains("global_linkage_index()")
+            && compiler_linkage.contains("compiler_linkage.read()")
+            && compiler_linkage.contains("compiler_linkage.write()")
+            && compiler_linkage.contains("build_global_linkage_index()"),
+        "Workspace must own the compact compiler linkage lifetime shared by IDG and streamed exact-body consumers"
+    );
+    let invalidation = function_body(&workspace, "invalidate_after_file_change");
+    assert!(
+        invalidation.contains("compiler_linkage.write() = None"),
+        "source edits must invalidate the compact compiler symbol snapshot"
+    );
+
+    let scan = function_body(&matcher, "scan_decl_index");
+    assert!(
+        scan.contains("FactRetention::Transient")
+            && scan.contains("decl_index_remapped_to_headers(global, file)"),
+        "transient matcher scans must re-lower one exact AST body and bind it to stable workspace symbols"
+    );
+
+    let inferred = function_body(&matcher, "infer_entry_point_sources_for_files_with_progress");
+    assert!(
+        inferred.contains("streaming_global_linkage(ws)")
+            && inferred.contains("decl_index_remapped_to_headers(global.as_ref(), file)")
+            && !inferred.contains("global_index()"),
+        "inferred entry-point analysis must stream exact file bodies instead of materializing a second workspace body index"
+    );
+
+    let execution = read(&repo_root().join("crates/security/src/analysis/execution.rs"));
+    let source_plan = function_body(&execution, "plan_source_work");
+    assert!(
+        source_plan.contains("exact_decl_index(file)")
+            && source_plan.contains("source_seed_set(pack, source.source, source_decl)"),
+        "taint source seed planning must derive carriers from exact AST bodies, not compact headers"
+    );
+    let analysis = read(&repo_root().join("crates/security/src/analysis/mod.rs"));
+    let source_graph_plan = function_body(&analysis, "schedule_source_graph_groups");
+    assert!(
+        source_graph_plan.contains("exact_decl_index(file)")
+            && source_graph_plan.contains("source_seed_set(pack, hit.hit, decl)"),
+        "source-analysis seed planning must derive carriers from exact AST bodies, not compact headers"
+    );
+
+    let package_facts = function_body(&matcher, "build_file_package_set");
+    assert!(
+        package_facts.contains("decl_index_uncached(file)") && !package_facts.contains("global_index()"),
+        "file-local package heuristics must consume file-local AST facts without opening the workspace body index"
+    );
+
+    assert_eq!(
+        matcher.matches(".global_index()").count(),
+        1,
+        "security matcher may use the resident whole-workspace body index only in its explicit cached mode"
+    );
+}
+
+#[test]
+fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
+    let workspace = read(&repo_root().join("crates/workspace/src/lib.rs"));
+    let security_chain = read(&repo_root().join("crates/security/src/analysis/chain_executor.rs"));
+    let security_analysis = read(&repo_root().join("crates/security/src/analysis/mod.rs"));
+    for function in [
+        "build_and_seed_idg_service_with_transfer_options",
+        "build_and_seed_idg_service_with_transfer_options_for_files",
+        "build_idg_service_with_transfer_options_for_files_and_call_graph",
+    ] {
+        let body = function_body(&workspace, function);
         assert!(
-            retrieval < idg,
-            "{function} must finish retrieval before IDG construction so workspace-scale allocation arenas do not overlap"
+            body.contains("compiler_linkage_index()")
+                && body.contains("build_streaming_with_file_semantics_and_options")
+                && body.contains("decl_index_remapped_to_headers")
+                && !body.contains("global_index()"),
+            "{function} must pair compact compiler linkage with disposable exact Tree-sitter bodies"
         );
     }
+
+    for path in [
+        "crates/browse/src/native_export.rs",
+        "crates/browse/src/graph_export.rs",
+    ] {
+        let source = read(&repo_root().join(path));
+        assert!(
+            source.contains("compiler_linkage_index()")
+                && source.contains("exact_decl_index(")
+                && !source.contains("global_index()"),
+            "{path} must export exact AST facts without retaining every lowered workspace body"
+        );
+    }
+
+    assert!(
+        function_body(&security_chain, "compile_source_graph").contains("with_global_index(self.global.as_ref())")
+            && function_body(&security_analysis, "build_source_group_candidates")
+                .contains("with_global_index(context.global)"),
+        "security taint closures must pass compact compiler linkage through the query boundary instead of reopening AnalyzerDb::global_index"
+    );
+
+    let taint_reachable = read(&repo_root().join("crates/taint/src/reachable.rs"));
+    let attribution = function_body(&taint_reachable, "cached_function_attribution");
+    assert!(
+        attribution.contains("decl_index_remapped_to_headers(global, file)")
+            && attribution.contains("build_function_call_event_summaries")
+            && attribution.contains("let built = file_index")
+            && attribution.contains(".defs"),
+        "compact taint queries must distill exact per-file AST call attribution and release the body"
+    );
+    let distilled = function_body(&taint_reachable, "build_function_call_event_summaries");
+    assert!(
+        distilled.contains("collect_call_event_summaries")
+            && distilled.contains("collect_return_spans")
+            && distilled.contains("collect_write_event_summaries"),
+        "all rendered call/write/return evidence must survive the transient exact-body boundary"
+    );
 }
 
 #[test]

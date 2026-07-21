@@ -725,7 +725,7 @@ struct ExportSpanCache {
 impl ExportSpanCache {
     fn new(ws: &Workspace) -> Self {
         let mut files = ahash::AHashMap::default();
-        for file in ws.db().global_index().all_files() {
+        for file in ws.db().vfs().all_files() {
             let path = ws
                 .vfs()
                 .path(file)
@@ -851,7 +851,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     writer: &mut W,
 ) -> serde_json::Result<()> {
     let total_started = Instant::now();
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let spans = ExportSpanCache::new(ws);
 
     let mut serializer = serde_json::Serializer::new(writer);
@@ -866,14 +866,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
 
     let structural = build_export_structural_metadata(ws, global.as_ref(), &spans, &total_started)?;
     map.serialize_entry("summary", &structural.summary)?;
-    map.serialize_entry(
-        "files",
-        &ExportFilesStreaming {
-            ws,
-            global: global.as_ref(),
-            spans: &spans,
-        },
-    )?;
+    map.serialize_entry("files", &ExportFilesStreaming { ws, spans: &spans })?;
     map.serialize_entry("classes", &structural.classes)?;
     map.serialize_entry("callgraph", &structural.callgraph)?;
     drop(structural);
@@ -984,7 +977,7 @@ fn build_export_structural_metadata(
             languages_set.insert(language.clone());
         }
 
-        let Some(idx) = global.file_index(file) else {
+        let Some(idx) = ws.exact_decl_index(file) else {
             continue;
         };
 
@@ -1084,12 +1077,11 @@ fn export_files_in_path_order(ws: &Workspace) -> Vec<(FileId, String)> {
 }
 
 fn export_import_specs(ws: &Workspace, file: FileId) -> Vec<bonsai_lang_api::ImportSpec> {
-    ws.db().imports_for(file)
+    ws.db().imports_for_uncached(file)
 }
 
 struct ExportFilesStreaming<'a> {
     ws: &'a Workspace,
-    global: &'a bonsai_index::GlobalIndex,
     spans: &'a ExportSpanCache,
 }
 
@@ -1101,7 +1093,8 @@ impl Serialize for ExportFilesStreaming<'_> {
         let files = export_files_in_path_order(self.ws);
         let mut sequence = serializer.serialize_seq(Some(files.len()))?;
         for (file, path) in files {
-            let export_file = build_export_file(self.ws, self.global, self.spans, file, path);
+            let index = self.ws.exact_decl_index(file);
+            let export_file = build_export_file(self.ws, index.as_ref(), self.spans, file, path);
             sequence.serialize_element(&export_file)?;
         }
         SerializeSeq::end(sequence)
@@ -1110,7 +1103,7 @@ impl Serialize for ExportFilesStreaming<'_> {
 
 fn build_export_file<'a>(
     ws: &Workspace,
-    global: &'a bonsai_index::GlobalIndex,
+    index: Option<&'a bonsai_lang_api::DeclIndex>,
     spans: &ExportSpanCache,
     file: FileId,
     path: String,
@@ -1120,7 +1113,7 @@ fn build_export_file<'a>(
         .adapter_for(file)
         .map(|adapter| adapter.language_id().as_str().to_string())
         .unwrap_or_default();
-    let Some(index) = global.file_index(file) else {
+    let Some(index) = index else {
         return ExportFile {
             path,
             language,
@@ -1654,8 +1647,7 @@ impl Serialize for ExportTaintPropagationsStreaming<'_> {
             return serde::ser::SerializeSeq::end(seq);
         }
 
-        let db = self.ws.db();
-        let global = db.global_index();
+        let global = self.ws.compiler_linkage_index();
         let mut render_cache = ExportTaintRecordRenderCache::default();
         let mut seq = serializer.serialize_seq(None)?;
         let mut count = 0usize;
@@ -1672,6 +1664,7 @@ impl Serialize for ExportTaintPropagationsStreaming<'_> {
             );
             {
                 let row = export_taint_propagation_row_ref(
+                    self.ws,
                     self.spans,
                     global.as_ref(),
                     self.idg,
@@ -1723,8 +1716,7 @@ struct ExportTaintChainsAndFlowLabels {
 }
 
 fn export_taint_functions(ws: &Workspace, spans: &ExportSpanCache) -> Vec<ExportTaintFunction> {
-    let db = ws.db();
-    let global = db.global_index();
+    let global = ws.compiler_linkage_index();
 
     // ---- functions: FuncId → display name mapping (the single
     // authoritative table other sections reference by `func_id`). ----
@@ -1990,75 +1982,29 @@ fn export_assign_chains_from_idg(
 }
 
 fn export_intra_taint(ws: &Workspace, functions: &[ExportTaintFunction]) -> Vec<ExportIntraTaint> {
-    use bonsai_common::SymbolId;
     use rayon::prelude::*;
 
-    let db = ws.db();
-    let global = db.global_index();
+    let function_ids: ahash::AHashSet<u32> = functions.iter().map(|function| function.func_id).collect();
 
     // ---- intra_taint: per-function CFG dataflow ----
     let phase_started = Instant::now();
-    let mut intra_taint: Vec<ExportIntraTaint> = functions
+    let by_file: Vec<Vec<ExportIntraTaint>> = ws
+        .vfs()
+        .all_files()
         .par_iter()
-        .filter_map(|f| {
-            let decl = global.decl_of(SymbolId::new(f.func_id))?;
-            if decl.params.is_empty() {
-                return None;
-            }
-            let cfg = bonsai_cfg::build_cfg_from_flow(&decl.name, &decl.flow_events);
-            let mut per_param: Vec<ExportIntraTaintParam> = Vec::new();
-            for (idx, param) in decl.params.iter().enumerate() {
-                if param.is_empty() {
-                    continue;
-                }
-                let mut seed = bonsai_taint::TokenSet::default();
-                seed.insert(param.clone());
-                let cfg_config = bonsai_taint::TaintConfig { sources: seed };
-                let result = bonsai_taint::intraprocedural_taint(&cfg, &cfg_config);
-                let mut blocks: Vec<ExportIntraBlock> = Vec::new();
-                // Emit blocks whose in OR out is non-empty — the
-                // entry always has the seeded param so it appears;
-                // blocks the taint never reaches are elided.
-                let mut block_ids: Vec<u32> = cfg.blocks.iter().map(|b| b.id.raw()).collect();
-                block_ids.sort_unstable();
-                for bid_raw in block_ids {
-                    let bid = bonsai_common::BasicBlockId::new(bid_raw);
-                    let block_in = result.block_in.get(&bid).cloned().unwrap_or_default();
-                    let block_out = result.block_out.get(&bid).cloned().unwrap_or_default();
-                    if block_in.is_empty() && block_out.is_empty() {
-                        continue;
-                    }
-                    let mut in_vec: Vec<String> = block_in.into_iter().collect();
-                    let mut out_vec: Vec<String> = block_out.into_iter().collect();
-                    in_vec.sort();
-                    out_vec.sort();
-                    blocks.push(ExportIntraBlock {
-                        id: bid_raw,
-                        taint_in: in_vec,
-                        taint_out: out_vec,
-                    });
-                }
-                if blocks.is_empty() {
-                    continue;
-                }
-                per_param.push(ExportIntraTaintParam {
-                    param_index: idx,
-                    param_name: param.clone(),
-                    iterations: result.iterations,
-                    blocks,
-                });
-            }
-            if per_param.is_empty() {
-                return None;
-            }
-            Some(ExportIntraTaint {
-                func_id: f.func_id,
-                function: f.name.clone(),
-                backend: "cfg_local",
-                per_param,
-            })
+        .map(|file| {
+            let Some(index) = ws.exact_decl_index(*file) else {
+                return Vec::new();
+            };
+            index
+                .defs
+                .iter()
+                .filter(|decl| function_ids.contains(&decl.symbol.raw()))
+                .filter_map(export_intra_taint_for_decl)
+                .collect()
         })
         .collect();
+    let mut intra_taint: Vec<ExportIntraTaint> = by_file.into_iter().flatten().collect();
     intra_taint.sort_by_key(|t| t.func_id);
     export_phase_log(format_args!(
         "taint.intra_taint: {:.3}s count={}",
@@ -2068,15 +2014,65 @@ fn export_intra_taint(ws: &Workspace, functions: &[ExportTaintFunction]) -> Vec<
     intra_taint
 }
 
+fn export_intra_taint_for_decl(decl: &bonsai_lang_api::Decl) -> Option<ExportIntraTaint> {
+    if decl.params.is_empty() {
+        return None;
+    }
+    let cfg = bonsai_cfg::build_cfg_from_flow(&decl.name, &decl.flow_events);
+    let mut per_param: Vec<ExportIntraTaintParam> = Vec::new();
+    for (idx, param) in decl.params.iter().enumerate() {
+        if param.is_empty() {
+            continue;
+        }
+        let mut seed = bonsai_taint::TokenSet::default();
+        seed.insert(param.clone());
+        let cfg_config = bonsai_taint::TaintConfig { sources: seed };
+        let result = bonsai_taint::intraprocedural_taint(&cfg, &cfg_config);
+        let mut blocks: Vec<ExportIntraBlock> = Vec::new();
+        let mut block_ids: Vec<u32> = cfg.blocks.iter().map(|block| block.id.raw()).collect();
+        block_ids.sort_unstable();
+        for bid_raw in block_ids {
+            let bid = bonsai_common::BasicBlockId::new(bid_raw);
+            let block_in = result.block_in.get(&bid).cloned().unwrap_or_default();
+            let block_out = result.block_out.get(&bid).cloned().unwrap_or_default();
+            if block_in.is_empty() && block_out.is_empty() {
+                continue;
+            }
+            let mut in_vec: Vec<String> = block_in.into_iter().collect();
+            let mut out_vec: Vec<String> = block_out.into_iter().collect();
+            in_vec.sort();
+            out_vec.sort();
+            blocks.push(ExportIntraBlock {
+                id: bid_raw,
+                taint_in: in_vec,
+                taint_out: out_vec,
+            });
+        }
+        if !blocks.is_empty() {
+            per_param.push(ExportIntraTaintParam {
+                param_index: idx,
+                param_name: param.clone(),
+                iterations: result.iterations,
+                blocks,
+            });
+        }
+    }
+    (!per_param.is_empty()).then(|| ExportIntraTaint {
+        func_id: decl.symbol.raw(),
+        function: decl.name.clone(),
+        backend: "cfg_local",
+        per_param,
+    })
+}
+
 fn export_alias_maps(ws: &Workspace) -> Vec<ExportAliasMap> {
     let db = ws.db();
-    let global = db.global_index();
 
     // ---- alias_maps: per-file alias resolution ----
     let phase_started = Instant::now();
     let mut alias_maps: Vec<ExportAliasMap> = Vec::new();
-    for file in global.all_files() {
-        let Some(imports) = db.import_index(file) else {
+    for file in ws.vfs().all_files() {
+        let Some(imports) = db.import_index_uncached(file) else {
             continue;
         };
         let map = bonsai_lang_api::kit::alias_map_from_imports(&imports);
@@ -2123,14 +2119,14 @@ fn export_alias_maps(ws: &Workspace) -> Vec<ExportAliasMap> {
 }
 
 fn export_class_fields(ws: &Workspace, spans: &ExportSpanCache) -> Vec<ExportClassFields> {
-    let db = ws.db();
-    let global = db.global_index();
-
     // ---- class_fields: per-class G3 field-taint ----
     let phase_started = Instant::now();
     let mut class_fields: Vec<ExportClassFields> = Vec::new();
-    for file in global.all_files() {
-        let decls = global.decls_in(file);
+    for file in ws.vfs().all_files() {
+        let Some(index) = ws.exact_decl_index(file) else {
+            continue;
+        };
+        let decls = &index.defs;
         let classes: Vec<&bonsai_lang_api::Decl> = decls
             .iter()
             .filter(|d| {
@@ -2238,6 +2234,7 @@ struct ExportTaintRecordRenderCache {
 type CallArgTextBySite = ahash::AHashMap<(Span, u32), String>;
 
 fn export_taint_propagation_row_ref<'a>(
+    ws: &Workspace,
     spans: &ExportSpanCache,
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
@@ -2256,7 +2253,7 @@ fn export_taint_propagation_row_ref<'a>(
     let unique_pairs: ahash::AHashSet<(bonsai_common::FuncId, bonsai_common::FuncId)> =
         cross_calls.iter().map(|ce| (ce.caller, ce.callee)).collect();
     let pairs_analyzed = std::cmp::max(1, unique_pairs.len());
-    cross_calls.retain(|ce| ensure_cached_export_taint_record(render_cache, ce, global, spans));
+    cross_calls.retain(|ce| ensure_cached_export_taint_record(render_cache, ce, global, spans, ws));
     let records: Vec<&ExportTaintRecord> = cross_calls
         .iter()
         .filter_map(|ce| render_cache.records.get(ce).and_then(Option::as_ref))
@@ -2305,11 +2302,12 @@ fn ensure_cached_export_taint_record(
     edge: &CrossCallEdge,
     global: &bonsai_index::GlobalIndex,
     spans: &ExportSpanCache,
+    ws: &Workspace,
 ) -> bool {
     if let Some(cached) = cache.records.get(edge) {
         return cached.is_some();
     }
-    let rendered = export_taint_record_from_cross_call(cache, edge, global, spans);
+    let rendered = export_taint_record_from_cross_call(cache, edge, global, spans, ws);
     let present = rendered.is_some();
     cache.records.insert(*edge, rendered);
     present
@@ -2320,6 +2318,7 @@ fn export_taint_record_from_cross_call(
     edge: &CrossCallEdge,
     global: &bonsai_index::GlobalIndex,
     spans: &ExportSpanCache,
+    ws: &Workspace,
 ) -> Option<ExportTaintRecord> {
     if !edge.relation.is_renderable_call() {
         return None;
@@ -2335,7 +2334,7 @@ fn export_taint_record_from_cross_call(
     let tainted_args = if edge.arg_idx != u32::MAX {
         vec![ExportTaintedArg {
             index: edge.arg_idx as usize,
-            value_text: cached_export_call_arg_text(cache, global, edge.caller, edge.call_span, edge.arg_idx)
+            value_text: cached_export_call_arg_text(cache, ws, edge.caller, edge.call_span, edge.arg_idx)
                 .unwrap_or_default(),
             param_name,
         }]
@@ -2343,9 +2342,8 @@ fn export_taint_record_from_cross_call(
         edge.relation,
         bonsai_idg::CrossCallRelation::Argument | bonsai_idg::CrossCallRelation::Capture
     ) {
-        if let Some(receiver) =
-            cached_export_call_arg_text(cache, global, edge.caller, edge.call_span, u32::MAX)
-                .filter(|receiver| !receiver.trim().is_empty())
+        if let Some(receiver) = cached_export_call_arg_text(cache, ws, edge.caller, edge.call_span, u32::MAX)
+            .filter(|receiver| !receiver.trim().is_empty())
         {
             vec![ExportTaintedArg {
                 index: usize::MAX,
@@ -2413,13 +2411,13 @@ fn cached_export_call_line(
 
 fn cached_export_call_arg_text(
     cache: &mut ExportTaintRecordRenderCache,
-    global: &bonsai_index::GlobalIndex,
+    ws: &Workspace,
     caller: FuncId,
     call_span: Span,
     arg_idx: u32,
 ) -> Option<String> {
     if !cache.call_arg_texts.contains_key(&caller) {
-        let rendered = export_call_arg_texts_for_func(global, caller);
+        let rendered = export_call_arg_texts_for_func(ws, caller);
         cache.call_arg_texts.insert(caller, rendered);
     }
     cache
@@ -2430,10 +2428,10 @@ fn cached_export_call_arg_text(
 }
 
 fn export_call_arg_texts_for_func(
-    global: &bonsai_index::GlobalIndex,
+    ws: &Workspace,
     func: FuncId,
 ) -> Option<ahash::AHashMap<(Span, u32), String>> {
-    let decl = global.decl_of(SymbolId::new(func.raw()))?;
+    let decl = ws.exact_decl(SymbolId::new(func.raw()))?;
     let mut arg_texts = ahash::AHashMap::default();
     collect_export_call_arg_texts(&decl.flow_events, &mut arg_texts);
     Some(arg_texts)
@@ -2670,9 +2668,6 @@ fn export_taint_chains_and_flow_labels(
 fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec<ExportEntryPoint> {
     type EntryParamMap = std::collections::BTreeMap<u32, (String, String, u32, Vec<String>, &'static str)>;
 
-    let db = ws.db();
-    let global = db.global_index();
-
     let callees_seen: ahash::AHashSet<bonsai_common::SymbolId> = ws
         .cached_resolved_call_graph()
         .inner()
@@ -2682,11 +2677,14 @@ fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec
         .map(|edge| bonsai_common::SymbolId::new(edge.to.raw()))
         .collect();
 
-    let class_field_writes = collect_class_field_taints_for_entries(global.as_ref());
+    let class_field_writes = collect_class_field_taints_for_entries(ws);
     let mut entry_params: EntryParamMap = std::collections::BTreeMap::new();
 
-    for file in global.all_files() {
-        for decl in global.decls_in(file) {
+    for file in ws.vfs().all_files() {
+        let Some(index) = ws.exact_decl_index(file) else {
+            continue;
+        };
+        for decl in &index.defs {
             if !matches!(
                 decl.kind,
                 DeclKind::Function | DeclKind::Method | DeclKind::Constructor
@@ -2697,8 +2695,7 @@ fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec
                 continue;
             }
             let has_callers = callees_seen.contains(&decl.symbol);
-            let decorator_entry =
-                detect_framework_decorator(ws, global.as_ref(), file, decl.span, decl.name_span);
+            let decorator_entry = detect_framework_decorator(ws, &index, file, decl.span, decl.name_span);
             let entry_kind = if decorator_entry {
                 Some("decorator")
             } else if !has_callers && matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
@@ -2853,13 +2850,15 @@ fn flow_reads_token(events: &[FlowEvent], token: &str) -> bool {
 }
 
 fn collect_class_field_taints_for_entries(
-    global: &bonsai_index::GlobalIndex,
+    ws: &Workspace,
 ) -> ahash::AHashMap<bonsai_common::SymbolId, ahash::AHashSet<String>> {
     let mut out: ahash::AHashMap<bonsai_common::SymbolId, ahash::AHashSet<String>> =
         ahash::AHashMap::default();
-    for file in global.all_files() {
-        let decls = global.decls_in(file);
-        for decl in decls {
+    for file in ws.vfs().all_files() {
+        let Some(index) = ws.exact_decl_index(file) else {
+            continue;
+        };
+        for decl in &index.defs {
             if !matches!(
                 decl.kind,
                 DeclKind::Method | DeclKind::Constructor | DeclKind::Function
@@ -2888,15 +2887,12 @@ fn collect_class_field_taints_for_entries(
 /// file-scoped or gap-only heuristic.
 fn detect_framework_decorator(
     ws: &Workspace,
-    global: &bonsai_index::GlobalIndex,
+    index: &bonsai_lang_api::DeclIndex,
     file: FileId,
     decl_span: Span,
     decl_name_span: Span,
 ) -> bool {
-    let Some(idx) = global.file_index(file) else {
-        return false;
-    };
-    !decl_decorator_names(ws, file, idx, decl_span, decl_name_span).is_empty()
+    !decl_decorator_names(ws, file, index, decl_span, decl_name_span).is_empty()
 }
 
 fn count_call_sites_for_export(events: &[bonsai_lang_api::FlowEvent], call_site_count: &mut usize) {

@@ -163,7 +163,7 @@ pub fn validate_pack(
             // global API matches.
             if !example.expect_no_match && !signals.is_empty() {
                 let mut has_package_signal = false;
-                for file_id in ws.db().global_index().all_files() {
+                for file_id in ws.db().vfs().all_files() {
                     let Some(import_index) = ws.db().import_index(file_id) else {
                         if let Some(idx) = ws.db().decl_index(file_id) {
                             if decl_index_has_java_like_fqn_package_signal(&rule.language, &idx, &signals) {

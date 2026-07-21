@@ -29,7 +29,7 @@ struct CompilerIdgFileSemantics<'a> {
 
 impl bonsai_idg::workspace_adapter::IdgFileSemanticsProvider for CompilerIdgFileSemantics<'_> {
     fn aliases(&mut self, file: bonsai_common::FileId) -> ahash::AHashMap<String, String> {
-        bonsai_resolve::semantic_import_binding_map_for_file(&self.db.imports_for(file))
+        bonsai_resolve::semantic_import_binding_map_for_file(&self.db.imports_for_uncached(file))
     }
 
     fn language(&self, file: bonsai_common::FileId) -> Option<&'static str> {
@@ -257,9 +257,9 @@ fn build_resolved_call_graph_snapshot_scoped(
 ) -> bonsai_callgraph::ResolvedCallGraph {
     let global = db.build_global_header_index();
     let semantics = bonsai_callgraph::CallGraphFileSemantics::new(
-        |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+        |file| bonsai_resolve::alias_map_for_file(&db.imports_for_uncached(file)),
         |file| {
-            bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
+            bonsai_lang_api::alias_map_from_import_specs(&db.imports_for_uncached(file))
                 .into_iter()
                 .collect()
         },
@@ -295,9 +295,9 @@ fn build_resolved_call_graph_snapshot_scoped(
             );
             bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context(
                 global.as_ref(),
-                |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+                |file| bonsai_resolve::alias_map_for_file(&db.imports_for_uncached(file)),
                 |file| {
-                    bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
+                    bonsai_lang_api::alias_map_from_import_specs(&db.imports_for_uncached(file))
                         .into_iter()
                         .collect()
                 },

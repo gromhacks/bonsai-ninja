@@ -588,6 +588,29 @@ impl AnalyzerDb {
         imports
     }
 
+    /// Grammar-aware imports for one streaming compiler pass without retaining
+    /// a workspace-sized import-index cache. Semantics are identical to
+    /// [`Self::imports_for`], including the generic Tree-sitter fallback.
+    #[must_use]
+    pub fn imports_for_uncached(&self, file: FileId) -> Vec<ImportSpec> {
+        if let Some(idx) = self.build_import_index_uncached(file) {
+            let imports = idx.imports;
+            self.release_syntax(file);
+            return imports;
+        }
+        let Ok(parsed) = self.parse(file) else {
+            return Vec::new();
+        };
+        let imports = bonsai_lang_api::kit::extract_generic_imports(
+            &parsed.tree,
+            file,
+            parsed.source_text().as_bytes(),
+        );
+        drop(parsed);
+        self.release_syntax(file);
+        imports
+    }
+
     /// Workspace-wide global declaration index. Built lazily on first
     /// access; invalidated when any per-file decl index is replaced.
     pub fn global_index(&self) -> Arc<GlobalIndex> {

@@ -152,6 +152,7 @@ impl SourceGroupExecutor<'_> {
                         self.ws.db(),
                         idg,
                     )
+                    .with_global_index(self.global.as_ref())
                     .with_transfers(bonsai_taint::IdgTaintTransfers {
                         call_result_passthroughs: &self.config.call_result_passthroughs,
                         call_results_materialized: true,
