@@ -222,14 +222,15 @@ fn build_idg_service(
     db: &AnalyzerDb,
     transfer_options: &bonsai_idg::TransferOptions,
 ) -> Arc<IdgQueryService> {
-    let global = db.global_index();
+    let global = db.build_global_linkage_index();
     let call_graph = build_resolved_call_graph_snapshot(db);
     let semantics = compiler_idg_file_semantics(db);
-    let ws = bonsai_idg::workspace_adapter::build_with_file_semantics_and_options(
+    let ws = bonsai_idg::workspace_adapter::build_streaming_with_file_semantics_and_options(
         global.as_ref(),
         &call_graph,
         semantics,
         transfer_options,
+        |file| db.decl_index_remapped_to_headers(global.as_ref(), file),
     );
     Arc::new(IdgQueryService::new(Arc::new(ws), global))
 }
@@ -254,7 +255,7 @@ fn build_resolved_call_graph_snapshot_scoped(
     db: &AnalyzerDb,
     included_files: Option<&[bonsai_common::FileId]>,
 ) -> bonsai_callgraph::ResolvedCallGraph {
-    let global = db.global_index();
+    let global = db.build_global_header_index();
     let semantics = bonsai_callgraph::CallGraphFileSemantics::new(
         |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
         |file| {
@@ -275,14 +276,41 @@ fn build_resolved_call_graph_snapshot_scoped(
                 .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
         },
     );
-    if let Some(files) = included_files {
-        bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files(
+    match included_files {
+        Some(files) => {
+            let context = bonsai_callgraph::ResolvedCallGraph::build_context(
+                global.as_ref(),
+                |file| {
+                    db.vfs()
+                        .path(file)
+                        .ok()
+                        .map(|path| path.to_string_lossy().into_owned())
+                },
+                |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+                |file| {
+                    db.adapter_for(file)
+                        .map(|adapter| adapter.capabilities())
+                        .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
+                },
+            );
+            bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context(
+                global.as_ref(),
+                |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+                |file| {
+                    bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
+                        .into_iter()
+                        .collect()
+                },
+                files,
+                &context,
+                |file| db.decl_index_remapped_to_headers(global.as_ref(), file),
+            )
+        }
+        None => bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_streaming(
             global.as_ref(),
             semantics,
-            files,
-        )
-    } else {
-        bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics(global.as_ref(), semantics)
+            |file| db.decl_index_remapped_to_headers(global.as_ref(), file),
+        ),
     }
 }
 

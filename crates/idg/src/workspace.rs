@@ -1027,7 +1027,7 @@ const IDG_WORKSPACE_TABLE_ID: u32 = 101;
 /// [`IdgSegment`], renamed enum variant in [`crate::place::Place`]) or
 /// source-to-call edge semantic change that can leave old facts
 /// structurally decodable but security-significant.
-const IDG_WORKSPACE_VERSION: u32 = 11;
+const IDG_WORKSPACE_VERSION: u32 = 12;
 
 #[cfg(not(test))]
 const IDG_WORKSPACE_EDGE_CHUNK_LEN: usize = 100_000;

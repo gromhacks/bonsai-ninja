@@ -106,6 +106,8 @@ struct FieldArgStitch {
     call_span: Span,
     precision: Precision,
     call_kind: CallEdgeKind,
+    arg_idx: u32,
+    param_idx: u32,
     allow_out_of_order_source: bool,
 }
 
@@ -1940,6 +1942,8 @@ fn stitch_candidate_explicit_arguments(
                     call_span: site.site.0,
                     precision: cand.precision,
                     call_kind: cand.edge_kind,
+                    arg_idx: u32::try_from(i).expect("call argument index exceeds u32"),
+                    param_idx: u32::try_from(callee_param_idx).expect("callee parameter index exceeds u32"),
                     allow_out_of_order_source: false,
                 });
             }
@@ -2788,6 +2792,8 @@ fn push_receiver_field_arg_site(
         call_span,
         precision,
         call_kind,
+        arg_idx: u32::MAX,
+        param_idx: u32::MAX,
         allow_out_of_order_source: false,
     });
 }
@@ -2835,6 +2841,8 @@ fn push_nested_receiver_field_arg_sites(
             call_span,
             precision,
             call_kind,
+            arg_idx: u32::MAX,
+            param_idx: u32::MAX,
             allow_out_of_order_source: false,
         });
     }
@@ -2888,6 +2896,8 @@ fn push_bare_implicit_member_field_arg_sites(
                 call_span,
                 precision,
                 call_kind,
+                arg_idx: u32::MAX,
+                param_idx: u32::MAX,
                 allow_out_of_order_source: true,
             });
         }
@@ -3036,6 +3046,8 @@ fn flush_symbolic_site_queues(
             precision: site.precision,
             call_kind: site.call_kind,
             kind: SymbolicFieldTransformKind::Argument,
+            arg_idx: site.arg_idx,
+            param_idx: site.param_idx,
             allow_out_of_order_source: site.allow_out_of_order_source,
         });
     }
@@ -3056,6 +3068,8 @@ fn flush_symbolic_site_queues(
             precision: site.precision,
             call_kind: site.call_kind,
             kind: SymbolicFieldTransformKind::Return,
+            arg_idx: u32::MAX,
+            param_idx: u32::MAX,
             allow_out_of_order_source: true,
         });
     }
@@ -3077,6 +3091,8 @@ fn flush_symbolic_site_queues(
             precision: site.precision,
             call_kind: site.call_kind,
             kind: SymbolicFieldTransformKind::ScalarReturn,
+            arg_idx: u32::MAX,
+            param_idx: u32::MAX,
             allow_out_of_order_source: true,
         });
     }
@@ -3097,6 +3113,8 @@ fn flush_symbolic_site_queues(
             precision: site.precision,
             call_kind: site.call_kind,
             kind: SymbolicFieldTransformKind::ConstructorReturn,
+            arg_idx: u32::MAX,
+            param_idx: u32::MAX,
             allow_out_of_order_source: true,
         });
     }
@@ -3491,69 +3509,91 @@ fn extend_symbolic_field_graph(
             if !field_transform_is_symbolic(&source_key, transform, symbolic_funcs) {
                 continue;
             }
-            let (target, exact_field, call_span, write_span, precision, call_kind, kind, allow) =
-                match transform {
-                    FieldWriteTransform::Argument(site) => (
-                        graph.intern_base(site.callee_seg, site.callee, &site.param_name),
-                        NO_SYMBOLIC_STRING,
-                        site.call_span,
-                        site.call_span,
-                        site.precision,
-                        site.call_kind,
-                        SymbolicFieldTransformKind::Argument,
-                        site.allow_out_of_order_source,
-                    ),
-                    FieldWriteTransform::Return(site) => (
-                        graph.intern_base(site.caller_seg, site.caller, &site.target_base),
-                        NO_SYMBOLIC_STRING,
-                        site.call_span,
-                        site.write_span,
-                        site.precision,
-                        site.call_kind,
-                        SymbolicFieldTransformKind::Return,
-                        true,
-                    ),
-                    FieldWriteTransform::ScalarReturn(site) => (
-                        graph.intern_base(site.caller_seg, site.caller, &site.target_base),
-                        graph.intern_string(&site.source_field),
-                        site.call_span,
-                        site.write_span,
-                        site.precision,
-                        site.call_kind,
-                        SymbolicFieldTransformKind::ScalarReturn,
-                        true,
-                    ),
-                    FieldWriteTransform::ConstructorReturn(site) => (
-                        graph.intern_base(site.caller_seg, site.caller, &site.target_base),
-                        NO_SYMBOLIC_STRING,
-                        site.call_span,
-                        site.write_span,
-                        site.precision,
-                        site.call_kind,
-                        SymbolicFieldTransformKind::ConstructorReturn,
-                        true,
-                    ),
-                    FieldWriteTransform::ReceiverMutation(site) => (
-                        graph.intern_base(site.caller_seg, site.caller, &site.target_base),
-                        NO_SYMBOLIC_STRING,
-                        site.call_span,
-                        site.call_span,
-                        site.precision,
-                        site.call_kind,
-                        SymbolicFieldTransformKind::ReceiverMutation,
-                        true,
-                    ),
-                    FieldWriteTransform::Copy(site) => (
-                        graph.intern_base(site.seg_id, site.func, &site.target_base),
-                        NO_SYMBOLIC_STRING,
-                        site.via_span,
-                        site.write_span,
-                        site.precision,
-                        site.call_kind,
-                        SymbolicFieldTransformKind::Copy,
-                        false,
-                    ),
-                };
+            let (
+                target,
+                exact_field,
+                call_span,
+                write_span,
+                precision,
+                call_kind,
+                kind,
+                arg_idx,
+                param_idx,
+                allow,
+            ) = match transform {
+                FieldWriteTransform::Argument(site) => (
+                    graph.intern_base(site.callee_seg, site.callee, &site.param_name),
+                    NO_SYMBOLIC_STRING,
+                    site.call_span,
+                    site.call_span,
+                    site.precision,
+                    site.call_kind,
+                    SymbolicFieldTransformKind::Argument,
+                    site.arg_idx,
+                    site.param_idx,
+                    site.allow_out_of_order_source,
+                ),
+                FieldWriteTransform::Return(site) => (
+                    graph.intern_base(site.caller_seg, site.caller, &site.target_base),
+                    NO_SYMBOLIC_STRING,
+                    site.call_span,
+                    site.write_span,
+                    site.precision,
+                    site.call_kind,
+                    SymbolicFieldTransformKind::Return,
+                    u32::MAX,
+                    u32::MAX,
+                    true,
+                ),
+                FieldWriteTransform::ScalarReturn(site) => (
+                    graph.intern_base(site.caller_seg, site.caller, &site.target_base),
+                    graph.intern_string(&site.source_field),
+                    site.call_span,
+                    site.write_span,
+                    site.precision,
+                    site.call_kind,
+                    SymbolicFieldTransformKind::ScalarReturn,
+                    u32::MAX,
+                    u32::MAX,
+                    true,
+                ),
+                FieldWriteTransform::ConstructorReturn(site) => (
+                    graph.intern_base(site.caller_seg, site.caller, &site.target_base),
+                    NO_SYMBOLIC_STRING,
+                    site.call_span,
+                    site.write_span,
+                    site.precision,
+                    site.call_kind,
+                    SymbolicFieldTransformKind::ConstructorReturn,
+                    u32::MAX,
+                    u32::MAX,
+                    true,
+                ),
+                FieldWriteTransform::ReceiverMutation(site) => (
+                    graph.intern_base(site.caller_seg, site.caller, &site.target_base),
+                    NO_SYMBOLIC_STRING,
+                    site.call_span,
+                    site.call_span,
+                    site.precision,
+                    site.call_kind,
+                    SymbolicFieldTransformKind::ReceiverMutation,
+                    u32::MAX,
+                    u32::MAX,
+                    true,
+                ),
+                FieldWriteTransform::Copy(site) => (
+                    graph.intern_base(site.seg_id, site.func, &site.target_base),
+                    NO_SYMBOLIC_STRING,
+                    site.via_span,
+                    site.write_span,
+                    site.precision,
+                    site.call_kind,
+                    SymbolicFieldTransformKind::Copy,
+                    u32::MAX,
+                    u32::MAX,
+                    false,
+                ),
+            };
             graph.push_transform(SymbolicFieldTransform {
                 source,
                 target,
@@ -3563,6 +3603,8 @@ fn extend_symbolic_field_graph(
                 precision,
                 call_kind,
                 kind,
+                arg_idx,
+                param_idx,
                 allow_out_of_order_source: allow,
             });
         }

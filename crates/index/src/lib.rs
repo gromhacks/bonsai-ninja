@@ -7,8 +7,8 @@
 //! retrievable when an adapter needs to go back to the per-file data.
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{short_qualified_tail, FileId, SymbolId};
-use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FlowEvent, Ref, Visibility};
+use bonsai_common::{short_qualified_tail, FileId, Span, SymbolId};
+use bonsai_lang_api::{CallKind, Decl, DeclIndex, DeclKind, FlowEvent, Ref, Visibility};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -20,6 +20,46 @@ struct DeclDedupKey {
     span: bonsai_common::Span,
     name_span: bonsai_common::Span,
     body_span: Option<bonsai_common::Span>,
+}
+
+/// Compact syntax facts retained across the streamed IDG phase boundary.
+///
+/// The full [`FlowEvent`] tree remains the authoritative per-file compiler
+/// IR. These facts are a lossless projection of the small subset needed after
+/// a file's transfer functions have been lowered. Keeping them separately
+/// avoids retaining every workspace body merely to stitch calls and receiver
+/// flows later.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FunctionLinkageFacts {
+    pub calls: Vec<CallLinkageFact>,
+    pub call_result_assignments: Vec<CallResultLinkageFact>,
+    pub returned_projection_tails: Vec<Box<str>>,
+}
+
+impl FunctionLinkageFacts {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.calls.is_empty()
+            && self.call_result_assignments.is_empty()
+            && self.returned_projection_tails.is_empty()
+    }
+}
+
+/// One grammar-derived call site needed by interprocedural stitching.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallLinkageFact {
+    pub span: Span,
+    pub name: Box<str>,
+    pub receiver: Option<Box<str>>,
+    pub call_kind: CallKind,
+    pub arg_spans: Box<[Span]>,
+}
+
+/// Arity evidence for an assignment whose right-hand side is a direct call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CallResultLinkageFact {
+    pub span: Span,
+    pub has_explicit_args: bool,
 }
 
 impl From<&Decl> for DeclDedupKey {
@@ -64,6 +104,16 @@ pub struct GlobalIndex {
     /// from `entries`.
     #[serde(skip)]
     slots_by_file: AHashMap<FileId, Vec<usize>>,
+    /// Finalized workspace ancestry shared by every streamed file rebind.
+    /// Recomputing this declaration-wide table per file would turn receiver
+    /// enrichment into quadratic compiler work.
+    #[serde(skip)]
+    finalized_bases_by_type: AHashMap<String, Vec<String>>,
+    /// Exact, flattened syntax facts required after streamed body lowering.
+    /// This is an in-memory phase artifact, never a persisted substitute for
+    /// adapter IR.
+    #[serde(skip)]
+    linkage_by_symbol: AHashMap<SymbolId, FunctionLinkageFacts>,
 }
 
 impl GlobalIndex {
@@ -91,6 +141,112 @@ impl GlobalIndex {
     /// while building the global graph.
     pub fn insert_preprocessed(&mut self, mut index: DeclIndex) {
         dedup_decl_index_defs(&mut index);
+        self.insert_deduped(index, Vec::new());
+    }
+
+    /// Insert only the workspace-wide declaration/type headers needed by
+    /// cross-file resolution.
+    ///
+    /// Function bodies and browse-only facts remain file-local compiler IR;
+    /// retaining them for every source file makes peak memory proportional to
+    /// total project body size. A later phase can re-lower one exact file and
+    /// bind it to these stable symbols with
+    /// [`Self::remap_file_to_existing_symbols`]. Aggregate layouts stay in the
+    /// header because initializer lowering resolves those types across files.
+    pub fn insert_header_preprocessed(&mut self, mut index: DeclIndex) {
+        dedup_decl_index_defs(&mut index);
+        for decl in &mut index.defs {
+            decl.flow_events.clear();
+        }
+        index.refs.clear();
+        index.assignment_values.clear();
+        index.call_receivers.clear();
+        index.runtime_type_narrowings.clear();
+        index.branch_conditions.clear();
+        index.strings.clear();
+        index.comments.clear();
+        index.compact_storage();
+        self.insert_deduped(index, Vec::new());
+    }
+
+    /// Insert declaration headers plus compact syntax-derived linkage facts
+    /// needed while stitching a streamed IDG.
+    ///
+    /// Transfer still consumes the complete freshly lowered file body. The
+    /// retained facts are only calls, call-result assignment arity, and
+    /// returned projection tails: the exact information used for call-site
+    /// ownership, callback argument spans, receiver dispatch, and accessor
+    /// returns after per-function transfer outputs exist. No [`FlowEvent`]
+    /// body survives this compiler phase boundary.
+    pub fn insert_linkage_header_preprocessed(&mut self, mut index: DeclIndex) {
+        dedup_decl_index_defs(&mut index);
+        let linkage = index
+            .defs
+            .iter()
+            .filter_map(|decl| {
+                let facts = function_linkage_facts(&decl.flow_events);
+                (!facts.is_empty()).then_some((decl.symbol, facts))
+            })
+            .collect();
+        for decl in &mut index.defs {
+            decl.flow_events.clear();
+        }
+        index.refs.clear();
+        index.assignment_values.clear();
+        index.call_receivers.clear();
+        index.runtime_type_narrowings.clear();
+        index.branch_conditions.clear();
+        index.strings.clear();
+        index.comments.clear();
+        index.compact_storage();
+        self.insert_deduped(index, linkage);
+    }
+
+    /// Rebind a freshly lowered, preprocessed file index to this index's
+    /// existing workspace-global symbols.
+    ///
+    /// The declaration identity sequence must match the header previously
+    /// inserted for the same immutable VFS snapshot. A mismatch is a compiler
+    /// invariant violation, so this method fails loudly rather than returning
+    /// a partially remapped body and silently losing edges.
+    #[must_use]
+    pub fn remap_file_to_existing_symbols(&self, mut index: DeclIndex) -> DeclIndex {
+        dedup_decl_index_defs(&mut index);
+        let file = index.file;
+        let headers = self
+            .by_file
+            .get(&file)
+            .unwrap_or_else(|| panic!("missing global declaration header for file {}", file.raw()));
+        assert_eq!(
+            index.defs.len(),
+            headers.defs.len(),
+            "declaration/header count changed while compiling file {}",
+            file.raw()
+        );
+
+        let mut local_to_global: AHashMap<SymbolId, SymbolId> = AHashMap::new();
+        for (body, header) in index.defs.iter().zip(&headers.defs) {
+            assert_eq!(
+                DeclDedupKey::from(body),
+                DeclDedupKey::from(header),
+                "declaration identity changed while compiling file {}",
+                file.raw()
+            );
+            local_to_global.insert(body.symbol, header.symbol);
+        }
+        remap_decl_index_symbols(&mut index, &local_to_global);
+
+        // Header finalization knows every workspace base declaration. Apply
+        // the same cross-file receiver ancestry to the streamed body that a
+        // fully resident GlobalIndex would have published.
+        for decl in &mut index.defs {
+            enrich_receiver_types_in_events(&mut decl.flow_events, &self.finalized_bases_by_type);
+        }
+        index.compact_storage();
+        index
+    }
+
+    fn insert_deduped(&mut self, mut index: DeclIndex, linkage: Vec<(SymbolId, FunctionLinkageFacts)>) {
         let file = index.file;
         if self.by_file.contains_key(&file) {
             self.remove_file(file);
@@ -113,12 +269,15 @@ impl GlobalIndex {
             slot_positions.push(self.entries.len());
             self.entries.push(Some((file, local_idx)));
         }
+        for (local_symbol, facts) in linkage {
+            let global_symbol = *local_to_global
+                .get(&local_symbol)
+                .expect("linkage declaration not remapped");
+            self.linkage_by_symbol.insert(global_symbol, facts);
+        }
         // Rewrite the index in place to use global ids.
-        for decl in &mut index.defs {
-            decl.symbol = *local_to_global.get(&decl.symbol).expect("decl not remapped");
-            if let Some(parent) = decl.parent {
-                decl.parent = local_to_global.get(&parent).copied();
-            }
+        remap_decl_index_symbols(&mut index, &local_to_global);
+        for decl in &index.defs {
             // Index by BOTH bare `name` and `qualified_name` (when
             // present and distinct). Bare-name lookup remains the
             // legacy path for callers that don't yet build a
@@ -133,11 +292,6 @@ impl GlobalIndex {
                 if qname != &decl.name {
                     self.by_name.entry(qname.clone()).or_default().push(decl.symbol);
                 }
-            }
-        }
-        for reference in &mut index.refs {
-            if let Some(resolved) = reference.resolved {
-                reference.resolved = local_to_global.get(&resolved).copied();
             }
         }
         for (idx, reference) in index.refs.iter().enumerate() {
@@ -157,6 +311,7 @@ impl GlobalIndex {
     /// receiver without falling back to receiver-name heuristics.
     pub fn finalize_semantic_facts(&mut self) {
         let bases_by_type = self.bases_by_type_name();
+        self.finalized_bases_by_type.clone_from(&bases_by_type);
         for index in self.by_file.values_mut() {
             for decl in &mut index.defs {
                 enrich_receiver_types_in_events(&mut decl.flow_events, &bases_by_type);
@@ -174,6 +329,7 @@ impl GlobalIndex {
     pub fn remove_file(&mut self, file: FileId) {
         if let Some(prev) = self.by_file.remove(&file) {
             for decl in &prev.defs {
+                self.linkage_by_symbol.remove(&decl.symbol);
                 if let Some(symbols) = self.by_name.get_mut(&decl.name) {
                     symbols.retain(|sym| *sym != decl.symbol);
                 }
@@ -260,6 +416,12 @@ impl GlobalIndex {
     pub fn decl_of(&self, symbol: SymbolId) -> Option<&Decl> {
         let (file, local_idx) = (*self.entries.get(symbol.raw() as usize)?)?;
         self.by_file.get(&file).and_then(|idx| idx.defs.get(local_idx))
+    }
+
+    /// Compact syntax facts retained for post-transfer IDG stitching.
+    #[must_use]
+    pub fn linkage_facts(&self, symbol: SymbolId) -> Option<&FunctionLinkageFacts> {
+        self.linkage_by_symbol.get(&symbol)
     }
 
     /// Every reference site that resolves to `symbol`, paired with
@@ -364,6 +526,96 @@ fn dedup_decl_index_defs(index: &mut DeclIndex) {
         }
     }
     index.defs = deduped;
+}
+
+fn remap_decl_index_symbols(index: &mut DeclIndex, local_to_global: &AHashMap<SymbolId, SymbolId>) {
+    for decl in &mut index.defs {
+        decl.symbol = *local_to_global.get(&decl.symbol).expect("decl not remapped");
+        if let Some(parent) = decl.parent {
+            decl.parent = local_to_global.get(&parent).copied();
+        }
+    }
+    for reference in &mut index.refs {
+        if let Some(resolved) = reference.resolved {
+            reference.resolved = local_to_global.get(&resolved).copied();
+        }
+    }
+}
+
+fn function_linkage_facts(events: &[FlowEvent]) -> FunctionLinkageFacts {
+    let mut facts = FunctionLinkageFacts::default();
+    collect_function_linkage_facts(events, &mut facts);
+    facts.calls.shrink_to_fit();
+    facts.call_result_assignments.shrink_to_fit();
+    facts.returned_projection_tails.shrink_to_fit();
+    facts
+}
+
+fn collect_function_linkage_facts(events: &[FlowEvent], facts: &mut FunctionLinkageFacts) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                call_kind,
+                args,
+                ..
+            } => facts.calls.push(CallLinkageFact {
+                span: *span,
+                name: name.clone().into_boxed_str(),
+                receiver: receiver.as_deref().map(Box::<str>::from),
+                call_kind: *call_kind,
+                arg_spans: args
+                    .iter()
+                    .map(|arg| arg.span)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            }),
+            FlowEvent::Assign {
+                span,
+                source_call,
+                source_call_args,
+                ..
+            } if source_call.is_some() => facts.call_result_assignments.push(CallResultLinkageFact {
+                span: *span,
+                has_explicit_args: !source_call_args.is_empty(),
+            }),
+            FlowEvent::Return { value_flow, .. } => {
+                if let Some(tail) = value_flow
+                    .projection
+                    .as_ref()
+                    .and_then(|projection| projection.path.last())
+                {
+                    facts
+                        .returned_projection_tails
+                        .push(tail.clone().into_boxed_str());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_function_linkage_facts(then_events, facts);
+                collect_function_linkage_facts(else_events, facts);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_function_linkage_facts(body, facts);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_function_linkage_facts(body, facts);
+                collect_function_linkage_facts(catch_events, facts);
+                collect_function_linkage_facts(finally_events, facts);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn merge_duplicate_decl(into: &mut Decl, mut duplicate: Decl) {

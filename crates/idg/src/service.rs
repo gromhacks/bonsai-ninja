@@ -196,11 +196,6 @@ struct SymbolicRuntimeIndex {
     cross_call_slots: Vec<(u32, u32)>,
 }
 
-#[derive(Clone, Debug)]
-struct SymbolicCallShape {
-    arg_places: Vec<Option<String>>,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct ContextBoundaryKey {
     caller: FuncId,
@@ -584,113 +579,11 @@ fn symbolic_cross_call_relation(kind: SymbolicFieldTransformKind) -> Option<Cros
     }
 }
 
-fn storage_is_same_or_descendant(storage: &str, base: &str) -> bool {
-    let storage = storage.trim();
-    let base = base.trim();
-    storage == base
-        || (!base.is_empty()
-            && storage
-                .strip_prefix(base)
-                .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with('[')))
-}
-
-fn symbolic_call_shape(events: &[bonsai_lang_api::FlowEvent], span: Span) -> Option<SymbolicCallShape> {
-    use bonsai_lang_api::FlowEvent;
-    for event in events {
-        match event {
-            FlowEvent::Call {
-                span: call_span,
-                args,
-                ..
-            } if *call_span == span => {
-                return Some(SymbolicCallShape {
-                    arg_places: args.iter().map(|arg| arg.place.clone()).collect(),
-                });
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                if let Some(shape) =
-                    symbolic_call_shape(then_events, span).or_else(|| symbolic_call_shape(else_events, span))
-                {
-                    return Some(shape);
-                }
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if let Some(shape) = symbolic_call_shape(body, span) {
-                    return Some(shape);
-                }
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                if let Some(shape) = symbolic_call_shape(body, span)
-                    .or_else(|| symbolic_call_shape(catch_events, span))
-                    .or_else(|| symbolic_call_shape(finally_events, span))
-                {
-                    return Some(shape);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn symbolic_cross_call_slots(
-    global: &bonsai_index::GlobalIndex,
-    graph: &crate::symbolic::SymbolicFieldGraph,
-    transform: &crate::symbolic::SymbolicFieldTransform,
-    call_shapes: &mut AHashMap<(FuncId, Span), Option<SymbolicCallShape>>,
-) -> (u32, u32) {
+fn symbolic_cross_call_slots(transform: &crate::symbolic::SymbolicFieldTransform) -> (u32, u32) {
     if transform.kind != SymbolicFieldTransformKind::Argument {
         return (u32::MAX, u32::MAX);
     }
-    let Some(source) = graph.bases().get(transform.source as usize) else {
-        return (u32::MAX, u32::MAX);
-    };
-    let Some(target) = graph.bases().get(transform.target as usize) else {
-        return (u32::MAX, u32::MAX);
-    };
-    let Some(source_storage) = graph.string(source.storage) else {
-        return (u32::MAX, u32::MAX);
-    };
-    let Some(target_storage) = graph.string(target.storage) else {
-        return (u32::MAX, u32::MAX);
-    };
-    let shape = call_shapes
-        .entry((source.func, transform.call_span))
-        .or_insert_with(|| {
-            global
-                .decl_of(bonsai_common::SymbolId::new(source.func.raw()))
-                .and_then(|decl| symbolic_call_shape(&decl.flow_events, transform.call_span))
-        })
-        .as_ref();
-    let arg_idx = shape
-        .and_then(|shape| {
-            shape.arg_places.iter().position(|place| {
-                place
-                    .as_deref()
-                    .is_some_and(|place| storage_is_same_or_descendant(source_storage, place))
-            })
-        })
-        .and_then(|idx| u32::try_from(idx).ok())
-        .unwrap_or(u32::MAX);
-    let param_idx = global
-        .decl_of(bonsai_common::SymbolId::new(target.func.raw()))
-        .and_then(|decl| {
-            decl.params
-                .iter()
-                .position(|param| storage_is_same_or_descendant(target_storage, param))
-        })
-        .and_then(|idx| u32::try_from(idx).ok())
-        .unwrap_or(u32::MAX);
-    (arg_idx, param_idx)
+    (transform.arg_idx, transform.param_idx)
 }
 
 /// Service handle for IDG queries. Wraps an [`IdgWorkspace`] and a
@@ -3013,11 +2906,10 @@ impl IdgQueryService {
     fn build_symbolic_runtime_index(&self, unified: &UnifiedAddressSpace) -> SymbolicRuntimeIndex {
         let symbolic = self.workspace.symbolic_field();
         let mut out = SymbolicRuntimeIndex::default();
-        let mut call_shapes = AHashMap::new();
         out.cross_call_slots = symbolic
             .transforms()
             .iter()
-            .map(|transform| symbolic_cross_call_slots(&self.global, symbolic, transform, &mut call_shapes))
+            .map(symbolic_cross_call_slots)
             .collect();
         for (segment_id, segment) in self.workspace.segments() {
             for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
@@ -3308,15 +3200,27 @@ impl IdgQueryService {
     /// call with an explicit receiver has no positional argument zero, so the
     /// cross-call carrier is the receiver sentinel.
     fn normalize_receiver_arg_index(&self, mut edge: CrossCallEdge) -> CrossCallEdge {
+        let caller_symbol = bonsai_common::SymbolId::new(edge.caller.raw());
         if edge.arg_idx == 0
             && matches!(
                 edge.relation,
                 CrossCallRelation::Argument | CrossCallRelation::Capture
             )
-            && self
-                .global
-                .decl_of(bonsai_common::SymbolId::new(edge.caller.raw()))
-                .is_some_and(|decl| call_event_is_argumentless_receiver(&decl.flow_events, edge.call_span))
+            && self.global.decl_of(caller_symbol).is_some_and(|decl| {
+                self.global.linkage_facts(caller_symbol).map_or_else(
+                    || call_event_is_argumentless_receiver(&decl.flow_events, edge.call_span),
+                    |facts| {
+                        facts.calls.iter().any(|call| {
+                            call.span == edge.call_span
+                                && call
+                                    .receiver
+                                    .as_deref()
+                                    .is_some_and(|receiver| !receiver.trim().is_empty())
+                                && call.arg_spans.is_empty()
+                        })
+                    },
+                )
+            })
         {
             edge.arg_idx = u32::MAX;
         }

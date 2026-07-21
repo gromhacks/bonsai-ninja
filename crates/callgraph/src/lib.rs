@@ -1017,12 +1017,24 @@ pub struct ResolvedCallGraph {
     /// without retaining or rebuilding every file's lowered declaration body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     nodes: Vec<CallGraphNode>,
+    /// Compiler-resolved file-local callable aliases (`let f = target;`).
+    /// IDG construction consumes this compact linkage result instead of
+    /// retaining every assignment event in every function body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    local_bindings: Vec<CallGraphLocalBinding>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CallGraphNode {
     func: FuncId,
     name: Box<str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct CallGraphLocalBinding {
+    caller: FuncId,
+    name: Box<str>,
+    target: FuncId,
 }
 
 #[derive(Clone, Debug)]
@@ -1036,6 +1048,14 @@ pub struct ResolvedCallGraphBuildContext {
     file_capabilities: AHashMap<FileId, LanguageCapabilities>,
     peer_class_index: Arc<PeerClassIndex>,
     constructor_index: Arc<ConstructorIndex>,
+}
+
+struct FileCallgraphInfo {
+    file: FileId,
+    aliases: AHashMap<String, String>,
+    alias_targets: AHashMap<String, AliasTarget>,
+    language: Option<&'static str>,
+    capabilities: LanguageCapabilities,
 }
 
 /// Compiler-facing callbacks used to derive per-file call-resolution facts.
@@ -1101,6 +1121,7 @@ impl ResolvedCallGraph {
         Self {
             cg,
             nodes: Vec::new(),
+            local_bindings: Vec::new(),
         }
     }
 
@@ -1188,6 +1209,47 @@ impl ResolvedCallGraph {
         C: Fn(FileId) -> LanguageCapabilities,
     {
         Self::build_with_file_semantics_scoped(global, file_semantics, None)
+    }
+
+    /// Build the exact resolved graph from a compact workspace declaration
+    /// header plus disposable per-file bodies.
+    ///
+    /// `body_for_file` must return the same normalized declaration sequence
+    /// whose headers were inserted into `global`; callers normally use
+    /// `AnalyzerDb::decl_index_remapped_to_headers`. Each body is dropped as
+    /// soon as that file's outgoing edges have been resolved, so graph
+    /// semantics are unchanged while resident memory is independent of total
+    /// source body size.
+    pub fn build_with_file_semantics_streaming<F, T, P, G, C, D>(
+        global: &GlobalIndex,
+        file_semantics: CallGraphFileSemantics<F, T, P, G, C>,
+        body_for_file: D,
+    ) -> Self
+    where
+        F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
+        P: Fn(FileId) -> Option<String>,
+        G: Fn(FileId) -> Option<&'static str>,
+        C: Fn(FileId) -> LanguageCapabilities,
+        D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+    {
+        let CallGraphFileSemantics {
+            aliases: aliases_for_file,
+            alias_targets: alias_targets_for_file,
+            path: path_for_file,
+            language: language_for_file,
+            capabilities: capabilities_for_file,
+        } = file_semantics;
+        let context = Self::build_context(global, path_for_file, language_for_file, capabilities_for_file);
+        let files = global.all_files().collect::<Vec<_>>();
+        Self::build_with_file_semantics_for_files_streaming_with_context(
+            global,
+            aliases_for_file,
+            alias_targets_for_file,
+            &files,
+            &context,
+            body_for_file,
+        )
     }
 
     /// Build the resolved call graph for a subset of caller files.
@@ -1281,13 +1343,6 @@ impl ResolvedCallGraph {
         let mut files = included_files.to_vec();
         files.sort_by_key(|file| file.raw());
         files.dedup();
-        struct FileCallgraphInfo {
-            file: FileId,
-            aliases: AHashMap<String, String>,
-            alias_targets: AHashMap<String, AliasTarget>,
-            language: Option<&'static str>,
-            capabilities: LanguageCapabilities,
-        }
         let file_infos = files
             .into_iter()
             .map(|file| FileCallgraphInfo {
@@ -1303,84 +1358,63 @@ impl ResolvedCallGraph {
             })
             .collect::<Vec<_>>();
         let resolve_file = |info: &FileCallgraphInfo| {
-            let path_lookup = |file| context.file_paths.get(&file).cloned();
-            let language_lookup = |file| context.file_languages.get(&file).copied().flatten();
-            let mut method_candidate_cache =
-                MethodCandidateCache::with_peer_class_index(context.peer_class_index.clone());
-            let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
-            let mut callable_target_cache = CallableTargetCache::default();
-            let mut local_cg = CallGraph::new();
-            for decl in global.decls_in(info.file) {
-                if !matches!(
-                    decl.kind,
-                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                ) {
-                    continue;
-                }
-                let from = FuncId::new(decl.symbol.raw());
-                let alias_targets = alias_targets_for_decl(&info.alias_targets, decl);
-                let local_bindings = collect_local_callable_bindings_with_alias_index(
-                    &decl.flow_events,
-                    global,
-                    decl,
-                    &alias_targets,
-                    &context.alias_index,
-                    Some(&context.callable_index),
-                    info.capabilities.module_path_syntax,
-                );
-                let resolution = CallResolutionContext {
-                    from,
-                    caller_decl: decl,
-                    global,
-                    aliases: &info.aliases,
-                    alias_targets: &alias_targets,
-                    local_bindings: &local_bindings,
-                    path_for_file: &path_lookup,
-                    file_path_parts: &context.file_path_parts,
-                    caller_language: info.language,
-                    caller_capabilities: info.capabilities,
-                    language_for_file: &language_lookup,
-                    alias_index: &context.alias_index,
-                    build_targets: &context.build_targets,
-                    constructor_index: &context.constructor_index,
-                };
-                add_resolved_call_edges(
-                    &decl.flow_events,
-                    &resolution,
-                    &mut CallGraphBuildState {
-                        method_candidate_cache: &mut method_candidate_cache,
-                        workspace_module_cache: &mut workspace_module_cache,
-                        callable_target_cache: &mut callable_target_cache,
-                        graph: &mut local_cg,
-                    },
-                );
-            }
-            local_cg.edges
+            resolve_file_call_edges(global, context, info, global.decls_in(info.file))
         };
-        let workers = callgraph_resolver_worker_count();
-        let edges = if rayon::current_thread_index().is_some() {
-            // A cold semantic service may be requested by several workers in
-            // an existing Rayon batch. Building and synchronously joining a
-            // nested pool there can form a lock cycle with the service's
-            // single-flight guard. Resolve serially on that worker instead;
-            // the fact set is identical and nested concurrency remains
-            // bounded by the caller's compiler scheduler.
-            file_infos.iter().flat_map(&resolve_file).collect()
-        } else {
-            match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
-                Ok(pool) => pool.install(|| {
-                    use rayon::prelude::*;
-                    file_infos
-                        .par_iter()
-                        .flat_map_iter(&resolve_file)
-                        .collect::<Vec<_>>()
-                }),
-                Err(_) => file_infos.iter().flat_map(resolve_file).collect(),
-            }
-        };
-        let cg = CallGraph::from_unique_edges(edges);
+        let resolution = collect_resolved_file_edges(&file_infos, resolve_file);
+        let cg = CallGraph::from_unique_edges(resolution.edges);
         let nodes = callgraph_nodes(global, &cg);
-        Self { cg, nodes }
+        Self {
+            cg,
+            nodes,
+            local_bindings: resolution.local_bindings,
+        }
+    }
+
+    /// Resolve a selected set of caller files from disposable exact bodies
+    /// while sharing one workspace-wide header resolution context.
+    pub fn build_with_file_semantics_for_files_streaming_with_context<F, T, D>(
+        global: &GlobalIndex,
+        mut aliases_for_file: F,
+        mut alias_targets_for_file: T,
+        included_files: &[FileId],
+        context: &ResolvedCallGraphBuildContext,
+        body_for_file: D,
+    ) -> Self
+    where
+        F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
+        D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+    {
+        let mut files = included_files.to_vec();
+        files.sort_by_key(|file| file.raw());
+        files.dedup();
+        let file_infos = files
+            .into_iter()
+            .map(|file| FileCallgraphInfo {
+                file,
+                aliases: aliases_for_file(file),
+                alias_targets: alias_targets_for_file(file),
+                language: context.file_languages.get(&file).copied().flatten(),
+                capabilities: context
+                    .file_capabilities
+                    .get(&file)
+                    .copied()
+                    .unwrap_or_else(LanguageCapabilities::unsupported),
+            })
+            .collect::<Vec<_>>();
+        let resolve_file = |info: &FileCallgraphInfo| {
+            body_for_file(info.file).map_or_else(FileCallgraphResolution::default, |index| {
+                resolve_file_call_edges(global, context, info, &index.defs)
+            })
+        };
+        let resolution = collect_resolved_file_edges(&file_infos, resolve_file);
+        let cg = CallGraph::from_unique_edges(resolution.edges);
+        let nodes = callgraph_nodes(global, &cg);
+        Self {
+            cg,
+            nodes,
+            local_bindings: resolution.local_bindings,
+        }
     }
 
     fn build_with_file_semantics_scoped<F, T, P, G, C>(
@@ -1444,6 +1478,137 @@ impl ResolvedCallGraph {
             .ok()
             .map(|index| self.nodes[index].name.as_ref())
     }
+
+    /// Iterate compiler-resolved local callable aliases in deterministic
+    /// `(caller, name, target)` order.
+    pub fn local_callable_bindings(&self) -> impl Iterator<Item = (FuncId, &str, FuncId)> {
+        self.local_bindings
+            .iter()
+            .map(|binding| (binding.caller, binding.name.as_ref(), binding.target))
+    }
+}
+
+fn resolve_file_call_edges(
+    global: &GlobalIndex,
+    context: &ResolvedCallGraphBuildContext,
+    info: &FileCallgraphInfo,
+    decls: &[Decl],
+) -> FileCallgraphResolution {
+    let path_lookup = |file| context.file_paths.get(&file).cloned();
+    let language_lookup = |file| context.file_languages.get(&file).copied().flatten();
+    let mut method_candidate_cache =
+        MethodCandidateCache::with_peer_class_index(context.peer_class_index.clone());
+    let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
+    let mut callable_target_cache = CallableTargetCache::default();
+    let mut local_cg = CallGraph::new();
+    let mut resolved_bindings = Vec::new();
+    for decl in decls {
+        if !matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) {
+            continue;
+        }
+        let from = FuncId::new(decl.symbol.raw());
+        let alias_targets = alias_targets_for_decl(&info.alias_targets, decl);
+        let local_bindings = collect_local_callable_bindings_with_alias_index(
+            &decl.flow_events,
+            global,
+            decl,
+            &alias_targets,
+            &context.alias_index,
+            Some(&context.callable_index),
+            info.capabilities.module_path_syntax,
+        );
+        resolved_bindings.extend(
+            local_bindings
+                .iter()
+                .map(|(name, &target)| CallGraphLocalBinding {
+                    caller: from,
+                    name: name.clone().into_boxed_str(),
+                    target,
+                }),
+        );
+        let resolution = CallResolutionContext {
+            from,
+            caller_decl: decl,
+            global,
+            aliases: &info.aliases,
+            alias_targets: &alias_targets,
+            local_bindings: &local_bindings,
+            path_for_file: &path_lookup,
+            file_path_parts: &context.file_path_parts,
+            caller_language: info.language,
+            caller_capabilities: info.capabilities,
+            language_for_file: &language_lookup,
+            alias_index: &context.alias_index,
+            build_targets: &context.build_targets,
+            constructor_index: &context.constructor_index,
+        };
+        add_resolved_call_edges(
+            &decl.flow_events,
+            &resolution,
+            &mut CallGraphBuildState {
+                method_candidate_cache: &mut method_candidate_cache,
+                workspace_module_cache: &mut workspace_module_cache,
+                callable_target_cache: &mut callable_target_cache,
+                graph: &mut local_cg,
+            },
+        );
+    }
+    FileCallgraphResolution {
+        edges: local_cg.edges,
+        local_bindings: resolved_bindings,
+    }
+}
+
+#[derive(Default)]
+struct FileCallgraphResolution {
+    edges: Vec<CallEdge>,
+    local_bindings: Vec<CallGraphLocalBinding>,
+}
+
+fn collect_resolved_file_edges<R>(
+    file_infos: &[FileCallgraphInfo],
+    resolve_file: R,
+) -> FileCallgraphResolution
+where
+    R: Fn(&FileCallgraphInfo) -> FileCallgraphResolution + Sync,
+{
+    let workers = callgraph_resolver_worker_count();
+    let file_results = if rayon::current_thread_index().is_some() {
+        // A cold semantic service may be requested by several workers in an
+        // existing Rayon batch. Building and synchronously joining a nested
+        // pool there can form a lock cycle with the service's single-flight
+        // guard. Resolve serially on that worker instead; the fact set is
+        // identical and nested concurrency remains bounded by the caller's
+        // compiler scheduler.
+        file_infos.iter().map(&resolve_file).collect()
+    } else {
+        match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
+            Ok(pool) => pool.install(|| {
+                use rayon::prelude::*;
+                file_infos.par_iter().map(&resolve_file).collect::<Vec<_>>()
+            }),
+            Err(_) => file_infos.iter().map(resolve_file).collect(),
+        }
+    };
+    let edge_count = file_results.iter().map(|result| result.edges.len()).sum();
+    let binding_count = file_results
+        .iter()
+        .map(|result| result.local_bindings.len())
+        .sum();
+    let mut out = FileCallgraphResolution {
+        edges: Vec::with_capacity(edge_count),
+        local_bindings: Vec::with_capacity(binding_count),
+    };
+    for result in file_results {
+        out.edges.extend(result.edges);
+        out.local_bindings.extend(result.local_bindings);
+    }
+    out.local_bindings.sort();
+    out.local_bindings.dedup();
+    out
 }
 
 fn callgraph_nodes(global: &GlobalIndex, graph: &CallGraph) -> Vec<CallGraphNode> {

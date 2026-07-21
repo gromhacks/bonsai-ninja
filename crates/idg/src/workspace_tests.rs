@@ -311,6 +311,8 @@ fn save_load_round_trip_preserves_chunked_cross_file_and_field_flow() {
             precision: Precision::Exact,
             call_kind: CallEdgeKind::Direct,
             kind: SymbolicFieldTransformKind::Argument,
+            arg_idx: 0,
+            param_idx: 0,
             allow_out_of_order_source: false,
         });
     }

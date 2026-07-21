@@ -633,6 +633,81 @@ impl AnalyzerDb {
         self.inner.cache.write().global_index = None;
     }
 
+    /// Build the compact workspace declaration header table used by
+    /// compiler-scale semantic passes.
+    ///
+    /// The returned index owns stable global symbols and cross-file
+    /// declaration/type metadata, but no function flow bodies or browse-only
+    /// facts. Callgraph and IDG builders re-lower exact file bodies through
+    /// [`Self::decl_index_remapped_to_headers`] and release them at the next
+    /// file/segment boundary.
+    #[must_use]
+    pub fn build_global_header_index(&self) -> Arc<GlobalIndex> {
+        self.build_streaming_global_index(GlobalIndex::insert_header_preprocessed)
+    }
+
+    /// Build declaration headers plus compact AST-derived linkage facts used
+    /// by streamed IDG stitching. Complete transfer bodies and control trees
+    /// are still lowered one file at a time and never accumulated here.
+    #[must_use]
+    pub fn build_global_linkage_index(&self) -> Arc<GlobalIndex> {
+        self.build_streaming_global_index(GlobalIndex::insert_linkage_header_preprocessed)
+    }
+
+    fn build_streaming_global_index(&self, insert: fn(&mut GlobalIndex, DeclIndex)) -> Arc<GlobalIndex> {
+        let files = self.inner.vfs.all_files();
+        let mut global = GlobalIndex::new();
+        let workers = global_index_worker_count();
+        if workers <= 1 || files.len() <= 1 {
+            for file in files {
+                if let Some(index) = self.decl_index_uncached(file) {
+                    insert(&mut global, index);
+                }
+            }
+        } else {
+            let chunk_size = (workers * 8).max(16);
+            match rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .stack_size(global_index_worker_stack_bytes())
+                .build()
+            {
+                Ok(pool) => {
+                    for chunk in files.chunks(chunk_size) {
+                        let indexes = pool.install(|| {
+                            use rayon::prelude::*;
+                            chunk
+                                .par_iter()
+                                .map(|&file| self.decl_index_uncached(file))
+                                .collect::<Vec<_>>()
+                        });
+                        for index in indexes.into_iter().flatten() {
+                            insert(&mut global, index);
+                        }
+                    }
+                }
+                Err(_) => {
+                    for file in files {
+                        if let Some(index) = self.decl_index_uncached(file) {
+                            insert(&mut global, index);
+                        }
+                    }
+                }
+            }
+        }
+        global.finalize_semantic_facts();
+        Arc::new(global)
+    }
+
+    /// Re-lower one file and bind its local symbols to an immutable global
+    /// header index. Returns `None` only when no language adapter owns the
+    /// file; declaration drift inside one VFS snapshot is a hard invariant
+    /// failure enforced by [`GlobalIndex::remap_file_to_existing_symbols`].
+    #[must_use]
+    pub fn decl_index_remapped_to_headers(&self, headers: &GlobalIndex, file: FileId) -> Option<DeclIndex> {
+        self.decl_index_uncached(file)
+            .map(|index| headers.remap_file_to_existing_symbols(index))
+    }
+
     fn build_global_index_uncached(&self) -> Arc<GlobalIndex> {
         let files = self.inner.vfs.all_files();
         let consume_decl_index_cache = should_consume_decl_index_cache_for_global();

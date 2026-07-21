@@ -203,15 +203,9 @@ fn nested_full_expression_edge_indexes_only_the_resolved_callee_event() {
     let graph = resolved_graph([(caller_id, field_id, outer_span)]);
     let by_site = call_edges_by_site_for_funcs(&graph, &idx, None);
 
-    assert!(by_site.contains_key(&CallSiteEdgeKey {
-        caller: caller_id,
-        site: inner_span,
-    }));
+    assert!(by_site.edges(caller_id, inner_span).next().is_some());
     assert!(
-        !by_site.contains_key(&CallSiteEdgeKey {
-            caller: caller_id,
-            site: outer_span,
-        }),
+        by_site.edges(caller_id, outer_span).next().is_none(),
         "a resolved inner edge must not also resolve the containing host call"
     );
 }
@@ -222,6 +216,64 @@ fn empty_workspace_produces_empty_idg() {
     let cg = ResolvedCallGraph::default();
     let ws = build(&idx, &cg);
     assert_eq!(ws.segment_count(), 0);
+}
+
+#[test]
+fn streamed_transfer_bodies_match_fully_resident_idg() {
+    let file = FileId::new(44);
+    let mut function = empty_decl(0, file.raw(), "identity");
+    function.params = vec!["input".to_string()];
+    function.flow_events = vec![FlowEvent::Return {
+        span: span(file.raw(), 20, 30),
+        value_text: Some("input".to_string()),
+        value_name: Some("input".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("input"),
+    }];
+    let body = bonsai_lang_api::DeclIndex {
+        file,
+        defs: vec![function],
+        ..Default::default()
+    };
+
+    let mut resident = GlobalIndex::new();
+    resident.insert_preprocessed(body.clone());
+    resident.finalize_semantic_facts();
+    let graph = ResolvedCallGraph::build_with(&resident, |_| AHashMap::new());
+    let expected = build_for_persistence_with_file_semantics_and_options(
+        &resident,
+        &graph,
+        ClosureIdgFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| Some("test"),
+            |_| None,
+            |_| &[] as &'static [&'static str],
+        ),
+        &TransferOptions::default(),
+    );
+
+    let mut headers = GlobalIndex::new();
+    headers.insert_linkage_header_preprocessed(body.clone());
+    headers.finalize_semantic_facts();
+    let actual = build_for_persistence_streaming_with_file_semantics_and_options(
+        &headers,
+        &graph,
+        ClosureIdgFileSemantics::new(
+            |_| AHashMap::new(),
+            |_| Some("test"),
+            |_| None,
+            |_| &[] as &'static [&'static str],
+        ),
+        &TransferOptions::default(),
+        |requested| (requested == file).then(|| headers.remap_file_to_existing_symbols(body.clone())),
+    );
+
+    assert_eq!(actual.segment_count(), expected.segment_count());
+    assert_eq!(actual.func_count(), expected.func_count());
+    assert_eq!(actual.total_edge_count(), expected.total_edge_count());
+    assert_eq!(
+        bonsai_common::wire::encode(&actual).expect("encode streamed IDG"),
+        bonsai_common::wire::encode(&expected).expect("encode resident IDG")
+    );
 }
 
 #[test]
