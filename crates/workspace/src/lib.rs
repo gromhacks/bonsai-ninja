@@ -2955,17 +2955,10 @@ fn workspace_parse_worker_count() -> usize {
         })
         .unwrap_or(available)
         .max(1);
-    // Tree-sitter itself is incremental, but a cold workspace parse owns a
-    // parser stack, CST, lowered declaration index, and source buffer per
-    // worker. Limit only concurrency under constrained RAM; every file is
-    // still parsed and indexed to completion.
-    const PARSE_TRANSIENT_BYTES_PER_WORKER: u64 = 256 * 1024 * 1024;
-    const PARSE_RESIDENT_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
-    bonsai_common::memory_bounded_worker_count(
-        requested.min(available),
-        PARSE_TRANSIENT_BYTES_PER_WORKER,
-        PARSE_RESIDENT_RESERVE_BYTES,
-    )
+    // This is cache scheduling only: every file is still parsed and indexed.
+    // The shared compiler profile keeps this earliest Tree-sitter phase from
+    // overcommitting memory before downstream exact analyses begin.
+    bonsai_common::compiler_worker_count(requested.min(available))
 }
 
 fn workspace_parse_worker_stack_bytes() -> usize {

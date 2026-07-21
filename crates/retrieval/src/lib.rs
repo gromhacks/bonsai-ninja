@@ -979,15 +979,9 @@ fn build_file_candidate_docs(
 
 fn retrieval_file_batch_width() -> usize {
     // Candidate terms temporarily duplicate strings from one lowered compiler
-    // unit. The estimate controls concurrency only: every file and semantic
-    // edge is still processed when constrained machines choose one worker.
-    const TRANSIENT_BYTES_PER_FILE: u64 = 1024 * 1024 * 1024;
-    const RESIDENT_COMPILER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-    bonsai_common::memory_bounded_worker_count(
-        rayon::current_num_threads().max(1),
-        TRANSIENT_BYTES_PER_FILE,
-        RESIDENT_COMPILER_BYTES,
-    )
+    // unit. The shared profile controls concurrency only: every file and
+    // semantic edge is still processed when constrained machines choose one.
+    bonsai_common::compiler_worker_count(rayon::current_num_threads().max(1))
 }
 
 /// Build the persisted candidate-only projection used to narrow files before
