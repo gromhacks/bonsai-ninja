@@ -1288,65 +1288,72 @@ impl ResolvedCallGraph {
                     .unwrap_or_else(LanguageCapabilities::unsupported),
             })
             .collect::<Vec<_>>();
-        use rayon::prelude::*;
-        let edges = file_infos
-            .par_iter()
-            .flat_map_iter(|info| {
-                let path_lookup = |file| context.file_paths.get(&file).cloned();
-                let language_lookup = |file| context.file_languages.get(&file).copied().flatten();
-                let mut method_candidate_cache =
-                    MethodCandidateCache::with_peer_class_index(context.peer_class_index.clone());
-                let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
-                let mut callable_target_cache = CallableTargetCache::default();
-                let mut local_cg = CallGraph::new();
-                for decl in global.decls_in(info.file) {
-                    if !matches!(
-                        decl.kind,
-                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                    ) {
-                        continue;
-                    }
-                    let from = FuncId::new(decl.symbol.raw());
-                    let alias_targets = alias_targets_for_decl(&info.alias_targets, decl);
-                    let local_bindings = collect_local_callable_bindings_with_alias_index(
-                        &decl.flow_events,
-                        global,
-                        decl,
-                        &alias_targets,
-                        &context.alias_index,
-                        Some(&context.callable_index),
-                        info.capabilities.module_path_syntax,
-                    );
-                    let resolution = CallResolutionContext {
-                        from,
-                        caller_decl: decl,
-                        global,
-                        aliases: &info.aliases,
-                        alias_targets: &alias_targets,
-                        local_bindings: &local_bindings,
-                        path_for_file: &path_lookup,
-                        file_path_parts: &context.file_path_parts,
-                        caller_language: info.language,
-                        caller_capabilities: info.capabilities,
-                        language_for_file: &language_lookup,
-                        alias_index: &context.alias_index,
-                        build_targets: &context.build_targets,
-                        constructor_index: &context.constructor_index,
-                    };
-                    add_resolved_call_edges(
-                        &decl.flow_events,
-                        &resolution,
-                        &mut CallGraphBuildState {
-                            method_candidate_cache: &mut method_candidate_cache,
-                            workspace_module_cache: &mut workspace_module_cache,
-                            callable_target_cache: &mut callable_target_cache,
-                            graph: &mut local_cg,
-                        },
-                    );
+        let resolve_file = |info: &FileCallgraphInfo| {
+            let path_lookup = |file| context.file_paths.get(&file).cloned();
+            let language_lookup = |file| context.file_languages.get(&file).copied().flatten();
+            let mut method_candidate_cache =
+                MethodCandidateCache::with_peer_class_index(context.peer_class_index.clone());
+            let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
+            let mut callable_target_cache = CallableTargetCache::default();
+            let mut local_cg = CallGraph::new();
+            for decl in global.decls_in(info.file) {
+                if !matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) {
+                    continue;
                 }
-                local_cg.edges
-            })
-            .collect::<Vec<_>>();
+                let from = FuncId::new(decl.symbol.raw());
+                let alias_targets = alias_targets_for_decl(&info.alias_targets, decl);
+                let local_bindings = collect_local_callable_bindings_with_alias_index(
+                    &decl.flow_events,
+                    global,
+                    decl,
+                    &alias_targets,
+                    &context.alias_index,
+                    Some(&context.callable_index),
+                    info.capabilities.module_path_syntax,
+                );
+                let resolution = CallResolutionContext {
+                    from,
+                    caller_decl: decl,
+                    global,
+                    aliases: &info.aliases,
+                    alias_targets: &alias_targets,
+                    local_bindings: &local_bindings,
+                    path_for_file: &path_lookup,
+                    file_path_parts: &context.file_path_parts,
+                    caller_language: info.language,
+                    caller_capabilities: info.capabilities,
+                    language_for_file: &language_lookup,
+                    alias_index: &context.alias_index,
+                    build_targets: &context.build_targets,
+                    constructor_index: &context.constructor_index,
+                };
+                add_resolved_call_edges(
+                    &decl.flow_events,
+                    &resolution,
+                    &mut CallGraphBuildState {
+                        method_candidate_cache: &mut method_candidate_cache,
+                        workspace_module_cache: &mut workspace_module_cache,
+                        callable_target_cache: &mut callable_target_cache,
+                        graph: &mut local_cg,
+                    },
+                );
+            }
+            local_cg.edges
+        };
+        let workers = callgraph_resolver_worker_count();
+        let edges = match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
+            Ok(pool) => pool.install(|| {
+                use rayon::prelude::*;
+                file_infos
+                    .par_iter()
+                    .flat_map_iter(&resolve_file)
+                    .collect::<Vec<_>>()
+            }),
+            Err(_) => file_infos.iter().flat_map(resolve_file).collect(),
+        };
         Self {
             cg: CallGraph::from_unique_edges(edges),
         }
@@ -1401,6 +1408,35 @@ impl ResolvedCallGraph {
     pub fn inner(&self) -> &CallGraph {
         &self.cg
     }
+}
+
+fn callgraph_resolver_worker_count() -> usize {
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .max(1);
+    let requested = std::env::var("BONSAI_CALLGRAPH_JOBS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .or_else(|| {
+            std::env::var("RAYON_NUM_THREADS")
+                .ok()
+                .and_then(|raw| raw.parse::<usize>().ok())
+        })
+        .unwrap_or(available)
+        .max(1)
+        .min(available);
+    // Resolver workers own candidate, module-target, and callable-binding
+    // caches derived from Tree-sitter-lowered declarations. These estimates
+    // govern concurrency only: a constrained machine resolves the identical
+    // file set serially and emits the identical graph.
+    const RESOLVER_TRANSIENT_BYTES_PER_WORKER: u64 = 1024 * 1024 * 1024;
+    const RESOLVER_RESIDENT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    bonsai_common::memory_bounded_worker_count(
+        requested,
+        RESOLVER_TRANSIENT_BYTES_PER_WORKER,
+        RESOLVER_RESIDENT_RESERVE_BYTES,
+    )
 }
 
 /// Walk one decl's `flow_events` and emit a [`CallEdge`] per resolved

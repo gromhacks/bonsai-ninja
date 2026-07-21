@@ -105,8 +105,12 @@ pub fn compute_edge_id(
     format!("E:{:08x}", fnv1a_names_low32(&tokens))
 }
 
-/// Collect resolved call edges in the workspace, then apply the
-/// filters. The public surface is semantic-only (exact/narrowed).
+/// Collect matching resolved call edges in the workspace. Cheap filters over
+/// compiler symbols are applied before an [`EdgeRecord`] allocates rendered
+/// paths, snippets, provenance strings, and ids. This matters on multi-million
+/// edge workspaces: a selective query remains proportional in allocations to
+/// its result set even though exact coverage still examines every candidate
+/// edge.
 pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
     let global = ws.db().global_index();
     let resolved = ws.cached_resolved_call_graph();
@@ -114,20 +118,22 @@ pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
         .inner()
         .edges
         .iter()
-        .filter(|edge| edge.precision.is_semantic())
-        .filter_map(|edge| edge_record_from_resolved_edge(ws, global.as_ref(), edge))
-        .collect();
-    records.retain(|edge| {
-        f.from.is_none_or(|needle| edge.caller_name.contains(needle))
-            && f.to.is_none_or(|needle| edge.callee_name.contains(needle))
-            && match f.precision {
-                Some(p) => p.matches(PrecisionClass::from_label(&edge.precision).into_precision()),
-                None => PrecisionClass::from_label(&edge.precision)
-                    .into_precision()
-                    .is_semantic(),
+        .filter_map(|edge| {
+            if !edge.precision.is_semantic()
+                || f.precision
+                    .is_some_and(|precision| !precision.matches(edge.precision))
+            {
+                return None;
             }
-            && f.edge_id.is_none_or(|id| edge.edge_id == id)
-    });
+            let caller_decl = global.decl_of(SymbolId::new(edge.from.raw()))?;
+            let callee_decl = global.decl_of(SymbolId::new(edge.to.raw()))?;
+            if !edge_names_match_filters(&caller_decl.name, &callee_decl.name, f) {
+                return None;
+            }
+            let record = edge_record_from_decls(ws, caller_decl, callee_decl, edge);
+            f.edge_id.is_none_or(|id| record.edge_id == id).then_some(record)
+        })
+        .collect();
     records.sort_by(|a, b| {
         precision_sort_key(&a.precision)
             .cmp(&precision_sort_key(&b.precision))
@@ -138,20 +144,6 @@ pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
     records
 }
 
-impl PrecisionClass {
-    /// Convert the public class enum back to the internal
-    /// `bonsai_common::Precision` so the filter can be matched
-    /// against the resolver's per-edge precision tag.
-    fn into_precision(self) -> bonsai_common::Precision {
-        match self {
-            Self::Exact => bonsai_common::Precision::Exact,
-            Self::Narrowed => bonsai_common::Precision::Narrowed,
-            Self::OverApproximate => bonsai_common::Precision::OverApproximate,
-            Self::Unknown => bonsai_common::Precision::Unknown,
-        }
-    }
-}
-
 pub(crate) fn edge_record_from_resolved_edge(
     ws: &Workspace,
     global: &bonsai_index::GlobalIndex,
@@ -159,10 +151,24 @@ pub(crate) fn edge_record_from_resolved_edge(
 ) -> Option<EdgeRecord> {
     let caller_decl = global.decl_of(SymbolId::new(edge.from.raw()))?;
     let callee_decl = global.decl_of(SymbolId::new(edge.to.raw()))?;
+    Some(edge_record_from_decls(ws, caller_decl, callee_decl, edge))
+}
+
+fn edge_names_match_filters(caller_name: &str, callee_name: &str, filters: &EdgesFilters<'_>) -> bool {
+    filters.from.is_none_or(|needle| caller_name.contains(needle))
+        && filters.to.is_none_or(|needle| callee_name.contains(needle))
+}
+
+fn edge_record_from_decls(
+    ws: &Workspace,
+    caller_decl: &Decl,
+    callee_decl: &Decl,
+    edge: &CallEdge,
+) -> EdgeRecord {
     let (caller_file, caller_line, _) = format_span(&caller_decl.name_span, ws);
     let (callee_file, callee_line, _) = format_span(&callee_decl.name_span, ws);
     let (call_file, call_line, call_column) = format_span(&edge.span, ws);
-    Some(EdgeRecord {
+    EdgeRecord {
         edge_id: compute_edge_id(
             &caller_decl.name,
             &callee_decl.name,
@@ -185,7 +191,7 @@ pub(crate) fn edge_record_from_resolved_edge(
         resolver_stage: edge.provenance.resolver_stage().to_string(),
         evidence: edge.provenance.evidence().to_string(),
         confidence: edge.provenance.confidence(),
-    })
+    }
 }
 
 fn edge_kind_display(kind: EdgeKind) -> &'static str {
