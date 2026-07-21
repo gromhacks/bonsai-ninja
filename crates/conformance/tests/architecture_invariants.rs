@@ -3436,6 +3436,24 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
 }
 
 #[test]
+fn semantic_prewarm_orders_workspace_phases_by_peak_memory() {
+    let sdk = read(&repo_root().join("crates/sdk/src/lib.rs"));
+    for function in ["warm_structural_sidecars", "rebuild_structural_with_export"] {
+        let body = function_body(&sdk, function);
+        let retrieval = body
+            .find("bonsai_retrieval::")
+            .unwrap_or_else(|| panic!("{function} must persist retrieval candidates"));
+        let idg = body
+            .find("build_and_persist_idg_sidecar")
+            .unwrap_or_else(|| panic!("{function} must persist the exact IDG"));
+        assert!(
+            retrieval < idg,
+            "{function} must finish retrieval before IDG construction so workspace-scale allocation arenas do not overlap"
+        );
+    }
+}
+
+#[test]
 fn workspace_context_does_not_run_an_unneeded_compiler_pass() {
     let root = repo_root();
     let diagnostics = read(&root.join("crates/cli/src/commands/diagnostics.rs"));

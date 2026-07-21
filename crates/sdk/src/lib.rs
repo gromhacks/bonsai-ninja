@@ -1842,6 +1842,12 @@ impl Cache<'_> {
     pub fn warm_structural_sidecars(&self) -> Result<()> {
         let cache = self.workspace_cache();
         let workspace = &self.project.workspace;
+        // Retrieval streams exact syntax units but retains a compact candidate
+        // snapshot until its factstore is committed. Build it before the IDG:
+        // the allocator can then reuse those pages for the graph, and the
+        // one-shot prewarm exits immediately after IDG persistence instead of
+        // stacking a second workspace-scale phase on released graph arenas.
+        let _ = bonsai_retrieval::ensure_sidecar(workspace, &self.project.root)?;
         let callgraph_is_current = workspace.callgraph_sidecar_is_current(&self.project.root);
         if !callgraph_is_current {
             let _ = workspace.cached_resolved_call_graph();
@@ -1859,7 +1865,6 @@ impl Cache<'_> {
                 let _ = workspace.build_and_persist_idg_sidecar()?;
             }
         }
-        let _ = bonsai_retrieval::ensure_sidecar(workspace, &self.project.root)?;
         let _ = cache.write_manifest()?;
         Ok(())
     }
@@ -1871,10 +1876,13 @@ impl Cache<'_> {
         cache.clear_all()?;
         let workspace = &self.project.workspace;
         workspace.db().invalidate_idg_service();
+        // Keep workspace-scale phases sequential in allocation order. The
+        // retrieval builder needs the callgraph but not the IDG, so running it
+        // first prevents its compact snapshot from overlapping graph arenas.
+        bonsai_retrieval::save_sidecar(workspace, &self.project.root)?;
         let _ = workspace.cached_resolved_call_graph();
         workspace.save_callgraph_sidecar(&self.project.root)?;
         let _ = workspace.build_and_persist_idg_sidecar()?;
-        bonsai_retrieval::save_sidecar(workspace, &self.project.root)?;
         if warm_export {
             self.project.export().warm_default_json_cache()?;
         }
