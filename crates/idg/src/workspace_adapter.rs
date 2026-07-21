@@ -27,7 +27,8 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{path::Path, time::Instant};
 
 use crate::builder::{
-    stitch_idg_from_segment_batches, CalleeResolver, ResolvedCallee, ReverseLookupRetention,
+    stitch_idg_from_relowered_segment_batches, stitch_idg_from_segment_batches, CalleeResolver,
+    ResolvedCallee, ReverseLookupRetention,
 };
 use crate::transfer::{
     declared_receiver_names, receiver_name_matches, transfer_function_for_with_options_and_syntax_facts,
@@ -2800,18 +2801,35 @@ where
         transfer_batch_width
     ));
     let phase_started = Instant::now();
-    let batches = transfer_inputs.chunks(transfer_batch_width).map(|batch| {
-        lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch, body_for_file)
-    });
-    let mut ws = stitch_idg_from_segment_batches(
-        batches,
-        function_count,
-        &resolver,
-        transfer_options.include_field_argument_forwarding,
-        transfer_options.symbolic_field_forwarding,
-        symbolic_funcs.as_ref(),
-        reverse_lookup_retention,
-    );
+    let mut ws = if reverse_lookup_retention == ReverseLookupRetention::SidecarOnly {
+        let canonical_batches = transfer_inputs.chunks(transfer_batch_width).map(|batch| {
+            lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch, body_for_file)
+        });
+        let stitch_batches = transfer_inputs.chunks(transfer_batch_width).map(|batch| {
+            lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch, body_for_file)
+        });
+        stitch_idg_from_relowered_segment_batches(
+            canonical_batches,
+            stitch_batches,
+            function_count,
+            &resolver,
+            transfer_options.include_field_argument_forwarding,
+            transfer_options.symbolic_field_forwarding,
+            symbolic_funcs.as_ref(),
+        )
+    } else {
+        let batches = transfer_inputs.chunks(transfer_batch_width).map(|batch| {
+            lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch, body_for_file)
+        });
+        stitch_idg_from_segment_batches(
+            batches,
+            function_count,
+            &resolver,
+            transfer_options.include_field_argument_forwarding,
+            transfer_options.symbolic_field_forwarding,
+            symbolic_funcs.as_ref(),
+        )
+    };
     stitch_declared_exception_hierarchy(&mut ws, &resolver);
     idg_build_log(format_args!(
         "stitch-idg: {:.3}s segments={} funcs={} intra_edges={} cross_edges={} field_links={}",

@@ -154,6 +154,20 @@ impl IdgSegment {
         self.strings.release_lookup();
     }
 
+    /// Recreate the transient interning indexes for one compiler pass.
+    ///
+    /// Persistence builds deliberately release these tables after their first
+    /// lowering pass. A later deterministic re-lowering pass rebuilds them for
+    /// only the active source-file segment, maps transfer-local ids back onto
+    /// the canonical dictionaries, then releases them again. This keeps the
+    /// memory bound proportional to one compilation unit without changing any
+    /// stable place or node id.
+    pub(crate) fn rebuild_build_lookups(&mut self) {
+        self.places.rebuild_lookup();
+        self.nodes.rebuild_lookup();
+        self.strings.rebuild_lookup();
+    }
+
     /// True iff the segment carries no edges (and so contributes
     /// nothing to the workspace IDG even if its dictionaries are
     /// populated).

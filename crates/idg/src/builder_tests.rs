@@ -214,7 +214,7 @@ fn single_function_no_calls_creates_one_segment() {
 }
 
 #[test]
-fn sidecar_only_stitch_preserves_the_exact_canonical_graph() {
+fn relowered_stitch_preserves_the_exact_canonical_graph() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["x".to_string()];
     decl.flow_events = vec![FlowEvent::Return {
@@ -227,28 +227,61 @@ fn sidecar_only_stitch_preserves_the_exact_canonical_graph() {
     let batches = || vec![vec![(SegmentId(0), vec![output.clone()])]];
     let resolver = MockResolver::new();
 
-    let queryable = stitch_idg_from_segment_batches(
-        batches(),
-        1,
-        &resolver,
-        true,
-        false,
-        None,
-        ReverseLookupRetention::Queryable,
-    );
-    let sidecar_only = stitch_idg_from_segment_batches(
-        batches(),
-        1,
-        &resolver,
-        true,
-        false,
-        None,
-        ReverseLookupRetention::SidecarOnly,
-    );
+    let queryable = stitch_idg_from_segment_batches(batches(), 1, &resolver, true, false, None);
+    let relowered =
+        stitch_idg_from_relowered_segment_batches(batches(), batches(), 1, &resolver, true, false, None);
 
     let queryable_wire = bonsai_common::wire::encode(&queryable).expect("encode queryable IDG");
-    let sidecar_wire = bonsai_common::wire::encode(&sidecar_only).expect("encode sidecar IDG");
-    assert_eq!(sidecar_wire, queryable_wire);
+    let relowered_wire = bonsai_common::wire::encode(&relowered).expect("encode relowered IDG");
+    assert_eq!(relowered_wire, queryable_wire);
+}
+
+#[test]
+fn relowered_sidecar_preserves_cross_segment_calls_byte_for_byte() {
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["source".to_string()];
+    caller.flow_events = vec![FlowEvent::Call {
+        span: span(20, 30),
+        name: "callee".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(24, 29),
+            name: None,
+            value_text: "source".to_string(),
+            place: Some("source".to_string()),
+            source_names: vec!["source".to_string()],
+        }],
+    }];
+    let mut callee = empty_decl(2, "callee");
+    callee.params = vec!["value".to_string()];
+    callee.flow_events = vec![FlowEvent::Return {
+        span: span(40, 50),
+        value_name: Some("value".to_string()),
+        value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("value"),
+    }];
+    let caller_out = transfer_function_for(&caller);
+    let callee_out = transfer_function_for(&callee);
+    let batches = || {
+        vec![vec![
+            (SegmentId(0), vec![caller_out.clone()]),
+            (SegmentId(1), vec![callee_out.clone()]),
+        ]]
+    };
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "callee", vec![FuncId::new(2)]);
+    let queryable = stitch_idg_from_segment_batches(batches(), 2, &resolver, true, false, None);
+    let relowered =
+        stitch_idg_from_relowered_segment_batches(batches(), batches(), 2, &resolver, true, false, None);
+
+    assert_eq!(queryable.cross_file().len(), 2);
+    assert_eq!(
+        bonsai_common::wire::encode(&relowered).expect("encode relowered cross-segment IDG"),
+        bonsai_common::wire::encode(&queryable).expect("encode queryable cross-segment IDG")
+    );
 }
 
 #[test]
