@@ -61,45 +61,13 @@ struct WorkspaceMaps {
     /// translates placeholders to real `IdgWorkspace` segment ids
     /// during registration.
     func_to_seg: AHashMap<FuncId, SegmentId>,
-    /// `FuncId → callee_name`, used by [`WorkspaceCalleeResolver`]
-    /// to filter `ResolvedCallGraph::callees_of` candidates by
-    /// name. The transfer pass records calls by their textual
-    /// callee name (the only stable handle a flow event has); we
-    /// match that against each callee's declared name to figure
-    /// out which call edge in the graph corresponds to which call
-    /// site.
-    func_to_name: AHashMap<FuncId, String>,
-    /// `FuncId → language id` for production workspaces. Synthetic
-    /// tests that do not provide language metadata leave entries
-    /// absent, and the resolver then keeps legacy permissive behavior.
-    func_to_language: AHashMap<FuncId, &'static str>,
     /// Callback binding lookup: stripped callback argument name /
     /// declared-name tail → candidate functions.
     funcs_by_callback_name: AHashMap<String, Vec<FuncId>>,
-    /// Scoped callback binding lookup by module path. Used before the
-    /// global name bucket so copied packages with identical helper
-    /// names do not cross-wire callbacks.
-    funcs_by_callback_name_module: AHashMap<(String, ModulePath), Vec<FuncId>>,
-    /// Scoped callback binding lookup by source directory. This is the
-    /// fallback when adapters have no module path but the workspace VFS
-    /// can still identify a local project/package directory.
-    funcs_by_callback_name_directory: AHashMap<(String, String), Vec<FuncId>>,
-    /// Scoped callback binding lookup by file. This preserves precise
-    /// single-file callback flows when neither module nor directory
-    /// metadata is available.
-    funcs_by_callback_name_file: AHashMap<(String, FileId), Vec<FuncId>>,
-    func_to_module: AHashMap<FuncId, ModulePath>,
-    func_to_directory: AHashMap<FuncId, String>,
-    func_to_file: AHashMap<FuncId, FileId>,
-    func_to_scope: AHashMap<FuncId, LocalScopeKey>,
-    symbol_to_scope: AHashMap<bonsai_common::SymbolId, LocalScopeKey>,
-    /// Source directory for every declaration symbol. A declaration may
-    /// use a module scope (for example a PHP namespace or Python module),
-    /// but its imported base class can still live in the same project
-    /// directory under a different module scope. This secondary key lets
-    /// inheritance lookup make that narrow cross-module hop without
-    /// falling back to every same-named class in the workspace.
-    symbol_to_directory: AHashMap<bonsai_common::SymbolId, String>,
+    /// One canonical directory per file. Function/symbol ownership already
+    /// lives in `GlobalIndex`; duplicating this string for every declaration
+    /// made resolver memory proportional to symbol count rather than files.
+    file_to_directory: AHashMap<FileId, String>,
     /// `FileId → language id`, used for class/constructor fallback
     /// where the candidate is still a `SymbolId` rather than a
     /// `FuncId`.
@@ -125,18 +93,8 @@ impl WorkspaceMaps {
         S: IdgFileSemanticsProvider,
     {
         let mut func_to_seg: AHashMap<FuncId, SegmentId> = AHashMap::new();
-        let mut func_to_name: AHashMap<FuncId, String> = AHashMap::new();
-        let mut func_to_language: AHashMap<FuncId, &'static str> = AHashMap::new();
         let mut funcs_by_callback_name: AHashMap<String, Vec<FuncId>> = AHashMap::new();
-        let mut funcs_by_callback_name_module: AHashMap<(String, ModulePath), Vec<FuncId>> = AHashMap::new();
-        let mut funcs_by_callback_name_directory: AHashMap<(String, String), Vec<FuncId>> = AHashMap::new();
-        let mut funcs_by_callback_name_file: AHashMap<(String, FileId), Vec<FuncId>> = AHashMap::new();
-        let mut func_to_module: AHashMap<FuncId, ModulePath> = AHashMap::new();
-        let mut func_to_directory: AHashMap<FuncId, String> = AHashMap::new();
-        let mut func_to_file: AHashMap<FuncId, FileId> = AHashMap::new();
-        let mut func_to_scope: AHashMap<FuncId, LocalScopeKey> = AHashMap::new();
-        let mut symbol_to_scope: AHashMap<bonsai_common::SymbolId, LocalScopeKey> = AHashMap::new();
-        let mut symbol_to_directory: AHashMap<bonsai_common::SymbolId, String> = AHashMap::new();
+        let mut file_to_directory: AHashMap<FileId, String> = AHashMap::new();
         let mut file_to_language: AHashMap<FileId, &'static str> = AHashMap::new();
         let mut file_to_module_resolution_extensions: AHashMap<FileId, &'static [&'static str]> =
             AHashMap::new();
@@ -153,6 +111,9 @@ impl WorkspaceMaps {
             let file_directory = semantics
                 .path(file)
                 .and_then(|path| parent_dir_key(path.as_str()));
+            if let Some(directory) = &file_directory {
+                file_to_directory.insert(file, directory.clone());
+            }
             if let Some(language) = language {
                 file_to_language.insert(file, language);
             }
@@ -171,61 +132,19 @@ impl WorkspaceMaps {
             let seg = SegmentId(next_seg);
             next_seg = next_seg.wrapping_add(1);
             file_to_seg.insert(file, seg);
-            for decl in global.decls_in(file) {
-                symbol_to_scope.insert(
-                    decl.symbol,
-                    local_scope_key_for_decl(file, decl, file_directory.as_deref()),
-                );
-                if let Some(directory) = &file_directory {
-                    symbol_to_directory.insert(decl.symbol, directory.clone());
-                }
-            }
             for decl in global.functions_in(file) {
                 let func = FuncId::new(decl.symbol.raw());
                 if included_funcs.is_some_and(|funcs| !funcs.contains(&func)) {
                     continue;
                 }
                 func_to_seg.insert(func, seg);
-                func_to_name.insert(func, decl.name.clone());
-                func_to_module.insert(func, decl.module_path.clone());
-                func_to_file.insert(func, file);
-                func_to_scope.insert(
-                    func,
-                    local_scope_key_for_decl(file, decl, file_directory.as_deref()),
-                );
-                if let Some(directory) = &file_directory {
-                    func_to_directory.insert(func, directory.clone());
-                }
-                add_callback_name_index_entries(
-                    &mut funcs_by_callback_name,
-                    &mut funcs_by_callback_name_module,
-                    &mut funcs_by_callback_name_directory,
-                    &mut funcs_by_callback_name_file,
-                    func,
-                    &decl.name,
-                    &decl.module_path,
-                    file_directory.as_deref(),
-                    file,
-                );
-                if let Some(language) = language {
-                    func_to_language.insert(func, language);
-                }
+                add_callback_name_index_entries(&mut funcs_by_callback_name, func, &decl.name);
             }
         }
         Self {
             func_to_seg,
-            func_to_name,
-            func_to_language,
             funcs_by_callback_name,
-            funcs_by_callback_name_module,
-            funcs_by_callback_name_directory,
-            funcs_by_callback_name_file,
-            func_to_module,
-            func_to_directory,
-            func_to_file,
-            func_to_scope,
-            symbol_to_scope,
-            symbol_to_directory,
+            file_to_directory,
             file_to_language,
             file_to_module_resolution_extensions,
             file_to_module_default_export_names,
@@ -248,82 +167,33 @@ fn local_scope_key_for_decl(
     LocalScopeKey::File(file)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn add_callback_name_index_entries(
-    index: &mut AHashMap<String, Vec<FuncId>>,
-    module_index: &mut AHashMap<(String, ModulePath), Vec<FuncId>>,
-    directory_index: &mut AHashMap<(String, String), Vec<FuncId>>,
-    file_index: &mut AHashMap<(String, FileId), Vec<FuncId>>,
-    func: FuncId,
-    decl_name: &str,
-    module_path: &ModulePath,
-    directory: Option<&str>,
-    file: FileId,
-) {
-    add_callback_name_index_entry(
-        index,
-        module_index,
-        directory_index,
-        file_index,
-        func,
-        decl_name,
-        module_path,
-        directory,
+fn symbol_scope_key(
+    global: &GlobalIndex,
+    file_to_directory: &AHashMap<FileId, String>,
+    symbol: bonsai_common::SymbolId,
+) -> Option<LocalScopeKey> {
+    let file = global.declaring_file(symbol)?;
+    let decl = global.decl_of(symbol)?;
+    Some(local_scope_key_for_decl(
         file,
-    );
+        decl,
+        file_to_directory.get(&file).map(String::as_str),
+    ))
+}
+
+fn add_callback_name_index_entries(index: &mut AHashMap<String, Vec<FuncId>>, func: FuncId, decl_name: &str) {
+    add_callback_name_index_entry(index, func, decl_name);
     if let Some((_, tail)) = decl_name.rsplit_once(['.', ':']) {
-        add_callback_name_index_entry(
-            index,
-            module_index,
-            directory_index,
-            file_index,
-            func,
-            tail,
-            module_path,
-            directory,
-            file,
-        );
+        add_callback_name_index_entry(index, func, tail);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn add_callback_name_index_entry(
-    index: &mut AHashMap<String, Vec<FuncId>>,
-    module_index: &mut AHashMap<(String, ModulePath), Vec<FuncId>>,
-    directory_index: &mut AHashMap<(String, String), Vec<FuncId>>,
-    file_index: &mut AHashMap<(String, FileId), Vec<FuncId>>,
-    func: FuncId,
-    name: &str,
-    module_path: &ModulePath,
-    directory: Option<&str>,
-    file: FileId,
-) {
+fn add_callback_name_index_entry(index: &mut AHashMap<String, Vec<FuncId>>, func: FuncId, name: &str) {
     let name = name.trim();
     if name.is_empty() {
         return;
     }
-    let name = name.to_string();
     let funcs = index.entry(name.to_string()).or_default();
-    if !funcs.contains(&func) {
-        funcs.push(func);
-    }
-    if !module_path.is_empty() {
-        let funcs = module_index
-            .entry((name.clone(), module_path.clone()))
-            .or_default();
-        if !funcs.contains(&func) {
-            funcs.push(func);
-        }
-    }
-    if let Some(directory) = directory {
-        let funcs = directory_index
-            .entry((name.clone(), directory.to_string()))
-            .or_default();
-        if !funcs.contains(&func) {
-            funcs.push(func);
-        }
-    }
-    let funcs = file_index.entry((name, file)).or_default();
     if !funcs.contains(&func) {
         funcs.push(func);
     }
@@ -338,26 +208,16 @@ fn add_callback_name_index_entry(
 /// a filter over already-resolved candidates.
 struct WorkspaceCalleeResolver<'a> {
     call_graph: &'a ResolvedCallGraph,
-    func_to_name: &'a AHashMap<FuncId, String>,
     global: &'a GlobalIndex,
     /// Per-callee alternate call names. Built from each file's
     /// import alias map so a callee like `persist` aliased as
     /// `persistEnvelope` can be reached via either name. Without
-    /// this, the strict `func_to_name` match in `resolve` rejects
+    /// this, the strict declaration-name match in `resolve` rejects
     /// the alias-rewritten call site even though the callgraph
     /// already resolved the edge.
     func_to_call_names: &'a AHashMap<FuncId, Vec<String>>,
-    func_to_language: &'a AHashMap<FuncId, &'static str>,
     funcs_by_callback_name: &'a AHashMap<String, Vec<FuncId>>,
-    funcs_by_callback_name_module: &'a AHashMap<(String, ModulePath), Vec<FuncId>>,
-    funcs_by_callback_name_directory: &'a AHashMap<(String, String), Vec<FuncId>>,
-    funcs_by_callback_name_file: &'a AHashMap<(String, FileId), Vec<FuncId>>,
-    func_to_module: &'a AHashMap<FuncId, ModulePath>,
-    func_to_directory: &'a AHashMap<FuncId, String>,
-    func_to_file: &'a AHashMap<FuncId, FileId>,
-    func_to_scope: &'a AHashMap<FuncId, LocalScopeKey>,
-    symbol_to_scope: &'a AHashMap<bonsai_common::SymbolId, LocalScopeKey>,
-    symbol_to_directory: &'a AHashMap<bonsai_common::SymbolId, String>,
+    file_to_directory: &'a AHashMap<FileId, String>,
     call_edges_by_site: &'a CallSiteEdgeIndex,
     file_to_language: &'a AHashMap<FileId, &'static str>,
     class_symbols_by_name: &'a AHashMap<String, Vec<bonsai_common::SymbolId>>,
@@ -418,7 +278,6 @@ impl CallSiteEdgeIndex {
                 && left.edge.edge_kind == right.edge.edge_kind
                 && left.edge.precision == right.edge.precision
         });
-        self.rows.shrink_to_fit();
     }
 
     fn edges(&self, caller: FuncId, site: bonsai_common::Span) -> impl Iterator<Item = &IndexedCallEdge> {
@@ -461,11 +320,13 @@ fn call_site_edge_sort_key(row: &IndexedCallSiteEdge) -> (u32, u32, u64, u64, u3
 fn call_edges_by_site_for_funcs(
     call_graph: &ResolvedCallGraph,
     global: &GlobalIndex,
-    included_funcs: Option<&AHashSet<FuncId>>,
+    included_funcs: Option<&AHashMap<FuncId, SegmentId>>,
 ) -> CallSiteEdgeIndex {
     let mut out = CallSiteEdgeIndex::default();
     for edge in &call_graph.inner().edges {
-        if included_funcs.is_some_and(|funcs| !funcs.contains(&edge.from) || !funcs.contains(&edge.to)) {
+        if included_funcs
+            .is_some_and(|funcs| !funcs.contains_key(&edge.from) || !funcs.contains_key(&edge.to))
+        {
             continue;
         }
         let indexed = IndexedCallEdge {
@@ -947,6 +808,46 @@ impl WorkspaceCalleeResolver<'_> {
 }
 
 impl WorkspaceCalleeResolver<'_> {
+    fn func_symbol(func: FuncId) -> bonsai_common::SymbolId {
+        bonsai_common::SymbolId::new(func.raw())
+    }
+
+    fn func_decl(&self, func: FuncId) -> Option<&bonsai_lang_api::Decl> {
+        self.global.decl_of(Self::func_symbol(func))
+    }
+
+    fn func_file(&self, func: FuncId) -> Option<FileId> {
+        self.global.declaring_file(Self::func_symbol(func))
+    }
+
+    fn func_language(&self, func: FuncId) -> Option<&'static str> {
+        self.func_file(func)
+            .and_then(|file| self.file_to_language.get(&file).copied())
+    }
+
+    fn func_module(&self, func: FuncId) -> Option<&ModulePath> {
+        self.func_decl(func).map(|decl| &decl.module_path)
+    }
+
+    fn func_directory(&self, func: FuncId) -> Option<&str> {
+        self.func_file(func)
+            .and_then(|file| self.file_to_directory.get(&file).map(String::as_str))
+    }
+
+    fn func_scope(&self, func: FuncId) -> Option<LocalScopeKey> {
+        self.symbol_scope(Self::func_symbol(func))
+    }
+
+    fn symbol_scope(&self, symbol: bonsai_common::SymbolId) -> Option<LocalScopeKey> {
+        symbol_scope_key(self.global, self.file_to_directory, symbol)
+    }
+
+    fn symbol_directory(&self, symbol: bonsai_common::SymbolId) -> Option<&str> {
+        self.global
+            .declaring_file(symbol)
+            .and_then(|file| self.file_to_directory.get(&file).map(String::as_str))
+    }
+
     fn callee_parent_is_declared_ancestor(&self, caller: FuncId, callee: FuncId) -> bool {
         let Some(caller_parent) = self
             .global
@@ -1015,7 +916,7 @@ impl WorkspaceCalleeResolver<'_> {
         precision: bonsai_common::Precision,
         callee_name: &str,
     ) {
-        let Some(decl_name) = self.func_to_name.get(&to) else {
+        let Some(decl_name) = self.func_decl(to).map(|decl| decl.name.as_str()) else {
             return;
         };
         let mut matched = names_match_for_callee(decl_name, callee_name);
@@ -1156,7 +1057,7 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         if thrown == caught {
             return Some(bonsai_common::Precision::Exact);
         }
-        let Some(scope) = self.func_to_scope.get(&func).cloned() else {
+        let Some(scope) = self.func_scope(func) else {
             return Some(bonsai_common::Precision::Narrowed);
         };
         let thrown_decls = self
@@ -1207,13 +1108,13 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         let mut seen: AHashSet<FuncId> = AHashSet::new();
         let mut saw_project_scope = false;
 
-        if let Some(module) = self.func_to_module.get(&caller) {
+        if let Some(module) = self.func_module(caller) {
             if !module.is_empty() {
                 saw_project_scope = true;
                 self.extend_callback_candidates_from_module(bound_name, module, &mut out, &mut seen);
             }
         }
-        if let Some(module) = self.func_to_module.get(&host) {
+        if let Some(module) = self.func_module(host) {
             if !module.is_empty() {
                 saw_project_scope = true;
                 self.extend_callback_candidates_from_module(bound_name, module, &mut out, &mut seen);
@@ -1223,11 +1124,11 @@ impl<'a> WorkspaceCalleeResolver<'a> {
             return out;
         }
 
-        if let Some(directory) = self.func_to_directory.get(&caller) {
+        if let Some(directory) = self.func_directory(caller) {
             saw_project_scope = true;
             self.extend_callback_candidates_from_directory(bound_name, directory, &mut out, &mut seen);
         }
-        if let Some(directory) = self.func_to_directory.get(&host) {
+        if let Some(directory) = self.func_directory(host) {
             saw_project_scope = true;
             self.extend_callback_candidates_from_directory(bound_name, directory, &mut out, &mut seen);
         }
@@ -1235,11 +1136,11 @@ impl<'a> WorkspaceCalleeResolver<'a> {
             return out;
         }
 
-        if let Some(file) = self.func_to_file.get(&caller) {
-            self.extend_callback_candidates_from_file(bound_name, *file, &mut out, &mut seen);
+        if let Some(file) = self.func_file(caller) {
+            self.extend_callback_candidates_from_file(bound_name, file, &mut out, &mut seen);
         }
-        if let Some(file) = self.func_to_file.get(&host) {
-            self.extend_callback_candidates_from_file(bound_name, *file, &mut out, &mut seen);
+        if let Some(file) = self.func_file(host) {
+            self.extend_callback_candidates_from_file(bound_name, file, &mut out, &mut seen);
         }
         if !out.is_empty() || saw_project_scope {
             return out;
@@ -1258,11 +1159,15 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         out: &mut Vec<FuncId>,
         seen: &mut AHashSet<FuncId>,
     ) {
-        if let Some(candidates) = self
-            .funcs_by_callback_name_module
-            .get(&(bound_name.to_string(), module.clone()))
-        {
-            extend_unique_funcs(out, seen, candidates.iter().copied());
+        if let Some(candidates) = self.funcs_by_callback_name.get(bound_name) {
+            extend_unique_funcs(
+                out,
+                seen,
+                candidates
+                    .iter()
+                    .copied()
+                    .filter(|candidate| self.func_module(*candidate) == Some(module)),
+            );
         }
     }
 
@@ -1273,11 +1178,15 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         out: &mut Vec<FuncId>,
         seen: &mut AHashSet<FuncId>,
     ) {
-        if let Some(candidates) = self
-            .funcs_by_callback_name_directory
-            .get(&(bound_name.to_string(), directory.to_string()))
-        {
-            extend_unique_funcs(out, seen, candidates.iter().copied());
+        if let Some(candidates) = self.funcs_by_callback_name.get(bound_name) {
+            extend_unique_funcs(
+                out,
+                seen,
+                candidates
+                    .iter()
+                    .copied()
+                    .filter(|candidate| self.func_directory(*candidate) == Some(directory)),
+            );
         }
     }
 
@@ -1288,19 +1197,23 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         out: &mut Vec<FuncId>,
         seen: &mut AHashSet<FuncId>,
     ) {
-        if let Some(candidates) = self
-            .funcs_by_callback_name_file
-            .get(&(bound_name.to_string(), file))
-        {
-            extend_unique_funcs(out, seen, candidates.iter().copied());
+        if let Some(candidates) = self.funcs_by_callback_name.get(bound_name) {
+            extend_unique_funcs(
+                out,
+                seen,
+                candidates
+                    .iter()
+                    .copied()
+                    .filter(|candidate| self.func_file(*candidate) == Some(file)),
+            );
         }
     }
 
     fn class_candidates_for_func_scope(&self, func: FuncId, name: &str) -> Vec<bonsai_common::SymbolId> {
-        if let Some(file) = self.func_to_file.get(&func) {
+        if let Some(file) = self.func_file(func) {
             if let Some(candidates) = self
                 .class_symbols_by_import_alias_file
-                .get(&(*file, name.to_string()))
+                .get(&(file, name.to_string()))
             {
                 if !candidates.is_empty() {
                     return candidates.clone();
@@ -1308,12 +1221,9 @@ impl<'a> WorkspaceCalleeResolver<'a> {
             }
         }
         let mut saw_project_scope = false;
-        if let Some(scope) = self.func_to_scope.get(&func) {
+        if let Some(scope) = self.func_scope(func) {
             saw_project_scope = scope.has_project_boundary();
-            if let Some(candidates) = self
-                .class_symbols_by_name_scope
-                .get(&(name.to_string(), scope.clone()))
-            {
+            if let Some(candidates) = self.class_symbols_by_name_scope.get(&(name.to_string(), scope)) {
                 if !candidates.is_empty() {
                     return candidates.clone();
                 }
@@ -1329,10 +1239,10 @@ impl<'a> WorkspaceCalleeResolver<'a> {
             .decl_of(bonsai_common::SymbolId::new(func.raw()))
             .and_then(|decl| decl.parent)
         {
-            if let Some(parent_scope) = self.symbol_to_scope.get(&parent) {
+            if let Some(parent_scope) = self.symbol_scope(parent) {
                 if let Some(candidates) = self
                     .class_symbols_by_name_scope
-                    .get(&(name.to_string(), parent_scope.clone()))
+                    .get(&(name.to_string(), parent_scope))
                 {
                     if !candidates.is_empty() {
                         return candidates.clone();
@@ -1352,12 +1262,9 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         name: &str,
     ) -> Vec<bonsai_common::SymbolId> {
         let mut saw_project_scope = false;
-        if let Some(scope) = self.symbol_to_scope.get(&symbol) {
+        if let Some(scope) = self.symbol_scope(symbol) {
             saw_project_scope = scope.has_project_boundary();
-            if let Some(candidates) = self
-                .class_symbols_by_name_scope
-                .get(&(name.to_string(), scope.clone()))
-            {
+            if let Some(candidates) = self.class_symbols_by_name_scope.get(&(name.to_string(), scope)) {
                 if !candidates.is_empty() {
                     return candidates.clone();
                 }
@@ -1385,11 +1292,11 @@ impl<'a> WorkspaceCalleeResolver<'a> {
             .flatten()
             .copied()
             .collect::<Vec<_>>();
-        if let Some(directory) = self.symbol_to_directory.get(&symbol) {
+        if let Some(directory) = self.symbol_directory(symbol) {
             let same_directory = candidates_for_name
                 .iter()
                 .copied()
-                .filter(|candidate| self.symbol_to_directory.get(candidate) == Some(directory))
+                .filter(|candidate| self.symbol_directory(*candidate) == Some(directory))
                 .collect::<Vec<_>>();
             if same_directory.len() == 1 {
                 return same_directory;
@@ -1436,7 +1343,7 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         if !scoped.is_empty() {
             return scoped;
         }
-        let Some(caller_file) = self.func_to_file.get(&caller) else {
+        let Some(caller_file) = self.func_file(caller) else {
             return Vec::new();
         };
         self.class_symbols_by_name
@@ -1444,22 +1351,19 @@ impl<'a> WorkspaceCalleeResolver<'a> {
             .into_iter()
             .flatten()
             .copied()
-            .filter(|symbol| self.global.declaring_file(*symbol).as_ref() == Some(caller_file))
+            .filter(|symbol| self.global.declaring_file(*symbol) == Some(caller_file))
             .collect()
     }
 
     fn funcs_share_language(&self, left: FuncId, right: FuncId) -> bool {
-        match (
-            self.func_to_language.get(&left),
-            self.func_to_language.get(&right),
-        ) {
+        match (self.func_language(left), self.func_language(right)) {
             (Some(left), Some(right)) => left == right,
             _ => true,
         }
     }
 
     fn symbol_shares_language_with_func(&self, func: FuncId, symbol: bonsai_common::SymbolId) -> bool {
-        let Some(func_language) = self.func_to_language.get(&func) else {
+        let Some(func_language) = self.func_language(func) else {
             return true;
         };
         let Some(file) = self.global.declaring_file(symbol) else {
@@ -1468,7 +1372,7 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         let Some(symbol_language) = self.file_to_language.get(&file) else {
             return true;
         };
-        func_language == symbol_language
+        func_language == *symbol_language
     }
 
     /// Walk the class hierarchy for an adapter-classified constructor
@@ -1574,9 +1478,8 @@ impl<'a> WorkspaceCalleeResolver<'a> {
                     for &func in candidates {
                         if self.funcs_share_language(caller, func)
                             && self
-                                .func_to_name
-                                .get(&func)
-                                .is_some_and(|name| names_match_for_callee(name, callee_name))
+                                .func_decl(func)
+                                .is_some_and(|decl| names_match_for_callee(&decl.name, callee_name))
                         {
                             methods.push(func);
                         }
@@ -1693,14 +1596,28 @@ fn parent_dir_key(path: &str) -> Option<String> {
 }
 
 fn funcs_share_language(
-    func_to_language: &AHashMap<FuncId, &'static str>,
+    global: &GlobalIndex,
+    file_to_language: &AHashMap<FileId, &'static str>,
     left: FuncId,
     right: FuncId,
 ) -> bool {
-    match (func_to_language.get(&left), func_to_language.get(&right)) {
+    match (
+        func_language(global, file_to_language, left),
+        func_language(global, file_to_language, right),
+    ) {
         (Some(left), Some(right)) => left == right,
         _ => true,
     }
+}
+
+fn func_language(
+    global: &GlobalIndex,
+    file_to_language: &AHashMap<FileId, &'static str>,
+    func: FuncId,
+) -> Option<&'static str> {
+    global
+        .declaring_file(bonsai_common::SymbolId::new(func.raw()))
+        .and_then(|file| file_language(file_to_language, file))
 }
 
 fn file_language(file_to_language: &AHashMap<FileId, &'static str>, file: FileId) -> Option<&'static str> {
@@ -1908,7 +1825,7 @@ fn declaration_matches_import_target(
 
 fn class_symbols_by_name_scope_for_files(
     global: &GlobalIndex,
-    symbol_to_scope: &AHashMap<bonsai_common::SymbolId, LocalScopeKey>,
+    file_to_directory: &AHashMap<FileId, String>,
     included_files: Option<&AHashSet<FileId>>,
 ) -> AHashMap<(String, LocalScopeKey), Vec<bonsai_common::SymbolId>> {
     let mut out: AHashMap<(String, LocalScopeKey), Vec<bonsai_common::SymbolId>> = AHashMap::new();
@@ -1920,10 +1837,9 @@ fn class_symbols_by_name_scope_for_files(
             if !decl_kind_is_type_receiver(decl.kind) {
                 continue;
             }
-            let Some(scope) = symbol_to_scope.get(&decl.symbol) else {
-                continue;
-            };
-            out.entry((decl.name.clone(), scope.clone()))
+            let scope =
+                local_scope_key_for_decl(file, decl, file_to_directory.get(&file).map(String::as_str));
+            out.entry((decl.name.clone(), scope))
                 .or_default()
                 .push(decl.symbol);
         }
@@ -2628,8 +2544,16 @@ where
     // validation. Rescanning every declaration for every alias is
     // quadratic on large workspaces.
     let mut funcs_by_decl_name: AHashMap<String, Vec<FuncId>> = AHashMap::new();
-    for (func, name) in &maps.func_to_name {
-        funcs_by_decl_name.entry(name.clone()).or_default().push(*func);
+    for file in global.all_files() {
+        for decl in global.functions_in(file) {
+            let func = FuncId::new(decl.symbol.raw());
+            if maps.func_to_seg.contains_key(&func) {
+                funcs_by_decl_name
+                    .entry(decl.name.clone())
+                    .or_default()
+                    .push(func);
+            }
+        }
     }
     let class_symbols_by_name = class_symbols_by_name_for_files(global, included_files);
     let module_prefixes = module_prefixes_by_file(global);
@@ -2740,7 +2664,7 @@ where
     ));
     let phase_started = Instant::now();
     let class_symbols_by_name_scope =
-        class_symbols_by_name_scope_for_files(global, &maps.symbol_to_scope, included_files);
+        class_symbols_by_name_scope_for_files(global, &maps.file_to_directory, included_files);
     let class_symbol_count: usize = class_symbols_by_name.values().map(Vec::len).sum();
     let class_constructors_by_parent =
         class_constructors_by_parent_for_files(global, included_files, included_funcs);
@@ -2758,8 +2682,7 @@ where
         class_method_count
     ));
     let phase_started = Instant::now();
-    let resolver_funcs: AHashSet<FuncId> = maps.func_to_seg.keys().copied().collect();
-    let call_edges_by_site = call_edges_by_site_for_funcs(call_graph, global, Some(&resolver_funcs));
+    let call_edges_by_site = call_edges_by_site_for_funcs(call_graph, global, Some(&maps.func_to_seg));
     let call_edge_site_count = call_edges_by_site.len();
     idg_build_log(format_args!(
         "call-edge site index: {:.3}s sites={} edges={}",
@@ -2769,20 +2692,10 @@ where
     ));
     let resolver = WorkspaceCalleeResolver {
         call_graph,
-        func_to_name: &maps.func_to_name,
         global,
         func_to_call_names: &func_to_call_names,
-        func_to_language: &maps.func_to_language,
         funcs_by_callback_name: &maps.funcs_by_callback_name,
-        funcs_by_callback_name_module: &maps.funcs_by_callback_name_module,
-        funcs_by_callback_name_directory: &maps.funcs_by_callback_name_directory,
-        funcs_by_callback_name_file: &maps.funcs_by_callback_name_file,
-        func_to_module: &maps.func_to_module,
-        func_to_directory: &maps.func_to_directory,
-        func_to_file: &maps.func_to_file,
-        func_to_scope: &maps.func_to_scope,
-        symbol_to_scope: &maps.symbol_to_scope,
-        symbol_to_directory: &maps.symbol_to_directory,
+        file_to_directory: &maps.file_to_directory,
         call_edges_by_site: &call_edges_by_site,
         file_to_language: &maps.file_to_language,
         class_symbols_by_name: &class_symbols_by_name,
@@ -2801,9 +2714,13 @@ where
         .collect();
     let symbolic_funcs =
         (transfer_options.symbolic_field_forwarding && !symbolic_languages.is_empty()).then(|| {
-            maps.func_to_language
-                .iter()
-                .filter_map(|(func, language)| symbolic_languages.contains(language).then_some(*func))
+            maps.func_to_seg
+                .keys()
+                .filter_map(|func| {
+                    func_language(global, &maps.file_to_language, *func)
+                        .is_some_and(|language| symbolic_languages.contains(language))
+                        .then_some(*func)
+                })
                 .collect::<AHashSet<_>>()
         });
     // Transfer outputs are the largest transient compiler IR in this build.
@@ -2850,13 +2767,7 @@ where
         let phase_started = Instant::now();
         let before_edges = ws.total_edge_count();
         let before_field_links = ws.field_flow().len();
-        stitch_receiver_field_flow(
-            &mut ws,
-            global,
-            &maps.func_to_language,
-            &maps.file_to_language,
-            &maps.symbol_to_scope,
-        );
+        stitch_receiver_field_flow(&mut ws, global, &maps.file_to_language, &maps.file_to_directory);
         idg_build_log(format_args!(
             "receiver-field-flow: {:.3}s edge_delta={} field_link_delta={} total_edges={} field_links={}",
             phase_started.elapsed().as_secs_f64(),
@@ -3247,10 +3158,8 @@ fn stitch_receiver_method_propagation(
     use crate::edge::IdgEdgeKind;
     use bonsai_common::SymbolId;
     use bonsai_lang_api::DeclKind;
-    let func_to_language = &maps.func_to_language;
     let file_to_language = &maps.file_to_language;
-    let func_to_scope = &maps.func_to_scope;
-    let symbol_to_scope = &maps.symbol_to_scope;
+    let file_to_directory = &maps.file_to_directory;
     let scope_files = propagation_scope_files(global, file_to_language);
     let offsets = SegmentOffsets::new(ws);
     // Group decls by parent so we know each class's known fields.
@@ -3268,9 +3177,13 @@ fn stitch_receiver_method_propagation(
                 .decls_in(file)
                 .iter()
                 .filter(|decl| matches!(decl.kind, DeclKind::Class))
-                .filter_map(move |decl| {
-                    let scope = symbol_to_scope.get(&decl.symbol)?;
-                    Some(((language, decl.name.clone(), scope.clone()), decl.symbol))
+                .map(move |decl| {
+                    let scope = local_scope_key_for_decl(
+                        file,
+                        decl,
+                        file_to_directory.get(&file).map(String::as_str),
+                    );
+                    ((language, decl.name.clone(), scope), decl.symbol)
                 })
         })
         .collect();
@@ -3306,7 +3219,7 @@ fn stitch_receiver_method_propagation(
                     continue;
                 };
                 let class_language = symbol_language(global, file_to_language, class_sym);
-                let Some(class_scope) = symbol_to_scope.get(&class_sym) else {
+                let Some(class_scope) = symbol_scope_key(global, file_to_directory, class_sym) else {
                     continue;
                 };
                 for base_name in &class_decl.bases {
@@ -3425,10 +3338,8 @@ fn stitch_receiver_method_propagation(
                     &class_by_name,
                     &methods_by_class_and_name,
                     &field_names,
-                    func_to_language,
                     file_to_language,
-                    func_to_scope,
-                    symbol_to_scope,
+                    file_to_directory,
                     &offsets,
                     &mut field_read_nodes_by_func,
                     &mut recv_nodes_by_func,
@@ -3451,7 +3362,7 @@ fn stitch_receiver_method_propagation(
             // emit edges into each field-Read of the callee.
             for edge in call_graph.callers_of(callee) {
                 let caller = edge.from;
-                if !funcs_share_language(func_to_language, caller, callee) {
+                if !funcs_share_language(global, file_to_language, caller, callee) {
                     continue;
                 }
                 let recv_slots = recv_slots_by_call
@@ -3893,10 +3804,8 @@ fn collect_super_chain_read_nodes_and_funcs(
     class_by_name: &ahash::AHashMap<(Option<&'static str>, String, LocalScopeKey), bonsai_common::SymbolId>,
     methods_by_class_and_name: &ahash::AHashMap<(bonsai_common::SymbolId, String), Vec<FuncId>>,
     field_names: &ahash::AHashSet<String>,
-    func_to_language: &AHashMap<FuncId, &'static str>,
     file_to_language: &AHashMap<FileId, &'static str>,
-    _func_to_scope: &AHashMap<FuncId, LocalScopeKey>,
-    symbol_to_scope: &AHashMap<bonsai_common::SymbolId, LocalScopeKey>,
+    file_to_directory: &AHashMap<FileId, String>,
     offsets: &SegmentOffsets,
     field_read_nodes_by_func: &mut FieldReadNodesByFunc,
     recv_nodes_by_func: &mut RecvNodesByFunc,
@@ -3914,9 +3823,9 @@ fn collect_super_chain_read_nodes_and_funcs(
     let mut frontier: Vec<bonsai_common::SymbolId> = Vec::new();
     if let Some(parent_decl) = global.decl_of(parent_sym) {
         let parent_language = symbol_language(global, file_to_language, parent_sym);
-        let parent_scope = symbol_to_scope.get(&parent_sym);
+        let parent_scope = symbol_scope_key(global, file_to_directory, parent_sym);
         for base_name in &parent_decl.bases {
-            let Some(parent_scope) = parent_scope else {
+            let Some(parent_scope) = parent_scope.as_ref() else {
                 continue;
             };
             if let Some(&base_sym) =
@@ -3934,7 +3843,7 @@ fn collect_super_chain_read_nodes_and_funcs(
         if let Some(methods) = methods_by_class_and_name.get(&(class_sym, method_name.clone())) {
             for other in methods {
                 let other = *other;
-                if !funcs_share_language(func_to_language, callee, other) {
+                if !funcs_share_language(global, file_to_language, callee, other) {
                     continue;
                 }
                 let mut nodes = {
@@ -3961,7 +3870,7 @@ fn collect_super_chain_read_nodes_and_funcs(
         }
         if let Some(class_decl) = global.decl_of(class_sym) {
             let class_language = symbol_language(global, file_to_language, class_sym);
-            let Some(class_scope) = symbol_to_scope.get(&class_sym) else {
+            let Some(class_scope) = symbol_scope_key(global, file_to_directory, class_sym) else {
                 continue;
             };
             for base_name in &class_decl.bases {
@@ -4107,9 +4016,8 @@ fn push_unique_class_name(out: &mut Vec<String>, value: String) {
 fn stitch_receiver_field_flow(
     ws: &mut IdgWorkspace,
     global: &GlobalIndex,
-    func_to_language: &AHashMap<FuncId, &'static str>,
     file_to_language: &AHashMap<FileId, &'static str>,
-    symbol_to_scope: &AHashMap<bonsai_common::SymbolId, LocalScopeKey>,
+    file_to_directory: &AHashMap<FileId, String>,
 ) {
     use crate::edge::IdgEdgeKind;
     use bonsai_common::SymbolId;
@@ -4143,9 +4051,13 @@ fn stitch_receiver_field_flow(
                 .decls_in(file)
                 .iter()
                 .filter(|decl| matches!(decl.kind, DeclKind::Class))
-                .filter_map(move |decl| {
-                    let scope = symbol_to_scope.get(&decl.symbol)?;
-                    Some(((language, decl.name.clone(), scope.clone()), decl.symbol))
+                .map(move |decl| {
+                    let scope = local_scope_key_for_decl(
+                        file,
+                        decl,
+                        file_to_directory.get(&file).map(String::as_str),
+                    );
+                    ((language, decl.name.clone(), scope), decl.symbol)
                 })
         })
         .collect();
@@ -4173,7 +4085,7 @@ fn stitch_receiver_field_flow(
                         continue;
                     };
                     let class_language = symbol_language(global, file_to_language, class_sym);
-                    let Some(class_scope) = symbol_to_scope.get(&class_sym) else {
+                    let Some(class_scope) = symbol_scope_key(global, file_to_directory, class_sym) else {
                         continue;
                     };
                     for base_name in &class_decl.bases {
@@ -4286,7 +4198,7 @@ fn stitch_receiver_field_flow(
                         // bridge_read fallback, no need to re-emit.
                         continue;
                     }
-                    if !funcs_share_language(func_to_language, *w_func, *r_func) {
+                    if !funcs_share_language(global, file_to_language, *w_func, *r_func) {
                         continue;
                     }
                     add_edge_between_ws_nodes(
