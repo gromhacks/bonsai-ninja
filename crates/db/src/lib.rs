@@ -905,17 +905,9 @@ fn global_index_worker_count() -> usize {
         .unwrap_or(available)
         .max(1)
         .min(available);
-    // One frontend worker can temporarily own a Tree-sitter CST, adapter
-    // scratch state, and a completed declaration unit before the deterministic
-    // global merge consumes it. A constrained machine lowers the identical
-    // file set serially; memory affects scheduling, never syntax coverage.
-    const FRONTEND_BYTES_PER_WORKER: u64 = 1024 * 1024 * 1024;
-    const FRONTEND_RESIDENT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-    bonsai_common::memory_bounded_worker_count(
-        requested,
-        FRONTEND_BYTES_PER_WORKER,
-        FRONTEND_RESIDENT_RESERVE_BYTES,
-    )
+    // A constrained machine lowers the identical file set serially; memory
+    // affects scheduling, never syntax coverage.
+    bonsai_common::compiler_worker_count(requested)
 }
 
 fn global_index_worker_stack_bytes() -> usize {

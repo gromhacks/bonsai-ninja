@@ -1483,17 +1483,9 @@ fn callgraph_resolver_worker_count() -> usize {
         .unwrap_or(available)
         .max(1)
         .min(available);
-    // Resolver workers own candidate, module-target, and callable-binding
-    // caches derived from Tree-sitter-lowered declarations. These estimates
-    // govern concurrency only: a constrained machine resolves the identical
-    // file set serially and emits the identical graph.
-    const RESOLVER_TRANSIENT_BYTES_PER_WORKER: u64 = 1024 * 1024 * 1024;
-    const RESOLVER_RESIDENT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-    bonsai_common::memory_bounded_worker_count(
-        requested,
-        RESOLVER_TRANSIENT_BYTES_PER_WORKER,
-        RESOLVER_RESIDENT_RESERVE_BYTES,
-    )
+    // Resolver workers own candidate and callable-binding caches. The shared
+    // compiler profile changes concurrency only; every caller is resolved.
+    bonsai_common::compiler_worker_count(requested)
 }
 
 /// Walk one decl's `flow_events` and emit a [`CallEdge`] per resolved

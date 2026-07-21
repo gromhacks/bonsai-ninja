@@ -2968,8 +2968,13 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
     let db = read(&root.join("crates/db/src/lib.rs"));
     let callgraph = read(&root.join("crates/callgraph/src/lib.rs"));
     let idg = read(&root.join("crates/idg/src/workspace_adapter.rs"));
+    let workspace = read(&root.join("crates/workspace/src/lib.rs"));
     for (phase, body) in [
-        ("frontend", function_body(&db, "global_index_worker_count")),
+        (
+            "syntax frontend",
+            function_body(&workspace, "workspace_parse_worker_count"),
+        ),
+        ("global index", function_body(&db, "global_index_worker_count")),
         (
             "callgraph",
             function_body(&callgraph, "callgraph_resolver_worker_count"),
@@ -2980,7 +2985,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         ),
     ] {
         assert!(
-            body.contains("memory_bounded_worker_count"),
+            body.contains("compiler_worker_count"),
             "{phase} concurrency must honor the effective process memory budget"
         );
         for forbidden in [".take(", ".truncate(", "max_files", "max_edges", "max_segments"] {

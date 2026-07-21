@@ -30,7 +30,7 @@ pub use names::{
 };
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;
-pub use resources::{effective_memory_limit_bytes, memory_bounded_worker_count};
+pub use resources::{compiler_worker_count, effective_memory_limit_bytes, memory_bounded_worker_count};
 pub use span::{LineCol, Span, SpanMap};
 pub use span_cache::{cached_span_map, cached_span_map_arc};
 

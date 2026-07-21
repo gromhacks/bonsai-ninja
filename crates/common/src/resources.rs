@@ -7,6 +7,9 @@
 use std::sync::OnceLock;
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
+const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
+const COMPILER_UNIT_TRANSIENT_BYTES: u64 = BYTES_PER_GIB;
+const COMPILER_RESIDENT_RESERVE_BYTES: u64 = 2 * BYTES_PER_GIB;
 
 /// Return the effective memory limit available to the analyzer process.
 ///
@@ -35,6 +38,29 @@ pub fn memory_bounded_worker_count(cpu_workers: usize, bytes_per_worker: u64, re
         bytes_per_worker,
         reserved_bytes,
         effective_memory_limit_bytes(),
+    )
+}
+
+/// Bound concurrent Tree-sitter/compiler units using the shared production
+/// memory profile.
+///
+/// Parsing, lowering, call resolution, IDG transfer, and candidate indexing
+/// all temporarily own roughly the same shape: one file/segment's CST or
+/// lowered IR plus output buffers. Keeping one profile prevents an early phase
+/// from overcommitting memory that a later phase already schedules safely. A
+/// 3 GiB process budget therefore executes one exact unit at a time; larger
+/// machines gain parallelism without changing analyzed files or emitted facts.
+#[must_use]
+pub fn compiler_worker_count(cpu_workers: usize) -> usize {
+    compiler_worker_count_for_limit(cpu_workers, effective_memory_limit_bytes())
+}
+
+fn compiler_worker_count_for_limit(cpu_workers: usize, limit: Option<u64>) -> usize {
+    worker_count_for_limit(
+        cpu_workers,
+        COMPILER_UNIT_TRANSIENT_BYTES,
+        COMPILER_RESIDENT_RESERVE_BYTES,
+        limit,
     )
 }
 
@@ -143,7 +169,7 @@ fn min_present(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{min_present, worker_count_for_limit};
+    use super::{compiler_worker_count_for_limit, min_present, worker_count_for_limit, BYTES_PER_GIB};
 
     #[test]
     fn configured_budget_cannot_raise_a_detected_machine_limit() {
@@ -165,5 +191,12 @@ mod tests {
     fn three_gib_budget_reduces_transient_concurrency_not_work() {
         const GIB: u64 = 1024 * 1024 * 1024;
         assert_eq!(worker_count_for_limit(32, GIB / 2, GIB, Some(3 * GIB)), 4);
+    }
+
+    #[test]
+    fn three_gib_budget_serializes_exact_compiler_units() {
+        assert_eq!(compiler_worker_count_for_limit(32, Some(3 * BYTES_PER_GIB)), 1);
+        assert_eq!(compiler_worker_count_for_limit(32, Some(8 * BYTES_PER_GIB)), 6);
+        assert_eq!(compiler_worker_count_for_limit(2, None), 2);
     }
 }
