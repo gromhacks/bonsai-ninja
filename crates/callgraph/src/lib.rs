@@ -1344,15 +1344,25 @@ impl ResolvedCallGraph {
             local_cg.edges
         };
         let workers = callgraph_resolver_worker_count();
-        let edges = match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
-            Ok(pool) => pool.install(|| {
-                use rayon::prelude::*;
-                file_infos
-                    .par_iter()
-                    .flat_map_iter(&resolve_file)
-                    .collect::<Vec<_>>()
-            }),
-            Err(_) => file_infos.iter().flat_map(resolve_file).collect(),
+        let edges = if rayon::current_thread_index().is_some() {
+            // A cold semantic service may be requested by several workers in
+            // an existing Rayon batch. Building and synchronously joining a
+            // nested pool there can form a lock cycle with the service's
+            // single-flight guard. Resolve serially on that worker instead;
+            // the fact set is identical and nested concurrency remains
+            // bounded by the caller's compiler scheduler.
+            file_infos.iter().flat_map(&resolve_file).collect()
+        } else {
+            match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
+                Ok(pool) => pool.install(|| {
+                    use rayon::prelude::*;
+                    file_infos
+                        .par_iter()
+                        .flat_map_iter(&resolve_file)
+                        .collect::<Vec<_>>()
+                }),
+                Err(_) => file_infos.iter().flat_map(resolve_file).collect(),
+            }
         };
         Self {
             cg: CallGraph::from_unique_edges(edges),

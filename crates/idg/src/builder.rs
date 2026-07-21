@@ -3222,7 +3222,10 @@ fn stitch_field_argument_forwarding(
     // synthetic-node indexes. Building them before the symbolic return made
     // demand-mode peak memory scale with the representation it deliberately
     // avoids.
-    let mut field_index = FieldPlaceIndex::from_workspace(ws);
+    let requested_field_places =
+        field_place_keys_for_propagation(&transforms, sites, symbolic_field_graph.as_ref(), &copy_sites);
+    let mut field_index = FieldPlaceIndex::from_workspace_for_keys(ws, &requested_field_places);
+    drop(requested_field_places);
     let syntactic_fields = field_index.syntactic_field_universe();
     let mut inter_call_arg_entries = InterCallArgEntryIndex::from_workspace(ws);
     let mut synthetic_field_writes = SyntheticFieldWriteCache::from_workspace(ws);
@@ -3325,6 +3328,87 @@ fn stitch_field_argument_forwarding(
     ));
     if let Some(graph) = symbolic_field_graph {
         ws.set_symbolic_field(graph);
+    }
+}
+
+/// Exact field-place keys that the forwarding phase can query.
+///
+/// Every key comes from an adapter-lowered place or a resolver-backed
+/// transform. Indexing only this demand set avoids duplicating unrelated
+/// workspace field strings while preserving the same arbitrary-depth AST
+/// paths and fixed point as a whole-workspace index.
+fn field_place_keys_for_propagation(
+    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
+    fallback_argument_sites: &[Arc<FieldArgStitch>],
+    symbolic: Option<&SymbolicFieldGraph>,
+    copy_sites: &[FieldCopySite],
+) -> AHashSet<FieldPlaceKey> {
+    let mut keys = AHashSet::default();
+    for (source, entries) in transforms {
+        keys.insert(source.clone());
+        for transform in entries {
+            let (segment, func, target_base) = match transform {
+                FieldWriteTransform::Argument(site) => (site.callee_seg, site.callee, &site.param_name),
+                FieldWriteTransform::Return(site) => (site.caller_seg, site.caller, &site.target_base),
+                FieldWriteTransform::ScalarReturn(site) => (site.caller_seg, site.caller, &site.target_base),
+                FieldWriteTransform::ConstructorReturn(site) => {
+                    (site.caller_seg, site.caller, &site.target_base)
+                }
+                FieldWriteTransform::ReceiverMutation(site) => {
+                    (site.caller_seg, site.caller, &site.target_base)
+                }
+                FieldWriteTransform::Copy(site) => (site.seg_id, site.func, &site.target_base),
+            };
+            insert_field_place_key(&mut keys, segment, func, target_base, false);
+        }
+    }
+    for site in fallback_argument_sites {
+        insert_field_place_key(&mut keys, site.caller_seg, site.caller, &site.actual_arg, true);
+        insert_field_place_key(&mut keys, site.callee_seg, site.callee, &site.param_name, false);
+    }
+    if let Some(symbolic) = symbolic {
+        for transform in symbolic
+            .transforms()
+            .iter()
+            .filter(|transform| transform.kind == SymbolicFieldTransformKind::Argument)
+        {
+            let Some(source) = symbolic.bases().get(transform.source as usize) else {
+                continue;
+            };
+            let Some(target) = symbolic.bases().get(transform.target as usize) else {
+                continue;
+            };
+            let (Some(source_base), Some(target_base)) =
+                (symbolic.string(source.storage), symbolic.string(target.storage))
+            else {
+                continue;
+            };
+            insert_field_place_key(&mut keys, source.segment, source.func, source_base, true);
+            insert_field_place_key(&mut keys, target.segment, target.func, target_base, false);
+        }
+    }
+    for site in copy_sites {
+        insert_field_place_key(&mut keys, site.seg_id, site.func, &site.source_base, true);
+        insert_field_place_key(&mut keys, site.seg_id, site.func, &site.target_base, false);
+    }
+    keys
+}
+
+fn insert_field_place_key(
+    keys: &mut AHashSet<FieldPlaceKey>,
+    seg_id: SegmentId,
+    func: FuncId,
+    base: &str,
+    writes: bool,
+) {
+    let base = normalize_storage_base(base);
+    if !base.is_empty() {
+        keys.insert(FieldPlaceKey {
+            seg_id,
+            func,
+            base,
+            writes,
+        });
     }
 }
 
@@ -4554,7 +4638,16 @@ fn normalize_static_subscripts(text: &str) -> String {
 }
 
 impl FieldPlaceIndex {
+    #[cfg(test)]
     fn from_workspace(ws: &IdgWorkspace) -> Self {
+        Self::from_workspace_with_filter(ws, None)
+    }
+
+    fn from_workspace_for_keys(ws: &IdgWorkspace, requested: &AHashSet<FieldPlaceKey>) -> Self {
+        Self::from_workspace_with_filter(ws, Some(requested))
+    }
+
+    fn from_workspace_with_filter(ws: &IdgWorkspace, requested: Option<&AHashSet<FieldPlaceKey>>) -> Self {
         let mut index = Self::default();
         for (seg_id, segment) in ws.segments() {
             for (node_idx, node) in segment.nodes.nodes.iter().enumerate() {
@@ -4577,7 +4670,9 @@ impl FieldPlaceIndex {
                     _ => continue,
                 };
                 let node_id = NodeId(node_idx as u32);
-                let _ = index.record_full_storage_place(seg_id, node.func, &full_name, writes, span, node_id);
+                let _ = index.record_full_storage_place_filtered(
+                    seg_id, node.func, &full_name, writes, span, node_id, requested,
+                );
             }
         }
         index.sort_and_dedup();
@@ -4718,7 +4813,8 @@ impl FieldPlaceIndex {
         added
     }
 
-    fn record_full_storage_place(
+    #[allow(clippy::too_many_arguments)]
+    fn record_full_storage_place_filtered(
         &mut self,
         seg_id: SegmentId,
         func: FuncId,
@@ -4726,6 +4822,7 @@ impl FieldPlaceIndex {
         writes: bool,
         span: Option<Span>,
         node: NodeId,
+        requested: Option<&AHashSet<FieldPlaceKey>>,
     ) -> Vec<(FieldPlaceKey, FieldPlaceHit)> {
         let mut added = Vec::new();
         let cached_parts = storage_segments_cached(full_name);
@@ -4738,6 +4835,16 @@ impl FieldPlaceIndex {
             let base = join_storage_part_refs(&parts[..split]);
             let field = join_storage_part_refs(field_parts);
             if base.is_empty() || field.is_empty() {
+                continue;
+            }
+            if requested.is_some_and(|requested| {
+                !requested.contains(&FieldPlaceKey {
+                    seg_id,
+                    func,
+                    base: base.clone(),
+                    writes,
+                })
+            }) {
                 continue;
             }
             added.extend(self.record_storage_hit(seg_id, func, base, field, writes, span, node));

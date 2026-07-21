@@ -1519,6 +1519,24 @@ fn syntactic_field_universe_keeps_numeric_and_deep_adapter_paths() {
         );
     }
     assert!(!universe.contains("child.child.value"));
+
+    let requested = AHashSet::from([FieldPlaceKey {
+        seg_id: SegmentId(0),
+        func: FuncId::new(1),
+        base: "tuple".to_string(),
+        writes: true,
+    }]);
+    let focused = FieldPlaceIndex::from_workspace_for_keys(&ws, &requested);
+    let tuple_hits = focused
+        .field_hits_for_normalized_base(SegmentId(0), FuncId::new(1), "tuple", true)
+        .expect("requested AST base remains indexed");
+    assert!(tuple_hits.iter().any(|hit| hit.field == "0.payload.value"));
+    assert!(
+        focused
+            .field_hits_for_normalized_base(SegmentId(0), FuncId::new(1), "map", true)
+            .is_none(),
+        "unrequested bases must not duplicate unrelated workspace field strings"
+    );
 }
 
 #[test]
