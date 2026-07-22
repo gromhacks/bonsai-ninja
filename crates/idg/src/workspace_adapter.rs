@@ -2327,7 +2327,7 @@ where
         call_graph,
         semantics,
         transfer_options,
-        IdgBuildScope::sidecar(None),
+        IdgBuildScope::sidecar(None, None),
     )
 }
 
@@ -2336,12 +2336,15 @@ where
 ///
 /// `body_for_file` returns a declaration index already rebound to `global`'s
 /// stable symbols. Each file is lowered and dropped at its segment boundary;
-/// no source file, function, edge, or fixed-point step is omitted.
+/// no source file, function, edge, or fixed-point step is omitted. The
+/// compiler spool is created beside `sidecar_path` so it is guaranteed to be
+/// filesystem-backed and can become the final FactStore payload atomically.
 pub fn build_for_persistence_streaming_with_file_semantics_and_options<S, D>(
     global: &GlobalIndex,
     call_graph: &ResolvedCallGraph,
     semantics: S,
     transfer_options: &TransferOptions,
+    sidecar_path: &std::path::Path,
     body_for_file: D,
 ) -> crate::IdgResult<IdgWorkspace>
 where
@@ -2353,7 +2356,7 @@ where
         call_graph,
         semantics,
         transfer_options,
-        IdgBuildScope::sidecar(Some(&body_for_file)),
+        IdgBuildScope::sidecar(Some(&body_for_file), Some(sidecar_path)),
     )
 }
 
@@ -2544,6 +2547,7 @@ struct IdgBuildScope<'a> {
     included_funcs: Option<&'a AHashSet<FuncId>>,
     reverse_lookup_retention: ReverseLookupRetention,
     body_for_file: Option<&'a FileBodyProvider<'a>>,
+    spool_path: Option<&'a std::path::Path>,
 }
 
 impl<'a> IdgBuildScope<'a> {
@@ -2557,15 +2561,20 @@ impl<'a> IdgBuildScope<'a> {
             included_funcs,
             reverse_lookup_retention: ReverseLookupRetention::Queryable,
             body_for_file,
+            spool_path: None,
         }
     }
 
-    fn sidecar(body_for_file: Option<&'a FileBodyProvider<'a>>) -> Self {
+    fn sidecar(
+        body_for_file: Option<&'a FileBodyProvider<'a>>,
+        spool_path: Option<&'a std::path::Path>,
+    ) -> Self {
         Self {
             included_files: None,
             included_funcs: None,
             reverse_lookup_retention: ReverseLookupRetention::SidecarOnly,
             body_for_file,
+            spool_path,
         }
     }
 }
@@ -2589,6 +2598,7 @@ where
         included_funcs,
         reverse_lookup_retention,
         body_for_file,
+        spool_path,
     } = scope;
     let total_started = Instant::now();
     let phase_started = Instant::now();
@@ -2806,6 +2816,7 @@ where
     ));
     let phase_started = Instant::now();
     let stream_sidecar_segments = reverse_lookup_retention == ReverseLookupRetention::SidecarOnly
+        && spool_path.is_some()
         && !transfer_options.include_diagnostic_field_flows
         && !transfer_options.include_receiver_method_propagation;
     let mut ws = if stream_sidecar_segments {
@@ -2819,6 +2830,7 @@ where
             canonical_batches,
             stitch_batches,
             function_count,
+            spool_path.expect("streaming sidecar path checked above"),
             &resolver,
             transfer_options.include_field_argument_forwarding,
             transfer_options.symbolic_field_forwarding,

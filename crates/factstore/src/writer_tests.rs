@@ -118,6 +118,57 @@ fn add_streamed_writes_without_an_intermediate_payload() {
 }
 
 #[test]
+fn prepared_payload_is_adopted_and_extended_without_reencoding() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("prepared.bin");
+    let mut prepared = PreparedFactStorePayload::create().expect("prepared payload");
+    let (first_offset, first_len) = prepared.append(b"compiler-segment-a").expect("append first");
+    let (second_offset, second_len) = prepared.append(b"compiler-segment-b").expect("append second");
+    assert_eq!(first_offset, HEADER_SIZE as u64);
+    assert_eq!(second_offset, first_offset + u64::from(first_len));
+
+    let writer = FactStoreWriter::create_from_prepared(
+        &target,
+        17,
+        0xC0DE,
+        prepared,
+        vec![
+            PreparedFactStoreEntry {
+                key: 2,
+                body_hash: 12,
+                payload_offset: second_offset,
+                payload_len: second_len,
+            },
+            PreparedFactStoreEntry {
+                key: 1,
+                body_hash: 11,
+                payload_offset: first_offset,
+                payload_len: first_len,
+            },
+        ],
+    )
+    .expect("adopt prepared payload");
+    writer
+        .add_owned(0, 10, b"metadata".to_vec())
+        .expect("append metadata");
+    assert_eq!(writer.finish().expect("finish"), 3);
+
+    let reader = FactStoreReader::open(&target, 17, 0xC0DE).expect("open");
+    assert_eq!(
+        reader.get(0).expect("metadata").expect("present").payload,
+        b"metadata"
+    );
+    assert_eq!(
+        reader.get(1).expect("first").expect("present").payload,
+        b"compiler-segment-a"
+    );
+    assert_eq!(
+        reader.get(2).expect("second").expect("present").payload,
+        b"compiler-segment-b"
+    );
+}
+
+#[test]
 fn failed_streamed_entry_never_publishes_a_partial_store() {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("v.bin");

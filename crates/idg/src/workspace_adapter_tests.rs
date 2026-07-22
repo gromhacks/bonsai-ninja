@@ -255,6 +255,8 @@ fn streamed_transfer_bodies_match_fully_resident_idg() {
     let mut headers = GlobalIndex::new();
     headers.insert_linkage_header_preprocessed(body.clone());
     headers.finalize_semantic_facts();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sidecar = dir.path().join("streaming-idg.factstore");
     let actual = build_for_persistence_streaming_with_file_semantics_and_options(
         &headers,
         &graph,
@@ -265,6 +267,7 @@ fn streamed_transfer_bodies_match_fully_resident_idg() {
             |_| &[] as &'static [&'static str],
         ),
         &TransferOptions::default(),
+        &sidecar,
         |requested| (requested == file).then(|| headers.remap_file_to_existing_symbols(body.clone())),
     )
     .expect("streaming persistence build");

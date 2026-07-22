@@ -1075,6 +1075,7 @@ pub(crate) fn stitch_idg_from_relowered_segment_batches<B1, I1, B2, I2>(
     canonical_batches: B1,
     stitch_batches: B2,
     function_count: usize,
+    spool_path: &std::path::Path,
     resolver: &dyn CalleeResolver,
     include_field_argument_forwarding: bool,
     symbolic_field_forwarding: bool,
@@ -1088,7 +1089,7 @@ where
 {
     let started = Instant::now();
     let mut ws = IdgWorkspace::new();
-    ws.enable_segment_spool()?;
+    ws.enable_segment_spool(spool_path)?;
     ws.disable_cross_file_indexes();
     let mut callee_endpoints: AHashMap<FuncId, CalleeEndpoints> = AHashMap::with_capacity(function_count);
     let mut schedule_to_workspace: AHashMap<SegmentId, SegmentId> = AHashMap::new();
