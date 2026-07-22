@@ -78,6 +78,60 @@ struct CalleeEndpoints {
     return_node: Option<NodeId>,
 }
 
+/// Packed endpoint records with a dense compiler-id indirection.
+///
+/// `CalleeEndpoints` is intentionally rich and therefore large. Storing it
+/// inline in an over-capacity hash table wastes one full record-sized bucket
+/// for every spare slot on broad workspaces. Function ids are stable `u32`
+/// compiler ids, so a compact `FuncId -> row` vector provides O(1) lookup
+/// while the endpoint rows remain tightly packed.
+struct CalleeEndpointIndex {
+    rows: Vec<CalleeEndpoints>,
+    row_by_func: Vec<u32>,
+}
+
+impl CalleeEndpointIndex {
+    const MISSING: u32 = u32::MAX;
+
+    fn with_capacity(function_count: usize) -> Self {
+        Self {
+            rows: Vec::with_capacity(function_count),
+            row_by_func: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, func: FuncId, endpoints: CalleeEndpoints) {
+        let func_index = func.raw() as usize;
+        if self.row_by_func.len() <= func_index {
+            self.row_by_func.resize(func_index + 1, Self::MISSING);
+        }
+        assert_eq!(
+            self.row_by_func[func_index],
+            Self::MISSING,
+            "callee endpoint inserted twice for function {}",
+            func.raw()
+        );
+        let row = u32::try_from(self.rows.len()).expect("callee endpoint row overflow");
+        self.rows.push(endpoints);
+        self.row_by_func[func_index] = row;
+    }
+
+    fn get(&self, func: FuncId) -> Option<&CalleeEndpoints> {
+        let row = *self.row_by_func.get(func.raw() as usize)?;
+        (row != Self::MISSING)
+            .then(|| self.rows.get(row as usize))
+            .flatten()
+    }
+
+    fn contains_key(&self, func: FuncId) -> bool {
+        self.get(func).is_some()
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+}
+
 #[derive(Debug)]
 struct FunctionStitchData {
     params: Vec<String>,
@@ -737,7 +791,7 @@ struct WorkspaceCallerStitch<'a> {
     caller_remap: &'a NodeRemap,
     data: FunctionStitchData,
     resolver: &'a dyn CalleeResolver,
-    callee_endpoints: &'a AHashMap<FuncId, CalleeEndpoints>,
+    callee_endpoints: &'a CalleeEndpointIndex,
     symbolic_field_forwarding: bool,
     symbolic_funcs: Option<&'a AHashSet<FuncId>>,
 }
@@ -1064,7 +1118,7 @@ where
     // the `IdgWorkspace`'s segment lookup.
     let mut seg_remaps: AHashMap<FuncId, (SegmentId, NodeRemap)> = AHashMap::with_capacity(function_count);
     let mut stitch_data: AHashMap<FuncId, FunctionStitchData> = AHashMap::with_capacity(function_count);
-    let mut callee_endpoints: AHashMap<FuncId, CalleeEndpoints> = AHashMap::with_capacity(function_count);
+    let mut callee_endpoints = CalleeEndpointIndex::with_capacity(function_count);
     // Callers emit placeholder segments in ascending order. This preserves
     // stable workspace node ids while allowing each completed compiler batch
     // to be consumed before the next batch is lowered.
@@ -1108,6 +1162,7 @@ where
                 &stitch_data,
                 &ws,
                 &mut callee_endpoints,
+                None,
             );
         }
     }
@@ -1190,6 +1245,11 @@ pub(crate) struct ReloweredStitchOptions<'a> {
     pub include_field_argument_forwarding: bool,
     pub symbolic_field_forwarding: bool,
     pub symbolic_funcs: Option<&'a AHashSet<FuncId>>,
+    /// Resolver-proven local callable targets that can consume lexical
+    /// captures. `None` preserves the general resident-builder contract;
+    /// persistence callers provide the exact callgraph-derived target set so
+    /// ordinary functions do not retain duplicate bare-read strings.
+    pub capture_funcs: Option<&'a AHashSet<FuncId>>,
 }
 
 pub(crate) fn stitch_idg_from_relowered_segment_batches<B1, I1, B2, I2>(
@@ -1210,12 +1270,13 @@ where
         include_field_argument_forwarding,
         symbolic_field_forwarding,
         symbolic_funcs,
+        capture_funcs,
     } = options;
     let started = Instant::now();
     let mut ws = IdgWorkspace::new();
     ws.enable_segment_spool(spool_path)?;
     ws.disable_cross_file_indexes();
-    let mut callee_endpoints: AHashMap<FuncId, CalleeEndpoints> = AHashMap::with_capacity(function_count);
+    let mut callee_endpoints = CalleeEndpointIndex::with_capacity(function_count);
     let mut schedule_to_workspace: AHashMap<SegmentId, SegmentId> = AHashMap::new();
     let mut previous_placeholder = None;
     let mut canonical_function_count = 0usize;
@@ -1254,6 +1315,7 @@ where
                 &data_by_func,
                 &ws,
                 &mut callee_endpoints,
+                capture_funcs,
             );
             if let Some(segment) = ws.segment_mut(segment_id) {
                 segment.release_build_lookups();
@@ -1383,7 +1445,8 @@ fn extend_callee_endpoints_for_segment(
     funcs: &[FuncId],
     stitch_data: &AHashMap<FuncId, FunctionStitchData>,
     ws: &IdgWorkspace,
-    out: &mut AHashMap<FuncId, CalleeEndpoints>,
+    out: &mut CalleeEndpointIndex,
+    capture_funcs: Option<&AHashSet<FuncId>>,
 ) {
     let Some(segment) = ws.segment(segment_id) else {
         return;
@@ -1431,7 +1494,11 @@ fn extend_callee_endpoints_for_segment(
             .map(|data| data.params.clone())
             .unwrap_or_default();
         let param_write_nodes = collect_non_entry_param_write_nodes(segment, func, &param_names, &params);
-        let capture_read_nodes = collect_unrooted_scalar_reads(segment, func);
+        let capture_read_nodes = if capture_funcs.is_none_or(|targets| targets.contains(&func)) {
+            collect_unrooted_scalar_reads(segment, func)
+        } else {
+            Vec::new()
+        };
         out.insert(
             func,
             CalleeEndpoints {
@@ -1802,7 +1869,7 @@ struct CallStitchRequest<'a> {
     caller_implicit_receiver_bases: &'a [String],
     caller_receiver_names: &'a [String],
     resolver: &'a dyn CalleeResolver,
-    callee_endpoints: &'a AHashMap<FuncId, CalleeEndpoints>,
+    callee_endpoints: &'a CalleeEndpointIndex,
 }
 
 struct CallStitchOutputs<'a> {
@@ -1925,7 +1992,7 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
     // Return semantics are known.
     let has_stitchable_candidate = candidates
         .iter()
-        .any(|candidate| callee_endpoints.contains_key(&candidate.func));
+        .any(|candidate| callee_endpoints.contains_key(candidate.func));
     // Constructor syntax itself proves that the returned object incorporates
     // its arguments even when the constructor body lives outside the indexed
     // workspace. This exception is keyed only by adapter-emitted CallKind,
@@ -2002,7 +2069,7 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
     // calls require explicit summaries/models; unresolved assignment
     // calls do not get a generic passthrough edge.
     for candidate in &candidates {
-        let Some(endpoints) = callee_endpoints.get(&candidate.func) else {
+        let Some(endpoints) = callee_endpoints.get(candidate.func) else {
             continue;
         };
         stitch_resolved_candidate(
@@ -2884,7 +2951,7 @@ fn stitch_source_callback_args(
     caller_remap: &NodeRemap,
     site: &CallSiteRef,
     resolver: &dyn CalleeResolver,
-    callee_endpoints: &AHashMap<FuncId, CalleeEndpoints>,
+    callee_endpoints: &CalleeEndpointIndex,
     ws: &mut IdgWorkspace,
 ) -> usize {
     if site.source_callback_args.is_empty() {
@@ -2904,7 +2971,7 @@ fn stitch_source_callback_args(
             continue;
         }
         for cand in resolver.callable_arg(caller, callback_text) {
-            let Some(endpoints) = callee_endpoints.get(&cand.func) else {
+            let Some(endpoints) = callee_endpoints.get(cand.func) else {
                 continue;
             };
             for &source_param_index in &shape.source_param_indices {
@@ -2946,7 +3013,7 @@ fn stitch_indirect_callback_inputs(
     caller_remap: &NodeRemap,
     site: &CallSiteRef,
     resolver: &dyn CalleeResolver,
-    callee_endpoints: &AHashMap<FuncId, CalleeEndpoints>,
+    callee_endpoints: &CalleeEndpointIndex,
     ws: &mut IdgWorkspace,
 ) -> usize {
     let mut callback_arg_indices = AHashSet::new();
@@ -2965,7 +3032,7 @@ fn stitch_indirect_callback_inputs(
         callback_arg_indices.insert(idx);
         for cand in resolved {
             if cand.edge_kind == bonsai_callgraph::EdgeKind::Indirect
-                && callee_endpoints.contains_key(&cand.func)
+                && callee_endpoints.contains_key(cand.func)
                 && seen_candidates.insert(cand.func)
             {
                 callback_candidates.push(cand);
@@ -2995,7 +3062,7 @@ fn stitch_indirect_callback_inputs(
 
     let mut emitted = 0usize;
     for cand in callback_candidates {
-        let Some(endpoints) = callee_endpoints.get(&cand.func) else {
+        let Some(endpoints) = callee_endpoints.get(cand.func) else {
             continue;
         };
         let callback_param_idx = explicit_arg_param_index(0, endpoints.receiver_param_index);

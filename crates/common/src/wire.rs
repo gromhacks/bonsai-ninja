@@ -35,6 +35,27 @@ where
     value.serialize(&mut Serializer::new(writer))
 }
 
+/// Encode `value` as MessagePack using named struct fields.
+///
+/// Use this for versioned artifacts that contain serde structs with
+/// `skip_serializing_if` fields. Compact tuple encoding cannot preserve a
+/// skipped field's position when a later field is present; named fields make
+/// that schema explicit while remaining streamable and deterministic.
+pub fn encode_struct_map_to_writer<W, T>(writer: W, value: &T) -> Result<(), EncodeError>
+where
+    W: Write,
+    T: Serialize + ?Sized,
+{
+    value.serialize(&mut Serializer::new(writer).with_struct_map())
+}
+
+/// Buffered counterpart to [`encode_struct_map_to_writer`].
+pub fn encode_struct_map<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, EncodeError> {
+    let mut encoded = Vec::new();
+    encode_struct_map_to_writer(&mut encoded, value)?;
+    Ok(encoded)
+}
+
 /// Decode one MessagePack value directly from `reader`.
 pub fn decode_from_reader<R, T>(reader: R) -> Result<T, DecodeError>
 where
@@ -78,6 +99,28 @@ mod tests {
         assert_eq!(
             decode_from_reader::<_, Record>(encoded.as_slice()).expect("decode"),
             record()
+        );
+    }
+
+    #[test]
+    fn struct_map_preserves_skipped_fields_before_present_fields() {
+        #[derive(Debug, Eq, PartialEq, serde::Deserialize, Serialize)]
+        struct SparseRecord {
+            first: u32,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            skipped: Option<String>,
+            last: u32,
+        }
+
+        let record = SparseRecord {
+            first: 1,
+            skipped: None,
+            last: 2,
+        };
+        let encoded = encode_struct_map(&record).expect("encode named wire record");
+        assert_eq!(
+            decode::<SparseRecord>(&encoded).expect("decode named wire record"),
+            record
         );
     }
 

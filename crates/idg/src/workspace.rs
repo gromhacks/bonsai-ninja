@@ -1182,10 +1182,10 @@ impl IdgWorkspace {
         );
         let persist_symbolic = match symbolic_transform_spool {
             Some(spool) => PersistSymbolic::Spool {
-                graph: std::sync::Arc::new(symbolic_field),
+                graph: symbolic_field,
                 spool,
             },
-            None => PersistSymbolic::Owned(std::sync::Arc::new(symbolic_field)),
+            None => PersistSymbolic::Owned(symbolic_field),
         };
         let result = save_workspace_parts(
             path,
@@ -1540,9 +1540,9 @@ impl<T> PersistSlice<'_, T> {
 
 enum PersistSymbolic<'a> {
     Borrowed(&'a SymbolicFieldGraph),
-    Owned(std::sync::Arc<SymbolicFieldGraph>),
+    Owned(SymbolicFieldGraph),
     Spool {
-        graph: std::sync::Arc<SymbolicFieldGraph>,
+        graph: SymbolicFieldGraph,
         spool: SymbolicTransformSpool,
     },
 }
@@ -1645,6 +1645,7 @@ fn save_workspace_parts(
     use bonsai_factstore::FactStoreWriter;
     use rayon::prelude::*;
 
+    let persistence_started = std::time::Instant::now();
     let segment_count = segments.len();
     let cross_file_edge_count = cross_file_edges.len();
     let cross_file_chunk_count = cross_file_edges.chunk_count();
@@ -1664,6 +1665,11 @@ fn save_workspace_parts(
             Some(other),
         ),
     };
+    bonsai_diagnostics::debug_log!(
+        "idg-build",
+        "persist writer-ready: {:.3}s segments={segment_count}",
+        persistence_started.elapsed().as_secs_f64()
+    );
     let metadata = IdgWorkspaceMetadata {
         version: IDG_WORKSPACE_VERSION,
         segment_count: segment_count as u32,
@@ -1707,6 +1713,11 @@ fn save_workspace_parts(
         Some(PersistSegments::Spool(_)) => unreachable!("spool was adopted above"),
         None => {}
     }
+    bonsai_diagnostics::debug_log!(
+        "idg-build",
+        "persist segments: {:.3}s segments={segment_count}",
+        persistence_started.elapsed().as_secs_f64()
+    );
 
     let cross_base = first_cross_file_chunk_key(segment_count as u32);
     match cross_file_edges {
@@ -1715,6 +1726,11 @@ fn save_workspace_parts(
         }
         PersistCrossFileEdges::Spool(spool) => spool.write_chunks(&writer, cross_base)?,
     }
+    bonsai_diagnostics::debug_log!(
+        "idg-build",
+        "persist cross-file: {:.3}s edges={cross_file_edge_count} chunks={cross_file_chunk_count}",
+        persistence_started.elapsed().as_secs_f64()
+    );
     let field_base = first_field_flow_chunk_key(segment_count as u32, cross_file_chunk_count as u32);
     write_slice_chunks(
         &writer,
@@ -1722,35 +1738,62 @@ fn save_workspace_parts(
         IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN,
         field_base,
     )?;
+    bonsai_diagnostics::debug_log!(
+        "idg-build",
+        "persist field-flow: {:.3}s links={} chunks={field_flow_chunk_count}",
+        persistence_started.elapsed().as_secs_f64(),
+        metadata.field_flow_count
+    );
     let symbolic_header = symbolic_field_header_key(
         segment_count as u32,
         cross_file_chunk_count as u32,
         field_flow_chunk_count as u32,
     );
-    match &symbolic_field {
-        PersistSymbolic::Borrowed(graph) => writer.add_owned(
-            symbolic_header,
-            IDG_WORKSPACE_VERSION as u64,
-            encode_sidecar_value(&(graph.strings(), graph.bases()))?,
-        )?,
-        PersistSymbolic::Owned(graph) => {
-            let graph = std::sync::Arc::clone(graph);
-            writer.add_streamed(symbolic_header, IDG_WORKSPACE_VERSION as u64, move |out| {
-                encode_sidecar_to_writer(out, &(graph.strings(), graph.bases()))
-            })?;
-        }
-        PersistSymbolic::Spool { graph, .. } => {
-            let graph = std::sync::Arc::clone(graph);
-            writer.add_streamed(symbolic_header, IDG_WORKSPACE_VERSION as u64, move |out| {
-                encode_sidecar_to_writer(out, &(graph.strings(), graph.bases()))
-            })?;
-        }
+    enum PersistTransforms<'a> {
+        Borrowed(&'a [SymbolicFieldTransform]),
+        Owned(std::sync::Arc<Vec<SymbolicFieldTransform>>),
+        Spool(SymbolicTransformSpool),
     }
-    let transform_base = symbolic_header + 1;
-    match symbolic_field {
+    let transforms = match symbolic_field {
         PersistSymbolic::Borrowed(graph) => {
-            for (idx, chunk) in graph
-                .transforms()
+            writer.add_owned(
+                symbolic_header,
+                IDG_WORKSPACE_VERSION as u64,
+                encode_sidecar_value(&(graph.strings(), graph.bases()))?,
+            )?;
+            PersistTransforms::Borrowed(graph.transforms())
+        }
+        PersistSymbolic::Owned(graph) => {
+            let (strings, bases, transforms) = graph.into_parts();
+            writer.add_streamed(symbolic_header, IDG_WORKSPACE_VERSION as u64, move |out| {
+                encode_sidecar_to_writer(out, &(strings.as_slice(), bases.as_slice()))
+            })?;
+            PersistTransforms::Owned(std::sync::Arc::new(transforms))
+        }
+        PersistSymbolic::Spool { graph, spool } => {
+            let (strings, bases, transforms) = graph.into_parts();
+            debug_assert!(
+                transforms.is_empty(),
+                "spooled symbolic compiler graph must not retain transforms"
+            );
+            writer.add_streamed(symbolic_header, IDG_WORKSPACE_VERSION as u64, move |out| {
+                encode_sidecar_to_writer(out, &(strings.as_slice(), bases.as_slice()))
+            })?;
+            drop(transforms);
+            PersistTransforms::Spool(spool)
+        }
+    };
+    bonsai_diagnostics::debug_log!(
+        "idg-build",
+        "persist symbolic-header: {:.3}s strings={} bases={}",
+        persistence_started.elapsed().as_secs_f64(),
+        metadata.symbolic_string_count,
+        metadata.symbolic_base_count
+    );
+    let transform_base = symbolic_header + 1;
+    match transforms {
+        PersistTransforms::Borrowed(transforms) => {
+            for (idx, chunk) in transforms
                 .chunks(IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN)
                 .enumerate()
             {
@@ -1761,28 +1804,38 @@ fn save_workspace_parts(
                 )?;
             }
         }
-        PersistSymbolic::Owned(graph) => {
-            for (idx, start) in (0..graph.transforms().len())
+        PersistTransforms::Owned(transforms) => {
+            for (idx, start) in (0..transforms.len())
                 .step_by(IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN)
                 .enumerate()
             {
-                let graph = std::sync::Arc::clone(&graph);
-                let end = graph
-                    .transforms()
+                let transforms = std::sync::Arc::clone(&transforms);
+                let end = transforms
                     .len()
                     .min(start.saturating_add(IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN));
                 writer.add_streamed(
                     transform_base + idx as u64,
                     IDG_WORKSPACE_VERSION as u64,
-                    move |out| encode_sidecar_to_writer(out, &graph.transforms()[start..end]),
+                    move |out| encode_sidecar_to_writer(out, &transforms[start..end]),
                 )?;
             }
         }
-        PersistSymbolic::Spool { spool, .. } => {
+        PersistTransforms::Spool(spool) => {
             spool.write_chunks(&writer, transform_base)?;
         }
     }
+    bonsai_diagnostics::debug_log!(
+        "idg-build",
+        "persist symbolic-transforms: {:.3}s transforms={symbolic_transform_count} chunks={symbolic_transform_chunk_count}",
+        persistence_started.elapsed().as_secs_f64()
+    );
     writer.finish()?;
+    bonsai_diagnostics::debug_log!(
+        "idg-build",
+        "persist finished: {:.3}s bytes={}",
+        persistence_started.elapsed().as_secs_f64(),
+        std::fs::metadata(path).map_or(0, |metadata| metadata.len())
+    );
     Ok(())
 }
 

@@ -252,6 +252,17 @@ impl SymbolicFieldGraph {
         self.outgoing_by_source = Vec::new();
     }
 
+    /// Consume the canonical relation into its wire-order components.
+    ///
+    /// Persistence-only compilers use this ownership boundary to serialize
+    /// and release the string/base dictionaries before copying an already-
+    /// spooled transform relation. The skipped hash-consing indexes are
+    /// intentionally discarded: they are rebuilt after decoding and never
+    /// participate in the persisted representation.
+    pub(crate) fn into_parts(self) -> (Vec<String>, Vec<SymbolicFieldBase>, Vec<SymbolicFieldTransform>) {
+        (self.strings, self.bases, self.transforms)
+    }
+
     pub(crate) fn from_parts(
         strings: Vec<String>,
         bases: Vec<SymbolicFieldBase>,

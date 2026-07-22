@@ -90,11 +90,18 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
 /// A worker exit is the portable hard reclamation boundary: every phase still
 /// sees the complete AST-derived compiler input and emits the same sidecars,
 /// while their peak resident sets cannot become additive.
-fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
+pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
     let executable = std::env::current_exe()?;
-    for phase in [SemanticWorkerPhase::Frontend, SemanticWorkerPhase::Idg] {
+    for phase in [
+        SemanticWorkerPhase::Callgraph,
+        SemanticWorkerPhase::Retrieval,
+        SemanticWorkerPhase::Linkage,
+        SemanticWorkerPhase::Idg,
+    ] {
         let phase_name = match phase {
-            SemanticWorkerPhase::Frontend => "frontend",
+            SemanticWorkerPhase::Retrieval => "retrieval",
+            SemanticWorkerPhase::Callgraph => "callgraph",
+            SemanticWorkerPhase::Linkage => "linkage",
             SemanticWorkerPhase::Idg => "idg",
         };
         let mut command = Command::new(&executable);
@@ -118,7 +125,9 @@ fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
 fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Result<()> {
     let project = open_project_sidecar_validation_only(root)?;
     match phase {
-        SemanticWorkerPhase::Frontend => project.cache().warm_retrieval_and_callgraph_sidecars(),
+        SemanticWorkerPhase::Retrieval => project.cache().warm_retrieval_sidecar(),
+        SemanticWorkerPhase::Callgraph => project.cache().warm_callgraph_sidecar(),
+        SemanticWorkerPhase::Linkage => project.cache().warm_compiler_linkage_sidecar(),
         SemanticWorkerPhase::Idg => {
             project.cache().warm_idg_sidecar_and_manifest()?;
             let stage = progress::ScopedSpinner::new("collecting index stats");
