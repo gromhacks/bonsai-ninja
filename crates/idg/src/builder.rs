@@ -46,14 +46,14 @@ use crate::edge::IdgEdge;
 use crate::node::NodeId;
 use crate::place::{CallSiteId, Place};
 use crate::segment::IdgSegment;
-use crate::symbolic::{
-    SymbolicFieldGraph, SymbolicFieldTransform, SymbolicFieldTransformKind, NO_SYMBOLIC_STRING,
-};
+use crate::symbolic::{SymbolicFieldTransform, SymbolicFieldTransformKind, NO_SYMBOLIC_STRING};
 use crate::transfer::{
     receiver_name_matches, receiver_tokens_equal, CallSiteRef, DescendantCopy, FlowControlFacts,
     ReturnFieldProjection, TransferOutput,
 };
-use crate::workspace::{CrossFileEdge, IdgWorkspace, SegmentId};
+use crate::workspace::{
+    CrossFileEdge, IdgWorkspace, SegmentId, SymbolicFieldCompilerStorage, WireChunkSpool,
+};
 
 #[derive(Debug, Clone)]
 struct CalleeEndpoints {
@@ -722,11 +722,13 @@ struct WorkspaceStitchState {
     return_field_sites: ReturnFieldSiteQueue,
     scalar_return_sites: ScalarReturnSiteQueue,
     constructor_return_sites: ConstructorReturnSiteQueue,
-    symbolic_field_graph: SymbolicFieldGraph,
+    symbolic_field_graph: SymbolicFieldCompilerStorage,
     receiver_mutation_sites: Vec<Arc<ReceiverMutationStitch>>,
+    pending_field_copy_sites: Vec<FieldCopySite>,
+    symbolic_field_copy_spool: Option<WireChunkSpool<FieldCopySite>>,
     passthrough_field_copy_sites: Vec<FieldCopySite>,
     field_contexts: AHashMap<FuncId, FunctionFieldContext>,
-    precollected_field_copy_sites: bool,
+    field_copy_sites_collected_by_segment: bool,
 }
 
 struct WorkspaceCallerStitch<'a> {
@@ -742,16 +744,35 @@ struct WorkspaceCallerStitch<'a> {
 
 impl WorkspaceStitchState {
     fn new(function_count: usize) -> Self {
-        Self::with_precollected_field_copy_sites(function_count, false)
+        Self::with_symbolic_storage(
+            function_count,
+            false,
+            SymbolicFieldCompilerStorage::resident(),
+            None,
+        )
     }
 
-    fn for_spooled_persistence(function_count: usize) -> Self {
-        Self::with_precollected_field_copy_sites(function_count, true)
-    }
-
-    fn with_precollected_field_copy_sites(
+    fn for_spooled_persistence(
         function_count: usize,
-        precollected_field_copy_sites: bool,
+        spool_path: &std::path::Path,
+    ) -> crate::IdgResult<Self> {
+        Ok(Self::with_symbolic_storage(
+            function_count,
+            true,
+            SymbolicFieldCompilerStorage::spooled(spool_path)?,
+            Some(WireChunkSpool::new(
+                spool_path,
+                FIELD_COPY_SPOOL_CHUNK_LEN,
+                "symbolic field copy",
+            )?),
+        ))
+    }
+
+    fn with_symbolic_storage(
+        function_count: usize,
+        field_copy_sites_collected_by_segment: bool,
+        symbolic_field_graph: SymbolicFieldCompilerStorage,
+        symbolic_field_copy_spool: Option<WireChunkSpool<FieldCopySite>>,
     ) -> Self {
         Self {
             call_started: Instant::now(),
@@ -761,24 +782,97 @@ impl WorkspaceStitchState {
             return_field_sites: ReturnFieldSiteQueue::default(),
             scalar_return_sites: ScalarReturnSiteQueue::default(),
             constructor_return_sites: ConstructorReturnSiteQueue::default(),
-            symbolic_field_graph: SymbolicFieldGraph::new(),
+            symbolic_field_graph,
             receiver_mutation_sites: Vec::new(),
+            pending_field_copy_sites: Vec::new(),
+            symbolic_field_copy_spool,
             passthrough_field_copy_sites: Vec::new(),
             field_contexts: AHashMap::with_capacity(function_count),
-            precollected_field_copy_sites,
+            field_copy_sites_collected_by_segment,
         }
     }
 
-    fn collect_active_segment_field_copy_sites(&mut self, seg_id: SegmentId, ws: &IdgWorkspace) {
+    fn check_symbolic_spool(&self) -> crate::IdgResult<()> {
+        self.symbolic_field_graph.check_spool()?;
+        self.symbolic_field_copy_spool
+            .as_ref()
+            .map_or(Ok(()), WireChunkSpool::check_error)
+    }
+
+    fn collect_active_segment_field_copy_sites(
+        &mut self,
+        seg_id: SegmentId,
+        ws: &IdgWorkspace,
+        symbolic_field_forwarding: bool,
+        symbolic_funcs: Option<&AHashSet<FuncId>>,
+    ) {
         let Some(segment) = ws.segment(seg_id) else {
             return;
         };
-        self.passthrough_field_copy_sites
-            .extend(collect_field_copy_sites_from_segment(
-                seg_id,
-                segment,
-                &self.field_contexts,
-            ));
+        let mut sites = std::mem::take(&mut self.pending_field_copy_sites);
+        sites.extend(collect_field_copy_sites_from_segment(
+            seg_id,
+            segment,
+            &self.field_contexts,
+        ));
+        sort_and_dedup_field_copy_sites(&mut sites);
+        for site in sites {
+            if symbolic_field_forwarding && symbolic_pair_supported(site.func, site.func, symbolic_funcs) {
+                if let Some(spool) = &mut self.symbolic_field_copy_spool {
+                    spool.push(site);
+                } else {
+                    push_symbolic_field_copy(&mut self.symbolic_field_graph, &site);
+                }
+            } else {
+                self.passthrough_field_copy_sites.push(site);
+            }
+        }
+        if symbolic_field_forwarding {
+            for func_raw in &segment.funcs {
+                let func = FuncId::new(*func_raw);
+                if symbolic_pair_supported(func, func, symbolic_funcs) {
+                    self.field_contexts.remove(&func);
+                }
+            }
+        }
+    }
+
+    fn collect_resident_field_copy_sites(
+        &mut self,
+        ws: &IdgWorkspace,
+        symbolic_field_forwarding: bool,
+        symbolic_funcs: Option<&AHashSet<FuncId>>,
+    ) {
+        let mut sites = std::mem::take(&mut self.pending_field_copy_sites);
+        sites.extend(collect_field_copy_sites(ws, &self.field_contexts));
+        sort_and_dedup_field_copy_sites(&mut sites);
+        for site in sites {
+            if symbolic_field_forwarding && symbolic_pair_supported(site.func, site.func, symbolic_funcs) {
+                push_symbolic_field_copy(&mut self.symbolic_field_graph, &site);
+            } else {
+                self.passthrough_field_copy_sites.push(site);
+            }
+        }
+        if symbolic_field_forwarding {
+            self.field_contexts
+                .retain(|func, _| !symbolic_pair_supported(*func, *func, symbolic_funcs));
+        }
+    }
+
+    fn flush_symbolic_field_copy_spool(&mut self) -> crate::IdgResult<()> {
+        let (spool, graph) = (
+            self.symbolic_field_copy_spool.as_ref(),
+            &mut self.symbolic_field_graph,
+        );
+        if let Some(spool) = spool {
+            spool.visit(|sites| {
+                for site in sites {
+                    push_symbolic_field_copy(graph, site);
+                }
+                Ok(())
+            })?;
+        }
+        graph.check_spool()
     }
 
     fn stitch_caller(&mut self, ws: &mut IdgWorkspace, request: WorkspaceCallerStitch<'_>) {
@@ -792,7 +886,8 @@ impl WorkspaceStitchState {
             symbolic_field_forwarding,
             symbolic_funcs,
         } = request;
-        self.passthrough_field_copy_sites
+        let receiver_mutation_start = self.receiver_mutation_sites.len();
+        self.pending_field_copy_sites
             .extend(data.descendant_copies.iter().map(|copy| FieldCopySite {
                 seg_id: caller_seg,
                 func: caller,
@@ -825,7 +920,7 @@ impl WorkspaceStitchState {
                     scalar_return_sites: &mut self.scalar_return_sites,
                     constructor_return_sites: &mut self.constructor_return_sites,
                     receiver_mutation_sites: &mut self.receiver_mutation_sites,
-                    passthrough_field_copy_sites: &mut self.passthrough_field_copy_sites,
+                    passthrough_field_copy_sites: &mut self.pending_field_copy_sites,
                     stats: self.collect_stats.then_some(&mut self.stats),
                 },
             );
@@ -839,6 +934,16 @@ impl WorkspaceStitchState {
                 &mut self.symbolic_field_graph,
                 symbolic_funcs,
             );
+            let mut current_receiver_mutations =
+                self.receiver_mutation_sites.split_off(receiver_mutation_start);
+            dedup_receiver_mutation_sites(&mut current_receiver_mutations);
+            for site in current_receiver_mutations {
+                if symbolic_pair_supported(site.callee, site.caller, symbolic_funcs) {
+                    push_symbolic_receiver_mutation(&mut self.symbolic_field_graph, &site);
+                } else {
+                    self.receiver_mutation_sites.push(site);
+                }
+            }
         }
         self.field_contexts.insert(
             caller,
@@ -856,6 +961,12 @@ impl WorkspaceStitchState {
         symbolic_field_forwarding: bool,
         symbolic_funcs: Option<&AHashSet<FuncId>>,
     ) -> crate::IdgResult<IdgWorkspace> {
+        if !self.field_copy_sites_collected_by_segment {
+            self.collect_resident_field_copy_sites(&ws, symbolic_field_forwarding, symbolic_funcs);
+        }
+        self.flush_symbolic_field_copy_spool()?;
+        self.passthrough_field_copy_sites
+            .append(&mut self.pending_field_copy_sites);
         dedup_receiver_mutation_sites(&mut self.receiver_mutation_sites);
         let field_arg_site_count = self.field_arg_sites.len();
         let return_field_site_count = self.return_field_sites.len();
@@ -863,13 +974,17 @@ impl WorkspaceStitchState {
         let constructor_return_site_count = self.constructor_return_sites.len();
         let receiver_mutation_site_count = self.receiver_mutation_sites.len();
         stitch_debug_log(format_args!(
-            "stitch call-sites-wired: {:.3}s field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={}",
+            "stitch call-sites-wired: {:.3}s field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={} symbolic_transforms={} symbolic_bases={} deferred_field_copies={} field_contexts={}",
             self.call_started.elapsed().as_secs_f64(),
             field_arg_site_count,
             return_field_site_count,
             scalar_return_site_count,
             constructor_return_site_count,
-            receiver_mutation_site_count
+            receiver_mutation_site_count,
+            self.symbolic_field_graph.transform_count(),
+            self.symbolic_field_graph.bases().len(),
+            self.passthrough_field_copy_sites.len(),
+            self.field_contexts.len(),
         ));
         let field_arg_sites = self.field_arg_sites.into_sites();
         let return_field_sites = self.return_field_sites.into_sites();
@@ -890,7 +1005,6 @@ impl WorkspaceStitchState {
                 symbolic_field_forwarding,
                 symbolic_funcs,
                 self.symbolic_field_graph,
-                self.precollected_field_copy_sites,
             )?;
         } else {
             stitch_debug_log(format_args!(
@@ -1160,7 +1274,7 @@ where
     ));
 
     let stitch_started = Instant::now();
-    let mut state = WorkspaceStitchState::for_spooled_persistence(function_count);
+    let mut state = WorkspaceStitchState::for_spooled_persistence(function_count, spool_path)?;
     let mut stitched_function_count = 0usize;
     let mut previous_placeholder = None;
     ws.begin_spool_generation()?;
@@ -1227,9 +1341,15 @@ where
             if let Some(segment) = ws.segment_mut(segment_id) {
                 segment.release_build_lookups();
             }
-            state.collect_active_segment_field_copy_sites(segment_id, &ws);
+            state.collect_active_segment_field_copy_sites(
+                segment_id,
+                &ws,
+                symbolic_field_forwarding,
+                symbolic_funcs,
+            );
             ws.spill_segment(segment_id)?;
             ws.check_cross_file_spool()?;
+            state.check_symbolic_spool()?;
         }
     }
     assert_eq!(
@@ -1237,6 +1357,13 @@ where
         "stitch lowering pass must cover the complete function schedule"
     );
     ws.finish_spool_generation()?;
+    // Call stitching is complete. Endpoint vectors include parameter names,
+    // capture nodes, returns, throws, and receiver writes for every function;
+    // field closure consumes only the already-emitted relations. Release this
+    // compiler phase before streaming those relations so the two workspace-
+    // scale lifetimes never overlap.
+    drop(callee_endpoints);
+    drop(schedule_to_workspace);
     stitch_debug_log(format_args!(
         "stitch relower-pass: {:.3}s segments={} funcs={}",
         stitch_started.elapsed().as_secs_f64(),
@@ -3330,7 +3457,7 @@ fn flush_symbolic_site_queues(
     return_fields: &mut ReturnFieldSiteQueue,
     scalar_returns: &mut ScalarReturnSiteQueue,
     constructor_returns: &mut ConstructorReturnSiteQueue,
-    graph: &mut SymbolicFieldGraph,
+    graph: &mut SymbolicFieldCompilerStorage,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
 ) {
     for site in field_args.take_current_sites() {
@@ -3468,8 +3595,7 @@ fn stitch_field_argument_forwarding(
     ws: &mut IdgWorkspace,
     symbolic: bool,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
-    mut symbolic_field_graph: SymbolicFieldGraph,
-    precollected_field_copy_sites: bool,
+    mut symbolic_field_graph: SymbolicFieldCompilerStorage,
 ) -> crate::IdgResult<()> {
     let FieldForwardingSites {
         field_args: sites,
@@ -3479,13 +3605,7 @@ fn stitch_field_argument_forwarding(
         receiver_mutations: receiver_mutation_sites,
         passthrough_copies: passthrough_field_copy_sites,
     } = sites;
-    let mut copy_sites = if precollected_field_copy_sites {
-        passthrough_field_copy_sites.to_vec()
-    } else {
-        let mut sites = collect_field_copy_sites(ws, field_contexts);
-        sites.extend_from_slice(passthrough_field_copy_sites);
-        sites
-    };
+    let mut copy_sites = passthrough_field_copy_sites.to_vec();
     copy_sites.sort_by(|a, b| {
         (
             a.seg_id.0,
@@ -3518,7 +3638,7 @@ fn stitch_field_argument_forwarding(
         && constructor_return_sites.is_empty()
         && receiver_mutation_sites.is_empty()
         && copy_sites.is_empty()
-        && symbolic_field_graph.transforms().is_empty()
+        && symbolic_field_graph.is_empty()
     {
         return Ok(());
     }
@@ -3530,7 +3650,7 @@ fn stitch_field_argument_forwarding(
         receiver_mutation_sites,
         &copy_sites,
     );
-    let symbolic_field_graph = if symbolic {
+    if symbolic {
         // Keep complete adapter AST places as a compact symbolic relation.
         // In a mixed-language workspace, transforms that cross an adapter
         // without complete field places remain on the eager compatibility
@@ -3542,10 +3662,7 @@ fn stitch_field_argument_forwarding(
             entries.retain(|transform| !field_transform_is_symbolic(source, transform, symbolic_funcs));
             !entries.is_empty()
         });
-        Some(symbolic_field_graph)
-    } else {
-        None
-    };
+    }
     // Eager compatibility mode alone needs the concrete field universe and
     // synthetic-node indexes. Building them before the symbolic return made
     // demand-mode peak memory scale with the representation it deliberately
@@ -3557,14 +3674,14 @@ fn stitch_field_argument_forwarding(
         .cloned()
         .collect::<Vec<_>>();
     let eager_requested_field_places =
-        field_place_keys_for_propagation(&transforms, sites, None, &eager_copy_sites);
+        field_place_keys_for_propagation(&transforms, sites, None, &eager_copy_sites)?;
     let mut requested_field_places = eager_requested_field_places.clone();
     requested_field_places.extend(field_place_keys_for_propagation(
         &AHashMap::new(),
         &[],
-        symbolic_field_graph.as_ref(),
+        symbolic.then_some(&symbolic_field_graph),
         &copy_sites,
-    ));
+    )?);
     let mut requested_segments = requested_field_places
         .iter()
         .map(|key| key.seg_id)
@@ -3607,11 +3724,11 @@ fn stitch_field_argument_forwarding(
     } else {
         stitch_field_argument_fallbacks(sites, &mut state)
     };
-    if let Some(graph) = symbolic_field_graph.as_ref() {
+    if symbolic {
         fallback_edges += if spooled {
-            stitch_symbolic_field_argument_fallbacks_spooled(graph, &mut state)?
+            stitch_symbolic_field_fallbacks_spooled(&symbolic_field_graph, &inputs, &mut state)?
         } else {
-            stitch_symbolic_field_argument_fallbacks(graph, &mut state)
+            stitch_symbolic_field_fallbacks(&symbolic_field_graph, &inputs, &mut state)?
         };
     }
     fallback_edges += if spooled {
@@ -3695,8 +3812,8 @@ fn stitch_field_argument_forwarding(
         state.ws.total_edge_count(),
         state.pending.len(),
     ));
-    if let Some(graph) = symbolic_field_graph {
-        ws.set_symbolic_field(graph);
+    if symbolic {
+        ws.install_symbolic_compiler_storage(symbolic_field_graph);
     }
     ws.spill_resident_segments()?;
     Ok(())
@@ -3711,9 +3828,9 @@ fn stitch_field_argument_forwarding(
 fn field_place_keys_for_propagation(
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
     fallback_argument_sites: &[Arc<FieldArgStitch>],
-    symbolic: Option<&SymbolicFieldGraph>,
+    symbolic: Option<&SymbolicFieldCompilerStorage>,
     copy_sites: &[FieldCopySite],
-) -> AHashSet<FieldPlaceKey> {
+) -> crate::IdgResult<AHashSet<FieldPlaceKey>> {
     let mut keys = AHashSet::default();
     for (source, entries) in transforms {
         keys.insert(source.clone());
@@ -3738,31 +3855,35 @@ fn field_place_keys_for_propagation(
         insert_field_place_key(&mut keys, site.callee_seg, site.callee, &site.param_name, false);
     }
     if let Some(symbolic) = symbolic {
-        for transform in symbolic
-            .transforms()
-            .iter()
-            .filter(|transform| transform.kind == SymbolicFieldTransformKind::Argument)
-        {
-            let Some(source) = symbolic.bases().get(transform.source as usize) else {
-                continue;
-            };
-            let Some(target) = symbolic.bases().get(transform.target as usize) else {
-                continue;
-            };
-            let (Some(source_base), Some(target_base)) =
-                (symbolic.string(source.storage), symbolic.string(target.storage))
-            else {
-                continue;
-            };
-            insert_field_place_key(&mut keys, source.segment, source.func, source_base, true);
-            insert_field_place_key(&mut keys, target.segment, target.func, target_base, false);
-        }
+        symbolic.visit_transforms(|transforms| {
+            for transform in transforms.iter().filter(|transform| {
+                matches!(
+                    transform.kind,
+                    SymbolicFieldTransformKind::Argument | SymbolicFieldTransformKind::Copy
+                )
+            }) {
+                let Some(source) = symbolic.bases().get(transform.source as usize) else {
+                    continue;
+                };
+                let Some(target) = symbolic.bases().get(transform.target as usize) else {
+                    continue;
+                };
+                let (Some(source_base), Some(target_base)) =
+                    (symbolic.string(source.storage), symbolic.string(target.storage))
+                else {
+                    continue;
+                };
+                insert_field_place_key(&mut keys, source.segment, source.func, source_base, true);
+                insert_field_place_key(&mut keys, target.segment, target.func, target_base, false);
+            }
+            Ok(())
+        })?;
     }
     for site in copy_sites {
         insert_field_place_key(&mut keys, site.seg_id, site.func, &site.source_base, true);
         insert_field_place_key(&mut keys, site.seg_id, site.func, &site.target_base, false);
     }
-    keys
+    Ok(keys)
 }
 
 fn insert_field_place_key(
@@ -3783,7 +3904,12 @@ fn insert_field_place_key(
     }
 }
 
-#[derive(Clone, Debug)]
+#[cfg(not(test))]
+const FIELD_COPY_SPOOL_CHUNK_LEN: usize = 100_000;
+#[cfg(test)]
+const FIELD_COPY_SPOOL_CHUNK_LEN: usize = 2;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct FieldCopySite {
     seg_id: SegmentId,
     func: FuncId,
@@ -3847,7 +3973,7 @@ fn build_field_write_transforms(
 }
 
 fn extend_symbolic_field_graph(
-    graph: &mut SymbolicFieldGraph,
+    graph: &mut SymbolicFieldCompilerStorage,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
 ) {
@@ -3962,6 +4088,42 @@ fn extend_symbolic_field_graph(
             });
         }
     }
+}
+
+fn push_symbolic_field_copy(graph: &mut SymbolicFieldCompilerStorage, site: &FieldCopySite) {
+    let source = graph.intern_base(site.seg_id, site.func, &site.source_base);
+    let target = graph.intern_base(site.seg_id, site.func, &site.target_base);
+    graph.push_transform(SymbolicFieldTransform {
+        source,
+        target,
+        exact_field: NO_SYMBOLIC_STRING,
+        call_span: site.via_span,
+        write_span: site.write_span,
+        precision: site.precision,
+        call_kind: site.call_kind,
+        kind: SymbolicFieldTransformKind::Copy,
+        arg_idx: u32::MAX,
+        param_idx: u32::MAX,
+        allow_out_of_order_source: false,
+    });
+}
+
+fn push_symbolic_receiver_mutation(graph: &mut SymbolicFieldCompilerStorage, site: &ReceiverMutationStitch) {
+    let source = graph.intern_base(site.callee_seg, site.callee, &site.callee_receiver_param_name);
+    let target = graph.intern_base(site.caller_seg, site.caller, &site.target_base);
+    graph.push_transform(SymbolicFieldTransform {
+        source,
+        target,
+        exact_field: NO_SYMBOLIC_STRING,
+        call_span: site.call_span,
+        write_span: site.call_span,
+        precision: site.precision,
+        call_kind: site.call_kind,
+        kind: SymbolicFieldTransformKind::ReceiverMutation,
+        arg_idx: u32::MAX,
+        param_idx: u32::MAX,
+        allow_out_of_order_source: true,
+    });
 }
 
 fn field_transform_is_symbolic(
@@ -4543,81 +4705,121 @@ fn stitch_field_argument_fallbacks_spooled(
     Ok(added)
 }
 
-fn stitch_symbolic_field_argument_fallbacks(
-    graph: &SymbolicFieldGraph,
+fn stitch_symbolic_field_fallbacks(
+    graph: &SymbolicFieldCompilerStorage,
+    inputs: &FieldPropagationInputs<'_>,
     state: &mut FieldPropagationState<'_>,
-) -> usize {
+) -> crate::IdgResult<usize> {
     let mut added = 0_usize;
-    for transform in graph
-        .transforms()
-        .iter()
-        .filter(|transform| transform.kind == SymbolicFieldTransformKind::Argument)
-    {
-        let Some(source) = graph.bases().get(transform.source as usize) else {
-            continue;
-        };
-        let Some(target) = graph.bases().get(transform.target as usize) else {
-            continue;
-        };
-        let (Some(actual_arg), Some(param_name)) =
-            (graph.string(source.storage), graph.string(target.storage))
-        else {
-            continue;
-        };
-        added += stitch_one_field_argument_fallback(
-            source.func,
-            source.segment,
-            target.func,
-            target.segment,
-            actual_arg,
-            param_name,
-            transform.call_span,
-            transform.precision,
-            transform.call_kind,
-            state,
-        );
-    }
-    added
+    graph.visit_transforms(|transforms| {
+        for transform in transforms {
+            let Some(source) = graph.bases().get(transform.source as usize) else {
+                continue;
+            };
+            let Some(target) = graph.bases().get(transform.target as usize) else {
+                continue;
+            };
+            let (Some(actual_arg), Some(param_name)) =
+                (graph.string(source.storage), graph.string(target.storage))
+            else {
+                continue;
+            };
+            match transform.kind {
+                SymbolicFieldTransformKind::Argument => {
+                    added += stitch_one_field_argument_fallback(
+                        source.func,
+                        source.segment,
+                        target.func,
+                        target.segment,
+                        actual_arg,
+                        param_name,
+                        transform.call_span,
+                        transform.precision,
+                        transform.call_kind,
+                        state,
+                    );
+                }
+                SymbolicFieldTransformKind::Copy => {
+                    let site = symbolic_field_copy_site(source, target, actual_arg, param_name, transform);
+                    added = added.saturating_add(stitch_one_field_copy_fallback(&site, inputs, state));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    })?;
+    Ok(added)
 }
 
-fn stitch_symbolic_field_argument_fallbacks_spooled(
-    graph: &SymbolicFieldGraph,
+fn stitch_symbolic_field_fallbacks_spooled(
+    graph: &SymbolicFieldCompilerStorage,
+    inputs: &FieldPropagationInputs<'_>,
     state: &mut FieldPropagationState<'_>,
 ) -> crate::IdgResult<usize> {
     let mut added = 0_usize;
     let mut active_segment = None;
-    for transform in graph
-        .transforms()
-        .iter()
-        .filter(|transform| transform.kind == SymbolicFieldTransformKind::Argument)
-    {
-        let Some(source) = graph.bases().get(transform.source as usize) else {
-            continue;
-        };
-        let Some(target) = graph.bases().get(transform.target as usize) else {
-            continue;
-        };
-        let (Some(actual_arg), Some(param_name)) =
-            (graph.string(source.storage), graph.string(target.storage))
-        else {
-            continue;
-        };
-        activate_fallback_segment(state.ws, &mut active_segment, source.segment)?;
-        added += stitch_one_field_argument_fallback(
-            source.func,
-            source.segment,
-            target.func,
-            target.segment,
-            actual_arg,
-            param_name,
-            transform.call_span,
-            transform.precision,
-            transform.call_kind,
-            state,
-        );
-    }
+    graph.visit_transforms(|transforms| {
+        for transform in transforms {
+            let Some(source) = graph.bases().get(transform.source as usize) else {
+                continue;
+            };
+            let Some(target) = graph.bases().get(transform.target as usize) else {
+                continue;
+            };
+            let (Some(actual_arg), Some(param_name)) =
+                (graph.string(source.storage), graph.string(target.storage))
+            else {
+                continue;
+            };
+            match transform.kind {
+                SymbolicFieldTransformKind::Argument => {
+                    activate_fallback_segment(state.ws, &mut active_segment, source.segment)?;
+                    added += stitch_one_field_argument_fallback(
+                        source.func,
+                        source.segment,
+                        target.func,
+                        target.segment,
+                        actual_arg,
+                        param_name,
+                        transform.call_span,
+                        transform.precision,
+                        transform.call_kind,
+                        state,
+                    );
+                }
+                SymbolicFieldTransformKind::Copy => {
+                    activate_fallback_segment(state.ws, &mut active_segment, source.segment)?;
+                    let site = symbolic_field_copy_site(source, target, actual_arg, param_name, transform);
+                    added = added.saturating_add(stitch_one_field_copy_fallback(&site, inputs, state));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    })?;
     state.ws.spill_resident_segments()?;
     Ok(added)
+}
+
+fn symbolic_field_copy_site(
+    source: &crate::symbolic::SymbolicFieldBase,
+    target: &crate::symbolic::SymbolicFieldBase,
+    source_base: &str,
+    target_base: &str,
+    transform: &SymbolicFieldTransform,
+) -> FieldCopySite {
+    debug_assert_eq!(source.segment, target.segment);
+    debug_assert_eq!(source.func, target.func);
+    FieldCopySite {
+        seg_id: source.segment,
+        func: source.func,
+        source_base: source_base.to_string(),
+        target_base: target_base.to_string(),
+        write_span: transform.write_span,
+        via_span: transform.call_span,
+        precision: transform.precision,
+        call_kind: transform.call_kind,
+    }
 }
 
 fn activate_fallback_segment(
