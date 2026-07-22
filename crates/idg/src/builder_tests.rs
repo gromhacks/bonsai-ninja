@@ -229,7 +229,16 @@ fn relowered_stitch_preserves_the_exact_canonical_graph() {
 
     let queryable = stitch_idg_from_segment_batches(batches(), 1, &resolver, true, false, None);
     let relowered =
-        stitch_idg_from_relowered_segment_batches(batches(), batches(), 1, &resolver, true, false, None);
+        stitch_idg_from_relowered_segment_batches(batches(), batches(), 1, &resolver, true, false, None)
+            .expect("spooled relowering");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("relowered-idg.factstore");
+    relowered
+        .save_into_disk(&path, 0x51DE_CAFE)
+        .expect("persist spooled graph");
+    let relowered = IdgWorkspace::load_from_disk(&path, 0x51DE_CAFE)
+        .expect("load spooled graph")
+        .expect("spooled graph exists");
 
     let queryable_wire = bonsai_common::wire::encode(&queryable).expect("encode queryable IDG");
     let relowered_wire = bonsai_common::wire::encode(&relowered).expect("encode relowered IDG");
@@ -277,14 +286,103 @@ fn relowered_sidecar_preserves_cross_segment_calls_byte_for_byte() {
     let mut resolver = MockResolver::new();
     resolver.add(FuncId::new(1), "callee", vec![FuncId::new(2)]);
     let queryable = stitch_idg_from_segment_batches(batches(), 2, &resolver, true, false, None);
-    let relowered =
-        stitch_idg_from_relowered_segment_batches(batches(), batches(), 2, &resolver, true, false, None);
+    let mut relowered =
+        stitch_idg_from_relowered_segment_batches(batches(), batches(), 2, &resolver, true, false, None)
+            .expect("spooled relowering");
+    relowered
+        .materialize_spooled_segments()
+        .expect("materialize relowered graph");
 
     assert_eq!(queryable.cross_file().len(), 2);
     assert_eq!(
         bonsai_common::wire::encode(&relowered).expect("encode relowered cross-segment IDG"),
         bonsai_common::wire::encode(&queryable).expect("encode queryable cross-segment IDG")
     );
+}
+
+#[test]
+fn relowered_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["source".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(10, 18),
+            target: "box.live".to_string(),
+            source_name: Some("source".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: span(20, 35),
+            name: "callee".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(27, 30),
+                name: None,
+                value_text: "box".to_string(),
+                place: Some("box".to_string()),
+                source_names: Vec::new(),
+            }],
+        },
+    ];
+    let mut callee = empty_decl(2, "callee");
+    callee.params = vec!["arg".to_string()];
+    callee.flow_events = vec![FlowEvent::Call {
+        span: span(40, 55),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(45, 53),
+            name: None,
+            value_text: "arg.live".to_string(),
+            place: Some("arg.live".to_string()),
+            source_names: vec!["arg.live".to_string()],
+        }],
+    }];
+    let caller_out = transfer_function_for(&caller);
+    let callee_out = transfer_function_for(&callee);
+    let batches = || {
+        vec![vec![
+            (SegmentId(0), vec![caller_out.clone()]),
+            (SegmentId(1), vec![callee_out.clone()]),
+        ]]
+    };
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "callee", vec![FuncId::new(2)]);
+    for symbolic_funcs in [
+        AHashSet::from([FuncId::new(1), FuncId::new(2)]),
+        AHashSet::from([FuncId::new(1)]),
+    ] {
+        let queryable =
+            stitch_idg_from_segment_batches(batches(), 2, &resolver, true, true, Some(&symbolic_funcs));
+        let mut relowered = stitch_idg_from_relowered_segment_batches(
+            batches(),
+            batches(),
+            2,
+            &resolver,
+            true,
+            true,
+            Some(&symbolic_funcs),
+        )
+        .expect("spooled symbolic relowering");
+        relowered
+            .materialize_spooled_segments()
+            .expect("materialize symbolic graph");
+
+        assert_eq!(
+            bonsai_common::wire::encode(&relowered).expect("encode relowered symbolic IDG"),
+            bonsai_common::wire::encode(&queryable).expect("encode queryable symbolic IDG")
+        );
+    }
 }
 
 #[test]

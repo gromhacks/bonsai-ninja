@@ -726,6 +726,7 @@ struct WorkspaceStitchState {
     receiver_mutation_sites: Vec<Arc<ReceiverMutationStitch>>,
     passthrough_field_copy_sites: Vec<FieldCopySite>,
     field_contexts: AHashMap<FuncId, FunctionFieldContext>,
+    precollected_field_copy_sites: bool,
 }
 
 struct WorkspaceCallerStitch<'a> {
@@ -741,6 +742,17 @@ struct WorkspaceCallerStitch<'a> {
 
 impl WorkspaceStitchState {
     fn new(function_count: usize) -> Self {
+        Self::with_precollected_field_copy_sites(function_count, false)
+    }
+
+    fn for_spooled_persistence(function_count: usize) -> Self {
+        Self::with_precollected_field_copy_sites(function_count, true)
+    }
+
+    fn with_precollected_field_copy_sites(
+        function_count: usize,
+        precollected_field_copy_sites: bool,
+    ) -> Self {
         Self {
             call_started: Instant::now(),
             collect_stats: stitch_debug_enabled(),
@@ -753,7 +765,20 @@ impl WorkspaceStitchState {
             receiver_mutation_sites: Vec::new(),
             passthrough_field_copy_sites: Vec::new(),
             field_contexts: AHashMap::with_capacity(function_count),
+            precollected_field_copy_sites,
         }
+    }
+
+    fn collect_active_segment_field_copy_sites(&mut self, seg_id: SegmentId, ws: &IdgWorkspace) {
+        let Some(segment) = ws.segment(seg_id) else {
+            return;
+        };
+        self.passthrough_field_copy_sites
+            .extend(collect_field_copy_sites_from_segment(
+                seg_id,
+                segment,
+                &self.field_contexts,
+            ));
     }
 
     fn stitch_caller(&mut self, ws: &mut IdgWorkspace, request: WorkspaceCallerStitch<'_>) {
@@ -830,7 +855,7 @@ impl WorkspaceStitchState {
         include_field_argument_forwarding: bool,
         symbolic_field_forwarding: bool,
         symbolic_funcs: Option<&AHashSet<FuncId>>,
-    ) -> IdgWorkspace {
+    ) -> crate::IdgResult<IdgWorkspace> {
         dedup_receiver_mutation_sites(&mut self.receiver_mutation_sites);
         let field_arg_site_count = self.field_arg_sites.len();
         let return_field_site_count = self.return_field_sites.len();
@@ -865,7 +890,8 @@ impl WorkspaceStitchState {
                 symbolic_field_forwarding,
                 symbolic_funcs,
                 self.symbolic_field_graph,
-            );
+                self.precollected_field_copy_sites,
+            )?;
         } else {
             stitch_debug_log(format_args!(
                 "field-forward worklist: skipped eager closure field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={}",
@@ -895,7 +921,7 @@ impl WorkspaceStitchState {
             self.stats.callback_nanos as f64 / 1_000_000_000.0
         ));
         release_storage_normalization_caches();
-        ws
+        Ok(ws)
     }
 }
 
@@ -1026,12 +1052,14 @@ where
         // edge graph is still growing instead of at function return.
         seg_remaps.remove(&caller);
     }
-    state.finish(
-        ws,
-        include_field_argument_forwarding,
-        symbolic_field_forwarding,
-        symbolic_funcs,
-    )
+    state
+        .finish(
+            ws,
+            include_field_argument_forwarding,
+            symbolic_field_forwarding,
+            symbolic_funcs,
+        )
+        .expect("resident IDG stitching does not perform fallible spill I/O")
 }
 
 /// Build a persistence graph with two deterministic lowering passes.
@@ -1051,7 +1079,7 @@ pub(crate) fn stitch_idg_from_relowered_segment_batches<B1, I1, B2, I2>(
     include_field_argument_forwarding: bool,
     symbolic_field_forwarding: bool,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
-) -> IdgWorkspace
+) -> crate::IdgResult<IdgWorkspace>
 where
     B1: IntoIterator<Item = I1>,
     I1: IntoIterator<Item = (SegmentId, Vec<TransferOutput>)>,
@@ -1060,6 +1088,7 @@ where
 {
     let started = Instant::now();
     let mut ws = IdgWorkspace::new();
+    ws.enable_segment_spool()?;
     ws.disable_cross_file_indexes();
     let mut callee_endpoints: AHashMap<FuncId, CalleeEndpoints> = AHashMap::with_capacity(function_count);
     let mut schedule_to_workspace: AHashMap<SegmentId, SegmentId> = AHashMap::new();
@@ -1104,6 +1133,7 @@ where
             if let Some(segment) = ws.segment_mut(segment_id) {
                 segment.release_build_lookups();
             }
+            ws.spill_segment(segment_id)?;
         }
     }
     assert_eq!(
@@ -1119,9 +1149,10 @@ where
     ));
 
     let stitch_started = Instant::now();
-    let mut state = WorkspaceStitchState::new(function_count);
+    let mut state = WorkspaceStitchState::for_spooled_persistence(function_count);
     let mut stitched_function_count = 0usize;
     let mut previous_placeholder = None;
+    ws.begin_spool_generation()?;
     for batch in stitch_batches {
         for (scheduled_segment, mut outputs) in batch {
             debug_assert!(
@@ -1138,6 +1169,7 @@ where
                         scheduled_segment.0
                     )
                 });
+            ws.hydrate_segment(segment_id)?;
             outputs.sort_by_key(|out| out.func.raw());
             let Some(segment) = ws.segment_mut(segment_id) else {
                 panic!("stitch pass referenced missing segment {}", segment_id.0);
@@ -1184,12 +1216,15 @@ where
             if let Some(segment) = ws.segment_mut(segment_id) {
                 segment.release_build_lookups();
             }
+            state.collect_active_segment_field_copy_sites(segment_id, &ws);
+            ws.spill_segment(segment_id)?;
         }
     }
     assert_eq!(
         stitched_function_count, function_count,
         "stitch lowering pass must cover the complete function schedule"
     );
+    ws.finish_spool_generation()?;
     stitch_debug_log(format_args!(
         "stitch relower-pass: {:.3}s segments={} funcs={}",
         stitch_started.elapsed().as_secs_f64(),
@@ -3422,7 +3457,8 @@ fn stitch_field_argument_forwarding(
     symbolic: bool,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
     mut symbolic_field_graph: SymbolicFieldGraph,
-) {
+    precollected_field_copy_sites: bool,
+) -> crate::IdgResult<()> {
     let FieldForwardingSites {
         field_args: sites,
         return_fields: return_field_sites,
@@ -3431,8 +3467,13 @@ fn stitch_field_argument_forwarding(
         receiver_mutations: receiver_mutation_sites,
         passthrough_copies: passthrough_field_copy_sites,
     } = sites;
-    let mut copy_sites = collect_field_copy_sites(ws, field_contexts);
-    copy_sites.extend_from_slice(passthrough_field_copy_sites);
+    let mut copy_sites = if precollected_field_copy_sites {
+        passthrough_field_copy_sites.to_vec()
+    } else {
+        let mut sites = collect_field_copy_sites(ws, field_contexts);
+        sites.extend_from_slice(passthrough_field_copy_sites);
+        sites
+    };
     copy_sites.sort_by(|a, b| {
         (
             a.seg_id.0,
@@ -3467,7 +3508,7 @@ fn stitch_field_argument_forwarding(
         && copy_sites.is_empty()
         && symbolic_field_graph.transforms().is_empty()
     {
-        return;
+        return Ok(());
     }
     let mut transforms = build_field_write_transforms(
         sites,
@@ -3497,12 +3538,31 @@ fn stitch_field_argument_forwarding(
     // synthetic-node indexes. Building them before the symbolic return made
     // demand-mode peak memory scale with the representation it deliberately
     // avoids.
-    let requested_field_places =
-        field_place_keys_for_propagation(&transforms, sites, symbolic_field_graph.as_ref(), &copy_sites);
-    let mut field_index = FieldPlaceIndex::from_workspace_for_keys(ws, &requested_field_places);
-    drop(requested_field_places);
+    let spooled = ws.has_segment_spool();
+    let eager_copy_sites = copy_sites
+        .iter()
+        .filter(|site| !symbolic || !symbolic_pair_supported(site.func, site.func, symbolic_funcs))
+        .cloned()
+        .collect::<Vec<_>>();
+    let eager_requested_field_places =
+        field_place_keys_for_propagation(&transforms, sites, None, &eager_copy_sites);
+    let mut requested_field_places = eager_requested_field_places.clone();
+    requested_field_places.extend(field_place_keys_for_propagation(
+        &AHashMap::new(),
+        &[],
+        symbolic_field_graph.as_ref(),
+        &copy_sites,
+    ));
+    let mut requested_segments = requested_field_places
+        .iter()
+        .map(|key| key.seg_id)
+        .collect::<Vec<_>>();
+    requested_segments.sort_by_key(|segment| segment.0);
+    requested_segments.dedup();
+    let mut field_index = FieldPlaceIndex::from_workspace_for_keys_streaming(ws, &requested_field_places)?;
     let syntactic_fields = field_index.syntactic_field_universe();
-    let mut inter_call_arg_entries = InterCallArgEntryIndex::from_workspace(ws);
+    let mut inter_call_arg_entries =
+        InterCallArgEntryIndex::from_workspace_for_segments_streaming(ws, &requested_segments)?;
     let mut synthetic_field_writes = SyntheticFieldWriteCache::from_workspace(ws);
     // Field forwarding creates edges to synthetic field nodes. Track only
     // edges produced by this phase instead of duplicating every pre-existing
@@ -3530,11 +3590,33 @@ fn stitch_field_argument_forwarding(
 
     let phase_started = Instant::now();
     let before_edges = state.ws.total_edge_count();
-    let mut fallback_edges = stitch_field_argument_fallbacks(sites, &mut state);
+    let mut fallback_edges = if spooled {
+        stitch_field_argument_fallbacks_spooled(sites, &mut state)?
+    } else {
+        stitch_field_argument_fallbacks(sites, &mut state)
+    };
     if let Some(graph) = symbolic_field_graph.as_ref() {
-        fallback_edges += stitch_symbolic_field_argument_fallbacks(graph, &mut state);
+        fallback_edges += if spooled {
+            stitch_symbolic_field_argument_fallbacks_spooled(graph, &mut state)?
+        } else {
+            stitch_symbolic_field_argument_fallbacks(graph, &mut state)
+        };
     }
-    fallback_edges += stitch_field_copy_fallbacks(&copy_sites, &inputs, &mut state);
+    fallback_edges += if spooled {
+        stitch_field_copy_fallbacks_spooled(&copy_sites, &inputs, &mut state)?
+    } else {
+        stitch_field_copy_fallbacks(&copy_sites, &inputs, &mut state)
+    };
+    if spooled {
+        state.ws.spill_resident_segments()?;
+        let mut eager_segments = eager_requested_field_places
+            .iter()
+            .map(|key| key.seg_id)
+            .collect::<Vec<_>>();
+        eager_segments.sort_by_key(|segment| segment.0);
+        eager_segments.dedup();
+        state.ws.hydrate_segments(eager_segments)?;
+    }
     let mut processed = 0usize;
     let mut processed_transforms = 0usize;
     while let Some(write) = state.pending.pop() {
@@ -3604,6 +3686,8 @@ fn stitch_field_argument_forwarding(
     if let Some(graph) = symbolic_field_graph {
         ws.set_symbolic_field(graph);
     }
+    ws.spill_resident_segments()?;
+    Ok(())
 }
 
 /// Exact field-place keys that the forwarding phase can query.
@@ -4422,6 +4506,31 @@ fn stitch_field_argument_fallbacks(
     added
 }
 
+fn stitch_field_argument_fallbacks_spooled(
+    sites: &[Arc<FieldArgStitch>],
+    state: &mut FieldPropagationState<'_>,
+) -> crate::IdgResult<usize> {
+    let mut added = 0usize;
+    let mut active_segment = None;
+    for site in sites {
+        activate_fallback_segment(state.ws, &mut active_segment, site.caller_seg)?;
+        added += stitch_one_field_argument_fallback(
+            site.caller,
+            site.caller_seg,
+            site.callee,
+            site.callee_seg,
+            &site.actual_arg,
+            &site.param_name,
+            site.call_span,
+            site.precision,
+            site.call_kind,
+            state,
+        );
+    }
+    state.ws.spill_resident_segments()?;
+    Ok(added)
+}
+
 fn stitch_symbolic_field_argument_fallbacks(
     graph: &SymbolicFieldGraph,
     state: &mut FieldPropagationState<'_>,
@@ -4457,6 +4566,59 @@ fn stitch_symbolic_field_argument_fallbacks(
         );
     }
     added
+}
+
+fn stitch_symbolic_field_argument_fallbacks_spooled(
+    graph: &SymbolicFieldGraph,
+    state: &mut FieldPropagationState<'_>,
+) -> crate::IdgResult<usize> {
+    let mut added = 0_usize;
+    let mut active_segment = None;
+    for transform in graph
+        .transforms()
+        .iter()
+        .filter(|transform| transform.kind == SymbolicFieldTransformKind::Argument)
+    {
+        let Some(source) = graph.bases().get(transform.source as usize) else {
+            continue;
+        };
+        let Some(target) = graph.bases().get(transform.target as usize) else {
+            continue;
+        };
+        let (Some(actual_arg), Some(param_name)) =
+            (graph.string(source.storage), graph.string(target.storage))
+        else {
+            continue;
+        };
+        activate_fallback_segment(state.ws, &mut active_segment, source.segment)?;
+        added += stitch_one_field_argument_fallback(
+            source.func,
+            source.segment,
+            target.func,
+            target.segment,
+            actual_arg,
+            param_name,
+            transform.call_span,
+            transform.precision,
+            transform.call_kind,
+            state,
+        );
+    }
+    state.ws.spill_resident_segments()?;
+    Ok(added)
+}
+
+fn activate_fallback_segment(
+    ws: &mut IdgWorkspace,
+    active_segment: &mut Option<SegmentId>,
+    requested: SegmentId,
+) -> crate::IdgResult<()> {
+    if active_segment.is_some_and(|active| active != requested) {
+        ws.spill_resident_segments()?;
+    }
+    ws.hydrate_segment(requested)?;
+    *active_segment = Some(requested);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4528,43 +4690,68 @@ fn stitch_field_copy_fallbacks(
 ) -> usize {
     let mut added = 0usize;
     for site in sites {
-        let writers = state.field_index.field_writes_for_base_before_call(
-            state.inter_call_arg_entries,
-            site.seg_id,
-            site.func,
-            &site.source_base,
-            site.via_span,
-        );
-        if !writers.is_empty() {
+        added = added.saturating_add(stitch_one_field_copy_fallback(site, inputs, state));
+    }
+    added
+}
+
+fn stitch_field_copy_fallbacks_spooled(
+    sites: &[FieldCopySite],
+    inputs: &FieldPropagationInputs<'_>,
+    state: &mut FieldPropagationState<'_>,
+) -> crate::IdgResult<usize> {
+    let mut added = 0usize;
+    let mut active_segment = None;
+    for site in sites {
+        activate_fallback_segment(state.ws, &mut active_segment, site.seg_id)?;
+        added = added.saturating_add(stitch_one_field_copy_fallback(site, inputs, state));
+    }
+    state.ws.spill_resident_segments()?;
+    Ok(added)
+}
+
+fn stitch_one_field_copy_fallback(
+    site: &FieldCopySite,
+    inputs: &FieldPropagationInputs<'_>,
+    state: &mut FieldPropagationState<'_>,
+) -> usize {
+    let writers = state.field_index.field_writes_for_base_before_call(
+        state.inter_call_arg_entries,
+        site.seg_id,
+        site.func,
+        &site.source_base,
+        site.via_span,
+    );
+    if !writers.is_empty() {
+        return 0;
+    }
+    let mut readers = state
+        .field_index
+        .field_reads_for_base(site.seg_id, site.func, &site.target_base);
+    readers.sort_by(|a, b| (a.0.as_str(), a.1 .0).cmp(&(b.0.as_str(), b.1 .0)));
+    readers.dedup();
+    let mut added = 0usize;
+    for (field, _) in readers {
+        if !is_forwardable_field(&field) {
             continue;
         }
-        let mut readers = state
-            .field_index
-            .field_reads_for_base(site.seg_id, site.func, &site.target_base);
-        readers.sort_by(|a, b| (a.0.as_str(), a.1 .0).cmp(&(b.0.as_str(), b.1 .0)));
-        readers.dedup();
-        for (field, _) in readers {
-            if !is_forwardable_field(&field) {
-                continue;
-            }
-            let Some(source_read) =
-                ensure_field_read_node(state.ws, site.seg_id, site.func, &site.source_base, &field)
-            else {
-                continue;
-            };
-            let before = state.known_edges.len();
-            apply_intra_field_copy_write(
-                site,
-                &FieldPlaceHit {
-                    field,
-                    node: source_read,
-                    span: None,
-                },
-                inputs,
-                state,
-            );
-            added = added.saturating_add(state.known_edges.len().saturating_sub(before));
-        }
+        let Some(source_read) =
+            ensure_field_read_node(state.ws, site.seg_id, site.func, &site.source_base, &field)
+        else {
+            continue;
+        };
+        let before = state.known_edges.len();
+        apply_intra_field_copy_write(
+            site,
+            &FieldPlaceHit {
+                field,
+                node: source_read,
+                span: None,
+            },
+            inputs,
+            state,
+        );
+        added = added.saturating_add(state.known_edges.len().saturating_sub(before));
     }
     added
 }
@@ -4637,59 +4824,79 @@ fn collect_field_copy_sites(
 ) -> Vec<FieldCopySite> {
     let mut out = Vec::new();
     for (seg_id, segment) in ws.segments() {
-        for edge in &segment.edges {
-            if !edge.meta.kind.is_intra() {
-                continue;
-            }
-            let Some(from_node) = segment.nodes.get(edge.from) else {
-                continue;
-            };
-            let Some(to_node) = segment.nodes.get(edge.to) else {
-                continue;
-            };
-            if from_node.func != to_node.func {
-                continue;
-            }
-            let Some(from_place) = segment.places.get(from_node.place) else {
-                continue;
-            };
-            let Some(to_place) = segment.places.get(to_node.place) else {
-                continue;
-            };
-            if !is_unprojected_storage_place(segment, from_place) {
-                continue;
-            }
-            let Some(source_base) = place_storage_name(segment, from_place) else {
-                continue;
-            };
-            let Some((target_base, write_span)) = write_place_storage_and_span(segment, to_place) else {
-                continue;
-            };
-            if source_base.is_empty()
-                || target_base.is_empty()
-                || source_base == target_base
-                || !is_container_copy_target(
-                    &target_base,
-                    field_contexts
-                        .get(&from_node.func)
-                        .map(|data| data.receiver_names.as_slice())
-                        .unwrap_or_default(),
-                )
-            {
-                continue;
-            }
-            out.push(FieldCopySite {
-                seg_id,
-                func: from_node.func,
-                source_base,
-                target_base,
-                write_span,
-                via_span: edge.meta.via_span,
-                precision: edge.meta.precision,
-                call_kind: edge.meta.call_kind,
-            });
-        }
+        out.extend(collect_field_copy_sites_from_segment(
+            seg_id,
+            segment,
+            field_contexts,
+        ));
     }
+    sort_and_dedup_field_copy_sites(&mut out);
+    out
+}
+
+fn collect_field_copy_sites_from_segment(
+    seg_id: SegmentId,
+    segment: &IdgSegment,
+    field_contexts: &AHashMap<FuncId, FunctionFieldContext>,
+) -> Vec<FieldCopySite> {
+    let mut out = Vec::new();
+    for edge in &segment.edges {
+        if !edge.meta.kind.is_intra() {
+            continue;
+        }
+        let Some(from_node) = segment.nodes.get(edge.from) else {
+            continue;
+        };
+        let Some(to_node) = segment.nodes.get(edge.to) else {
+            continue;
+        };
+        if from_node.func != to_node.func {
+            continue;
+        }
+        let Some(from_place) = segment.places.get(from_node.place) else {
+            continue;
+        };
+        let Some(to_place) = segment.places.get(to_node.place) else {
+            continue;
+        };
+        if !is_unprojected_storage_place(segment, from_place) {
+            continue;
+        }
+        let Some(source_base) = place_storage_name(segment, from_place) else {
+            continue;
+        };
+        let Some((target_base, write_span)) = write_place_storage_and_span(segment, to_place) else {
+            continue;
+        };
+        if source_base.is_empty()
+            || target_base.is_empty()
+            || source_base == target_base
+            || !is_container_copy_target(
+                &target_base,
+                field_contexts
+                    .get(&from_node.func)
+                    .map(|data| data.receiver_names.as_slice())
+                    .unwrap_or_default(),
+            )
+        {
+            continue;
+        }
+        out.push(FieldCopySite {
+            seg_id,
+            func: from_node.func,
+            source_base,
+            target_base,
+            write_span,
+            via_span: edge.meta.via_span,
+            precision: edge.meta.precision,
+            call_kind: edge.meta.call_kind,
+        });
+    }
+    sort_and_dedup_field_copy_sites(&mut out);
+    out
+}
+
+fn sort_and_dedup_field_copy_sites(out: &mut Vec<FieldCopySite>) {
     out.sort_by(|a, b| {
         (
             a.seg_id.0,
@@ -4714,7 +4921,6 @@ fn collect_field_copy_sites(
             && a.write_span == b.write_span
             && a.via_span == b.via_span
     });
-    out
 }
 
 fn is_container_copy_target(target: &str, receiver_names: &[String]) -> bool {
@@ -4952,36 +5158,65 @@ impl FieldPlaceIndex {
         Self::from_workspace_with_filter(ws, Some(requested))
     }
 
+    fn from_workspace_for_keys_streaming(
+        ws: &mut IdgWorkspace,
+        requested: &AHashSet<FieldPlaceKey>,
+    ) -> crate::IdgResult<Self> {
+        if !ws.has_segment_spool() {
+            return Ok(Self::from_workspace_for_keys(ws, requested));
+        }
+        let mut segment_ids = requested.iter().map(|key| key.seg_id).collect::<Vec<_>>();
+        segment_ids.sort_by_key(|segment| segment.0);
+        segment_ids.dedup();
+        let mut index = Self::default();
+        for seg_id in segment_ids {
+            ws.visit_segment(seg_id, |segment| {
+                index.extend_segment_with_filter(seg_id, segment, Some(requested));
+            })?;
+        }
+        index.sort_and_dedup();
+        Ok(index)
+    }
+
     fn from_workspace_with_filter(ws: &IdgWorkspace, requested: Option<&AHashSet<FieldPlaceKey>>) -> Self {
         let mut index = Self::default();
         for (seg_id, segment) in ws.segments() {
-            for (node_idx, node) in segment.nodes.nodes.iter().enumerate() {
-                let Some(place) = segment.places.get(node.place) else {
-                    continue;
-                };
-                let (writes, span, full_name) = match place {
-                    Place::Read { .. } => {
-                        let Some(full_name) = place_storage_name(segment, place) else {
-                            continue;
-                        };
-                        (false, None, full_name)
-                    }
-                    Place::Write { span, .. } => {
-                        let Some(full_name) = place_storage_name(segment, place) else {
-                            continue;
-                        };
-                        (true, Some(*span), full_name)
-                    }
-                    _ => continue,
-                };
-                let node_id = NodeId(node_idx as u32);
-                let _ = index.record_full_storage_place_filtered(
-                    seg_id, node.func, &full_name, writes, span, node_id, requested,
-                );
-            }
+            index.extend_segment_with_filter(seg_id, segment, requested);
         }
         index.sort_and_dedup();
         index
+    }
+
+    fn extend_segment_with_filter(
+        &mut self,
+        seg_id: SegmentId,
+        segment: &IdgSegment,
+        requested: Option<&AHashSet<FieldPlaceKey>>,
+    ) {
+        for (node_idx, node) in segment.nodes.nodes.iter().enumerate() {
+            let Some(place) = segment.places.get(node.place) else {
+                continue;
+            };
+            let (writes, span, full_name) = match place {
+                Place::Read { .. } => {
+                    let Some(full_name) = place_storage_name(segment, place) else {
+                        continue;
+                    };
+                    (false, None, full_name)
+                }
+                Place::Write { span, .. } => {
+                    let Some(full_name) = place_storage_name(segment, place) else {
+                        continue;
+                    };
+                    (true, Some(*span), full_name)
+                }
+                _ => continue,
+            };
+            let node_id = NodeId(node_idx as u32);
+            let _ = self.record_full_storage_place_filtered(
+                seg_id, node.func, &full_name, writes, span, node_id, requested,
+            );
+        }
     }
 
     fn syntactic_field_universe(&self) -> SyntacticFieldUniverse {
@@ -5303,6 +5538,56 @@ impl InterCallArgEntryIndex {
         index
     }
 
+    fn from_workspace_for_segments_streaming(
+        ws: &mut IdgWorkspace,
+        segment_ids: &[SegmentId],
+    ) -> crate::IdgResult<Self> {
+        if !ws.has_segment_spool() {
+            return Ok(Self::from_workspace(ws));
+        }
+        let requested = segment_ids.iter().copied().collect::<AHashSet<_>>();
+        let mut cross_entries: AHashMap<SegmentId, Vec<NodeId>> = AHashMap::new();
+        for cross in &ws.cross_file().edges {
+            if requested.contains(&cross.to_segment)
+                && matches!(
+                    cross.edge.meta.kind,
+                    crate::edge::IdgEdgeKind::InterCallArg
+                        | crate::edge::IdgEdgeKind::InterFieldCallArg
+                        | crate::edge::IdgEdgeKind::InterFieldReturn
+                )
+            {
+                cross_entries
+                    .entry(cross.to_segment)
+                    .or_default()
+                    .push(cross.edge.to);
+            }
+        }
+        let mut index = Self::default();
+        for &seg_id in segment_ids {
+            ws.visit_segment(seg_id, |segment| {
+                for edge in &segment.edges {
+                    if !matches!(
+                        edge.meta.kind,
+                        crate::edge::IdgEdgeKind::InterCallArg
+                            | crate::edge::IdgEdgeKind::InterFieldCallArg
+                            | crate::edge::IdgEdgeKind::InterFieldReturn
+                    ) {
+                        continue;
+                    }
+                    if let Some(to_node) = segment.nodes.get(edge.to) {
+                        index.entries.insert((seg_id, to_node.func, edge.to));
+                    }
+                }
+                for &node in cross_entries.get(&seg_id).into_iter().flatten() {
+                    if let Some(to_node) = segment.nodes.get(node) {
+                        index.entries.insert((seg_id, to_node.func, node));
+                    }
+                }
+            })?;
+        }
+        Ok(index)
+    }
+
     fn contains(&self, seg_id: SegmentId, func: FuncId, local: NodeId) -> bool {
         self.entries.contains(&(seg_id, func, local))
     }
@@ -5315,9 +5600,8 @@ impl InterCallArgEntryIndex {
 impl SyntheticFieldWriteCache {
     fn from_workspace(ws: &IdgWorkspace) -> Self {
         let mut initial_node_counts = vec![0; ws.segment_count()];
-        for (seg_id, segment) in ws.segments() {
-            initial_node_counts[seg_id.0 as usize] =
-                u32::try_from(segment.nodes.len()).expect("segment node count exceeds u32");
+        for (index, count) in initial_node_counts.iter_mut().enumerate() {
+            *count = ws.segment_node_count(SegmentId(index as u32));
         }
         Self {
             initial_node_counts,

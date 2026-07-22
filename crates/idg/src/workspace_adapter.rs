@@ -2274,13 +2274,13 @@ pub fn build_with_file_semantics_and_options<S>(
 where
     S: IdgFileSemanticsProvider,
 {
-    build_with_file_info_and_options_scoped(
+    expect_queryable_idg(build_with_file_info_and_options_scoped(
         global,
         call_graph,
         semantics,
         transfer_options,
         IdgBuildScope::queryable(None, None, None),
-    )
+    ))
 }
 
 /// Build a queryable exact IDG from compact workspace linkage headers and
@@ -2296,13 +2296,13 @@ where
     S: IdgFileSemanticsProvider,
     D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
 {
-    build_with_file_info_and_options_scoped(
+    expect_queryable_idg(build_with_file_info_and_options_scoped(
         global,
         call_graph,
         semantics,
         transfer_options,
         IdgBuildScope::queryable(None, None, Some(&body_for_file)),
-    )
+    ))
 }
 
 /// Build a complete compiler IDG for immediate sidecar persistence.
@@ -2318,7 +2318,7 @@ pub fn build_for_persistence_with_file_semantics_and_options<S>(
     call_graph: &ResolvedCallGraph,
     semantics: S,
     transfer_options: &TransferOptions,
-) -> IdgWorkspace
+) -> crate::IdgResult<IdgWorkspace>
 where
     S: IdgFileSemanticsProvider,
 {
@@ -2343,7 +2343,7 @@ pub fn build_for_persistence_streaming_with_file_semantics_and_options<S, D>(
     semantics: S,
     transfer_options: &TransferOptions,
     body_for_file: D,
-) -> IdgWorkspace
+) -> crate::IdgResult<IdgWorkspace>
 where
     S: IdgFileSemanticsProvider,
     D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
@@ -2424,13 +2424,13 @@ where
     S: IdgFileSemanticsProvider,
 {
     let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
-    build_with_file_info_and_options_scoped(
+    expect_queryable_idg(build_with_file_info_and_options_scoped(
         global,
         call_graph,
         semantics,
         transfer_options,
         IdgBuildScope::queryable(Some(&included_files), None, None),
-    )
+    ))
 }
 
 /// Build a file-scoped queryable IDG from compact workspace linkage and
@@ -2448,13 +2448,13 @@ where
     D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
 {
     let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
-    build_with_file_info_and_options_scoped(
+    expect_queryable_idg(build_with_file_info_and_options_scoped(
         global,
         call_graph,
         semantics,
         transfer_options,
         IdgBuildScope::queryable(Some(&included_files), None, Some(&body_for_file)),
-    )
+    ))
 }
 
 /// Build with per-file aliases, language ids, paths, transfer options,
@@ -2501,13 +2501,13 @@ where
 {
     let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
     let included_funcs: AHashSet<FuncId> = included_funcs.iter().copied().collect();
-    build_with_file_info_and_options_scoped(
+    expect_queryable_idg(build_with_file_info_and_options_scoped(
         global,
         call_graph,
         semantics,
         transfer_options,
         IdgBuildScope::queryable(Some(&included_files), Some(&included_funcs), None),
-    )
+    ))
 }
 
 /// Build a file/function-scoped queryable IDG from compact workspace linkage
@@ -2528,13 +2528,13 @@ where
 {
     let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
     let included_funcs: AHashSet<FuncId> = included_funcs.iter().copied().collect();
-    build_with_file_info_and_options_scoped(
+    expect_queryable_idg(build_with_file_info_and_options_scoped(
         global,
         call_graph,
         semantics,
         transfer_options,
         IdgBuildScope::queryable(Some(&included_files), Some(&included_funcs), Some(&body_for_file)),
-    )
+    ))
 }
 
 type FileBodyProvider<'a> = dyn Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync + 'a;
@@ -2570,13 +2570,17 @@ impl<'a> IdgBuildScope<'a> {
     }
 }
 
+fn expect_queryable_idg(result: crate::IdgResult<IdgWorkspace>) -> IdgWorkspace {
+    result.expect("resident query IDG construction does not perform fallible spill I/O")
+}
+
 fn build_with_file_info_and_options_scoped<S>(
     global: &GlobalIndex,
     call_graph: &ResolvedCallGraph,
     mut semantics: S,
     transfer_options: &TransferOptions,
     scope: IdgBuildScope<'_>,
-) -> IdgWorkspace
+) -> crate::IdgResult<IdgWorkspace>
 where
     S: IdgFileSemanticsProvider,
 {
@@ -2801,7 +2805,10 @@ where
         transfer_batch_width
     ));
     let phase_started = Instant::now();
-    let mut ws = if reverse_lookup_retention == ReverseLookupRetention::SidecarOnly {
+    let stream_sidecar_segments = reverse_lookup_retention == ReverseLookupRetention::SidecarOnly
+        && !transfer_options.include_diagnostic_field_flows
+        && !transfer_options.include_receiver_method_propagation;
+    let mut ws = if stream_sidecar_segments {
         let canonical_batches = transfer_inputs.chunks(transfer_batch_width).map(|batch| {
             lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch, body_for_file)
         });
@@ -2821,16 +2828,16 @@ where
         let batches = transfer_inputs.chunks(transfer_batch_width).map(|batch| {
             lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch, body_for_file)
         });
-        stitch_idg_from_segment_batches(
+        Ok(stitch_idg_from_segment_batches(
             batches,
             function_count,
             &resolver,
             transfer_options.include_field_argument_forwarding,
             transfer_options.symbolic_field_forwarding,
             symbolic_funcs.as_ref(),
-        )
-    };
-    stitch_declared_exception_hierarchy(&mut ws, &resolver);
+        ))
+    }?;
+    stitch_declared_exception_hierarchy(&mut ws, &resolver)?;
     idg_build_log(format_args!(
         "stitch-idg: {:.3}s segments={} funcs={} intra_edges={} cross_edges={} field_links={}",
         phase_started.elapsed().as_secs_f64(),
@@ -2888,7 +2895,7 @@ where
         ws.total_edge_count(),
         ws.field_flow().len()
     ));
-    ws
+    Ok(ws)
 }
 
 /// Complete typed `throw → catch` edges using declaration inheritance.
@@ -2896,7 +2903,19 @@ where
 /// no global type-name inventory. Here the workspace's tree-sitter-derived
 /// class declarations and `bases` facts can prove subtype assignability
 /// without treating names such as `Exception` or `Error` as magic roots.
-fn stitch_declared_exception_hierarchy(ws: &mut IdgWorkspace, resolver: &WorkspaceCalleeResolver<'_>) {
+fn stitch_declared_exception_hierarchy(
+    ws: &mut IdgWorkspace,
+    resolver: &WorkspaceCalleeResolver<'_>,
+) -> crate::IdgResult<()> {
+    ws.visit_segments_mut(|_, segment| {
+        stitch_declared_exception_hierarchy_in_segment(segment, resolver);
+    })
+}
+
+fn stitch_declared_exception_hierarchy_in_segment(
+    segment: &mut crate::segment::IdgSegment,
+    resolver: &WorkspaceCalleeResolver<'_>,
+) {
     #[derive(Clone)]
     struct ThrowNode {
         node: crate::node::NodeId,
@@ -2912,108 +2931,99 @@ fn stitch_declared_exception_hierarchy(ws: &mut IdgWorkspace, resolver: &Workspa
         try_span: bonsai_common::Span,
     }
 
-    let segment_ids = ws.segments().map(|(id, _)| id).collect::<Vec<_>>();
-    for segment_id in segment_ids {
-        let Some(segment) = ws.segment(segment_id) else {
-            continue;
-        };
-        // Index the exact evidence spans once. Looking them up separately for
-        // every throw/catch node turns this phase into O(nodes * edges) on a
-        // large function even though each relevant edge has one endpoint.
-        let mut throw_spans = vec![None; segment.nodes.nodes.len()];
-        let mut catch_try_spans = vec![None; segment.nodes.nodes.len()];
-        for edge in &segment.edges {
-            match edge.meta.kind {
-                crate::edge::IdgEdgeKind::IntraThrow => {
-                    if let Some(slot) = throw_spans.get_mut(edge.to.0 as usize) {
-                        if slot.is_none() {
-                            *slot = Some(edge.meta.via_span);
-                        }
+    // Index the exact evidence spans once. Looking them up separately for
+    // every throw/catch node turns this phase into O(nodes * edges) on a
+    // large function even though each relevant edge has one endpoint.
+    let mut throw_spans = vec![None; segment.nodes.nodes.len()];
+    let mut catch_try_spans = vec![None; segment.nodes.nodes.len()];
+    for edge in &segment.edges {
+        match edge.meta.kind {
+            crate::edge::IdgEdgeKind::IntraThrow => {
+                if let Some(slot) = throw_spans.get_mut(edge.to.0 as usize) {
+                    if slot.is_none() {
+                        *slot = Some(edge.meta.via_span);
                     }
                 }
-                crate::edge::IdgEdgeKind::IntraAssign => {
-                    if let Some(slot) = catch_try_spans.get_mut(edge.from.0 as usize) {
-                        if slot.is_none() {
-                            *slot = Some(edge.meta.via_span);
-                        }
+            }
+            crate::edge::IdgEdgeKind::IntraAssign => {
+                if let Some(slot) = catch_try_spans.get_mut(edge.from.0 as usize) {
+                    if slot.is_none() {
+                        *slot = Some(edge.meta.via_span);
                     }
                 }
-                _ => {}
             }
-        }
-        let mut throws = Vec::new();
-        let mut catches = Vec::new();
-        for (index, node) in segment.nodes.nodes.iter().enumerate() {
-            let local = crate::node::NodeId(index as u32);
-            let Some(place) = segment.places.get(node.place) else {
-                continue;
-            };
-            match place {
-                crate::place::Place::Throw { ty } => {
-                    let Some(span) = throw_spans[index] else {
-                        continue;
-                    };
-                    let Some(name) = segment.strings.get(ty.0).map(str::to_string) else {
-                        continue;
-                    };
-                    throws.push(ThrowNode {
-                        node: local,
-                        func: node.func,
-                        ty: name,
-                        span,
-                    });
-                }
-                crate::place::Place::Catch { ty } => {
-                    let Some(try_span) = catch_try_spans[index] else {
-                        continue;
-                    };
-                    let Some(name) = segment.strings.get(ty.0).map(str::to_string) else {
-                        continue;
-                    };
-                    catches.push(CatchNode {
-                        node: local,
-                        func: node.func,
-                        ty: name,
-                        try_span,
-                    });
-                }
-                _ => {}
-            }
-        }
-        let mut additions = Vec::new();
-        for thrown in &throws {
-            for caught in &catches {
-                if thrown.func != caught.func
-                    || thrown.span.file != caught.try_span.file
-                    || thrown.span.start < caught.try_span.start
-                    || thrown.span.end > caught.try_span.end
-                {
-                    continue;
-                }
-                let Some(precision) =
-                    resolver.exception_type_assignability(thrown.func, &thrown.ty, &caught.ty)
-                else {
-                    continue;
-                };
-                let edge = crate::edge::IdgEdge {
-                    from: thrown.node,
-                    to: caught.node,
-                    meta: crate::edge::EdgeMeta {
-                        precision,
-                        kind: crate::edge::IdgEdgeKind::IntraThrow,
-                        call_kind: bonsai_callgraph::EdgeKind::Direct,
-                        via_span: thrown.span,
-                    },
-                };
-                if !segment.edges.contains(&edge) && !additions.contains(&edge) {
-                    additions.push(edge);
-                }
-            }
-        }
-        if let Some(segment) = ws.segment_mut(segment_id) {
-            segment.edges.extend(additions);
+            _ => {}
         }
     }
+    let mut throws = Vec::new();
+    let mut catches = Vec::new();
+    for (index, node) in segment.nodes.nodes.iter().enumerate() {
+        let local = crate::node::NodeId(index as u32);
+        let Some(place) = segment.places.get(node.place) else {
+            continue;
+        };
+        match place {
+            crate::place::Place::Throw { ty } => {
+                let Some(span) = throw_spans[index] else {
+                    continue;
+                };
+                let Some(name) = segment.strings.get(ty.0).map(str::to_string) else {
+                    continue;
+                };
+                throws.push(ThrowNode {
+                    node: local,
+                    func: node.func,
+                    ty: name,
+                    span,
+                });
+            }
+            crate::place::Place::Catch { ty } => {
+                let Some(try_span) = catch_try_spans[index] else {
+                    continue;
+                };
+                let Some(name) = segment.strings.get(ty.0).map(str::to_string) else {
+                    continue;
+                };
+                catches.push(CatchNode {
+                    node: local,
+                    func: node.func,
+                    ty: name,
+                    try_span,
+                });
+            }
+            _ => {}
+        }
+    }
+    let mut additions = Vec::new();
+    for thrown in &throws {
+        for caught in &catches {
+            if thrown.func != caught.func
+                || thrown.span.file != caught.try_span.file
+                || thrown.span.start < caught.try_span.start
+                || thrown.span.end > caught.try_span.end
+            {
+                continue;
+            }
+            let Some(precision) = resolver.exception_type_assignability(thrown.func, &thrown.ty, &caught.ty)
+            else {
+                continue;
+            };
+            let edge = crate::edge::IdgEdge {
+                from: thrown.node,
+                to: caught.node,
+                meta: crate::edge::EdgeMeta {
+                    precision,
+                    kind: crate::edge::IdgEdgeKind::IntraThrow,
+                    call_kind: bonsai_callgraph::EdgeKind::Direct,
+                    via_span: thrown.span,
+                },
+            };
+            if !segment.edges.contains(&edge) && !additions.contains(&edge) {
+                additions.push(edge);
+            }
+        }
+    }
+    segment.edges.extend(additions);
 }
 
 fn add_func_call_alias(func_to_call_names: &mut AHashMap<FuncId, Vec<String>>, func: FuncId, alias: &str) {

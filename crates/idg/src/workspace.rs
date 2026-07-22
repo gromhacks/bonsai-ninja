@@ -20,6 +20,7 @@
 use ahash::AHashMap;
 use bonsai_common::{wire, FuncId};
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::edge::IdgEdge;
 use crate::segment::{IdgSegment, IDG_SEGMENT_VERSION};
@@ -88,6 +89,191 @@ pub struct FieldFlowLink {
     /// field propagation is narrowed by a concrete call site;
     /// broad peer-method field bucketing remains diagnostic-only.
     pub precision: bonsai_common::Precision,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct SpoolEntry {
+    offset: u64,
+    encoded_len: u64,
+    node_count: u32,
+    edge_count: usize,
+}
+
+/// Append-only compiler spill for canonical IDG segments.
+///
+/// Persistence builds rewrite one source-file segment at a time. Appending a
+/// new version and replacing its tiny offset-table entry keeps memory bounded
+/// by the largest compilation unit while preserving the exact canonical wire
+/// payload. The anonymous temporary file disappears automatically on every
+/// success and error path.
+#[derive(Debug)]
+pub(crate) struct IdgSegmentSpool {
+    file: std::fs::File,
+    entries: Vec<Option<SpoolEntry>>,
+    generation: Option<SpoolGeneration>,
+}
+
+#[derive(Debug)]
+struct SpoolGeneration {
+    file: std::fs::File,
+    entries: Vec<Option<SpoolEntry>>,
+}
+
+impl IdgSegmentSpool {
+    fn new() -> crate::IdgResult<Self> {
+        Ok(Self {
+            file: tempfile::tempfile()?,
+            entries: Vec::new(),
+            generation: None,
+        })
+    }
+
+    fn write_segment(&mut self, id: SegmentId, segment: &IdgSegment) -> crate::IdgResult<()> {
+        let payload = wire::encode(segment)
+            .map_err(|err| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
+        let (file, entries) = self
+            .generation
+            .as_mut()
+            .map_or((&mut self.file, &mut self.entries), |generation| {
+                (&mut generation.file, &mut generation.entries)
+            });
+        let offset = file.seek(SeekFrom::End(0))?;
+        file.write_all(&payload)?;
+        let index = id.0 as usize;
+        if entries.len() <= index {
+            entries.resize(index + 1, None);
+        }
+        entries[index] = Some(SpoolEntry {
+            offset,
+            encoded_len: payload.len() as u64,
+            node_count: u32::try_from(segment.nodes.len()).expect("segment node count exceeds u32"),
+            edge_count: segment.edges.len(),
+        });
+        Ok(())
+    }
+
+    fn read_segment(&mut self, id: SegmentId) -> crate::IdgResult<IdgSegment> {
+        let index = id.0 as usize;
+        let from_generation = self
+            .generation
+            .as_ref()
+            .and_then(|generation| generation.entries.get(index))
+            .copied()
+            .flatten();
+        let entry = from_generation.map_or_else(|| self.entry(id), Ok)?;
+        let len = usize::try_from(entry.encoded_len).map_err(|_| {
+            crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "spooled IDG segment exceeds addressable memory",
+            ))
+        })?;
+        let mut payload = vec![0_u8; len];
+        let file = if from_generation.is_some() {
+            &mut self
+                .generation
+                .as_mut()
+                .expect("generation entry checked above")
+                .file
+        } else {
+            &mut self.file
+        };
+        file.seek(SeekFrom::Start(entry.offset))?;
+        file.read_exact(&mut payload)?;
+        let segment: IdgSegment = wire::decode(&payload)
+            .map_err(|err| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
+        if segment.version != IDG_SEGMENT_VERSION {
+            return Err(crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "spooled IDG segment version mismatch",
+            )));
+        }
+        Ok(segment)
+    }
+
+    fn entry(&self, id: SegmentId) -> crate::IdgResult<SpoolEntry> {
+        if let Some(entry) = self
+            .generation
+            .as_ref()
+            .and_then(|generation| generation.entries.get(id.0 as usize))
+            .copied()
+            .flatten()
+        {
+            return Ok(entry);
+        }
+        self.entries.get(id.0 as usize).copied().flatten().ok_or_else(|| {
+            crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("missing spooled IDG segment {}", id.0),
+            ))
+        })
+    }
+
+    fn edge_count(&self, id: SegmentId) -> usize {
+        self.entry(id).map_or(0, |entry| entry.edge_count)
+    }
+
+    fn node_count(&self, id: SegmentId) -> u32 {
+        self.entry(id).map_or(0, |entry| entry.node_count)
+    }
+
+    fn len(&self) -> usize {
+        self.generation.as_ref().map_or(self.entries.len(), |generation| {
+            self.entries.len().max(generation.entries.len())
+        })
+    }
+
+    fn streamed_entry(&self, id: SegmentId) -> crate::IdgResult<(std::fs::File, u64, u64)> {
+        let generation_entry = self
+            .generation
+            .as_ref()
+            .and_then(|generation| generation.entries.get(id.0 as usize))
+            .copied()
+            .flatten();
+        let entry = generation_entry.map_or_else(|| self.entry(id), Ok)?;
+        let file = if generation_entry.is_some() {
+            &self
+                .generation
+                .as_ref()
+                .expect("generation entry checked above")
+                .file
+        } else {
+            &self.file
+        };
+        Ok((file.try_clone()?, entry.offset, entry.encoded_len))
+    }
+
+    fn begin_generation(&mut self) -> crate::IdgResult<()> {
+        if self.generation.is_some() {
+            return Err(crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "IDG spool generation already active",
+            )));
+        }
+        self.generation = Some(SpoolGeneration {
+            file: tempfile::tempfile()?,
+            entries: vec![None; self.entries.len()],
+        });
+        Ok(())
+    }
+
+    fn finish_generation(&mut self) -> crate::IdgResult<()> {
+        let generation = self.generation.take().ok_or_else(|| {
+            crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "IDG spool generation is not active",
+            ))
+        })?;
+        if generation.entries.len() != self.entries.len() || generation.entries.iter().any(Option::is_none) {
+            self.generation = Some(generation);
+            return Err(crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "IDG spool generation did not rewrite every compiler segment",
+            )));
+        }
+        self.file = generation.file;
+        self.entries = generation.entries;
+        Ok(())
+    }
 }
 
 /// Canonical cross-file edges with optional forward/backward indexes.
@@ -281,6 +467,14 @@ impl CrossFileEdges {
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IdgWorkspace {
     segments: Vec<IdgSegment>,
+    /// Sidecar-only builds keep inactive segment payloads in an anonymous
+    /// compiler spool. Query workspaces never enable this field.
+    #[serde(skip)]
+    segment_spool: Option<IdgSegmentSpool>,
+    /// Residency bit per segment while `segment_spool` is active. Skipped on
+    /// disk; a normal decoded workspace has every segment resident.
+    #[serde(skip)]
+    resident_segments: Vec<bool>,
     /// `FuncId.raw() → SegmentId`. Rebuilt from each segment's `funcs`
     /// list after deserialisation; Serde skips it on the wire.
     #[serde(skip)]
@@ -320,6 +514,9 @@ impl IdgWorkspace {
             self.by_func.insert(*func_raw, id);
         }
         self.segments.push(segment);
+        if self.segment_spool.is_some() {
+            self.resident_segments.push(true);
+        }
         id
     }
 
@@ -332,11 +529,29 @@ impl IdgWorkspace {
     /// Borrow segment `id`. `None` for invalid ids.
     #[must_use]
     pub fn segment(&self, id: SegmentId) -> Option<&IdgSegment> {
+        if self.segment_spool.is_some()
+            && !self
+                .resident_segments
+                .get(id.0 as usize)
+                .copied()
+                .unwrap_or(false)
+        {
+            return None;
+        }
         self.segments.get(id.0 as usize)
     }
 
     /// Mutably borrow segment `id`.
     pub fn segment_mut(&mut self, id: SegmentId) -> Option<&mut IdgSegment> {
+        if self.segment_spool.is_some()
+            && !self
+                .resident_segments
+                .get(id.0 as usize)
+                .copied()
+                .unwrap_or(false)
+        {
+            return None;
+        }
         self.segments.get_mut(id.0 as usize)
     }
 
@@ -345,7 +560,167 @@ impl IdgWorkspace {
         self.segments
             .iter()
             .enumerate()
+            .filter(|(i, _)| {
+                self.segment_spool.is_none() || self.resident_segments.get(*i).copied().unwrap_or(false)
+            })
             .map(|(i, s)| (SegmentId(i as u32), s))
+    }
+
+    pub(crate) fn enable_segment_spool(&mut self) -> crate::IdgResult<()> {
+        if self.segment_spool.is_none() {
+            self.segment_spool = Some(IdgSegmentSpool::new()?);
+            self.resident_segments = vec![true; self.segments.len()];
+        }
+        Ok(())
+    }
+
+    pub(crate) fn has_segment_spool(&self) -> bool {
+        self.segment_spool.is_some()
+    }
+
+    pub(crate) fn spill_segment(&mut self, id: SegmentId) -> crate::IdgResult<()> {
+        let index = id.0 as usize;
+        if self.segment_spool.is_none() || !self.resident_segments.get(index).copied().unwrap_or(false) {
+            return Ok(());
+        }
+        let segment = self.segments.get(index).ok_or_else(|| {
+            crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid IDG segment {}", id.0),
+            ))
+        })?;
+        self.segment_spool
+            .as_mut()
+            .expect("spool checked above")
+            .write_segment(id, segment)?;
+        self.segments[index] = IdgSegment::new();
+        self.resident_segments[index] = false;
+        Ok(())
+    }
+
+    pub(crate) fn hydrate_segment(&mut self, id: SegmentId) -> crate::IdgResult<()> {
+        let index = id.0 as usize;
+        if self.segment_spool.is_none() || self.resident_segments.get(index).copied().unwrap_or(false) {
+            return Ok(());
+        }
+        let segment = self
+            .segment_spool
+            .as_mut()
+            .expect("spool checked above")
+            .read_segment(id)?;
+        let slot = self.segments.get_mut(index).ok_or_else(|| {
+            crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid IDG segment {}", id.0),
+            ))
+        })?;
+        *slot = segment;
+        self.resident_segments[index] = true;
+        Ok(())
+    }
+
+    pub(crate) fn hydrate_segments<I>(&mut self, ids: I) -> crate::IdgResult<()>
+    where
+        I: IntoIterator<Item = SegmentId>,
+    {
+        for id in ids {
+            self.hydrate_segment(id)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn visit_segment<F>(&mut self, id: SegmentId, visit: F) -> crate::IdgResult<()>
+    where
+        F: FnOnce(&IdgSegment),
+    {
+        let index = id.0 as usize;
+        let was_resident =
+            self.segment_spool.is_none() || self.resident_segments.get(index).copied().unwrap_or(false);
+        self.hydrate_segment(id)?;
+        let segment = self.segment(id).ok_or_else(|| {
+            crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid IDG segment {}", id.0),
+            ))
+        })?;
+        visit(segment);
+        if self.segment_spool.is_some() && !was_resident {
+            self.segments[index] = IdgSegment::new();
+            self.resident_segments[index] = false;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn segment_node_count(&self, id: SegmentId) -> u32 {
+        let index = id.0 as usize;
+        if self.segment_spool.is_some() && !self.resident_segments.get(index).copied().unwrap_or(false) {
+            return self
+                .segment_spool
+                .as_ref()
+                .map_or(0, |spool| spool.node_count(id));
+        }
+        self.segments.get(index).map_or(0, |segment| {
+            u32::try_from(segment.nodes.len()).expect("segment node count exceeds u32")
+        })
+    }
+
+    pub(crate) fn spill_resident_segments(&mut self) -> crate::IdgResult<()> {
+        if self.segment_spool.is_none() {
+            return Ok(());
+        }
+        for index in 0..self.segments.len() {
+            if self.resident_segments.get(index).copied().unwrap_or(false) {
+                self.spill_segment(SegmentId(index as u32))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn begin_spool_generation(&mut self) -> crate::IdgResult<()> {
+        if let Some(spool) = &mut self.segment_spool {
+            spool.begin_generation()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish_spool_generation(&mut self) -> crate::IdgResult<()> {
+        if let Some(spool) = &mut self.segment_spool {
+            spool.finish_generation()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn visit_segments_mut<F>(&mut self, mut visit: F) -> crate::IdgResult<()>
+    where
+        F: FnMut(SegmentId, &mut IdgSegment),
+    {
+        if self.segment_spool.is_none() {
+            for (index, segment) in self.segments.iter_mut().enumerate() {
+                visit(SegmentId(index as u32), segment);
+            }
+            return Ok(());
+        }
+        self.begin_spool_generation()?;
+        for index in 0..self.segments.len() {
+            let id = SegmentId(index as u32);
+            self.hydrate_segment(id)?;
+            visit(id, &mut self.segments[index]);
+            self.spill_segment(id)?;
+        }
+        self.finish_spool_generation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialize_spooled_segments(&mut self) -> crate::IdgResult<()> {
+        if self.segment_spool.is_none() {
+            return Ok(());
+        }
+        for index in 0..self.segments.len() {
+            self.hydrate_segment(SegmentId(index as u32))?;
+        }
+        self.segment_spool = None;
+        self.resident_segments.clear();
+        Ok(())
     }
 
     /// Number of segments registered.
@@ -363,7 +738,21 @@ impl IdgWorkspace {
     /// Total number of intra-segment edges across the workspace.
     #[must_use]
     pub fn intra_edge_count(&self) -> usize {
-        self.segments.iter().map(|s| s.edges.len()).sum()
+        self.segments
+            .iter()
+            .enumerate()
+            .map(|(index, segment)| {
+                if self.segment_spool.is_some()
+                    && !self.resident_segments.get(index).copied().unwrap_or(false)
+                {
+                    self.segment_spool
+                        .as_ref()
+                        .map_or(0, |spool| spool.edge_count(SegmentId(index as u32)))
+                } else {
+                    segment.edges.len()
+                }
+            })
+            .sum()
     }
 
     /// Borrow the cross-file edge index.
@@ -426,6 +815,12 @@ impl IdgWorkspace {
     /// matcher-policy bump (or any consumer that wants the IDG
     /// invalidated together) naturally rejects a stale sidecar.
     pub fn save_to_disk(&self, path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<()> {
+        if self.segment_spool.is_some() {
+            return Err(crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "spooled compiler workspace must be consumed by save_into_disk",
+            )));
+        }
         save_workspace_parts(
             path,
             pipeline_hash,
@@ -444,14 +839,18 @@ impl IdgWorkspace {
     /// memory from becoming additive with those tables on large workspaces.
     /// Every node and edge remains in the canonical vectors written by
     /// [`Self::save_to_disk`]; warm loads rebuild the reverse indexes.
-    pub fn save_into_disk(self, path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<()> {
+    pub fn save_into_disk(mut self, path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<()> {
+        self.spill_resident_segments()?;
         let Self {
             mut segments,
+            segment_spool,
+            resident_segments,
             by_func,
             mut cross_file,
             field_flow,
             mut symbolic_field,
         } = self;
+        drop(resident_segments);
         drop(by_func);
         cross_file.release_indexes();
         symbolic_field.release_indexes();
@@ -460,10 +859,12 @@ impl IdgWorkspace {
         }
         let cross_file_edges = std::sync::Arc::new(std::mem::take(&mut cross_file.edges));
         drop(cross_file);
+        let persist_segments =
+            segment_spool.map_or_else(|| PersistSegments::Owned(segments), PersistSegments::Spool);
         let result = save_workspace_parts(
             path,
             pipeline_hash,
-            PersistSegments::Owned(segments),
+            persist_segments,
             PersistSlice::Owned(cross_file_edges),
             PersistSlice::Owned(std::sync::Arc::new(field_flow)),
             PersistSymbolic::Owned(std::sync::Arc::new(symbolic_field)),
@@ -539,6 +940,8 @@ impl IdgWorkspace {
         }
         let mut ws = Self {
             segments: Vec::with_capacity(metadata.segment_count as usize),
+            segment_spool: None,
+            resident_segments: Vec::new(),
             by_func: AHashMap::new(),
             cross_file: CrossFileEdges::new(),
             field_flow: Vec::with_capacity(metadata.field_flow_count.min(usize::MAX as u64) as usize),
@@ -769,6 +1172,7 @@ impl IdgWorkspace {
 enum PersistSegments<'a> {
     Borrowed(&'a [IdgSegment]),
     Owned(Vec<IdgSegment>),
+    Spool(IdgSegmentSpool),
 }
 
 enum PersistSlice<'a, T> {
@@ -804,6 +1208,7 @@ impl PersistSegments<'_> {
         match self {
             Self::Borrowed(segments) => segments.len(),
             Self::Owned(segments) => segments.len(),
+            Self::Spool(spool) => spool.len(),
         }
     }
 }
@@ -913,6 +1318,22 @@ fn save_workspace_parts(
             for (idx, segment) in segments.into_iter().enumerate() {
                 writer.add_streamed((idx + 1) as u64, IDG_WORKSPACE_VERSION as u64, move |out| {
                     encode_sidecar_to_writer(out, &segment)
+                })?;
+            }
+        }
+        PersistSegments::Spool(spool) => {
+            for idx in 0..spool.len() {
+                let (mut file, offset, encoded_len) = spool.streamed_entry(SegmentId(idx as u32))?;
+                writer.add_streamed((idx + 1) as u64, IDG_WORKSPACE_VERSION as u64, move |out| {
+                    file.seek(SeekFrom::Start(offset))?;
+                    let copied = std::io::copy(&mut (&mut file).take(encoded_len), out)?;
+                    if copied != encoded_len {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "spooled IDG segment ended before its recorded payload length",
+                        ));
+                    }
+                    Ok(())
                 })?;
             }
         }
