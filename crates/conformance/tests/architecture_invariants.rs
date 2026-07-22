@@ -3066,6 +3066,10 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && stitch.contains("segment.release_build_lookups()")
             && stitch.contains("segment.rebuild_build_lookups()")
             && stitch.contains("remap_transfer_into_segment")
+            && stitch.contains("enable_segment_spool()")
+            && stitch.contains("spill_segment")
+            && stitch.contains("begin_spool_generation()")
+            && stitch.contains("finish_spool_generation()")
             && stitch.contains("schedule_to_workspace")
             && stitch.contains("canonical_function_count")
             && stitch.contains("stitched_function_count")
@@ -3073,7 +3077,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && function_body(&idg, "build_with_file_info_and_options_scoped")
                 .contains("stitch_idg_from_relowered_segment_batches")
             && function_body(&idg_workspace, "rebuild_indexes").contains("self.maintain_indexes = true"),
-        "sidecar IDG builds must re-lower every compiler unit, release transient indexes at segment boundaries, and defer query-only edge indexes to warm load"
+        "sidecar IDG builds must re-lower and spill every compiler unit without semantic caps, release transient indexes at segment boundaries, and defer query-only edge indexes to warm load"
     );
     assert!(
         symbolic.contains("pub arg_idx: u32")

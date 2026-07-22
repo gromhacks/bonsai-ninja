@@ -22,8 +22,6 @@ regex.workspace = true
 serde.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
 
 [lints]

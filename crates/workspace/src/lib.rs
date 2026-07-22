@@ -1480,7 +1480,7 @@ impl Workspace {
                         .db
                         .decl_index_remapped_to_headers(global.as_ref(), file)
                 },
-            );
+            )?;
         let segment_count = workspace.segment_count();
         let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
         workspace.save_into_disk(&sidecar, pipeline_hash)?;

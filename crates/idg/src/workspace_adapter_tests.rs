@@ -249,7 +249,8 @@ fn streamed_transfer_bodies_match_fully_resident_idg() {
             |_| &[] as &'static [&'static str],
         ),
         &TransferOptions::default(),
-    );
+    )
+    .expect("resident persistence build");
 
     let mut headers = GlobalIndex::new();
     headers.insert_linkage_header_preprocessed(body.clone());
@@ -265,7 +266,8 @@ fn streamed_transfer_bodies_match_fully_resident_idg() {
         ),
         &TransferOptions::default(),
         |requested| (requested == file).then(|| headers.remap_file_to_existing_symbols(body.clone())),
-    );
+    )
+    .expect("streaming persistence build");
 
     assert_eq!(actual.segment_count(), expected.segment_count());
     assert_eq!(actual.func_count(), expected.func_count());
