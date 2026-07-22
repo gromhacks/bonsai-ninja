@@ -120,6 +120,144 @@ struct SpoolGeneration {
     entries: Vec<Option<SpoolEntry>>,
 }
 
+#[derive(Copy, Clone, Debug)]
+struct CrossFileSpoolEntry {
+    offset: u64,
+    encoded_len: u32,
+}
+
+/// Append-only exact wire chunks for sidecar-only cross-file edges.
+///
+/// A compiler build never queries the finished graph in-process. Retaining
+/// millions of cross edges in a growing `Vec` therefore adds no semantic
+/// value and can briefly require both the old and new allocation during a
+/// capacity increase. This spool retains one canonical wire chunk in memory,
+/// supports a single streamed compiler scan for field closure, and later
+/// copies those already-encoded chunks into the final FactStore.
+#[derive(Debug)]
+struct CrossFileEdgeSpool {
+    file: bonsai_factstore::PreparedFactStorePayload,
+    entries: Vec<CrossFileSpoolEntry>,
+    buffer: Vec<CrossFileEdge>,
+    edge_count: usize,
+    error: Option<String>,
+}
+
+impl CrossFileEdgeSpool {
+    fn new(target: &std::path::Path) -> crate::IdgResult<Self> {
+        Ok(Self {
+            file: bonsai_factstore::PreparedFactStorePayload::create_near(target)?,
+            entries: Vec::new(),
+            buffer: Vec::with_capacity(IDG_WORKSPACE_EDGE_CHUNK_LEN),
+            edge_count: 0,
+            error: None,
+        })
+    }
+
+    fn push(&mut self, edge: CrossFileEdge) {
+        if self.error.is_some() {
+            return;
+        }
+        self.buffer.push(edge);
+        self.edge_count = self.edge_count.saturating_add(1);
+        if self.buffer.len() == IDG_WORKSPACE_EDGE_CHUNK_LEN {
+            if let Err(error) = self.flush_buffer() {
+                self.error = Some(error.to_string());
+                self.buffer.clear();
+            }
+        }
+    }
+
+    fn flush_buffer(&mut self) -> crate::IdgResult<()> {
+        self.check_error()?;
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let payload = encode_sidecar_value(self.buffer.as_slice())?;
+        let (offset, encoded_len) = self.file.append(&payload)?;
+        self.entries.push(CrossFileSpoolEntry { offset, encoded_len });
+        self.buffer.clear();
+        Ok(())
+    }
+
+    fn check_error(&self) -> crate::IdgResult<()> {
+        if let Some(error) = &self.error {
+            return Err(crate::IdgError::Io(std::io::Error::other(format!(
+                "cross-file edge spool failed: {error}"
+            ))));
+        }
+        Ok(())
+    }
+
+    fn visit<F>(&self, mut visit: F) -> crate::IdgResult<()>
+    where
+        F: FnMut(&[CrossFileEdge]),
+    {
+        self.check_error()?;
+        let mut file = self.file.try_clone_file()?;
+        for entry in &self.entries {
+            file.seek(SeekFrom::Start(entry.offset))?;
+            let mut payload = vec![0_u8; entry.encoded_len as usize];
+            file.read_exact(&mut payload)?;
+            let edges: Vec<CrossFileEdge> = wire::decode(&payload).map_err(|error| {
+                crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            })?;
+            if edges.len() != IDG_WORKSPACE_EDGE_CHUNK_LEN {
+                return Err(crate::IdgError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "cross-file edge spool contains a non-canonical full chunk",
+                )));
+            }
+            visit(&edges);
+        }
+        visit(&self.buffer);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn into_edges(self) -> crate::IdgResult<Vec<CrossFileEdge>> {
+        let mut edges = Vec::with_capacity(self.edge_count);
+        self.visit(|chunk| edges.extend_from_slice(chunk))?;
+        Ok(edges)
+    }
+
+    fn write_chunks(
+        mut self,
+        writer: &bonsai_factstore::FactStoreWriter,
+        first_key: u64,
+    ) -> crate::IdgResult<()> {
+        self.flush_buffer()?;
+        self.check_error()?;
+        for (index, entry) in self.entries.into_iter().enumerate() {
+            let mut file = self.file.try_clone_file()?;
+            writer.add_streamed(
+                first_key + index as u64,
+                IDG_WORKSPACE_VERSION as u64,
+                move |output| {
+                    file.seek(SeekFrom::Start(entry.offset))?;
+                    let copied = std::io::copy(&mut file.take(u64::from(entry.encoded_len)), output)?;
+                    if copied != u64::from(entry.encoded_len) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "cross-file edge spool payload was truncated",
+                        ));
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.edge_count
+    }
+
+    fn chunk_count(&self) -> usize {
+        chunk_count(self.edge_count, IDG_WORKSPACE_EDGE_CHUNK_LEN)
+    }
+}
+
 impl IdgSegmentSpool {
     fn new(target: &std::path::Path) -> crate::IdgResult<Self> {
         Ok(Self {
@@ -502,6 +640,10 @@ pub struct IdgWorkspace {
     /// disk; a normal decoded workspace has every segment resident.
     #[serde(skip)]
     resident_segments: Vec<bool>,
+    /// Sidecar-only canonical cross-edge chunks. Kept separate from the
+    /// resident query vector so cold compilation is bounded by one wire chunk.
+    #[serde(skip)]
+    cross_file_spool: Option<CrossFileEdgeSpool>,
     /// `FuncId.raw() → SegmentId`. Rebuilt from each segment's `funcs`
     /// list after deserialisation; Serde skips it on the wire.
     #[serde(skip)]
@@ -595,7 +737,10 @@ impl IdgWorkspace {
 
     pub(crate) fn enable_segment_spool(&mut self, target: &std::path::Path) -> crate::IdgResult<()> {
         if self.segment_spool.is_none() {
-            self.segment_spool = Some(IdgSegmentSpool::new(target)?);
+            let segment_spool = IdgSegmentSpool::new(target)?;
+            let cross_file_spool = CrossFileEdgeSpool::new(target)?;
+            self.segment_spool = Some(segment_spool);
+            self.cross_file_spool = Some(cross_file_spool);
             self.resident_segments = vec![true; self.segments.len()];
         }
         Ok(())
@@ -747,6 +892,9 @@ impl IdgWorkspace {
         }
         self.segment_spool = None;
         self.resident_segments.clear();
+        if let Some(spool) = self.cross_file_spool.take() {
+            self.cross_file.edges = spool.into_edges()?;
+        }
         Ok(())
     }
 
@@ -788,6 +936,43 @@ impl IdgWorkspace {
         &self.cross_file
     }
 
+    /// Exact cross-file edge count across resident and sidecar-only storage.
+    #[must_use]
+    pub fn cross_file_edge_count(&self) -> usize {
+        self.cross_file_spool
+            .as_ref()
+            .map_or_else(|| self.cross_file.len(), CrossFileEdgeSpool::len)
+    }
+
+    /// Visit canonical cross-file edges without requiring them to be resident.
+    pub(crate) fn visit_cross_file_edges<F>(&self, mut visit: F) -> crate::IdgResult<()>
+    where
+        F: FnMut(&[CrossFileEdge]),
+    {
+        if let Some(spool) = &self.cross_file_spool {
+            spool.visit(visit)
+        } else {
+            visit(&self.cross_file.edges);
+            Ok(())
+        }
+    }
+
+    /// Append one canonical cross-file edge to resident query storage or the
+    /// bounded sidecar compiler spool selected for this workspace.
+    pub(crate) fn push_cross_file_edge(&mut self, edge: CrossFileEdge) {
+        if let Some(spool) = &mut self.cross_file_spool {
+            spool.push(edge);
+        } else {
+            self.cross_file.push(edge);
+        }
+    }
+
+    pub(crate) fn check_cross_file_spool(&self) -> crate::IdgResult<()> {
+        self.cross_file_spool
+            .as_ref()
+            .map_or(Ok(()), CrossFileEdgeSpool::check_error)
+    }
+
     /// Read-only access to the cross-method field-flow links.
     pub fn field_flow(&self) -> &[FieldFlowLink] {
         &self.field_flow
@@ -819,7 +1004,7 @@ impl IdgWorkspace {
     /// Total edge count: intra-segment + cross-file.
     #[must_use]
     pub fn total_edge_count(&self) -> usize {
-        self.intra_edge_count() + self.cross_file.len()
+        self.intra_edge_count() + self.cross_file_edge_count()
     }
 
     /// Persist the entire workspace IDG to `path` as a streamed
@@ -852,7 +1037,7 @@ impl IdgWorkspace {
             path,
             pipeline_hash,
             PersistSegments::Borrowed(&self.segments),
-            PersistSlice::Borrowed(&self.cross_file.edges),
+            PersistCrossFileEdges::Resident(PersistSlice::Borrowed(&self.cross_file.edges)),
             PersistSlice::Borrowed(&self.field_flow),
             PersistSymbolic::Borrowed(&self.symbolic_field),
         )
@@ -872,6 +1057,7 @@ impl IdgWorkspace {
             mut segments,
             segment_spool,
             resident_segments,
+            cross_file_spool,
             by_func,
             mut cross_file,
             field_flow,
@@ -888,11 +1074,15 @@ impl IdgWorkspace {
         drop(cross_file);
         let persist_segments =
             segment_spool.map_or_else(|| PersistSegments::Owned(segments), PersistSegments::Spool);
+        let persist_cross_file = cross_file_spool.map_or_else(
+            || PersistCrossFileEdges::Resident(PersistSlice::Owned(cross_file_edges)),
+            PersistCrossFileEdges::Spool,
+        );
         let result = save_workspace_parts(
             path,
             pipeline_hash,
             persist_segments,
-            PersistSlice::Owned(cross_file_edges),
+            persist_cross_file,
             PersistSlice::Owned(std::sync::Arc::new(field_flow)),
             PersistSymbolic::Owned(std::sync::Arc::new(symbolic_field)),
         );
@@ -969,6 +1159,7 @@ impl IdgWorkspace {
             segments: Vec::with_capacity(metadata.segment_count as usize),
             segment_spool: None,
             resident_segments: Vec::new(),
+            cross_file_spool: None,
             by_func: AHashMap::new(),
             cross_file: CrossFileEdges::new(),
             field_flow: Vec::with_capacity(metadata.field_flow_count.min(usize::MAX as u64) as usize),
@@ -1207,6 +1398,27 @@ enum PersistSlice<'a, T> {
     Owned(std::sync::Arc<Vec<T>>),
 }
 
+enum PersistCrossFileEdges<'a> {
+    Resident(PersistSlice<'a, CrossFileEdge>),
+    Spool(CrossFileEdgeSpool),
+}
+
+impl PersistCrossFileEdges<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Resident(edges) => edges.as_slice().len(),
+            Self::Spool(spool) => spool.len(),
+        }
+    }
+
+    fn chunk_count(&self) -> usize {
+        match self {
+            Self::Resident(edges) => chunk_count(edges.as_slice().len(), IDG_WORKSPACE_EDGE_CHUNK_LEN),
+            Self::Spool(spool) => spool.chunk_count(),
+        }
+    }
+}
+
 impl<T> PersistSlice<'_, T> {
     fn as_slice(&self) -> &[T] {
         match self {
@@ -1289,7 +1501,7 @@ fn save_workspace_parts(
     path: &std::path::Path,
     pipeline_hash: u64,
     segments: PersistSegments<'_>,
-    cross_file_edges: PersistSlice<'_, CrossFileEdge>,
+    cross_file_edges: PersistCrossFileEdges<'_>,
     field_flow: PersistSlice<'_, FieldFlowLink>,
     symbolic_field: PersistSymbolic<'_>,
 ) -> crate::IdgResult<()> {
@@ -1297,7 +1509,8 @@ fn save_workspace_parts(
     use rayon::prelude::*;
 
     let segment_count = segments.len();
-    let cross_file_chunk_count = chunk_count(cross_file_edges.as_slice().len(), IDG_WORKSPACE_EDGE_CHUNK_LEN);
+    let cross_file_edge_count = cross_file_edges.len();
+    let cross_file_chunk_count = cross_file_edges.chunk_count();
     let field_flow_chunk_count = chunk_count(field_flow.as_slice().len(), IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN);
     let symbolic = symbolic_field.as_graph();
     let symbolic_transform_chunk_count = chunk_count(
@@ -1319,7 +1532,7 @@ fn save_workspace_parts(
     let metadata = IdgWorkspaceMetadata {
         version: IDG_WORKSPACE_VERSION,
         segment_count: segment_count as u32,
-        cross_file_edge_count: cross_file_edges.as_slice().len() as u64,
+        cross_file_edge_count: cross_file_edge_count as u64,
         cross_file_chunk_count: cross_file_chunk_count as u32,
         field_flow_count: field_flow.as_slice().len() as u64,
         field_flow_chunk_count: field_flow_chunk_count as u32,
@@ -1361,12 +1574,12 @@ fn save_workspace_parts(
     }
 
     let cross_base = first_cross_file_chunk_key(segment_count as u32);
-    write_slice_chunks(
-        &writer,
-        cross_file_edges,
-        IDG_WORKSPACE_EDGE_CHUNK_LEN,
-        cross_base,
-    )?;
+    match cross_file_edges {
+        PersistCrossFileEdges::Resident(edges) => {
+            write_slice_chunks(&writer, edges, IDG_WORKSPACE_EDGE_CHUNK_LEN, cross_base)?;
+        }
+        PersistCrossFileEdges::Spool(spool) => spool.write_chunks(&writer, cross_base)?,
+    }
     let field_base = first_field_flow_chunk_key(segment_count as u32, cross_file_chunk_count as u32);
     write_slice_chunks(
         &writer,

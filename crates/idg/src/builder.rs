@@ -1071,15 +1071,19 @@ where
 /// segment dictionaries, stitches calls, and discards that transient state.
 /// This is a compiler memory-lifetime boundary, not a semantic budget: both
 /// passes cover every scheduled function and all closure phases still run.
+pub(crate) struct ReloweredStitchOptions<'a> {
+    pub spool_path: &'a std::path::Path,
+    pub include_field_argument_forwarding: bool,
+    pub symbolic_field_forwarding: bool,
+    pub symbolic_funcs: Option<&'a AHashSet<FuncId>>,
+}
+
 pub(crate) fn stitch_idg_from_relowered_segment_batches<B1, I1, B2, I2>(
     canonical_batches: B1,
     stitch_batches: B2,
     function_count: usize,
-    spool_path: &std::path::Path,
     resolver: &dyn CalleeResolver,
-    include_field_argument_forwarding: bool,
-    symbolic_field_forwarding: bool,
-    symbolic_funcs: Option<&AHashSet<FuncId>>,
+    options: ReloweredStitchOptions<'_>,
 ) -> crate::IdgResult<IdgWorkspace>
 where
     B1: IntoIterator<Item = I1>,
@@ -1087,6 +1091,12 @@ where
     B2: IntoIterator<Item = I2>,
     I2: IntoIterator<Item = (SegmentId, Vec<TransferOutput>)>,
 {
+    let ReloweredStitchOptions {
+        spool_path,
+        include_field_argument_forwarding,
+        symbolic_field_forwarding,
+        symbolic_funcs,
+    } = options;
     let started = Instant::now();
     let mut ws = IdgWorkspace::new();
     ws.enable_segment_spool(spool_path)?;
@@ -1219,6 +1229,7 @@ where
             }
             state.collect_active_segment_field_copy_sites(segment_id, &ws);
             ws.spill_segment(segment_id)?;
+            ws.check_cross_file_spool()?;
         }
     }
     assert_eq!(
@@ -5548,21 +5559,23 @@ impl InterCallArgEntryIndex {
         }
         let requested = segment_ids.iter().copied().collect::<AHashSet<_>>();
         let mut cross_entries: AHashMap<SegmentId, Vec<NodeId>> = AHashMap::new();
-        for cross in &ws.cross_file().edges {
-            if requested.contains(&cross.to_segment)
-                && matches!(
-                    cross.edge.meta.kind,
-                    crate::edge::IdgEdgeKind::InterCallArg
-                        | crate::edge::IdgEdgeKind::InterFieldCallArg
-                        | crate::edge::IdgEdgeKind::InterFieldReturn
-                )
-            {
-                cross_entries
-                    .entry(cross.to_segment)
-                    .or_default()
-                    .push(cross.edge.to);
+        ws.visit_cross_file_edges(|edges| {
+            for cross in edges {
+                if requested.contains(&cross.to_segment)
+                    && matches!(
+                        cross.edge.meta.kind,
+                        crate::edge::IdgEdgeKind::InterCallArg
+                            | crate::edge::IdgEdgeKind::InterFieldCallArg
+                            | crate::edge::IdgEdgeKind::InterFieldReturn
+                    )
+                {
+                    cross_entries
+                        .entry(cross.to_segment)
+                        .or_default()
+                        .push(cross.edge.to);
+                }
             }
-        }
+        })?;
         let mut index = Self::default();
         for &seg_id in segment_ids {
             ws.visit_segment(seg_id, |segment| {
@@ -5720,7 +5733,7 @@ fn place_inter_edge(from_seg: SegmentId, to_seg: SegmentId, edge: IdgEdge, ws: &
             seg.add_edge(edge);
         }
     } else {
-        ws.cross_file_mut().push(CrossFileEdge {
+        ws.push_cross_file_edge(CrossFileEdge {
             from_segment: from_seg,
             to_segment: to_seg,
             edge,

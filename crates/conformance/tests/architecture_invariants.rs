@@ -3082,13 +3082,18 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
     );
     assert!(
         struct_body(&idg_workspace, "IdgSegmentSpool").contains("PreparedFactStorePayload")
+            && struct_body(&idg_workspace, "CrossFileEdgeSpool").contains("PreparedFactStorePayload")
+            && function_body(&idg_builder, "place_inter_edge").contains("push_cross_file_edge")
+            && function_body(&idg_builder, "from_workspace_for_segments_streaming")
+                .contains("visit_cross_file_edges")
             && function_body(&idg_workspace, "save_workspace_parts")
                 .contains("into_factstore_writer")
+            && function_body(&idg_workspace, "save_workspace_parts").contains("spool.write_chunks")
             && function_body(&idg_workspace, "into_factstore_writer")
                 .contains("FactStoreWriter::create_from_prepared")
             && function_body(&factstore_writer, "create_from_prepared").contains("prepared.relocate")
             && !idg_workspace.contains("fn streamed_entry"),
-        "sidecar persistence must adopt already-encoded compiler segments as the final FactStore payload instead of copying the complete graph through a second writer pass"
+        "sidecar persistence must adopt already-encoded compiler segments and stream bounded cross-edge chunks instead of retaining or recopying the complete graph"
     );
     assert!(
         symbolic.contains("pub arg_idx: u32")
