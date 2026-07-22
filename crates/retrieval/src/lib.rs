@@ -1068,7 +1068,16 @@ pub fn ensure_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<
     let pipeline = pipeline_hash_for_workspace(ws);
     match validate_sidecar_file_with_pipeline(&retrieval_sidecar_path(workspace_root), pipeline) {
         Ok(docs) => Ok(RetrievalSidecarStatus::Reused { docs }),
-        Err(_) => save_sidecar(ws, workspace_root).map(|docs| RetrievalSidecarStatus::Rebuilt { docs }),
+        Err(_) => {
+            // Candidate construction consumes exact resolved edge identity.
+            // Reuse the independently validated compiler artifact before
+            // `build_persisted_candidate_snapshot` asks for the graph; a
+            // fresh semantic worker otherwise recompiles the whole callgraph
+            // even when its sidecar is current. A miss remains exact because
+            // `cached_resolved_call_graph` rebuilds from syntax below.
+            let _ = ws.load_callgraph_sidecar(workspace_root);
+            save_sidecar(ws, workspace_root).map(|docs| RetrievalSidecarStatus::Rebuilt { docs })
+        }
     }
 }
 

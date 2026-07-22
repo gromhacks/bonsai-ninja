@@ -255,6 +255,46 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
 }
 
 #[test]
+fn linkage_wire_is_canonical_and_rebuilds_compiler_indexes() {
+    let file = FileId::new(25);
+    let call_span = Span::new(file, 10, 20);
+    let mut function = decl(file, 1, "handler");
+    function.flow_events.push(FlowEvent::Call {
+        span: call_span,
+        name: "consume".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: Vec::new(),
+    });
+    let body = DeclIndex {
+        file,
+        defs: vec![function],
+        ..DeclIndex::default()
+    };
+    let mut global = GlobalIndex::new();
+    global.insert_linkage_header_preprocessed(body.clone());
+    global.finalize_semantic_facts();
+
+    let first = bonsai_common::wire::encode_struct_map(&global).expect("encode linkage index");
+    let second = bonsai_common::wire::encode_struct_map(&global).expect("repeat linkage encoding");
+    assert_eq!(first, second, "linkage wire order must be deterministic");
+
+    let mut restored: GlobalIndex = bonsai_common::wire::decode(&first).expect("decode linkage index");
+    let symbol = restored.find_by_name("handler")[0];
+    assert_eq!(restored.declaring_file(symbol), Some(file));
+    assert_eq!(
+        restored.linkage_facts(symbol).expect("persisted linkage").calls[0].span,
+        call_span
+    );
+    let rebound = restored.remap_file_to_existing_symbols(body);
+    assert_eq!(rebound.defs[0].symbol, symbol);
+    restored.remove_file(file);
+    assert!(restored.decl_of(symbol).is_none());
+    assert!(restored.find_by_name("handler").is_empty());
+}
+
+#[test]
 fn scalar_return_survives_as_a_compact_summary_fact() {
     let file = FileId::new(23);
     let mut function = decl(file, 1, "identity");

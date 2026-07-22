@@ -240,6 +240,7 @@ fn relowered_stitch_preserves_the_exact_canonical_graph() {
             include_field_argument_forwarding: true,
             symbolic_field_forwarding: false,
             symbolic_funcs: None,
+            capture_funcs: None,
         },
     )
     .expect("spooled relowering");
@@ -308,6 +309,7 @@ fn relowered_sidecar_preserves_cross_segment_calls_byte_for_byte() {
             include_field_argument_forwarding: true,
             symbolic_field_forwarding: false,
             symbolic_funcs: None,
+            capture_funcs: None,
         },
     )
     .expect("spooled relowering");
@@ -430,6 +432,7 @@ fn relowered_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
                 include_field_argument_forwarding: true,
                 symbolic_field_forwarding: true,
                 symbolic_funcs: Some(&symbolic_funcs),
+                capture_funcs: None,
             },
         )
         .expect("spooled symbolic relowering");
@@ -2446,6 +2449,42 @@ fn lexical_capture_stitch_is_name_preserving_and_local_binding_scoped() {
     assert!(
         has_capture_edge(&local_ws),
         "resolver-proven local callable must receive its matching captured writer"
+    );
+
+    let caller_output = transfer_function_for(&caller);
+    let closure_output = transfer_function_for(&closure);
+    let batches = || {
+        vec![vec![
+            (SegmentId(0), vec![caller_output.clone()]),
+            (SegmentId(1), vec![closure_output.clone()]),
+        ]]
+    };
+    let capture_funcs = AHashSet::from_iter([FuncId::new(2)]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("local-capture.factstore");
+    let relowered = stitch_idg_from_relowered_segment_batches(
+        batches(),
+        batches(),
+        2,
+        &local_resolver,
+        ReloweredStitchOptions {
+            spool_path: &path,
+            include_field_argument_forwarding: true,
+            symbolic_field_forwarding: false,
+            symbolic_funcs: None,
+            capture_funcs: Some(&capture_funcs),
+        },
+    )
+    .expect("spooled capture relowering");
+    relowered
+        .save_into_disk(&path, 0xCA97_0AEE)
+        .expect("persist capture graph");
+    let relowered = IdgWorkspace::load_from_disk(&path, 0xCA97_0AEE)
+        .expect("load capture graph")
+        .expect("capture graph exists");
+    assert!(
+        has_capture_edge(&relowered),
+        "persistence capture filtering must retain resolver-proven callable targets"
     );
 
     let mut ordinary_resolver = MockResolver::new();

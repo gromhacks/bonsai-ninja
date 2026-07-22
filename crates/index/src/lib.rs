@@ -29,7 +29,7 @@ struct DeclDedupKey {
 /// a file's transfer functions have been lowered. Keeping them separately
 /// avoids retaining every workspace body merely to stitch calls and receiver
 /// flows later.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FunctionLinkageFacts {
     pub calls: Vec<CallLinkageFact>,
     pub call_result_assignments: Vec<CallResultLinkageFact>,
@@ -50,7 +50,7 @@ impl FunctionLinkageFacts {
 }
 
 /// One grammar-derived call site needed by interprocedural stitching.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallLinkageFact {
     pub span: Span,
     pub name: Box<str>,
@@ -60,7 +60,7 @@ pub struct CallLinkageFact {
 }
 
 /// Arity evidence for an assignment whose right-hand side is a direct call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallResultLinkageFact {
     pub span: Span,
     pub has_explicit_args: bool,
@@ -69,7 +69,7 @@ pub struct CallResultLinkageFact {
 /// A constructor expression proven by the adapter's AST lowering to feed a
 /// function return. Call resolution uses this compact compiler fact to type a
 /// later assignment without retaining the returned function body.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ReturnedConstructorLinkageFact {
     pub name: Box<str>,
     pub receiver: Option<Box<str>>,
@@ -91,7 +91,7 @@ impl From<&Decl> for DeclDedupKey {
 }
 
 /// A merged view over all per-file decl indices.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct GlobalIndex {
     /// All per-file indices, indexed by the file they belong to.
     by_file: AHashMap<FileId, DeclIndex>,
@@ -110,23 +110,18 @@ pub struct GlobalIndex {
     /// table on every removal — important for long-running
     /// indexers with frequent file edits.
     ///
-    /// `serde(skip)` because a deserialised GlobalIndex with a
-    /// `default()` empty map but populated `entries`/`by_file`
-    /// would silently no-op subsequent `remove_file` tombstones.
-    /// `GlobalIndex` isn't currently persisted; if that changes,
-    /// add a `Deserialize` adaptor that rebuilds the reverse map
-    /// from `entries`.
-    #[serde(skip)]
+    /// The canonical wire adaptor omits this derived map and rebuilds it from
+    /// `entries`, preventing a decoded index from silently no-oping later
+    /// `remove_file` tombstones.
     slots_by_file: AHashMap<FileId, Vec<usize>>,
     /// Finalized workspace ancestry shared by every streamed file rebind.
     /// Recomputing this declaration-wide table per file would turn receiver
     /// enrichment into quadratic compiler work.
-    #[serde(skip)]
     finalized_bases_by_type: AHashMap<String, Vec<String>>,
     /// Exact, flattened syntax facts required after streamed body lowering.
-    /// This is an in-memory phase artifact, never a persisted substitute for
-    /// adapter IR.
-    #[serde(skip)]
+    /// Persisting this compact compiler phase artifact lets a fresh semantic
+    /// worker bind re-lowered Tree-sitter bodies to the same stable symbols
+    /// without reparsing every file merely to reconstruct linkage headers.
     linkage_by_symbol: AHashMap<SymbolId, FunctionLinkageFacts>,
 }
 
@@ -338,6 +333,60 @@ impl GlobalIndex {
         }
     }
 
+    /// Restore indexes derived from the canonical serialized linkage table.
+    ///
+    /// The per-file slot map and finalized ancestry lookup are intentionally
+    /// omitted from the wire payload because their source vectors are already
+    /// present. A linkage-sidecar loader calls this once after decoding so
+    /// later exact file re-lowering has the same compiler behavior as an
+    /// index built directly from Tree-sitter facts.
+    pub fn rebuild_persisted_indexes(&mut self) {
+        self.by_name.clear();
+        self.refs_by_symbol.clear();
+        let mut files: Vec<FileId> = self.by_file.keys().copied().collect();
+        files.sort_unstable_by_key(|file| file.raw());
+        for file in files {
+            let index = &self.by_file[&file];
+            for decl in &index.defs {
+                self.by_name
+                    .entry(decl.name.clone())
+                    .or_default()
+                    .push(decl.symbol);
+                if let Some(qualified) = &decl.qualified_name {
+                    if qualified != &decl.name {
+                        self.by_name
+                            .entry(qualified.clone())
+                            .or_default()
+                            .push(decl.symbol);
+                    }
+                }
+            }
+            for (reference_index, reference) in index.refs.iter().enumerate() {
+                if let Some(target) = reference.resolved {
+                    self.refs_by_symbol
+                        .entry(target)
+                        .or_default()
+                        .push((file, reference_index));
+                }
+            }
+        }
+        for symbols in self.by_name.values_mut() {
+            symbols.sort_unstable_by_key(|symbol| symbol.raw());
+            symbols.dedup();
+        }
+        for references in self.refs_by_symbol.values_mut() {
+            references.sort_unstable_by_key(|(file, index)| (file.raw(), *index));
+            references.dedup();
+        }
+        self.slots_by_file.clear();
+        for (slot, entry) in self.entries.iter().copied().enumerate() {
+            if let Some((file, _)) = entry {
+                self.slots_by_file.entry(file).or_default().push(slot);
+            }
+        }
+        self.finalized_bases_by_type = self.bases_by_type_name();
+    }
+
     /// Drop every cached fact derived from `file`: per-file indexes,
     /// name-table entries, ref backlinks, and tombstone the global
     /// id slots so old SymbolIds resolve to `None`.
@@ -507,6 +556,79 @@ impl GlobalIndex {
     /// True when every per-file index is empty.
     pub fn is_empty(&self) -> bool {
         self.by_file.values().all(|index| index.defs.is_empty())
+    }
+}
+
+#[derive(Serialize)]
+struct GlobalIndexWireRef<'a> {
+    by_file: Vec<(FileId, &'a DeclIndex)>,
+    entries: Vec<Option<(FileId, u32)>>,
+    linkage_by_symbol: Vec<(SymbolId, &'a FunctionLinkageFacts)>,
+}
+
+#[derive(Deserialize)]
+struct GlobalIndexWireOwned {
+    by_file: Vec<(FileId, DeclIndex)>,
+    entries: Vec<Option<(FileId, u32)>>,
+    linkage_by_symbol: Vec<(SymbolId, FunctionLinkageFacts)>,
+}
+
+impl Serialize for GlobalIndex {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut by_file: Vec<(FileId, &DeclIndex)> =
+            self.by_file.iter().map(|(file, index)| (*file, index)).collect();
+        by_file.sort_unstable_by_key(|(file, _)| file.raw());
+        let mut linkage_by_symbol: Vec<(SymbolId, &FunctionLinkageFacts)> = self
+            .linkage_by_symbol
+            .iter()
+            .map(|(symbol, facts)| (*symbol, facts))
+            .collect();
+        linkage_by_symbol.sort_unstable_by_key(|(symbol, _)| symbol.raw());
+        let entries = self
+            .entries
+            .iter()
+            .map(|entry| {
+                entry.map(|(file, local_index)| {
+                    (
+                        file,
+                        u32::try_from(local_index).expect("per-file declaration index exceeds u32"),
+                    )
+                })
+            })
+            .collect();
+        GlobalIndexWireRef {
+            by_file,
+            entries,
+            linkage_by_symbol,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for GlobalIndex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = GlobalIndexWireOwned::deserialize(deserializer)?;
+        let mut index = Self {
+            by_file: wire.by_file.into_iter().collect(),
+            entries: wire
+                .entries
+                .into_iter()
+                .map(|entry| entry.map(|(file, local_index)| (file, local_index as usize)))
+                .collect(),
+            by_name: AHashMap::new(),
+            refs_by_symbol: AHashMap::new(),
+            slots_by_file: AHashMap::new(),
+            finalized_bases_by_type: AHashMap::new(),
+            linkage_by_symbol: wire.linkage_by_symbol.into_iter().collect(),
+        };
+        index.rebuild_persisted_indexes();
+        Ok(index)
     }
 }
 

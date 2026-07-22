@@ -25,7 +25,9 @@ use crate::help_theme::{
 /// from the public CLI because `index --semantic` orchestrates it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum SemanticWorkerPhase {
-    Frontend,
+    Retrieval,
+    Callgraph,
+    Linkage,
     Idg,
 }
 

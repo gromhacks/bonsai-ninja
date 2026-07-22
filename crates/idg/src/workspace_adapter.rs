@@ -2737,6 +2737,11 @@ where
             add_func_call_alias(&mut func_to_call_names, *func, alias);
         }
     }
+    let capture_funcs = local_callable_bindings
+        .values()
+        .flat_map(|bindings| bindings.values())
+        .copied()
+        .collect::<AHashSet<_>>();
     let alias_count: usize = func_to_call_names.values().map(Vec::len).sum();
     idg_build_log(format_args!(
         "call-name aliases: {:.3}s funcs={} aliases={}",
@@ -2836,6 +2841,7 @@ where
                 include_field_argument_forwarding: transfer_options.include_field_argument_forwarding,
                 symbolic_field_forwarding: transfer_options.symbolic_field_forwarding,
                 symbolic_funcs: symbolic_funcs.as_ref(),
+                capture_funcs: Some(&capture_funcs),
             },
         )
     } else {

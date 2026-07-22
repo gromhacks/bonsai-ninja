@@ -300,6 +300,12 @@ fn cache_clear(workspace: Option<std::path::PathBuf>, dataflow_only: bool) -> Re
         );
         print_existing_sidecar(
             &print_kv,
+            "  compiler linkage sidecar",
+            &stats.linkage_sidecar,
+            stats.linkage_sidecar_exists,
+        );
+        print_existing_sidecar(
+            &print_kv,
             "  IDG factstore",
             &stats.idg_sidecar,
             stats.idg_sidecar_exists,
@@ -365,36 +371,18 @@ fn cache_rebuild(workspace: Option<std::path::PathBuf>, warm_export: bool) -> Re
         print_kv("freed", &format!("{freed} bytes"));
     }
 
-    // Open structurally, then refresh reusable
-    // sidecars explicitly. Do not route through a full
-    // workspace prewarm path here: that computes
-    // dataflow/value-flow/flow-id caches and can retain
-    // gigabytes on broad workspaces. Exact taint and
-    // source-analysis commands compute their requested scope
-    // when invoked; cache rebuild only prepares structural
-    // artifacts those exact commands can reuse.
+    // Refresh each exact compiler phase in its own worker process. This is the
+    // same frontend-artifact -> IDG pipeline used by `index --semantic`; the
+    // OS reclaims Tree-sitter and allocator arenas between phases instead of
+    // making their peaks additive. No source, edge, or fixed-point cap is
+    // involved.
     print_kv("rebuilding", &workspace_root.display().to_string());
-    let (project, _footer) = open_project_index_only(&workspace_root)?;
-    let workspace = project.workspace();
-
-    let spin = progress::ScopedSpinner::new("warming callgraph sidecar");
-    let _ = workspace.cached_resolved_call_graph();
-    workspace
-        .save_callgraph_sidecar(&workspace_root)
-        .with_context(|| format!("writing {}", stats.callgraph_sidecar.display()))?;
-    spin.finish();
-
-    let spin = progress::ScopedSpinner::new("warming IDG sidecar");
-    let _ = workspace.build_and_persist_idg_sidecar()?;
-    spin.finish();
-
-    let retrieval_sidecar = bonsai_retrieval::retrieval_sidecar_path(&workspace_root);
-    let spin = progress::ScopedSpinner::new("building retrieval facts");
-    bonsai_retrieval::save_sidecar(workspace, &workspace_root)
-        .with_context(|| format!("writing {}", retrieval_sidecar.display()))?;
+    let spin = progress::ScopedSpinner::new("warming structural compiler sidecars");
+    super::diagnostics::run_semantic_workers(&workspace_root)?;
     spin.finish();
 
     if warm_export {
+        let (project, _footer) = open_project_index_only(&workspace_root)?;
         let spin = progress::ScopedSpinner::new("warming export cache");
         warm_export_cache_for_project(&project)?;
         spin.finish();
@@ -404,13 +392,20 @@ fn cache_rebuild(workspace: Option<std::path::PathBuf>, warm_export: bool) -> Re
     let _manifest = cache.write_manifest()?;
     spin.finish();
 
-    let rebuilt = project.cache().stats()?;
+    let rebuilt = cache.stats()?;
     print_sidecar(
         &print_kv,
         "wrote callgraph sidecar",
         &rebuilt.callgraph_sidecar,
         rebuilt.callgraph_sidecar_exists,
         rebuilt.callgraph_sidecar_bytes,
+    );
+    print_sidecar(
+        &print_kv,
+        "wrote compiler linkage sidecar",
+        &rebuilt.linkage_sidecar,
+        rebuilt.linkage_sidecar_exists,
+        rebuilt.linkage_sidecar_bytes,
     );
     print_sidecar(
         &print_kv,

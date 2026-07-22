@@ -22,6 +22,7 @@ pub mod enclosing_index;
 pub mod flow_ids;
 pub mod flow_ids_disk;
 pub mod flow_query;
+pub mod linkage_sidecar;
 pub mod semantic_context;
 pub mod taint_index;
 pub mod taint_index_disk;
@@ -999,6 +1000,47 @@ impl Workspace {
         callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, graph)
     }
 
+    /// Check whether the compiler linkage artifact exactly matches the
+    /// current VFS identity and semantic ABI without decoding its payload.
+    #[must_use]
+    pub fn compiler_linkage_sidecar_is_current(&self, root: &Path) -> bool {
+        let path = linkage_sidecar::linkage_sidecar_path(root);
+        linkage_sidecar::validate_linkage_sidecar_for_db(&path, &self.inner.db).is_ok()
+    }
+
+    /// Load and seed the compact compiler linkage table from its exact
+    /// sidecar. The caller receives the concrete validation/decode error so a
+    /// compiler orchestration phase can rebuild rather than weakening facts.
+    pub fn load_compiler_linkage_sidecar_checked(&self, root: &Path) -> std::io::Result<()> {
+        if self.inner.compiler_linkage.read().is_some() {
+            return Ok(());
+        }
+        let path = linkage_sidecar::linkage_sidecar_path(root);
+        let index = Arc::new(linkage_sidecar::load_linkage_sidecar_checked(
+            &path,
+            &self.inner.db,
+        )?);
+        let mut slot = self.inner.compiler_linkage.write();
+        if slot.is_none() {
+            *slot = Some(index);
+        }
+        Ok(())
+    }
+
+    /// Persist the complete linkage-header table. Full function bodies are
+    /// never part of this artifact; later IDG transfer re-lowers them from the
+    /// registered Tree-sitter adapters one compilation unit at a time.
+    pub fn save_compiler_linkage_sidecar(&self, root: &Path) -> std::io::Result<()> {
+        if !self.is_complete_workspace_index() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "compiler linkage sidecars require a complete workspace index",
+            ));
+        }
+        let path = linkage_sidecar::linkage_sidecar_path(root);
+        linkage_sidecar::save_linkage_sidecar(&path, &self.inner.db, self.compiler_linkage_index())
+    }
+
     /// Compact workspace-wide compiler linkage shared by call resolution and
     /// the IDG. It contains stable declaration/type symbols and AST-derived
     /// linkage summaries, but never retains every function body.
@@ -1017,6 +1059,14 @@ impl Workspace {
         let mut slot = self.inner.compiler_linkage.write();
         if let Some(linkage) = slot.as_ref() {
             return linkage.clone();
+        }
+        if let Some(root) = self.root_path() {
+            let path = linkage_sidecar::linkage_sidecar_path(&root);
+            if let Ok(linkage) = linkage_sidecar::load_linkage_sidecar_checked(&path, &self.inner.db) {
+                let linkage = Arc::new(linkage);
+                *slot = Some(linkage.clone());
+                return linkage;
+            }
         }
         let linkage = self.inner.db.build_global_linkage_index();
         *slot = Some(linkage.clone());

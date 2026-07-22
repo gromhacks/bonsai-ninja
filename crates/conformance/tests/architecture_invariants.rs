@@ -3440,7 +3440,12 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
             && index_body.contains("open_project_dataflow_prewarm(root)?")
             && index_body.contains("open_project_parse_only(root)?")
             && function_body(&diagnostics, "run_semantic_workers").contains("std::env::current_exe()")
-            && function_body(&diagnostics, "run_semantic_workers").contains("SemanticWorkerPhase::Frontend")
+            && function_body(&diagnostics, "run_semantic_workers")
+                .contains("SemanticWorkerPhase::Retrieval")
+            && function_body(&diagnostics, "run_semantic_workers")
+                .contains("SemanticWorkerPhase::Callgraph")
+            && function_body(&diagnostics, "run_semantic_workers")
+                .contains("SemanticWorkerPhase::Linkage")
             && function_body(&diagnostics, "run_semantic_workers").contains("SemanticWorkerPhase::Idg"),
         "cmd_index must keep default/structural-only runs parse-only and isolate exact semantic phases in worker processes"
     );
@@ -3490,11 +3495,10 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
         "full dataflow prewarm helper must remain explicit and visibly side-effectful"
     );
     assert!(
-        cache_cmd.contains("Open structurally, then refresh reusable")
-            && cache_cmd.contains("Do not route through a full")
-            && cache_cmd.contains("workspace prewarm path here")
-            && cache_cmd.contains("build_and_persist_idg_sidecar()"),
-        "cache rebuild must not regress to full-workspace taint/value-flow/flow-id prewarm"
+        function_body(&cache_cmd, "cache_rebuild").contains("run_semantic_workers(&workspace_root)?")
+            && !function_body(&cache_cmd, "cache_rebuild").contains("build_and_persist_idg_sidecar()")
+            && !function_body(&cache_cmd, "cache_rebuild").contains("prewarm_dataflow"),
+        "cache rebuild must use isolated structural compiler workers without regressing to full-workspace compatibility prewarm"
     );
 }
 
@@ -3504,6 +3508,11 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     let diagnostics = read(&repo_root().join("crates/cli/src/commands/diagnostics.rs"));
     let idg_workspace = read(&repo_root().join("crates/idg/src/workspace.rs"));
     let idg_service = read(&repo_root().join("crates/idg/src/service.rs"));
+    let idg_builder = read(&repo_root().join("crates/idg/src/builder.rs"));
+    let idg_adapter = read(&repo_root().join("crates/idg/src/workspace_adapter.rs"));
+    let linkage_sidecar = read(&repo_root().join("crates/workspace/src/linkage_sidecar.rs"));
+    let index = read(&repo_root().join("crates/index/src/lib.rs"));
+    let retrieval_crate = read(&repo_root().join("crates/retrieval/src/lib.rs"));
     let workspace = read(&repo_root().join("crates/workspace/src/lib.rs"));
     let warm = function_body(&sdk, "warm_structural_sidecars");
     assert!(
@@ -3512,25 +3521,51 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
         "SDK semantic warming must expose the same explicit compiler phase boundary"
     );
     let frontend = function_body(&sdk, "warm_retrieval_and_callgraph_sidecars");
+    let retrieval = function_body(&sdk, "warm_retrieval_sidecar");
+    let callgraph = function_body(&sdk, "warm_callgraph_sidecar");
+    let linkage = function_body(&sdk, "warm_compiler_linkage_sidecar");
     let idg = function_body(&sdk, "warm_idg_sidecar_and_manifest");
     assert!(
-        frontend.contains("bonsai_retrieval::ensure_sidecar")
-            && frontend.contains("save_callgraph_sidecar")
+        frontend.contains("warm_retrieval_sidecar()?")
+            && frontend.contains("warm_callgraph_sidecar()?")
+            && frontend.contains("warm_compiler_linkage_sidecar()")
+            && retrieval.contains("bonsai_retrieval::ensure_sidecar")
+            && callgraph.contains("save_callgraph_sidecar")
+            && linkage.contains("save_compiler_linkage_sidecar")
             && !frontend.contains("build_and_persist_idg_sidecar")
             && idg.contains("validate_idg_sidecar_layout")
             && idg.contains("load_callgraph_sidecar_checked")
+            && idg.contains("load_compiler_linkage_sidecar_checked")
             && idg.contains("build_and_persist_idg_sidecar")
             && idg.contains("write_manifest"),
-        "frontend/callgraph and IDG persistence must be independently executable exact phases"
+        "retrieval, callgraph, linkage, and IDG persistence must be independently executable exact phases"
     );
     let workers = function_body(&diagnostics, "run_semantic_workers");
     assert!(
         workers.contains("Command::new(&executable)")
-            && workers.contains("SemanticWorkerPhase::Frontend")
+            && workers.contains("SemanticWorkerPhase::Retrieval")
+            && workers.contains("SemanticWorkerPhase::Callgraph")
+            && workers.contains("SemanticWorkerPhase::Linkage")
             && workers.contains("SemanticWorkerPhase::Idg")
             && workers.contains("command.status()?")
             && workers.contains("if !status.success()"),
         "CLI semantic prewarm must run exact phases sequentially across OS-reclaimed process boundaries"
+    );
+    assert!(
+        workers
+            .find("SemanticWorkerPhase::Callgraph")
+            .zip(workers.find("SemanticWorkerPhase::Retrieval"))
+            .is_some_and(|(callgraph, retrieval)| callgraph < retrieval)
+            && function_body(&retrieval_crate, "ensure_sidecar")
+                .contains("ws.load_callgraph_sidecar(workspace_root)"),
+        "retrieval compilation must reuse the exact callgraph phase artifact instead of recompiling its dependency"
+    );
+    assert!(
+        linkage_sidecar.contains("files: Vec<(u32, String, u64)>")
+            && linkage_sidecar.contains("wire::encode_struct_map_to_writer(output, index.as_ref())")
+            && function_body(&index, "serialize").contains("sort_unstable_by_key")
+            && function_body(&index, "deserialize").contains("rebuild_persisted_indexes"),
+        "linkage phase artifacts must bind exact VFS identity and use canonical compiler wire order"
     );
     let load = function_body(&idg_workspace, "load_from_disk");
     assert!(
@@ -3549,6 +3584,15 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
             && local_lookup.contains("binary_search_by_key")
             && !idg_service.contains("segment.nodes.lookup(func, pid)"),
         "warm query lookup must use compact exact per-function ordering, not linear segment scans or full reverse hash tables"
+    );
+    assert!(
+        idg_builder.contains("struct CalleeEndpointIndex")
+            && idg_builder.contains("rows: Vec<CalleeEndpoints>")
+            && idg_builder.contains("row_by_func: Vec<u32>")
+            && idg_builder.contains("capture_funcs.is_none_or(|targets| targets.contains(&func))")
+            && idg_adapter.contains("let capture_funcs = local_callable_bindings")
+            && idg_adapter.contains("capture_funcs: Some(&capture_funcs)"),
+        "cold IDG stitching must keep endpoint records packed and retain lexical captures only for AST/callgraph-proven local callables"
     );
     let hydrate = function_body(&workspace, "load_idg_sidecar");
     assert!(
