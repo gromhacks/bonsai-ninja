@@ -228,11 +228,19 @@ fn relowered_stitch_preserves_the_exact_canonical_graph() {
     let resolver = MockResolver::new();
 
     let queryable = stitch_idg_from_segment_batches(batches(), 1, &resolver, true, false, None);
-    let relowered =
-        stitch_idg_from_relowered_segment_batches(batches(), batches(), 1, &resolver, true, false, None)
-            .expect("spooled relowering");
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("relowered-idg.factstore");
+    let relowered = stitch_idg_from_relowered_segment_batches(
+        batches(),
+        batches(),
+        1,
+        &path,
+        &resolver,
+        true,
+        false,
+        None,
+    )
+    .expect("spooled relowering");
     relowered
         .save_into_disk(&path, 0x51DE_CAFE)
         .expect("persist spooled graph");
@@ -286,9 +294,19 @@ fn relowered_sidecar_preserves_cross_segment_calls_byte_for_byte() {
     let mut resolver = MockResolver::new();
     resolver.add(FuncId::new(1), "callee", vec![FuncId::new(2)]);
     let queryable = stitch_idg_from_segment_batches(batches(), 2, &resolver, true, false, None);
-    let mut relowered =
-        stitch_idg_from_relowered_segment_batches(batches(), batches(), 2, &resolver, true, false, None)
-            .expect("spooled relowering");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cross-segment.factstore");
+    let mut relowered = stitch_idg_from_relowered_segment_batches(
+        batches(),
+        batches(),
+        2,
+        &path,
+        &resolver,
+        true,
+        false,
+        None,
+    )
+    .expect("spooled relowering");
     relowered
         .materialize_spooled_segments()
         .expect("materialize relowered graph");
@@ -358,6 +376,8 @@ fn relowered_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
     };
     let mut resolver = MockResolver::new();
     resolver.add(FuncId::new(1), "callee", vec![FuncId::new(2)]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("symbolic.factstore");
     for symbolic_funcs in [
         AHashSet::from([FuncId::new(1), FuncId::new(2)]),
         AHashSet::from([FuncId::new(1)]),
@@ -368,6 +388,7 @@ fn relowered_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
             batches(),
             batches(),
             2,
+            &path,
             &resolver,
             true,
             true,

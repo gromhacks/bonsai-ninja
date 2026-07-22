@@ -109,6 +109,171 @@ pub struct FactStoreWriter {
     finish_reply: parking_lot::Mutex<Option<Receiver<FactStoreResult<usize>>>>,
 }
 
+/// A prepared FactStore payload file that can be filled before the final
+/// table metadata is known.
+///
+/// Compiler pipelines use this as an object-file staging area: exact payload
+/// entries are appended once, may be read back by the compiler while later
+/// passes run, and are finally adopted by [`FactStoreWriter`] without copying
+/// the complete payload section through userspace again. The file starts with
+/// a reserved FactStore header and is removed automatically unless ownership
+/// is transferred to [`FactStoreWriter::create_from_prepared`].
+#[derive(Debug)]
+pub struct PreparedFactStorePayload {
+    file: Option<File>,
+    tmp_path: Option<PathBuf>,
+}
+
+/// One already-written entry inside a [`PreparedFactStorePayload`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PreparedFactStoreEntry {
+    /// Lookup key for the final FactStore index.
+    pub key: u64,
+    /// Content or schema hash associated with the payload.
+    pub body_hash: u64,
+    /// Absolute byte offset inside the prepared file.
+    pub payload_offset: u64,
+    /// Encoded payload length.
+    pub payload_len: u32,
+}
+
+impl PreparedFactStorePayload {
+    /// Create a temporary prepared payload on the host's filesystem-backed
+    /// temporary directory.
+    ///
+    /// Final adoption relocates it beside the destination before publication.
+    /// If the temporary directory is on another filesystem, relocation falls
+    /// back to an exact file copy; this affects performance only, never facts.
+    pub fn create() -> FactStoreResult<Self> {
+        let seed = std::env::temp_dir().join("bonsai-factstore-payload");
+        Self::create_near(&seed)
+    }
+
+    /// Create a prepared payload beside its eventual FactStore target.
+    ///
+    /// Large compiler spools should prefer this constructor so the staging
+    /// file is guaranteed to use the destination filesystem rather than a
+    /// potentially memory-backed operating-system temporary directory.
+    pub fn create_near(target: &Path) -> FactStoreResult<Self> {
+        if let Some(parent) = target.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let tmp_path = unique_tmp_path(target);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        file.write_all(&[0u8; HEADER_SIZE])?;
+        Ok(Self {
+            file: Some(file),
+            tmp_path: Some(tmp_path),
+        })
+    }
+
+    /// Append one encoded payload and return its absolute file range.
+    ///
+    /// The 4 GiB limit is the FactStore per-entry wire limit, not an analysis
+    /// budget. Callers split larger relations into complete keyed chunks.
+    pub fn append(&mut self, payload: &[u8]) -> FactStoreResult<(u64, u32)> {
+        let payload_len = u32::try_from(payload.len()).map_err(|_| {
+            FactStoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "payload exceeds 4 GiB",
+            ))
+        })?;
+        let file = self.file.as_mut().ok_or_else(|| {
+            FactStoreError::Io(std::io::Error::other(
+                "prepared FactStore payload was already consumed",
+            ))
+        })?;
+        let payload_offset = file.seek(SeekFrom::End(0))?;
+        file.write_all(payload)?;
+        Ok((payload_offset, payload_len))
+    }
+
+    /// Clone the prepared file handle for positioned compiler reads.
+    pub fn try_clone_file(&self) -> FactStoreResult<File> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| {
+                FactStoreError::Io(std::io::Error::other(
+                    "prepared FactStore payload was already consumed",
+                ))
+            })?
+            .try_clone()
+            .map_err(Into::into)
+    }
+
+    fn relocate(mut self, target: &Path) -> FactStoreResult<(File, PathBuf, u64)> {
+        if let Some(parent) = target.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let source_path = self.tmp_path.take().ok_or_else(|| {
+            FactStoreError::Io(std::io::Error::other(
+                "prepared FactStore payload path was already consumed",
+            ))
+        })?;
+        let source_file = self.file.take().ok_or_else(|| {
+            FactStoreError::Io(std::io::Error::other(
+                "prepared FactStore payload file was already consumed",
+            ))
+        })?;
+        let payload_end = source_file.metadata()?.len();
+        drop(source_file);
+
+        let target_tmp = unique_tmp_path(target);
+        match std::fs::rename(&source_path, &target_tmp) {
+            Ok(()) => {}
+            Err(rename_err) if rename_err.kind() == std::io::ErrorKind::CrossesDevices => {
+                if let Err(copy_err) = std::fs::copy(&source_path, &target_tmp) {
+                    let _ = std::fs::remove_file(&target_tmp);
+                    let _ = std::fs::remove_file(&source_path);
+                    return Err(copy_err.into());
+                }
+                if let Err(remove_err) = std::fs::remove_file(&source_path) {
+                    let _ = std::fs::remove_file(&target_tmp);
+                    return Err(remove_err.into());
+                }
+            }
+            Err(err) => {
+                let _ = std::fs::remove_file(&source_path);
+                return Err(err.into());
+            }
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .open(&target_tmp);
+        let mut file = match file {
+            Ok(file) => file,
+            Err(err) => {
+                let _ = std::fs::remove_file(&target_tmp);
+                return Err(err.into());
+            }
+        };
+        if let Err(err) = file.seek(SeekFrom::Start(payload_end)) {
+            drop(file);
+            let _ = std::fs::remove_file(&target_tmp);
+            return Err(err.into());
+        }
+        Ok((file, target_tmp, payload_end))
+    }
+}
+
+impl Drop for PreparedFactStorePayload {
+    fn drop(&mut self) {
+        self.file.take();
+        if let Some(path) = self.tmp_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 impl std::fmt::Debug for FactStoreWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FactStoreWriter")
@@ -258,29 +423,80 @@ impl FactStoreWriter {
     /// dedicated writer thread up front; the calling thread does no
     /// file I/O.
     pub fn create(target: &Path, table_id: u32, pipeline_hash: u64) -> FactStoreResult<Self> {
-        if let Some(parent) = target.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
+        let prepared = PreparedFactStorePayload::create_near(target)?;
+        Self::create_from_prepared(target, table_id, pipeline_hash, prepared, Vec::new())
+    }
+
+    /// Adopt payload entries that a compiler already wrote into a prepared
+    /// FactStore file, then accept ordinary/streamed entries and finalize the
+    /// table atomically.
+    ///
+    /// Prepared bytes are not decoded, re-encoded, or copied through the
+    /// process when the temporary and destination paths share a filesystem.
+    /// The supplied index entries remain subject to the same bounds, duplicate
+    /// key checks, and deterministic final sort as newly appended entries.
+    pub fn create_from_prepared(
+        target: &Path,
+        table_id: u32,
+        pipeline_hash: u64,
+        prepared: PreparedFactStorePayload,
+        entries: Vec<PreparedFactStoreEntry>,
+    ) -> FactStoreResult<Self> {
+        let prepared_len = prepared
+            .file
+            .as_ref()
+            .ok_or_else(|| {
+                FactStoreError::Io(std::io::Error::other(
+                    "prepared FactStore payload was already consumed",
+                ))
+            })?
+            .metadata()?
+            .len();
+        for entry in &entries {
+            let payload_end = entry
+                .payload_offset
+                .checked_add(u64::from(entry.payload_len))
+                .ok_or_else(|| {
+                    FactStoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "prepared FactStore entry range overflow",
+                    ))
+                })?;
+            if entry.payload_offset < HEADER_SIZE as u64 || payload_end > prepared_len {
+                return Err(FactStoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "prepared FactStore entry range is outside the payload file",
+                )));
             }
         }
-        let tmp_path = unique_tmp_path(target);
-        // Open the tmp file on the calling thread first so any
-        // permission / EEXIST error surfaces synchronously to the
-        // caller rather than silently in the background thread.
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .read(true)
-            .create_new(true)
-            .open(&tmp_path)?;
+        let (file, tmp_path, next_payload_offset) = prepared.relocate(target)?;
+        let mut pending = Vec::with_capacity(entries.len());
+        for entry in entries {
+            pending.push(PendingIndexEntry {
+                key: entry.key,
+                body_hash: entry.body_hash,
+                payload_offset: entry.payload_offset,
+                payload_len: entry.payload_len,
+            });
+        }
         let target_path = target.to_path_buf();
         let (sender, receiver) = entry_channel();
         let byte_budget = Arc::new(ByteBudget::new(entry_queue_byte_budget()));
         let (finish_reply_tx, finish_reply_rx) = bounded::<FactStoreResult<usize>>(1);
+        let cleanup_tmp_path = tmp_path.clone();
         let handle = std::thread::Builder::new()
             .name("factstore-writer".to_string())
             .spawn(move || {
-                let outcome =
-                    run_writer_thread(file, receiver, table_id, pipeline_hash, tmp_path, target_path);
+                let outcome = run_writer_thread(
+                    file,
+                    receiver,
+                    table_id,
+                    pipeline_hash,
+                    tmp_path,
+                    target_path,
+                    pending,
+                    next_payload_offset,
+                );
                 if let Err(err) = outcome {
                     // The Finish path already replies through the
                     // one-shot. This branch covers a write error in
@@ -289,7 +505,14 @@ impl FactStoreWriter {
                     // channel anyway so `finish()` can return it.
                     let _ = finish_reply_tx.send(Err(err));
                 }
-            })?;
+            });
+        let handle = match handle {
+            Ok(handle) => handle,
+            Err(err) => {
+                let _ = std::fs::remove_file(cleanup_tmp_path);
+                return Err(err.into());
+            }
+        };
         Ok(Self {
             string_pool: parking_lot::Mutex::new(StringPoolBuilder::new()),
             sender,
@@ -537,15 +760,10 @@ fn run_writer_thread(
     pipeline_hash: u64,
     tmp_path: PathBuf,
     target_path: PathBuf,
+    mut entries: Vec<PendingIndexEntry>,
+    mut next_payload_offset: u64,
 ) -> FactStoreResult<()> {
     let mut buf = BufWriter::new(file);
-    // Reserve the header. We could `set_len` instead but writing
-    // explicit zeros keeps the file deterministic if the process is
-    // killed mid-stream.
-    buf.write_all(&[0u8; HEADER_SIZE])?;
-
-    let mut entries: Vec<PendingIndexEntry> = Vec::new();
-    let mut next_payload_offset: u64 = HEADER_SIZE as u64;
 
     loop {
         match receiver.recv() {

@@ -1469,12 +1469,14 @@ impl Workspace {
         let global = self.compiler_linkage_index();
         let transfer_options = default_workspace_idg_transfer_options(&self.inner.db);
         let semantics = bonsai_taint::compiler_idg_file_semantics(&self.inner.db);
+        let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
         let workspace =
             bonsai_idg::workspace_adapter::build_for_persistence_streaming_with_file_semantics_and_options(
                 global.as_ref(),
                 call_graph.as_ref(),
                 semantics,
                 &transfer_options,
+                &sidecar,
                 |file| {
                     self.inner
                         .db
@@ -1482,7 +1484,6 @@ impl Workspace {
                 },
             )?;
         let segment_count = workspace.segment_count();
-        let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
         workspace.save_into_disk(&sidecar, pipeline_hash)?;
         Ok(Some(segment_count))
     }

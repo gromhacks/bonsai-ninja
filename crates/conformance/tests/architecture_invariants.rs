@@ -2994,6 +2994,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
     let idg_builder = read(&root.join("crates/idg/src/builder.rs"));
     let idg_workspace = read(&root.join("crates/idg/src/workspace.rs"));
     let idg_service = read(&root.join("crates/idg/src/service.rs"));
+    let factstore_writer = read(&root.join("crates/factstore/src/writer.rs"));
     let symbolic = read(&root.join("crates/idg/src/symbolic.rs"));
     let index = read(&root.join("crates/index/src/lib.rs"));
     let taint_idg = read(&root.join("crates/taint/src/idg_build.rs"));
@@ -3066,7 +3067,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && stitch.contains("segment.release_build_lookups()")
             && stitch.contains("segment.rebuild_build_lookups()")
             && stitch.contains("remap_transfer_into_segment")
-            && stitch.contains("enable_segment_spool()")
+            && stitch.contains("enable_segment_spool(spool_path)")
             && stitch.contains("spill_segment")
             && stitch.contains("begin_spool_generation()")
             && stitch.contains("finish_spool_generation()")
@@ -3078,6 +3079,16 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 .contains("stitch_idg_from_relowered_segment_batches")
             && function_body(&idg_workspace, "rebuild_indexes").contains("self.maintain_indexes = true"),
         "sidecar IDG builds must re-lower and spill every compiler unit without semantic caps, release transient indexes at segment boundaries, and defer query-only edge indexes to warm load"
+    );
+    assert!(
+        struct_body(&idg_workspace, "IdgSegmentSpool").contains("PreparedFactStorePayload")
+            && function_body(&idg_workspace, "save_workspace_parts")
+                .contains("into_factstore_writer")
+            && function_body(&idg_workspace, "into_factstore_writer")
+                .contains("FactStoreWriter::create_from_prepared")
+            && function_body(&factstore_writer, "create_from_prepared").contains("prepared.relocate")
+            && !idg_workspace.contains("fn streamed_entry"),
+        "sidecar persistence must adopt already-encoded compiler segments as the final FactStore payload instead of copying the complete graph through a second writer pass"
     );
     assert!(
         symbolic.contains("pub arg_idx: u32")

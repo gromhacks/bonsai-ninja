@@ -20,7 +20,7 @@
 use ahash::AHashMap;
 use bonsai_common::{wire, FuncId};
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 
 use crate::edge::IdgEdge;
 use crate::segment::{IdgSegment, IDG_SEGMENT_VERSION};
@@ -104,27 +104,29 @@ struct SpoolEntry {
 /// Persistence builds rewrite one source-file segment at a time. Appending a
 /// new version and replacing its tiny offset-table entry keeps memory bounded
 /// by the largest compilation unit while preserving the exact canonical wire
-/// payload. The anonymous temporary file disappears automatically on every
-/// success and error path.
+/// payload. The prepared FactStore payload disappears automatically on every
+/// error path and is adopted directly by the final atomic writer on success.
 #[derive(Debug)]
 pub(crate) struct IdgSegmentSpool {
-    file: std::fs::File,
+    file: bonsai_factstore::PreparedFactStorePayload,
     entries: Vec<Option<SpoolEntry>>,
     generation: Option<SpoolGeneration>,
+    target: std::path::PathBuf,
 }
 
 #[derive(Debug)]
 struct SpoolGeneration {
-    file: std::fs::File,
+    file: bonsai_factstore::PreparedFactStorePayload,
     entries: Vec<Option<SpoolEntry>>,
 }
 
 impl IdgSegmentSpool {
-    fn new() -> crate::IdgResult<Self> {
+    fn new(target: &std::path::Path) -> crate::IdgResult<Self> {
         Ok(Self {
-            file: tempfile::tempfile()?,
+            file: bonsai_factstore::PreparedFactStorePayload::create_near(target)?,
             entries: Vec::new(),
             generation: None,
+            target: target.to_path_buf(),
         })
     }
 
@@ -137,15 +139,14 @@ impl IdgSegmentSpool {
             .map_or((&mut self.file, &mut self.entries), |generation| {
                 (&mut generation.file, &mut generation.entries)
             });
-        let offset = file.seek(SeekFrom::End(0))?;
-        file.write_all(&payload)?;
+        let (offset, encoded_len) = file.append(&payload)?;
         let index = id.0 as usize;
         if entries.len() <= index {
             entries.resize(index + 1, None);
         }
         entries[index] = Some(SpoolEntry {
             offset,
-            encoded_len: payload.len() as u64,
+            encoded_len: u64::from(encoded_len),
             node_count: u32::try_from(segment.nodes.len()).expect("segment node count exceeds u32"),
             edge_count: segment.edges.len(),
         });
@@ -168,14 +169,14 @@ impl IdgSegmentSpool {
             ))
         })?;
         let mut payload = vec![0_u8; len];
-        let file = if from_generation.is_some() {
-            &mut self
-                .generation
-                .as_mut()
+        let mut file = if from_generation.is_some() {
+            self.generation
+                .as_ref()
                 .expect("generation entry checked above")
                 .file
+                .try_clone_file()?
         } else {
-            &mut self.file
+            self.file.try_clone_file()?
         };
         file.seek(SeekFrom::Start(entry.offset))?;
         file.read_exact(&mut payload)?;
@@ -222,26 +223,6 @@ impl IdgSegmentSpool {
         })
     }
 
-    fn streamed_entry(&self, id: SegmentId) -> crate::IdgResult<(std::fs::File, u64, u64)> {
-        let generation_entry = self
-            .generation
-            .as_ref()
-            .and_then(|generation| generation.entries.get(id.0 as usize))
-            .copied()
-            .flatten();
-        let entry = generation_entry.map_or_else(|| self.entry(id), Ok)?;
-        let file = if generation_entry.is_some() {
-            &self
-                .generation
-                .as_ref()
-                .expect("generation entry checked above")
-                .file
-        } else {
-            &self.file
-        };
-        Ok((file.try_clone()?, entry.offset, entry.encoded_len))
-    }
-
     fn begin_generation(&mut self) -> crate::IdgResult<()> {
         if self.generation.is_some() {
             return Err(crate::IdgError::Io(std::io::Error::new(
@@ -250,7 +231,7 @@ impl IdgSegmentSpool {
             )));
         }
         self.generation = Some(SpoolGeneration {
-            file: tempfile::tempfile()?,
+            file: bonsai_factstore::PreparedFactStorePayload::create_near(&self.target)?,
             entries: vec![None; self.entries.len()],
         });
         Ok(())
@@ -273,6 +254,52 @@ impl IdgSegmentSpool {
         self.file = generation.file;
         self.entries = generation.entries;
         Ok(())
+    }
+
+    fn into_factstore_writer(
+        self,
+        path: &std::path::Path,
+        pipeline_hash: u64,
+    ) -> crate::IdgResult<bonsai_factstore::FactStoreWriter> {
+        if self.generation.is_some() {
+            return Err(crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cannot persist an active IDG spool generation",
+            )));
+        }
+        let entries = self
+            .entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let entry = entry.ok_or_else(|| {
+                    crate::IdgError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("missing spooled IDG segment {index}"),
+                    ))
+                })?;
+                let payload_len = u32::try_from(entry.encoded_len).map_err(|_| {
+                    crate::IdgError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "spooled IDG segment exceeds the FactStore entry limit",
+                    ))
+                })?;
+                Ok(bonsai_factstore::PreparedFactStoreEntry {
+                    key: (index + 1) as u64,
+                    body_hash: IDG_WORKSPACE_VERSION as u64,
+                    payload_offset: entry.offset,
+                    payload_len,
+                })
+            })
+            .collect::<crate::IdgResult<Vec<_>>>()?;
+        bonsai_factstore::FactStoreWriter::create_from_prepared(
+            path,
+            IDG_WORKSPACE_TABLE_ID,
+            pipeline_hash,
+            self.file,
+            entries,
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -566,9 +593,9 @@ impl IdgWorkspace {
             .map(|(i, s)| (SegmentId(i as u32), s))
     }
 
-    pub(crate) fn enable_segment_spool(&mut self) -> crate::IdgResult<()> {
+    pub(crate) fn enable_segment_spool(&mut self, target: &std::path::Path) -> crate::IdgResult<()> {
         if self.segment_spool.is_none() {
-            self.segment_spool = Some(IdgSegmentSpool::new()?);
+            self.segment_spool = Some(IdgSegmentSpool::new(target)?);
             self.resident_segments = vec![true; self.segments.len()];
         }
         Ok(())
@@ -1278,9 +1305,17 @@ fn save_workspace_parts(
         IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN,
     );
     // Segment payloads carry their own compact string dictionaries; the
-    // outer factstore string pool is intentionally empty. The writer retains
-    // only its byte-backpressured payload queue and small on-disk index.
-    let writer = FactStoreWriter::create(path, IDG_WORKSPACE_TABLE_ID, pipeline_hash)?;
+    // outer factstore string pool is intentionally empty. A compiler spool is
+    // already a prepared FactStore payload file, so adopt its exact bytes and
+    // append the remaining tables rather than copying every segment through a
+    // second userspace writer pass.
+    let (writer, resident_segments) = match segments {
+        PersistSegments::Spool(spool) => (spool.into_factstore_writer(path, pipeline_hash)?, None),
+        other => (
+            FactStoreWriter::create(path, IDG_WORKSPACE_TABLE_ID, pipeline_hash)?,
+            Some(other),
+        ),
+    };
     let metadata = IdgWorkspaceMetadata {
         version: IDG_WORKSPACE_VERSION,
         segment_count: segment_count as u32,
@@ -1300,8 +1335,8 @@ fn save_workspace_parts(
     // vectors are released batch by batch while the exact wire entries are
     // streamed in deterministic SegmentId order.
     let encoding_width = idg_serialization_worker_count();
-    match segments {
-        PersistSegments::Borrowed(segments) => {
+    match resident_segments {
+        Some(PersistSegments::Borrowed(segments)) => {
             for (batch_idx, batch) in segments.chunks(encoding_width).enumerate() {
                 let encoded = batch.par_iter().map(encode_sidecar_value).collect::<Vec<_>>();
                 let first_segment_idx = batch_idx * encoding_width;
@@ -1314,29 +1349,15 @@ fn save_workspace_parts(
                 }
             }
         }
-        PersistSegments::Owned(segments) => {
+        Some(PersistSegments::Owned(segments)) => {
             for (idx, segment) in segments.into_iter().enumerate() {
                 writer.add_streamed((idx + 1) as u64, IDG_WORKSPACE_VERSION as u64, move |out| {
                     encode_sidecar_to_writer(out, &segment)
                 })?;
             }
         }
-        PersistSegments::Spool(spool) => {
-            for idx in 0..spool.len() {
-                let (mut file, offset, encoded_len) = spool.streamed_entry(SegmentId(idx as u32))?;
-                writer.add_streamed((idx + 1) as u64, IDG_WORKSPACE_VERSION as u64, move |out| {
-                    file.seek(SeekFrom::Start(offset))?;
-                    let copied = std::io::copy(&mut (&mut file).take(encoded_len), out)?;
-                    if copied != encoded_len {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "spooled IDG segment ended before its recorded payload length",
-                        ));
-                    }
-                    Ok(())
-                })?;
-            }
-        }
+        Some(PersistSegments::Spool(_)) => unreachable!("spool was adopted above"),
+        None => {}
     }
 
     let cross_base = first_cross_file_chunk_key(segment_count as u32);
