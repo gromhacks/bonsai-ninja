@@ -349,6 +349,16 @@ fn relowered_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
             declares_new_binding: false,
             value_kind: None,
         },
+        FlowEvent::Assign {
+            span: span(18, 20),
+            target: "copy".to_string(),
+            source_name: Some("box".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
         FlowEvent::Call {
             span: span(20, 35),
             name: "callee".to_string(),
@@ -400,7 +410,17 @@ fn relowered_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
     ] {
         let queryable =
             stitch_idg_from_segment_batches(batches(), 2, &resolver, true, true, Some(&symbolic_funcs));
-        let mut relowered = stitch_idg_from_relowered_segment_batches(
+        if symbolic_funcs.contains(&FuncId::new(1)) {
+            assert!(
+                queryable
+                    .symbolic_field()
+                    .transforms()
+                    .iter()
+                    .any(|transform| transform.kind == SymbolicFieldTransformKind::Copy),
+                "fixture must exercise the symbolic copy spool"
+            );
+        }
+        let relowered = stitch_idg_from_relowered_segment_batches(
             batches(),
             batches(),
             2,
@@ -413,9 +433,21 @@ fn relowered_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
             },
         )
         .expect("spooled symbolic relowering");
+        assert_eq!(
+            relowered.symbolic_transform_count(),
+            queryable.symbolic_field().transforms().len(),
+            "sidecar compilation must count every disk-spooled symbolic transform"
+        );
+        assert!(
+            relowered.symbolic_field().transforms().is_empty(),
+            "sidecar compilation must not retain symbolic transforms in memory"
+        );
         relowered
-            .materialize_spooled_segments()
-            .expect("materialize symbolic graph");
+            .save_into_disk(&path, 0x51A0_B01C)
+            .expect("persist symbolic transform spool");
+        let relowered = IdgWorkspace::load_from_disk(&path, 0x51A0_B01C)
+            .expect("load symbolic sidecar")
+            .expect("symbolic sidecar exists");
 
         assert_eq!(
             bonsai_common::wire::encode(&relowered).expect("encode relowered symbolic IDG"),

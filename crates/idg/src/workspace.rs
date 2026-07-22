@@ -121,46 +121,49 @@ struct SpoolGeneration {
 }
 
 #[derive(Copy, Clone, Debug)]
-struct CrossFileSpoolEntry {
+struct WireChunkEntry {
     offset: u64,
     encoded_len: u32,
 }
 
-/// Append-only exact wire chunks for sidecar-only cross-file edges.
-///
-/// A compiler build never queries the finished graph in-process. Retaining
-/// millions of cross edges in a growing `Vec` therefore adds no semantic
-/// value and can briefly require both the old and new allocation during a
-/// capacity increase. This spool retains one canonical wire chunk in memory,
-/// supports a single streamed compiler scan for field closure, and later
-/// copies those already-encoded chunks into the final FactStore.
 #[derive(Debug)]
-struct CrossFileEdgeSpool {
+pub(crate) struct WireChunkSpool<T> {
     file: bonsai_factstore::PreparedFactStorePayload,
-    entries: Vec<CrossFileSpoolEntry>,
-    buffer: Vec<CrossFileEdge>,
-    edge_count: usize,
+    entries: Vec<WireChunkEntry>,
+    buffer: Vec<T>,
+    item_count: usize,
+    chunk_len: usize,
+    kind: &'static str,
     error: Option<String>,
 }
 
-impl CrossFileEdgeSpool {
-    fn new(target: &std::path::Path) -> crate::IdgResult<Self> {
+impl<T> WireChunkSpool<T> {
+    pub(crate) fn new(
+        target: &std::path::Path,
+        chunk_len: usize,
+        kind: &'static str,
+    ) -> crate::IdgResult<Self> {
         Ok(Self {
             file: bonsai_factstore::PreparedFactStorePayload::create_near(target)?,
             entries: Vec::new(),
-            buffer: Vec::with_capacity(IDG_WORKSPACE_EDGE_CHUNK_LEN),
-            edge_count: 0,
+            buffer: Vec::with_capacity(chunk_len),
+            item_count: 0,
+            chunk_len,
+            kind,
             error: None,
         })
     }
 
-    fn push(&mut self, edge: CrossFileEdge) {
+    pub(crate) fn push(&mut self, item: T)
+    where
+        T: serde::Serialize,
+    {
         if self.error.is_some() {
             return;
         }
-        self.buffer.push(edge);
-        self.edge_count = self.edge_count.saturating_add(1);
-        if self.buffer.len() == IDG_WORKSPACE_EDGE_CHUNK_LEN {
+        self.buffer.push(item);
+        self.item_count = self.item_count.saturating_add(1);
+        if self.buffer.len() == self.chunk_len {
             if let Err(error) = self.flush_buffer() {
                 self.error = Some(error.to_string());
                 self.buffer.clear();
@@ -168,30 +171,35 @@ impl CrossFileEdgeSpool {
         }
     }
 
-    fn flush_buffer(&mut self) -> crate::IdgResult<()> {
+    fn flush_buffer(&mut self) -> crate::IdgResult<()>
+    where
+        T: serde::Serialize,
+    {
         self.check_error()?;
         if self.buffer.is_empty() {
             return Ok(());
         }
         let payload = encode_sidecar_value(self.buffer.as_slice())?;
         let (offset, encoded_len) = self.file.append(&payload)?;
-        self.entries.push(CrossFileSpoolEntry { offset, encoded_len });
+        self.entries.push(WireChunkEntry { offset, encoded_len });
         self.buffer.clear();
         Ok(())
     }
 
-    fn check_error(&self) -> crate::IdgResult<()> {
+    pub(crate) fn check_error(&self) -> crate::IdgResult<()> {
         if let Some(error) = &self.error {
             return Err(crate::IdgError::Io(std::io::Error::other(format!(
-                "cross-file edge spool failed: {error}"
+                "{} spool failed: {error}",
+                self.kind
             ))));
         }
         Ok(())
     }
 
-    fn visit<F>(&self, mut visit: F) -> crate::IdgResult<()>
+    pub(crate) fn visit<F>(&self, mut visit: F) -> crate::IdgResult<()>
     where
-        F: FnMut(&[CrossFileEdge]),
+        T: serde::de::DeserializeOwned,
+        F: FnMut(&[T]) -> crate::IdgResult<()>,
     {
         self.check_error()?;
         let mut file = self.file.try_clone_file()?;
@@ -199,33 +207,28 @@ impl CrossFileEdgeSpool {
             file.seek(SeekFrom::Start(entry.offset))?;
             let mut payload = vec![0_u8; entry.encoded_len as usize];
             file.read_exact(&mut payload)?;
-            let edges: Vec<CrossFileEdge> = wire::decode(&payload).map_err(|error| {
+            let items: Vec<T> = wire::decode(&payload).map_err(|error| {
                 crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
             })?;
-            if edges.len() != IDG_WORKSPACE_EDGE_CHUNK_LEN {
+            if items.len() != self.chunk_len {
                 return Err(crate::IdgError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "cross-file edge spool contains a non-canonical full chunk",
+                    format!("{} spool contains a non-canonical full chunk", self.kind),
                 )));
             }
-            visit(&edges);
+            visit(&items)?;
         }
-        visit(&self.buffer);
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn into_edges(self) -> crate::IdgResult<Vec<CrossFileEdge>> {
-        let mut edges = Vec::with_capacity(self.edge_count);
-        self.visit(|chunk| edges.extend_from_slice(chunk))?;
-        Ok(edges)
+        visit(&self.buffer)
     }
 
     fn write_chunks(
         mut self,
         writer: &bonsai_factstore::FactStoreWriter,
         first_key: u64,
-    ) -> crate::IdgResult<()> {
+    ) -> crate::IdgResult<()>
+    where
+        T: serde::Serialize,
+    {
         self.flush_buffer()?;
         self.check_error()?;
         for (index, entry) in self.entries.into_iter().enumerate() {
@@ -239,7 +242,7 @@ impl CrossFileEdgeSpool {
                     if copied != u64::from(entry.encoded_len) {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
-                            "cross-file edge spool payload was truncated",
+                            format!("{} spool payload was truncated", self.kind),
                         ));
                     }
                     Ok(())
@@ -250,11 +253,104 @@ impl CrossFileEdgeSpool {
     }
 
     fn len(&self) -> usize {
-        self.edge_count
+        self.item_count
     }
 
     fn chunk_count(&self) -> usize {
-        chunk_count(self.edge_count, IDG_WORKSPACE_EDGE_CHUNK_LEN)
+        chunk_count(self.item_count, self.chunk_len)
+    }
+}
+
+/// Append-only exact wire chunks for sidecar-only cross-file edges.
+///
+/// A compiler build never queries the finished graph in-process. Retaining
+/// millions of cross edges in a growing `Vec` therefore adds no semantic
+/// value and can briefly require both the old and new allocation during a
+/// capacity increase. The shared wire spool retains one canonical chunk in
+/// memory, supports streamed compiler scans, and later copies the already-
+/// encoded chunks into the final FactStore.
+type CrossFileEdgeSpool = WireChunkSpool<CrossFileEdge>;
+type SymbolicTransformSpool = WireChunkSpool<SymbolicFieldTransform>;
+
+/// Compiler-owned symbolic access-path relation.
+///
+/// Query graphs retain transforms and build their outgoing index. Sidecar-only
+/// compilers retain only the numeric string/base dictionaries and stream every
+/// transform in canonical insertion order. The two modes therefore have the
+/// same wire facts while choosing different memory lifetimes.
+pub(crate) struct SymbolicFieldCompilerStorage {
+    graph: SymbolicFieldGraph,
+    transform_spool: Option<SymbolicTransformSpool>,
+}
+
+impl SymbolicFieldCompilerStorage {
+    pub(crate) fn resident() -> Self {
+        Self {
+            graph: SymbolicFieldGraph::new(),
+            transform_spool: None,
+        }
+    }
+
+    pub(crate) fn spooled(target: &std::path::Path) -> crate::IdgResult<Self> {
+        Ok(Self {
+            graph: SymbolicFieldGraph::new(),
+            transform_spool: Some(WireChunkSpool::new(
+                target,
+                IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN,
+                "symbolic field transform",
+            )?),
+        })
+    }
+
+    pub(crate) fn intern_string(&mut self, value: &str) -> u32 {
+        self.graph.intern_string(value)
+    }
+
+    pub(crate) fn intern_base(&mut self, segment: SegmentId, func: FuncId, storage: &str) -> u32 {
+        self.graph.intern_base(segment, func, storage)
+    }
+
+    pub(crate) fn push_transform(&mut self, transform: SymbolicFieldTransform) {
+        if let Some(spool) = &mut self.transform_spool {
+            spool.push(transform);
+        } else {
+            self.graph.push_transform(transform);
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.transform_count() == 0
+    }
+
+    pub(crate) fn transform_count(&self) -> usize {
+        self.transform_spool
+            .as_ref()
+            .map_or_else(|| self.graph.transforms().len(), WireChunkSpool::len)
+    }
+
+    pub(crate) fn bases(&self) -> &[SymbolicFieldBase] {
+        self.graph.bases()
+    }
+
+    pub(crate) fn string(&self, id: u32) -> Option<&str> {
+        self.graph.string(id)
+    }
+
+    pub(crate) fn visit_transforms<F>(&self, mut visit: F) -> crate::IdgResult<()>
+    where
+        F: FnMut(&[SymbolicFieldTransform]) -> crate::IdgResult<()>,
+    {
+        if let Some(spool) = &self.transform_spool {
+            spool.visit(visit)
+        } else {
+            visit(self.graph.transforms())
+        }
+    }
+
+    pub(crate) fn check_spool(&self) -> crate::IdgResult<()> {
+        self.transform_spool
+            .as_ref()
+            .map_or(Ok(()), WireChunkSpool::check_error)
     }
 }
 
@@ -644,6 +740,11 @@ pub struct IdgWorkspace {
     /// resident query vector so cold compilation is bounded by one wire chunk.
     #[serde(skip)]
     cross_file_spool: Option<CrossFileEdgeSpool>,
+    /// Sidecar-only symbolic transform chunks. The accompanying string/base
+    /// dictionaries remain in `symbolic_field`; query workspaces instead keep
+    /// transforms resident and build the outgoing runtime index.
+    #[serde(skip)]
+    symbolic_transform_spool: Option<SymbolicTransformSpool>,
     /// `FuncId.raw() → SegmentId`. Rebuilt from each segment's `funcs`
     /// list after deserialisation; Serde skips it on the wire.
     #[serde(skip)]
@@ -738,7 +839,8 @@ impl IdgWorkspace {
     pub(crate) fn enable_segment_spool(&mut self, target: &std::path::Path) -> crate::IdgResult<()> {
         if self.segment_spool.is_none() {
             let segment_spool = IdgSegmentSpool::new(target)?;
-            let cross_file_spool = CrossFileEdgeSpool::new(target)?;
+            let cross_file_spool =
+                WireChunkSpool::new(target, IDG_WORKSPACE_EDGE_CHUNK_LEN, "cross-file edge")?;
             self.segment_spool = Some(segment_spool);
             self.cross_file_spool = Some(cross_file_spool);
             self.resident_segments = vec![true; self.segments.len()];
@@ -882,22 +984,6 @@ impl IdgWorkspace {
         self.finish_spool_generation()
     }
 
-    #[cfg(test)]
-    pub(crate) fn materialize_spooled_segments(&mut self) -> crate::IdgResult<()> {
-        if self.segment_spool.is_none() {
-            return Ok(());
-        }
-        for index in 0..self.segments.len() {
-            self.hydrate_segment(SegmentId(index as u32))?;
-        }
-        self.segment_spool = None;
-        self.resident_segments.clear();
-        if let Some(spool) = self.cross_file_spool.take() {
-            self.cross_file.edges = spool.into_edges()?;
-        }
-        Ok(())
-    }
-
     /// Number of segments registered.
     #[must_use]
     pub fn segment_count(&self) -> usize {
@@ -950,7 +1036,10 @@ impl IdgWorkspace {
         F: FnMut(&[CrossFileEdge]),
     {
         if let Some(spool) = &self.cross_file_spool {
-            spool.visit(visit)
+            spool.visit(|edges| {
+                visit(edges);
+                Ok(())
+            })
         } else {
             visit(&self.cross_file.edges);
             Ok(())
@@ -993,6 +1082,18 @@ impl IdgWorkspace {
     /// Replace the symbolic access-path relation after Phase 3 stitching.
     pub fn set_symbolic_field(&mut self, graph: SymbolicFieldGraph) {
         self.symbolic_field = graph;
+    }
+
+    pub(crate) fn install_symbolic_compiler_storage(&mut self, storage: SymbolicFieldCompilerStorage) {
+        self.symbolic_field = storage.graph;
+        self.symbolic_transform_spool = storage.transform_spool;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn symbolic_transform_count(&self) -> usize {
+        self.symbolic_transform_spool
+            .as_ref()
+            .map_or_else(|| self.symbolic_field.transforms().len(), WireChunkSpool::len)
     }
 
     /// Mutable access for the IDG builder phase 3 to push
@@ -1058,6 +1159,7 @@ impl IdgWorkspace {
             segment_spool,
             resident_segments,
             cross_file_spool,
+            symbolic_transform_spool,
             by_func,
             mut cross_file,
             field_flow,
@@ -1078,13 +1180,20 @@ impl IdgWorkspace {
             || PersistCrossFileEdges::Resident(PersistSlice::Owned(cross_file_edges)),
             PersistCrossFileEdges::Spool,
         );
+        let persist_symbolic = match symbolic_transform_spool {
+            Some(spool) => PersistSymbolic::Spool {
+                graph: std::sync::Arc::new(symbolic_field),
+                spool,
+            },
+            None => PersistSymbolic::Owned(std::sync::Arc::new(symbolic_field)),
+        };
         let result = save_workspace_parts(
             path,
             pipeline_hash,
             persist_segments,
             persist_cross_file,
             PersistSlice::Owned(std::sync::Arc::new(field_flow)),
-            PersistSymbolic::Owned(std::sync::Arc::new(symbolic_field)),
+            persist_symbolic,
         );
         result
     }
@@ -1160,6 +1269,7 @@ impl IdgWorkspace {
             segment_spool: None,
             resident_segments: Vec::new(),
             cross_file_spool: None,
+            symbolic_transform_spool: None,
             by_func: AHashMap::new(),
             cross_file: CrossFileEdges::new(),
             field_flow: Vec::with_capacity(metadata.field_flow_count.min(usize::MAX as u64) as usize),
@@ -1431,6 +1541,10 @@ impl<T> PersistSlice<'_, T> {
 enum PersistSymbolic<'a> {
     Borrowed(&'a SymbolicFieldGraph),
     Owned(std::sync::Arc<SymbolicFieldGraph>),
+    Spool {
+        graph: std::sync::Arc<SymbolicFieldGraph>,
+        spool: SymbolicTransformSpool,
+    },
 }
 
 impl PersistSymbolic<'_> {
@@ -1438,6 +1552,29 @@ impl PersistSymbolic<'_> {
         match self {
             Self::Borrowed(graph) => graph,
             Self::Owned(graph) => graph,
+            Self::Spool { graph, .. } => graph,
+        }
+    }
+
+    fn transform_count(&self) -> usize {
+        match self {
+            Self::Borrowed(graph) => graph.transforms().len(),
+            Self::Owned(graph) => graph.transforms().len(),
+            Self::Spool { spool, .. } => spool.len(),
+        }
+    }
+
+    fn transform_chunk_count(&self) -> usize {
+        match self {
+            Self::Borrowed(graph) => chunk_count(
+                graph.transforms().len(),
+                IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN,
+            ),
+            Self::Owned(graph) => chunk_count(
+                graph.transforms().len(),
+                IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN,
+            ),
+            Self::Spool { spool, .. } => spool.chunk_count(),
         }
     }
 }
@@ -1513,10 +1650,8 @@ fn save_workspace_parts(
     let cross_file_chunk_count = cross_file_edges.chunk_count();
     let field_flow_chunk_count = chunk_count(field_flow.as_slice().len(), IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN);
     let symbolic = symbolic_field.as_graph();
-    let symbolic_transform_chunk_count = chunk_count(
-        symbolic.transforms().len(),
-        IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN,
-    );
+    let symbolic_transform_count = symbolic_field.transform_count();
+    let symbolic_transform_chunk_count = symbolic_field.transform_chunk_count();
     // Segment payloads carry their own compact string dictionaries; the
     // outer factstore string pool is intentionally empty. A compiler spool is
     // already a prepared FactStore payload file, so adopt its exact bytes and
@@ -1538,7 +1673,7 @@ fn save_workspace_parts(
         field_flow_chunk_count: field_flow_chunk_count as u32,
         symbolic_string_count: symbolic.strings().len() as u64,
         symbolic_base_count: symbolic.bases().len() as u64,
-        symbolic_transform_count: symbolic.transforms().len() as u64,
+        symbolic_transform_count: symbolic_transform_count as u64,
         symbolic_transform_chunk_count: symbolic_transform_chunk_count as u32,
     };
     writer.add_owned(0, IDG_WORKSPACE_VERSION as u64, encode_sidecar_value(&metadata)?)?;
@@ -1604,6 +1739,12 @@ fn save_workspace_parts(
                 encode_sidecar_to_writer(out, &(graph.strings(), graph.bases()))
             })?;
         }
+        PersistSymbolic::Spool { graph, .. } => {
+            let graph = std::sync::Arc::clone(graph);
+            writer.add_streamed(symbolic_header, IDG_WORKSPACE_VERSION as u64, move |out| {
+                encode_sidecar_to_writer(out, &(graph.strings(), graph.bases()))
+            })?;
+        }
     }
     let transform_base = symbolic_header + 1;
     match symbolic_field {
@@ -1636,6 +1777,9 @@ fn save_workspace_parts(
                     move |out| encode_sidecar_to_writer(out, &graph.transforms()[start..end]),
                 )?;
             }
+        }
+        PersistSymbolic::Spool { spool, .. } => {
+            spool.write_chunks(&writer, transform_base)?;
         }
     }
     writer.finish()?;
