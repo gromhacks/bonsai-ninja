@@ -3276,6 +3276,8 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
     let value_flow = read(&root.join("crates/workspace/src/value_flow.rs"));
     let flow_ids = read(&root.join("crates/workspace/src/flow_ids.rs"));
     let taint_index = read(&root.join("crates/workspace/src/taint_index.rs"));
+    let retrieval = read(&root.join("crates/retrieval/src/lib.rs"));
+    let workspace = read(&root.join("crates/workspace/src/lib.rs"));
     let workspace_build = read(&root.join("crates/workspace/build.rs"));
     let callgraph_sidecar = read(&root.join("crates/workspace/src/callgraph_sidecar.rs"));
     let security_analysis = security_analysis_source(&root);
@@ -3300,8 +3302,9 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
         assert!(
             body.contains("MATCHER_POLICY_FINGERPRINT")
                 && body.contains("workspace_content_fingerprint(db)")
-                && body.contains("dependency_metadata_fingerprint_for_sidecar(sidecar_path)"),
-            "{label} factstore pipeline hash must bind matcher policy, source content, and dependency metadata"
+                && body.contains("dependency_metadata_fingerprint_for_sidecar(sidecar_path)")
+                && !body.contains("build_fingerprint_hash()"),
+            "{label} factstore pipeline hash must bind its semantic ABI, matcher policy, source content, and dependency metadata without whole-binary invalidation"
         );
     }
 
@@ -3311,8 +3314,24 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
             && taint_graph_body.contains("workspace_content_fingerprint(db)")
             && taint_graph_body.contains("dependency_metadata_fingerprint_for_sidecar(sidecar_path)")
             && taint_graph_body.contains("idg_stitching_semantic_fingerprint()")
-            && taint_graph_body.contains("config_fingerprint"),
-        "taint graph sidecar must bind matcher policy, IDG semantics, source content, dependency metadata, and rule/config fingerprint"
+            && taint_graph_body.contains("config_fingerprint")
+            && !taint_graph_body.contains("build_fingerprint_hash()"),
+        "taint graph sidecar must bind matcher policy, IDG semantics, source content, dependency metadata, and rule/config fingerprint without whole-binary invalidation"
+    );
+    let retrieval_pipeline_body = function_body(&retrieval, "pipeline_hash_for_source_fingerprints");
+    let idg_pipeline_body = function_body(&workspace, "idg_pipeline_hash");
+    assert!(
+        retrieval_pipeline_body.contains("RETRIEVAL_SCHEMA_VERSION")
+            && retrieval_pipeline_body.contains("source_fingerprints_content_fingerprint")
+            && retrieval_pipeline_body.contains("dependency_metadata_fingerprint(root)")
+            && !retrieval_pipeline_body.contains("build_fingerprint"),
+        "retrieval sidecars must use their semantic/schema ABI and exact compiler inputs, not the whole binary identity"
+    );
+    assert!(
+        idg_pipeline_body.contains("MATCHER_POLICY_FINGERPRINT")
+            && idg_pipeline_body.contains("idg_stitching_semantic_fingerprint()")
+            && !idg_pipeline_body.contains("build_fingerprint_hash()"),
+        "IDG sidecars must use the IDG semantic ABI and exact compiler inputs, not the whole binary identity"
     );
     let dirty_hash_body = function_body(&workspace_build, "dirty_content_hash");
     assert!(
@@ -3341,7 +3360,7 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
     // loads. Inspect both boundaries so this invariant continues to prove the
     // complete contract without requiring validation logic to be duplicated
     // inside `load_callgraph_sidecar`.
-    let callgraph_load_body = function_body(&callgraph_sidecar, "load_callgraph_sidecar");
+    let callgraph_load_body = function_body(&callgraph_sidecar, "load_callgraph_sidecar_checked");
     let callgraph_validation_body = function_body(&callgraph_sidecar, "validate_metadata");
     assert!(
         callgraph_sidecar.contains("matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT")
@@ -3353,8 +3372,9 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
             && callgraph_validation_body.contains(
                 "metadata.dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path)",
             )
+            && !callgraph_validation_body.contains("build_fingerprint_hash()")
             && callgraph_load_body.contains("current_source_fingerprints(db) != metadata.files"),
-        "callgraph sidecar must validate matcher policy, dependency metadata, and the complete source file set"
+        "callgraph sidecar must validate its semantic ABI, matcher policy, dependency metadata, and complete source set without whole-binary invalidation"
     );
 
     let export_metadata_body = function_body(&sdk, "build_export_cache_metadata");
@@ -3488,6 +3508,8 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
         frontend.contains("bonsai_retrieval::ensure_sidecar")
             && frontend.contains("save_callgraph_sidecar")
             && !frontend.contains("build_and_persist_idg_sidecar")
+            && idg.contains("validate_idg_sidecar_layout")
+            && idg.contains("load_callgraph_sidecar_checked")
             && idg.contains("build_and_persist_idg_sidecar")
             && idg.contains("write_manifest"),
         "frontend/callgraph and IDG persistence must be independently executable exact phases"

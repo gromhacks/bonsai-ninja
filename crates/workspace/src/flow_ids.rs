@@ -56,7 +56,6 @@ fn flow_ids_pipeline_hash_for_content(content_fingerprint: u64, sidecar_path: &P
         ^ u64::from(FLOW_IDS_CACHE_VERSION)
         ^ content_fingerprint
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
-        ^ crate::build_fingerprint_hash()
 }
 
 /// Per-function chain cap. Matches `bonsai_inspect`'s `--max-flows`

@@ -1547,7 +1547,7 @@ pub fn fact_id_for_parts(kind: &str, file: &str, line: u32, column: u32, name: &
 }
 
 /// Pipeline hash for retrieval sidecars. Includes source content,
-/// dependency metadata, build fingerprint, and schema version.
+/// dependency metadata, and the retrieval semantic/schema version.
 #[must_use]
 pub fn pipeline_hash_for_workspace(ws: &Workspace) -> u64 {
     let fingerprints = ws.vfs().all_files().into_iter().filter_map(|file| {
@@ -1577,7 +1577,6 @@ where
     if let Some(root) = workspace_root {
         h.absorb(&dependency_metadata_fingerprint(root).to_le_bytes());
     }
-    h.absorb(&build_fingerprint_hash().to_le_bytes());
     h.finish()
 }
 
@@ -2381,14 +2380,6 @@ fn dependency_metadata_fingerprint(root: &Path) -> u64 {
         h.absorb_separator();
     }
     h.finish()
-}
-
-fn build_fingerprint_hash() -> u64 {
-    const FINGERPRINT_HEX: &str = env!(
-        "BONSAI_BUILD_FINGERPRINT_HASH",
-        "build.rs must emit BONSAI_BUILD_FINGERPRINT_HASH"
-    );
-    u64::from_str_radix(FINGERPRINT_HEX, 16).unwrap_or(0)
 }
 
 fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {

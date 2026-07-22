@@ -962,13 +962,16 @@ impl Workspace {
     /// recorded `(path, content_hash)` matches current state.
     /// Returns `true` when the sidecar was a hit.
     pub fn load_callgraph_sidecar(&self, root: &Path) -> bool {
+        self.load_callgraph_sidecar_checked(root).is_ok()
+    }
+
+    /// Load and seed the conventional callgraph sidecar while preserving the
+    /// exact validation/decode error for compiler phase orchestration.
+    pub fn load_callgraph_sidecar_checked(&self, root: &Path) -> std::io::Result<()> {
         let path = callgraph_sidecar::callgraph_sidecar_path(root);
-        if let Some(graph) = callgraph_sidecar::load_callgraph_sidecar(&path, &self.inner.db) {
-            self.seed_resolved_call_graph(Arc::new(graph));
-            true
-        } else {
-            false
-        }
+        let graph = callgraph_sidecar::load_callgraph_sidecar_checked(&path, &self.inner.db)?;
+        self.seed_resolved_call_graph(Arc::new(graph));
+        Ok(())
     }
 
     /// Check whether the conventional callgraph sidecar exactly matches this
@@ -3272,7 +3275,7 @@ fn idg_pipeline_hash() -> u64 {
     let raw = bonsai_common::MATCHER_POLICY_FINGERPRINT;
     let lo = raw as u64;
     let hi = (raw >> 64) as u64;
-    lo ^ hi ^ idg_stitching_semantic_fingerprint() ^ build_fingerprint_hash()
+    lo ^ hi ^ idg_stitching_semantic_fingerprint()
 }
 
 /// Semantic-only IDG construction fingerprint shared with caches whose
@@ -3317,13 +3320,12 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
-/// Build-time fingerprint emitted by `build.rs` — combines
-/// `git rev-parse HEAD` with the working-tree dirty hash, folded
-/// into a `u64`. Every sidecar's pipeline hash xors this in so an
-/// upgraded binary can't reuse caches built by a different analyzer
-/// version even if the per-sidecar manual semantic constant wasn't
-/// bumped. Falls back to `0` only when the build.rs env var is
-/// somehow unset (defense in depth — `build.rs` always emits it).
+/// Build-time producer fingerprint emitted by `build.rs` — combines
+/// `git rev-parse HEAD` with the working-tree dirty hash, folded into a
+/// `u64`. Presentation/aggregate metadata can retain this identity for
+/// provenance. Semantic compiler sidecars use their own ABI version and exact
+/// source, dependency, matcher, rule, and transfer fingerprints so unrelated
+/// binary changes do not invalidate valid AST-derived facts.
 pub(crate) fn build_fingerprint_hash() -> u64 {
     const FINGERPRINT_HEX: &str = env!(
         "BONSAI_BUILD_FINGERPRINT_HASH",

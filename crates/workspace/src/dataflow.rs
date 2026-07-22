@@ -130,7 +130,6 @@ fn dataflow_pipeline_hash_for_content(content_fingerprint: u64, sidecar_path: &P
         ^ u64::from(DATAFLOW_CACHE_VERSION)
         ^ content_fingerprint
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
-        ^ crate::build_fingerprint_hash()
 }
 
 /// Thread-safe per-function taint-facts cache. One instance per

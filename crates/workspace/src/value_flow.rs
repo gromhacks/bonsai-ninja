@@ -59,7 +59,6 @@ fn value_flow_pipeline_hash_for_content(content_fingerprint: u64, sidecar_path: 
         ^ u64::from(VALUE_FLOW_CACHE_VERSION)
         ^ content_fingerprint
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
-        ^ crate::build_fingerprint_hash()
 }
 
 /// Per-function content-address hash used for fine-grained
