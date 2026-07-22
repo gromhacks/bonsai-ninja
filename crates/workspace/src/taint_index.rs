@@ -81,14 +81,8 @@ fn taint_graph_pipeline_hash(db: &AnalyzerDb, config_fingerprint: u64, sidecar_p
     // the old. `0` is the sentinel "no fingerprint set" value the
     // backward-compatible API used; treat it as opting out of the
     // config-bound check.
-    let build_fp = crate::build_fingerprint_hash();
     if config_fingerprint == 0 {
-        policy_lo
-            ^ policy_hi
-            ^ content
-            ^ semantic_version
-            ^ crate::idg_stitching_semantic_fingerprint()
-            ^ build_fp
+        policy_lo ^ policy_hi ^ content ^ semantic_version ^ crate::idg_stitching_semantic_fingerprint()
     } else {
         policy_lo
             ^ policy_hi
@@ -96,7 +90,6 @@ fn taint_graph_pipeline_hash(db: &AnalyzerDb, config_fingerprint: u64, sidecar_p
             ^ config_fingerprint
             ^ semantic_version
             ^ crate::idg_stitching_semantic_fingerprint()
-            ^ build_fp
     }
 }
 

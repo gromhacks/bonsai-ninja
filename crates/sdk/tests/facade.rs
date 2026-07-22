@@ -1282,6 +1282,48 @@ fn query_open_loads_callgraph_sidecar_when_dataflow_is_disabled() {
 }
 
 #[test]
+fn idg_rebuild_reuses_callgraph_without_an_aggregate_manifest() {
+    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
+    let root = temp_python_micro("idg-reuses-independent-callgraph");
+    let sdk = sdk();
+    let indexed = sdk.index_semantic(&root).expect("semantic index");
+    let stats = indexed.cache().stats().expect("semantic cache stats");
+    let callgraph_modified = std::fs::metadata(&stats.callgraph_sidecar)
+        .expect("callgraph metadata")
+        .modified()
+        .expect("callgraph modified time");
+
+    std::fs::remove_file(&stats.idg_sidecar).expect("remove IDG sidecar");
+    std::fs::remove_file(&stats.manifest).expect("remove aggregate manifest");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // Open a fresh structural workspace so no in-memory callgraph can hide a
+    // disk lifecycle regression. The IDG phase must hydrate the independently
+    // valid compiler sidecar rather than rebuilding syntax resolution.
+    let reopened = sdk.index(&root).expect("fresh structural open");
+    reopened
+        .cache()
+        .warm_idg_sidecar_and_manifest()
+        .expect("rebuild IDG from persisted callgraph");
+    let rebuilt = reopened.cache().stats().expect("rebuilt cache stats");
+
+    assert_eq!(
+        callgraph_modified,
+        std::fs::metadata(&rebuilt.callgraph_sidecar)
+            .expect("reused callgraph metadata")
+            .modified()
+            .expect("reused callgraph modified time"),
+        "a missing aggregate manifest must not rewrite an independently valid callgraph"
+    );
+    assert!(
+        rebuilt.idg_sidecar_exists && rebuilt.manifest_exists,
+        "IDG rebuild must restore the graph artifact and aggregate manifest: {rebuilt:#?}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn facade_index_is_structural_by_default() {
     let root = temp_python_micro("default-index");
     let indexed = sdk().index(&root).expect("index");

@@ -39,6 +39,9 @@ struct CallgraphMetadata {
     /// Sorted `(workspace path, content hash)` pairs for every indexed file.
     files: Vec<(String, u64)>,
     dependency_metadata_fingerprint: u64,
+    /// Producer identity retained for diagnostics and artifact integrity.
+    /// Freshness is governed by the callgraph semantic ABI plus exact input
+    /// fingerprints, not by unrelated changes elsewhere in the binary.
     build_fingerprint: u64,
 }
 
@@ -107,15 +110,21 @@ fn callgraph_sidecar_version(file_name: &std::ffi::OsStr) -> Option<u32> {
     version.parse().ok()
 }
 
-/// Load the exact current graph, returning `None` for missing, stale, or
-/// malformed artifacts so the caller can rebuild from syntax facts.
-pub(crate) fn load_callgraph_sidecar(path: &Path, db: &AnalyzerDb) -> Option<ResolvedCallGraph> {
-    let (reader, metadata) = open_sidecar(path).ok()?;
-    validate_metadata(path, &metadata).ok()?;
+/// Load and validate the exact current graph while preserving the concrete
+/// miss/decode error for compiler warm-up orchestration.
+pub(crate) fn load_callgraph_sidecar_checked(
+    path: &Path,
+    db: &AnalyzerDb,
+) -> std::io::Result<ResolvedCallGraph> {
+    let (reader, metadata) = open_sidecar(path)?;
+    validate_metadata(path, &metadata)?;
     if current_source_fingerprints(db) != metadata.files {
-        return None;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "callgraph sidecar source fingerprint mismatch",
+        ));
     }
-    decode_graph(&reader).ok()
+    decode_graph(&reader)
 }
 
 /// Validate exact workspace freshness without reading the graph payload.
@@ -132,7 +141,7 @@ pub(crate) fn validate_callgraph_sidecar_for_db(path: &Path, db: &AnalyzerDb) ->
 }
 
 /// Validate that a callgraph sidecar is structurally readable and was
-/// produced by the current callgraph/matcher/build pipeline. This exhaustive
+/// produced by the current callgraph/matcher pipeline. This exhaustive
 /// validator decodes the graph payload; warm-up uses the metadata-only exact
 /// workspace validator above.
 pub fn validate_callgraph_sidecar_file(path: &Path) -> std::io::Result<usize> {
@@ -253,12 +262,6 @@ fn validate_metadata(path: &Path, metadata: &CallgraphMetadata) -> std::io::Resu
             "callgraph sidecar dependency metadata fingerprint mismatch",
         ));
     }
-    if metadata.build_fingerprint != crate::build_fingerprint_hash() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "callgraph sidecar build fingerprint mismatch",
-        ));
-    }
     Ok(())
 }
 
@@ -269,6 +272,9 @@ fn metadata_pipeline_hash(metadata: &CallgraphMetadata) -> u64 {
     hasher.absorb(&metadata.version.to_le_bytes());
     hasher.absorb(&metadata.matcher_policy_fingerprint.to_le_bytes());
     hasher.absorb(&metadata.dependency_metadata_fingerprint.to_le_bytes());
+    // Bind the header to the recorded producer so metadata tampering cannot
+    // preserve the artifact hash. This is an integrity/provenance field, not
+    // a comparison against the currently running binary.
     hasher.absorb(&metadata.build_fingerprint.to_le_bytes());
     for (path, content_hash) in &metadata.files {
         hasher.absorb(path.as_bytes());
@@ -353,5 +359,23 @@ mod tests {
             callgraph_sidecar_version(std::ffi::OsStr::new("idg.v12.factstore")),
             None
         );
+    }
+
+    #[test]
+    fn producer_identity_is_provenance_not_semantic_freshness() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache_dir = root.path().join(".bonsai");
+        std::fs::create_dir(&cache_dir).expect("create cache dir");
+        let path = cache_dir.join(format!("callgraph.v{CALLGRAPH_CACHE_VERSION}.factstore"));
+        let metadata = CallgraphMetadata {
+            version: CALLGRAPH_CACHE_VERSION,
+            matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
+            files: Vec::new(),
+            dependency_metadata_fingerprint: dependency_metadata_fingerprint_for_sidecar(&path),
+            build_fingerprint: crate::build_fingerprint_hash() ^ 1,
+        };
+
+        validate_metadata(&path, &metadata)
+            .expect("an unrelated producer build must not invalidate exact compiler inputs");
     }
 }
