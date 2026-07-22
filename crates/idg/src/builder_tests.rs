@@ -234,11 +234,13 @@ fn relowered_stitch_preserves_the_exact_canonical_graph() {
         batches(),
         batches(),
         1,
-        &path,
         &resolver,
-        true,
-        false,
-        None,
+        ReloweredStitchOptions {
+            spool_path: &path,
+            include_field_argument_forwarding: true,
+            symbolic_field_forwarding: false,
+            symbolic_funcs: None,
+        },
     )
     .expect("spooled relowering");
     relowered
@@ -296,20 +298,34 @@ fn relowered_sidecar_preserves_cross_segment_calls_byte_for_byte() {
     let queryable = stitch_idg_from_segment_batches(batches(), 2, &resolver, true, false, None);
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cross-segment.factstore");
-    let mut relowered = stitch_idg_from_relowered_segment_batches(
+    let relowered = stitch_idg_from_relowered_segment_batches(
         batches(),
         batches(),
         2,
-        &path,
         &resolver,
-        true,
-        false,
-        None,
+        ReloweredStitchOptions {
+            spool_path: &path,
+            include_field_argument_forwarding: true,
+            symbolic_field_forwarding: false,
+            symbolic_funcs: None,
+        },
     )
     .expect("spooled relowering");
+    assert_eq!(
+        relowered.cross_file_edge_count(),
+        queryable.cross_file().len(),
+        "sidecar compilation must count every disk-spooled cross edge"
+    );
+    assert!(
+        relowered.cross_file().is_empty(),
+        "sidecar compilation must not retain its canonical cross-edge vector in memory"
+    );
     relowered
-        .materialize_spooled_segments()
-        .expect("materialize relowered graph");
+        .save_into_disk(&path, 0xC205_5E6A)
+        .expect("persist cross-segment spool");
+    let relowered = IdgWorkspace::load_from_disk(&path, 0xC205_5E6A)
+        .expect("load cross-segment sidecar")
+        .expect("cross-segment sidecar exists");
 
     assert_eq!(queryable.cross_file().len(), 2);
     assert_eq!(
@@ -388,11 +404,13 @@ fn relowered_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
             batches(),
             batches(),
             2,
-            &path,
             &resolver,
-            true,
-            true,
-            Some(&symbolic_funcs),
+            ReloweredStitchOptions {
+                spool_path: &path,
+                include_field_argument_forwarding: true,
+                symbolic_field_forwarding: true,
+                symbolic_funcs: Some(&symbolic_funcs),
+            },
         )
         .expect("spooled symbolic relowering");
         relowered

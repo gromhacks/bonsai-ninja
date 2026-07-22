@@ -28,7 +28,7 @@ use std::{path::Path, time::Instant};
 
 use crate::builder::{
     stitch_idg_from_relowered_segment_batches, stitch_idg_from_segment_batches, CalleeResolver,
-    ResolvedCallee, ReverseLookupRetention,
+    ReloweredStitchOptions, ResolvedCallee, ReverseLookupRetention,
 };
 use crate::transfer::{
     declared_receiver_names, receiver_name_matches, transfer_function_for_with_options_and_syntax_facts,
@@ -2830,11 +2830,13 @@ where
             canonical_batches,
             stitch_batches,
             function_count,
-            spool_path.expect("streaming sidecar path checked above"),
             &resolver,
-            transfer_options.include_field_argument_forwarding,
-            transfer_options.symbolic_field_forwarding,
-            symbolic_funcs.as_ref(),
+            ReloweredStitchOptions {
+                spool_path: spool_path.expect("streaming sidecar path checked above"),
+                include_field_argument_forwarding: transfer_options.include_field_argument_forwarding,
+                symbolic_field_forwarding: transfer_options.symbolic_field_forwarding,
+                symbolic_funcs: symbolic_funcs.as_ref(),
+            },
         )
     } else {
         let batches = transfer_inputs.chunks(transfer_batch_width).map(|batch| {
@@ -2856,7 +2858,7 @@ where
         ws.segment_count(),
         ws.func_count(),
         ws.intra_edge_count(),
-        ws.cross_file().len(),
+        ws.cross_file_edge_count(),
         ws.field_flow().len()
     ));
     if transfer_options.include_diagnostic_field_flows {
@@ -4526,7 +4528,7 @@ fn add_edge_between_ws_nodes(
             seg.add_edge(edge);
         }
     } else {
-        ws.cross_file_mut().push(crate::workspace::CrossFileEdge {
+        ws.push_cross_file_edge(crate::workspace::CrossFileEdge {
             from_segment: from_seg,
             to_segment: to_seg,
             edge,
