@@ -42,9 +42,9 @@ const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v12.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
 const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v13";
 const CACHE_MANIFEST_FILE: &str = "manifest.json";
-// v2 requires the compiler-linkage phase artifact alongside retrieval,
-// callgraph, and IDG sidecars for a production-scale warm semantic pipeline.
-const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 2;
+// v3 requires the immutable per-file compiler-object generation before every
+// linked semantic artifact.
+const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 3;
 const RETRIEVAL_NO_CANDIDATES_FILTER: &str = "/__bonsai_no_retrieval_candidates__/__none__";
 static EXPORT_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1393,6 +1393,9 @@ pub struct CacheStats {
     pub flow_ids_sidecar: PathBuf,
     pub flow_ids_sidecar_exists: bool,
     pub flow_ids_sidecar_bytes: u64,
+    pub compiler_object_sidecar: PathBuf,
+    pub compiler_object_sidecar_exists: bool,
+    pub compiler_object_sidecar_bytes: u64,
     pub callgraph_sidecar: PathBuf,
     pub callgraph_sidecar_exists: bool,
     pub callgraph_sidecar_bytes: u64,
@@ -1580,6 +1583,7 @@ impl WorkspaceCache {
             bonsai_workspace::dataflow::DataFlowCache::factstore_sidecar_path(&self.root);
         let value_flow_sidecar = bonsai_workspace::value_flow::ValueFlowCache::sidecar_path(&self.root);
         let flow_ids_sidecar = bonsai_workspace::flow_ids::FlowIdCache::sidecar_path(&self.root);
+        let compiler_object_sidecar = bonsai_workspace::compiler_object_sidecar_path(&self.root);
         let callgraph_sidecar = bonsai_workspace::callgraph_sidecar::callgraph_sidecar_path(&self.root);
         let linkage_sidecar = bonsai_workspace::linkage_sidecar::linkage_sidecar_path(&self.root);
         let idg_sidecar = bonsai_workspace::idg_sidecar_path(&self.root);
@@ -1593,6 +1597,7 @@ impl WorkspaceCache {
         let dataflow_factstore_sidecar_bytes = file_size(&dataflow_factstore_sidecar);
         let value_flow_sidecar_bytes = file_size(&value_flow_sidecar);
         let flow_ids_sidecar_bytes = file_size(&flow_ids_sidecar);
+        let compiler_object_sidecar_bytes = file_size(&compiler_object_sidecar);
         let callgraph_sidecar_bytes = file_size(&callgraph_sidecar);
         let linkage_sidecar_bytes = file_size(&linkage_sidecar);
         let idg_sidecar_bytes = file_size(&idg_sidecar);
@@ -1605,6 +1610,7 @@ impl WorkspaceCache {
             dataflow_factstore_sidecar_exists: dataflow_factstore_sidecar.is_file(),
             value_flow_sidecar_exists: value_flow_sidecar.is_file(),
             flow_ids_sidecar_exists: flow_ids_sidecar.is_file(),
+            compiler_object_sidecar_exists: compiler_object_sidecar.is_file(),
             callgraph_sidecar_exists: callgraph_sidecar.is_file(),
             linkage_sidecar_exists: linkage_sidecar.is_file(),
             idg_sidecar_exists: idg_sidecar.is_file(),
@@ -1624,6 +1630,8 @@ impl WorkspaceCache {
             value_flow_sidecar_bytes,
             flow_ids_sidecar,
             flow_ids_sidecar_bytes,
+            compiler_object_sidecar,
+            compiler_object_sidecar_bytes,
             callgraph_sidecar,
             callgraph_sidecar_bytes,
             linkage_sidecar,
@@ -1827,6 +1835,9 @@ impl Cache<'_> {
     /// This performs no parsing and does not hydrate callgraph or IDG facts.
     pub fn structural_sidecars_are_current(&self) -> Result<bool> {
         let workspace = &self.project.workspace;
+        if !workspace.compiler_object_sidecar_is_current(&self.project.root) {
+            return Ok(false);
+        }
         if !workspace.callgraph_sidecar_is_current(&self.project.root) {
             return Ok(false);
         }
@@ -1853,6 +1864,7 @@ impl Cache<'_> {
     /// explicitly need an independent cache audit can subsequently call
     /// [`Self::stats`].
     pub fn warm_structural_sidecars(&self) -> Result<()> {
+        self.warm_compiler_object_sidecar()?;
         self.warm_retrieval_and_callgraph_sidecars()?;
         self.warm_idg_sidecar_and_manifest()
     }
@@ -1868,6 +1880,18 @@ impl Cache<'_> {
         self.warm_retrieval_sidecar()?;
         self.warm_callgraph_sidecar()?;
         self.warm_compiler_linkage_sidecar()
+    }
+
+    /// Warm the immutable generation of exact adapter-lowered file objects.
+    /// All broad compiler phases consume these objects, so one Tree-sitter
+    /// interpretation is shared across retrieval, callgraph, linkage, IDG,
+    /// security, inspect, and export.
+    pub fn warm_compiler_object_sidecar(&self) -> Result<()> {
+        let workspace = &self.project.workspace;
+        if !workspace.compiler_object_sidecar_is_current(&self.project.root) {
+            let _ = workspace.save_compiler_object_sidecar(&self.project.root)?;
+        }
+        Ok(())
     }
 
     /// Warm the complete grammar-derived retrieval candidate artifact.
@@ -1907,6 +1931,9 @@ impl Cache<'_> {
     pub fn warm_idg_sidecar_and_manifest(&self) -> Result<()> {
         let cache = self.workspace_cache();
         let workspace = &self.project.workspace;
+        if !workspace.compiler_object_sidecar_is_current(&self.project.root) {
+            let _ = workspace.save_compiler_object_sidecar(&self.project.root)?;
+        }
         match workspace.validate_idg_sidecar_layout(&self.project.root) {
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => {
@@ -1950,6 +1977,7 @@ impl Cache<'_> {
         // Keep workspace-scale phases sequential in allocation order. The
         // retrieval builder needs the callgraph but not the IDG, so running it
         // first prevents its compact snapshot from overlapping graph arenas.
+        let _ = workspace.save_compiler_object_sidecar(&self.project.root)?;
         bonsai_retrieval::save_sidecar(workspace, &self.project.root)?;
         let _ = workspace.cached_resolved_call_graph();
         workspace.save_callgraph_sidecar(&self.project.root)?;
@@ -1973,6 +2001,13 @@ impl Cache<'_> {
 
 fn cache_manifest_sidecars(stats: &CacheStats) -> Vec<CacheManifestSidecar> {
     vec![
+        cache_manifest_sidecar(
+            "compiler_objects",
+            &stats.compiler_object_sidecar,
+            stats.compiler_object_sidecar_exists,
+            stats.compiler_object_sidecar_bytes,
+            "Immutable content-addressed Tree-sitter adapter output shared by every compiler phase.",
+        ),
         cache_manifest_sidecar(
             "callgraph",
             &stats.callgraph_sidecar,
@@ -2073,16 +2108,17 @@ fn cache_manifest_coverage(
     idg_sidecar_applicable: bool,
 ) -> CacheManifestCoverage {
     let idg_ready = stats.idg_sidecar_exists || !idg_sidecar_applicable;
-    let structural_ready = stats.callgraph_sidecar_exists
+    let structural_ready = stats.compiler_object_sidecar_exists
+        && stats.callgraph_sidecar_exists
         && stats.linkage_sidecar_exists
         && idg_ready
         && stats.retrieval_sidecar_exists;
     let semantic_ready = structural_ready;
     let mut missing_reasons = Vec::new();
     let required_sidecars: &[&str] = if idg_sidecar_applicable {
-        &["callgraph", "linkage", "idg", "retrieval"]
+        &["compiler_objects", "callgraph", "linkage", "idg", "retrieval"]
     } else {
-        &["callgraph", "linkage", "retrieval"]
+        &["compiler_objects", "callgraph", "linkage", "retrieval"]
     };
     for required in required_sidecars {
         if let Some(sidecar) = sidecars.iter().find(|sidecar| {
@@ -2176,7 +2212,9 @@ fn cache_validation_report(
         ),
     };
 
-    let structural_ready = validation_status(&sidecars, "callgraph") == Some(CacheFreshnessStatus::Fresh)
+    let structural_ready = validation_status(&sidecars, "compiler_objects")
+        == Some(CacheFreshnessStatus::Fresh)
+        && validation_status(&sidecars, "callgraph") == Some(CacheFreshnessStatus::Fresh)
         && validation_status(&sidecars, "linkage") == Some(CacheFreshnessStatus::Fresh)
         && matches!(
             validation_status(&sidecars, "idg"),
@@ -2415,6 +2453,12 @@ fn validate_sidecar_payload(
     source_files: &[bonsai_workspace::SourceFileFingerprint],
 ) -> Option<String> {
     match input.name {
+        "compiler_objects" if input.exists => {
+            bonsai_workspace::validate_compiler_object_sidecar_layout(root)
+                .map(|_| ())
+                .err()
+                .map(|err| format!("compiler-object sidecar validation failed: {err}"))
+        }
         "callgraph" if input.exists => {
             bonsai_workspace::callgraph_sidecar::validate_callgraph_sidecar_file_with_source_fingerprints(
                 input.path,
@@ -2666,6 +2710,12 @@ struct CacheValidationInput<'a> {
 
 fn cache_validation_inputs(stats: &CacheStats) -> Vec<CacheValidationInput<'_>> {
     vec![
+        CacheValidationInput {
+            name: "compiler_objects",
+            path: &stats.compiler_object_sidecar,
+            exists: stats.compiler_object_sidecar_exists,
+            bytes: stats.compiler_object_sidecar_bytes,
+        },
         CacheValidationInput {
             name: "callgraph",
             path: &stats.callgraph_sidecar,

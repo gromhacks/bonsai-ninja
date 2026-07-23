@@ -6,8 +6,9 @@
 //! worker start in a fresh process: parser and allocator arenas die with the
 //! frontend process instead of becoming additive with the graph compiler.
 //!
-//! This is not a substitute for syntax. IDG transfer still re-lowers each
-//! exact file body from Tree-sitter at its segment boundary. The sidecar is
+//! This is not a substitute for syntax. IDG transfer streams each exact file
+//! body from the content-addressed Tree-sitter compiler-object generation at
+//! its segment boundary. The sidecar is
 //! the compiler's symbol/linkage table, analogous to a module interface or
 //! object-file symbol table.
 
@@ -91,7 +92,8 @@ pub(crate) fn load_linkage_sidecar_checked(path: &Path, db: &AnalyzerDb) -> std:
 ///
 /// Root-only cache inspection has no live VFS, so it validates the canonical
 /// `(path, content hash)` projection. Actual compiler loads additionally bind
-/// the persisted FileId ordering through [`load_linkage_sidecar_checked`].
+/// the persisted FileId ordering through the private
+/// `load_linkage_sidecar_checked` loader.
 pub fn validate_linkage_sidecar_file_with_source_fingerprints<I, P>(
     path: &Path,
     fingerprints: I,

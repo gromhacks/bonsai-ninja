@@ -175,11 +175,27 @@ fn cache_stats(workspace: Option<std::path::PathBuf>, format: BrowseFormat) -> R
     );
     print_validated_sidecar(
         &print_kv,
+        "compiler objects",
+        &stats.compiler_object_sidecar,
+        stats.compiler_object_sidecar_exists,
+        stats.compiler_object_sidecar_bytes,
+        validation_sidecar(&stats, "compiler_objects"),
+    );
+    print_validated_sidecar(
+        &print_kv,
         "callgraph sidecar",
         &stats.callgraph_sidecar,
         stats.callgraph_sidecar_exists,
         stats.callgraph_sidecar_bytes,
         validation_sidecar(&stats, "callgraph"),
+    );
+    print_validated_sidecar(
+        &print_kv,
+        "compiler linkage sidecar",
+        &stats.linkage_sidecar,
+        stats.linkage_sidecar_exists,
+        stats.linkage_sidecar_bytes,
+        validation_sidecar(&stats, "linkage"),
     );
     print_validated_sidecar(
         &print_kv,
@@ -294,6 +310,12 @@ fn cache_clear(workspace: Option<std::path::PathBuf>, dataflow_only: bool) -> Re
         );
         print_existing_sidecar(
             &print_kv,
+            "  compiler objects",
+            &stats.compiler_object_sidecar,
+            stats.compiler_object_sidecar_exists,
+        );
+        print_existing_sidecar(
+            &print_kv,
             "  callgraph sidecar",
             &stats.callgraph_sidecar,
             stats.callgraph_sidecar_exists,
@@ -393,6 +415,13 @@ fn cache_rebuild(workspace: Option<std::path::PathBuf>, warm_export: bool) -> Re
     spin.finish();
 
     let rebuilt = cache.stats()?;
+    print_sidecar(
+        &print_kv,
+        "wrote compiler objects",
+        &rebuilt.compiler_object_sidecar,
+        rebuilt.compiler_object_sidecar_exists,
+        rebuilt.compiler_object_sidecar_bytes,
+    );
     print_sidecar(
         &print_kv,
         "wrote callgraph sidecar",

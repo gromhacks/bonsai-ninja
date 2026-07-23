@@ -92,6 +92,36 @@ fn forward_and_backward_csrs_have_matching_total_edges() {
 }
 
 #[test]
+fn bidirectional_factory_matches_independent_csrs() {
+    let pairs = vec![(0, 1), (0, 2), (2, 1), (2, 1), (9, 0)];
+    let expected_forward = EdgeCsr::forward_pairs(3, &pairs);
+    let expected_backward = EdgeCsr::backward_pairs(3, &pairs);
+    let (forward, backward) = EdgeCsr::bidirectional_from_pair_visitor(3, |visit| {
+        for &(from, to) in &pairs {
+            visit(from, to);
+        }
+    });
+
+    assert_eq!(forward, expected_forward);
+    assert_eq!(backward, expected_backward);
+}
+
+#[test]
+fn bidirectional_visitor_matches_independent_csrs() {
+    let pairs = vec![(0, 1), (0, 2), (2, 1), (2, 1), (9, 0)];
+    let expected_forward = EdgeCsr::forward_pairs(3, &pairs);
+    let expected_backward = EdgeCsr::backward_pairs(3, &pairs);
+    let (forward, backward) = EdgeCsr::bidirectional_from_pair_visitor(3, |visit| {
+        for &(from, to) in &pairs {
+            visit(from, to);
+        }
+    });
+
+    assert_eq!(forward, expected_forward);
+    assert_eq!(backward, expected_backward);
+}
+
+#[test]
 fn duplicate_edges_appear_multiple_times_in_csr() {
     // The CSR is faithful — duplicates are kept; consumers can
     // dedupe at query time if needed.

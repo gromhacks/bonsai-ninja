@@ -46,6 +46,14 @@ impl bonsai_idg::workspace_adapter::IdgFileSemanticsProvider for CompilerIdgFile
             .map(|path| path.to_string_lossy().into_owned())
     }
 
+    fn source_bytes(&self, file: bonsai_common::FileId) -> Option<u64> {
+        self.db
+            .vfs()
+            .snapshot(file)
+            .ok()
+            .map(|snapshot| u64::try_from(snapshot.text.len()).unwrap_or(u64::MAX))
+    }
+
     fn module_resolution_extensions(&self, file: bonsai_common::FileId) -> &'static [&'static str] {
         self.db
             .adapter_for(file)

@@ -15,6 +15,7 @@ bonsai-ninja does not require a project config file for normal scans. Workspace-
 |---|---|---|---|
 | `.bonsai/rules/` | directory | Absent | Optional workspace-local rule overlay. |
 | `.bonsai/manifest.json` | generated file | `index --semantic`, SDK semantic/full-prewarm facades, or `cache rebuild` | JSON inventory of cache coverage, producer fingerprints, sidecar paths, and missing reasons. Do not use as the hot analysis path; commands validate and read the binary sidecars. |
+| `.bonsai/compiler-objects.v*.factstore` | generated file | first phase of `index --semantic`, SDK semantic prewarm, or `cache rebuild` | Atomic generation of per-file adapter-lowered compiler objects and diagnostics, validated by relative path, adapter, frontend ABI, SHA-256 source digest, and payload digest. |
 | `.bonsai/dataflow.v3.factstore` | generated file | SDK full prewarm, explicit dataflow prewarm, or exact query commands | Persisted dataflow sidecar. Do not edit manually. |
 | `.bonsai/value_flow.v*.factstore` | generated file | explicit compatibility prewarm/save APIs | Persisted legacy `ValueFlowGraph` projection. Canonical security/export semantics live in the IDG; do not edit manually. |
 | `.bonsai/flow_ids.v*.factstore` | generated file | SDK full prewarm or exact render/query commands | Persisted flow-id sidecar. Do not edit manually. |
@@ -38,6 +39,12 @@ explicitly rebuilds only the compatibility dataflow projection. That
 projection supports older SDK/query surfaces; it is not a second taint engine.
 `index --watch` keeps a live workspace open, polls for saved changes, and
 reparses changed files in place.
+
+Semantic workers publish compiler objects first. Unchanged compressed objects
+are copied into the next generation; only source/path/adapter/ABI misses are
+lowered again. Callgraph, retrieval, linkage, and IDG then consume that one
+generation. The IDG persistence phase replays typed stitch records from its
+first transfer pass instead of running transfer lowering twice.
 
 Cache and render limits never change analysis semantics. The IDG factstore is
 streamed and has no source-file-count ceiling. A rendered page that exceeds
@@ -67,6 +74,9 @@ paths.
 |---|---|---|---|
 | `BONSAI_RULES_DIR` | path | Auto-discover | Rulepack directory. |
 | `BONSAI_PARSE_TIMEOUT_MS` | integer milliseconds | unset (uncapped) | Optional per-file tree-sitter parse timeout. `0` disables the timeout guard. |
+| `BONSAI_MEMORY_BUDGET_MB` | positive integer MiB | detected host/container limit | Lower the compiler's detected memory limit. Weighted phases first apply the conservative worker profile (one exact unit at 3 GiB), then subtract current process RSS and safety headroom before admitting transient units. This controls concurrency only and cannot reduce analyzed files or graph closure. |
+| `BONSAI_COMPILER_JOBS` | positive integer | available CPU count | Upper bound on compiler-object workers before file-size/memory weighting. Every file is still compiled. |
+| `BONSAI_IDG_TRANSFER_BATCH_SEGMENTS` | positive integer | available Rayon workers | Upper bound on concurrently lowered IDG source-file segments before exact VFS-size/memory weighting. Every segment and transfer fact is still compiled. |
 | `BONSAI_NO_DATAFLOW` | boolean-like | unset | Skip explicit dataflow prewarm and trace eager hydration. Query commands still compute required facts on demand. |
 | `BONSAI_THEME` | string | `moss` | Terminal theme: `moss`, `earthy-dark`, `dracula`, or `retro-amber`. |
 | `BONSAI_WORKSPACE_DIR` | path | Workspace root | Per-workspace state directory override. |

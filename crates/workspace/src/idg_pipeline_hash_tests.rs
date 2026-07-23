@@ -48,6 +48,37 @@ fn idg_pipeline_hash_tracks_dependency_metadata() {
 }
 
 #[test]
+fn workspace_generation_reuses_pipeline_identity_until_an_edit() {
+    let root = tempdir_for_test("bonsai-idg-pipeline-generation");
+    std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"demo\"\n").expect("write pyproject");
+    let workspace = Workspace::new(Arc::new(LanguageRegistry::new()));
+    workspace.apply_edit(&root.join("app.py"), "def entry(x):\n    return x\n".to_string());
+
+    let before = workspace.cached_idg_workspace_pipeline_hash(Some(&root));
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"demo\"\ndependencies = [\"flask\"]\n",
+    )
+    .expect("rewrite pyproject");
+    assert_eq!(
+        workspace.cached_idg_workspace_pipeline_hash(Some(&root)),
+        before,
+        "one immutable compiler generation must reuse its validated identity"
+    );
+
+    workspace.apply_edit(
+        &root.join("app.py"),
+        "def entry(x):\n    return (x, x)\n".to_string(),
+    );
+    assert_ne!(
+        workspace.cached_idg_workspace_pipeline_hash(Some(&root)),
+        before,
+        "a source edit must invalidate the pipeline identity"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn idg_transfer_fingerprint_is_order_stable() {
     let left = bonsai_idg::TransferOptions {
         clean_output_overwrites: vec![

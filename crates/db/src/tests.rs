@@ -298,6 +298,130 @@ fn transient_lowering_releases_cst_and_reparses_the_exact_snapshot() {
 }
 
 #[test]
+fn compiler_object_generation_replays_typed_adapter_ir_without_reparsing() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("fixture.py");
+    let vfs = Arc::new(Vfs::new());
+    let file = vfs.write(
+        path.to_string_lossy().into_owned(),
+        "def exact():\n    return 1\n",
+    );
+    let declaration_calls = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(CountingPythonAdapter {
+        declaration_calls: Arc::clone(&declaration_calls),
+    }));
+    let db = AnalyzerDb::new(Arc::clone(&vfs), Arc::clone(&registry));
+    db.set_workspace_root(root.path().to_path_buf());
+
+    assert_eq!(
+        db.save_compiler_object_sidecar(root.path())
+            .expect("save objects"),
+        1
+    );
+    assert_eq!(declaration_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        db.save_compiler_object_sidecar(root.path())
+            .expect("reuse objects"),
+        1
+    );
+    assert_eq!(
+        declaration_calls.load(Ordering::SeqCst),
+        1,
+        "unchanged generations must copy validated object payloads without lowering"
+    );
+
+    let reopened = AnalyzerDb::new(Arc::clone(&vfs), registry);
+    reopened.set_workspace_root(root.path().to_path_buf());
+    let object = reopened
+        .compiler_file_object_uncached(file)
+        .expect("replay compiler object");
+    assert_eq!(object.language.as_deref(), Some("python"));
+    assert!(object.declarations.is_some());
+    assert_eq!(
+        declaration_calls.load(Ordering::SeqCst),
+        1,
+        "an exact compiler-object hit must not invoke the language adapter again"
+    );
+
+    vfs.write(
+        path.to_string_lossy().into_owned(),
+        "def changed():\n    return 2\n",
+    );
+    assert_eq!(
+        reopened
+            .save_compiler_object_sidecar(root.path())
+            .expect("replace changed object"),
+        1
+    );
+    assert_eq!(
+        declaration_calls.load(Ordering::SeqCst),
+        2,
+        "a changed digest must lower exactly that compiler object again"
+    );
+}
+
+#[test]
+fn compiler_object_generation_preserves_parser_diagnostics() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("broken.py");
+    let vfs = Arc::new(Vfs::new());
+    let file = vfs.write(path.to_string_lossy().into_owned(), "def broken(\n");
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+    let db = AnalyzerDb::new(Arc::clone(&vfs), Arc::clone(&registry));
+    db.set_workspace_root(root.path().to_path_buf());
+    db.save_compiler_object_sidecar(root.path())
+        .expect("save objects");
+
+    let reopened = AnalyzerDb::new(vfs, registry);
+    reopened.set_workspace_root(root.path().to_path_buf());
+    let object = reopened
+        .compiler_file_object_uncached(file)
+        .expect("replay compiler object");
+    assert!(
+        object
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("syntax-error")),
+        "warm compiler objects must preserve exhaustive Tree-sitter diagnostics"
+    );
+    assert!(
+        reopened
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("syntax-error")),
+        "object diagnostics must publish through the ordinary database facade"
+    );
+}
+
+#[test]
+fn compiler_object_invalidation_removes_stale_diagnostics() {
+    let vfs = Arc::new(Vfs::new());
+    let file = vfs.write("broken.py", "def broken(\n");
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+    let db = AnalyzerDb::new(Arc::clone(&vfs), registry);
+
+    let _ = db.compiler_file_object_uncached(file);
+    assert!(db.diagnostics().iter().any(|diagnostic| {
+        diagnostic.span.file == file && diagnostic.code.as_deref() == Some("syntax-error")
+    }));
+
+    vfs.write("broken.py", "def repaired():\n    return 1\n");
+    db.invalidate_file(file);
+    let _ = db.compiler_file_object_uncached(file);
+    assert!(
+        db.diagnostics().iter().all(|diagnostic| {
+            diagnostic.span.file != file || diagnostic.code.as_deref() != Some("syntax-error")
+        }),
+        "diagnostics from an older source version must not survive invalidation"
+    );
+}
+
+#[test]
 fn global_index_concurrent_callers_lower_each_file_once() {
     use std::sync::{atomic::AtomicUsize, Barrier};
 

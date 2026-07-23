@@ -330,6 +330,9 @@ Concrete wiring:
 
 | Cache | File | Build trigger | Invalidation |
 |-------|------|----------------|--------------|
+| `CompiledFileObject` generation | `crates/db/src/compiler_object.rs` | first `index --semantic` worker; lazy one-file miss | SHA-256/path/adapter/ABI per object; atomic generation replacement |
+| compiler linkage | `crates/workspace/src/linkage_sidecar.rs` | semantic linkage worker | complete generation/source/dependency/pipeline identity |
+| workspace IDG | `crates/idg/src/workspace.rs` | semantic IDG worker or exact query miss | complete source/dependency/transfer pipeline identity |
 | `DataFlowCache` | `crates/workspace/src/dataflow.rs` | `prewarm_all` | per-FuncId via dependency files |
 | `ValueFlowCache` | `crates/workspace/src/value_flow.rs` | lazy `graph_for_with_caches`; explicit compatibility prewarm only | clear |
 | `FlowIdCache` | `crates/workspace/src/flow_ids.rs` | `prewarm_all` | clear |
@@ -340,6 +343,12 @@ Concrete wiring:
 | `DeclNameIndex` | `crates/workspace/src/decl_name_index.rs` | lazy | clear |
 | `cached_resolved_call_graph` | `crates/workspace/src/lib.rs` | lazy | clear |
 | `inter_taint_caches` | `crates/workspace/src/lib.rs` | per-key lazy | clear |
+
+Compiler-object generations are different from ordinary memoization. A
+generation is immutable and atomically replaced, while individual unchanged
+objects remain reusable from a stale generation after another file changes.
+Never publish a partial/scoped generation under the full workspace path, and
+never accept an object from path or a fast hash alone.
 
 ### 13a. Watch out for `parking_lot` read-then-write hazards
 

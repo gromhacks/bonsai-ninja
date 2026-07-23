@@ -58,6 +58,17 @@ so consumers always know the confidence of what they're looking at. Spans
 are half-open byte ranges, line/column lookups go through a thread-local
 LRU cache.
 
+`crates/common::resources` also owns resource scheduling. Memory limits are
+detected from the host and Linux cgroups, optionally lowered by
+`BONSAI_MEMORY_BUDGET_MB`. Weighted compiler batches use each source unit's
+actual byte size after subtracting the process's measured resident set and a
+safety margin; the conservative worker profile serializes exact units at a
+3 GiB budget, while larger budgets allow small units to share only the
+remaining parallelism. IDG transfer obtains the same exact VFS byte length
+through the compiler semantics provider after linkage/resolver state is
+resident. Unsupported RSS probes fall back to a conservative reserve. This is
+never an analysis budget.
+
 **`crates/hash`** provides FNV-1a digests for every persisted ID. Sole API:
 `fnv1a_str_slice64`, `fnv1a_names64`, `fnv1a_bytes64`, `fnv1a_low32`. RFC
 vector verified.
@@ -76,9 +87,46 @@ is the consumer's job.
 identity, file, language, and version. Adapters share the exact same
 `Arc<Tree>` for an immutable source snapshot. Mutable parsers are checked out
 from per-language pools, so same-language files parse concurrently without a
-global parser lock. It walks for ERROR/MISSING nodes (cap 100); parsing is
+global parser lock. It walks every ERROR/MISSING node; parsing is
 uncapped by default, with `BONSAI_PARSE_TIMEOUT_MS` available for explicitly
 bounded diagnostic runs.
+
+## Immutable compiler objects and generations
+
+**`crates/db/src/compiler_object.rs`** is the syntax-to-semantic ownership
+boundary. For each source snapshot it persists a relocatable
+`CompiledFileObject` containing adapter-lowered declarations, imports, flow
+events, syntax facts, and parser/adapter diagnostics. It never persists a raw
+Tree-sitter tree or parser handle.
+
+Object identity is the workspace-relative path/module context, selected
+adapter, explicit frontend ABI, and SHA-256 of the complete source. A
+factstore generation contains exact per-object payload digests and a strong
+generation digest. Publication is atomic. A stale generation may still supply
+an unchanged content-addressed object; generation refresh copies its validated
+compressed payload directly and recompiles only misses.
+
+```mermaid
+flowchart LR
+  S[Immutable source snapshot] --> T[Language Tree-sitter adapter]
+  T --> O[Typed compiler object]
+  O --> G[Atomic object generation]
+  G --> L[Headers and linker]
+  G --> C[Resolved callgraph]
+  G --> R[Retrieval candidates]
+  G --> X[One-pass transfer lowering]
+  X --> P[Typed stitch spool]
+  P --> I[Exact IDG closure substrate]
+  I --> Q[Inspect, security, taint, export]
+```
+
+`index --semantic` runs compiler objects, callgraph, retrieval, linkage, and
+IDG as ordered worker processes. The process boundary returns Tree-sitter and
+allocator arenas to the OS. Later workers open the same object generation, so
+the boundary does not imply another syntax interpretation. The parent then
+validates every sidecar against the same current workspace snapshot; if a file
+changed between workers, it reruns the exact phases until one coherent atomic
+generation is current. That retry reaches quiescence without an iteration cap.
 
 ## Adapter framework
 
@@ -123,8 +171,51 @@ adapter handles precisely versus partially.
 
 ## Analysis core
 
-**`crates/db`** is the in-memory facts database. Every other analysis crate
-reads from it and writes back through it.
+**`crates/db`** is the compiler-object and in-memory fact database. Every
+other analysis crate reads from it and writes back through it. Broad
+declaration/import APIs converge on `compiler_file_object_uncached`; a narrow
+uncached query can compile one missing object directly from Tree-sitter.
+
+The persisted IDG builder lowers each function transfer exactly once. At a
+file boundary it spills the canonical segment plus a compact typed stitch
+record and local-to-segment node map. Stitching hydrates one segment and moves
+that record into the linker; it does not reparse or re-lower the AST. Every
+scheduled function and fixed-point relation is still consumed.
+
+Interprocedural return summaries are compiled from structural call boundaries
+identified by caller, resolved callee, and exact call span. The compiler
+reconstructs one function-local CSR at a time from canonical segment edges,
+composes the current callee summaries, and requeues callers whenever a callee
+summary grows. Recursive and mutually recursive components therefore reach
+their least fixed point without a depth, iteration, or graph-size cap. The
+contextual query runtime stores matched call and return boundaries in sorted
+sparse source rows and streams ordinary local relations directly into CSR;
+it does not retain a second workspace-sized endpoint relation.
+
+Symbolic field flow is compiled into numeric access-path facts and algebraic
+transforms emitted from the adapter-lowered AST. Query setup streams the
+persisted transform relation once through bounded external sort runs, then
+stores every transform field in a fixed-width, source-indexed temporary
+relation. Node facts use the same fixed-width paging pattern. Broad closures
+therefore read exact numeric rows without repeatedly decoding whole IDG
+segments or MessagePack transform chunks. Page-cache size can change I/O and
+latency, but never the transform set or closure result. Multi-parameter return
+summaries may first evaluate the union of all remaining formal seeds; a
+negative union is a proof that each member is negative, while positive unions
+are still checked per parameter. This removes redundant work without changing
+the least fixed point.
+
+Large compiler phases transfer only their canonical result across a scoped
+worker-heap boundary. Transient maps, sort buffers, and CSR construction state
+are released before the next phase begins. This is allocation-lifetime
+isolation, not parallel semantic execution or a result budget: every compiler
+unit and fixed-point relation is still evaluated.
+
+Memory-bounded export may unload the resident IDG between compiler and
+presentation phases. The workspace retains only the validated pipeline hash
+for the current immutable source generation, so reloading the same sidecar
+does not rescan the source and dependency trees. Any source edit clears that
+token together with the IDG and other semantic caches.
 
 **`crates/retrieval`** is a fact-backed candidate index, not an evidence
 engine. It persists `FactDoc` records under `.bonsai/` with stable fact ids,
@@ -237,6 +328,11 @@ construction. All interprocedural taint surfaces are IDG-backed: source seeds ar
 resolved to concrete IDG nodes, configured transfer summaries are applied to
 fixpoint, and the resulting closure is cut to a semantic target/lineage
 corridor before call records or findings are rendered.
+On first query, forward and backward numeric CSR adjacency is counted and
+filled together in two passes over canonical IDG edges. It does not stage a
+second workspace-sized endpoint vector, perform name search, or change the
+edge set. Precision-specific adjacency remains lazy so unused query modes do
+not duplicate the graph in memory or on disk.
 `interprocedural_taint_with_caches` is a compatibility façade over that same
 closure, not a second scheduler. `reachable.rs` also owns the
 shared default entry seed helpers used by cached dataflow, inspect, and

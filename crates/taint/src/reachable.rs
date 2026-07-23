@@ -282,8 +282,9 @@ pub fn name_reachable_through_func_kinded(func: FuncId, db: &AnalyzerDb) -> Kind
 }
 
 /// Collect per-function reachability facts from one exact compiler body.
-/// Workspace-scale callers use this with a disposable file [`DeclIndex`]
-/// beside compact global linkage, avoiding a resident workspace body index.
+/// Workspace-scale callers use this with a disposable file
+/// [`bonsai_lang_api::DeclIndex`] beside compact global linkage, avoiding a
+/// resident workspace body index.
 #[must_use]
 pub fn name_reachable_through_decl_kinded(
     decl: &bonsai_lang_api::Decl,
@@ -2037,9 +2038,7 @@ fn materialize_synthetic_tainted_calls(
         let writes = summaries.writes.clone();
         let names = tainted_names_by_caller
             .entry(func)
-            .or_insert_with(|| {
-                tainted_local_names_in_caller(func, context.global, context.idg, context.closure_set)
-            })
+            .or_insert_with(|| tainted_local_names_in_caller(func, context.idg, context.closure_set))
             .clone();
         if names.is_empty() {
             continue;
@@ -3588,104 +3587,12 @@ fn call_preorder_from_source(
     order
 }
 
-/// Walk `events` and collect every bare-identifier name reachable
-/// through Assign / Call / Return events. Used by
-/// [`entry_taint_graph_from_idg`] to enumerate candidate names for
-/// the receiver-tainted check.
-fn collect_caller_local_names(events: &[bonsai_lang_api::FlowEvent], params: &[String]) -> Vec<String> {
-    let mut out: ahash::AHashSet<String> = params.iter().filter(|p| !p.is_empty()).cloned().collect();
-    walk_collect_names(events, &mut out);
-    out.into_iter().collect()
-}
-
 fn tainted_local_names_in_caller(
     caller: FuncId,
-    global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     closure_set: &ahash::AHashSet<bonsai_idg::WsNodeId>,
 ) -> ahash::AHashSet<String> {
-    let Some(caller_decl) = global.decl_of(bonsai_common::SymbolId::new(caller.raw())) else {
-        return ahash::AHashSet::default();
-    };
-    let candidate_names = collect_caller_local_names(&caller_decl.flow_events, &caller_decl.params);
-    idg.read_or_write_names_in_reachable_nodes(caller, &candidate_names, closure_set)
-}
-
-fn walk_collect_names(events: &[bonsai_lang_api::FlowEvent], out: &mut ahash::AHashSet<String>) {
-    use bonsai_lang_api::FlowEvent;
-    for event in events {
-        match event {
-            FlowEvent::Assign {
-                target,
-                source_name,
-                source_names,
-                source_call_args,
-                ..
-            } => {
-                if !target.is_empty() {
-                    out.insert(target.clone());
-                }
-                if let Some(name) = source_name {
-                    if !name.is_empty() {
-                        out.insert(name.clone());
-                    }
-                }
-                for n in source_names {
-                    if !n.is_empty() {
-                        out.insert(n.clone());
-                    }
-                }
-                for n in source_call_args {
-                    if !n.is_empty() {
-                        out.insert(n.clone());
-                    }
-                }
-            }
-            FlowEvent::Call { args, .. } => {
-                for arg in args {
-                    if let Some(p) = arg.place.as_deref() {
-                        if !p.is_empty() {
-                            out.insert(p.to_string());
-                        }
-                    }
-                    for n in &arg.source_names {
-                        if !n.is_empty() {
-                            out.insert(n.clone());
-                        }
-                    }
-                }
-            }
-            FlowEvent::Return { value_name, .. } => {
-                if let Some(n) = value_name {
-                    if !n.is_empty() {
-                        out.insert(n.clone());
-                    }
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                walk_collect_names(then_events, out);
-                walk_collect_names(else_events, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                walk_collect_names(body, out);
-                walk_collect_names(catch_events, out);
-                walk_collect_names(finally_events, out);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                walk_collect_names(body, out);
-            }
-            _ => {}
-        }
-    }
+    idg.read_or_write_names_in_reachable_nodes(caller, closure_set)
 }
 
 #[derive(Clone, Debug)]
@@ -4335,20 +4242,17 @@ fn cached_function_attribution<'a>(
         if let Some(summaries) = shared_hit {
             cache.by_func.insert(func, summaries);
         } else {
-            // Compact compiler linkage intentionally drops recursive flow
-            // bodies. Re-lower one exact Tree-sitter file when attribution
-            // first needs it, distill every function in that file into call
-            // summaries, then release the body. This keeps source rendering
-            // exact without materialising a second workspace-wide body index.
+            // Compiler linkage is a compact scheduling/index surface; even a
+            // non-empty header body is not a completeness promise. Re-lower
+            // one exact Tree-sitter file when attribution first needs it,
+            // distill every function in that file into call summaries, then
+            // release the body. This keeps source rendering exact without
+            // materialising a second workspace-wide body index.
             let symbol = bonsai_common::SymbolId::new(func.raw());
-            let exact_file = global
-                .decl_of(symbol)
-                .filter(|decl| decl.flow_events.is_empty())
-                .and(cache.db)
-                .and_then(|db| {
-                    let file = global.declaring_file(symbol)?;
-                    db.decl_index_remapped_to_headers(global, file)
-                });
+            let exact_file = cache.db.and_then(|db| {
+                let file = global.declaring_file(symbol)?;
+                db.decl_index_remapped_to_headers(global, file)
+            });
             if let Some(file_index) = exact_file {
                 let built = file_index
                     .defs

@@ -7,7 +7,7 @@
 //! framework like `salsa` (which we can swap in later without changing the
 //! public API of this crate).
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use bonsai_abstract_interp::{run_entry, RawTrace, TraceLimits};
 use bonsai_cfg::{build_cfg_from_flow, Cfg};
 use bonsai_common::{FileId, FuncId, SymbolId};
@@ -20,6 +20,13 @@ use bonsai_trace::{finalize, TraceResult};
 use bonsai_vfs::Vfs;
 use parking_lot::{Mutex, RwLock};
 use std::sync::{Arc, OnceLock};
+
+mod compiler_object;
+
+pub use compiler_object::{
+    compiler_object_sidecar_path, validate_compiler_object_sidecar_layout, CompiledFileObject,
+    COMPILER_OBJECT_CACHE_VERSION,
+};
 
 /// Immutable handle shared across threads. Cheap to clone.
 #[derive(Clone)]
@@ -67,6 +74,20 @@ struct DbInner {
     /// `AdapterContext.workspace_root` to derive workspace-relative
     /// module paths (semantic-identity contract).
     workspace_root: RwLock<Option<std::path::PathBuf>>,
+    /// Reusable immutable per-file compiler objects from the most recent
+    /// compatible workspace generation. Individual entries are validated by
+    /// strong content digest, path/module context, language, and frontend ABI
+    /// before use; a changed file simply falls through to exact Tree-sitter
+    /// lowering while unchanged objects remain reusable.
+    compiler_object_store: RwLock<Option<Arc<compiler_object::CompilerObjectStore>>>,
+    /// Snapshots whose persisted diagnostics have already been published into
+    /// the process sink. Broad phases may read one compiler object repeatedly;
+    /// diagnostics remain complete without multiplying identical messages.
+    compiler_diagnostics_published: RwLock<AHashSet<(FileId, [u8; 32])>>,
+    /// Serializes the published-version set with replacement of its diagnostic
+    /// rows. Without this gate, an edit racing a warm object load could remove
+    /// a new diagnostic while leaving its version marked as published.
+    compiler_diagnostics_gate: Mutex<()>,
     /// Workspace-wide IDG query service. Seeded by the workspace at
     /// open/index time via [`AnalyzerDb::set_idg_service`]. Consumers
     /// (value-flow, security analysis, browse, dump, export, inspect)
@@ -140,6 +161,9 @@ impl AnalyzerDb {
                 cache: RwLock::new(Caches::default()),
                 global_index_build: Mutex::new(()),
                 workspace_root: RwLock::new(None),
+                compiler_object_store: RwLock::new(None),
+                compiler_diagnostics_published: RwLock::new(AHashSet::new()),
+                compiler_diagnostics_gate: Mutex::new(()),
                 idg_service: RwLock::new(None),
                 idg_services_by_semantics: RwLock::new(AHashMap::new()),
             }),
@@ -150,7 +174,11 @@ impl AnalyzerDb {
     /// workspace-relative module paths. Called by `Workspace` at
     /// open/index time. No-op when called twice with the same value.
     pub fn set_workspace_root(&self, root: std::path::PathBuf) {
+        let store = compiler_object::CompilerObjectStore::open_reusable(&root)
+            .ok()
+            .map(Arc::new);
         *self.inner.workspace_root.write() = Some(root);
+        *self.inner.compiler_object_store.write() = store;
     }
 
     /// Returns the workspace root path if set, or `None` for
@@ -360,6 +388,20 @@ impl AnalyzerDb {
         f(&ctx)
     }
 
+    fn adapter_context_with_diagnostics<F, R>(&self, diagnostics: &RwLock<DiagnosticSink>, f: F) -> R
+    where
+        F: FnOnce(&AdapterContext<'_>) -> R,
+    {
+        let root_guard = self.inner.workspace_root.read();
+        let ctx = AdapterContext {
+            vfs: &self.inner.vfs,
+            diagnostics,
+            tree_provider: Some(self),
+            workspace_root: root_guard.as_deref(),
+        };
+        f(&ctx)
+    }
+
     /// Parse `file` (cached by VFS, file, language, and version inside the
     /// parser cache). Errors when no adapter handles the extension.
     pub fn parse(&self, file: FileId) -> Result<Arc<ParsedFile>, ParseError> {
@@ -424,8 +466,16 @@ impl AnalyzerDb {
     }
 
     fn build_decl_index_uncached(&self, file: FileId) -> Option<DeclIndex> {
+        self.build_decl_index_with_diagnostics(file, &self.inner.diagnostics)
+    }
+
+    fn build_decl_index_with_diagnostics(
+        &self,
+        file: FileId,
+        diagnostics: &RwLock<DiagnosticSink>,
+    ) -> Option<DeclIndex> {
         let adapter = self.adapter_for(file)?;
-        Some(self.adapter_context_with(|ctx| {
+        Some(self.adapter_context_with_diagnostics(diagnostics, |ctx| {
             let mut index = adapter.extract_declarations(file, ctx);
             let capabilities = adapter.capabilities();
             // Materialize the adapter's language-syntax receiver tokens on
@@ -480,9 +530,7 @@ impl AnalyzerDb {
     /// when they only need file-local facts and would otherwise retain
     /// one `DeclIndex` per workspace file.
     pub fn decl_index_uncached(&self, file: FileId) -> Option<DeclIndex> {
-        let index = self.build_decl_index_uncached(file);
-        self.release_syntax(file);
-        index
+        self.compiler_file_object_uncached(file)?.declarations
     }
 
     /// Populate/reuse the cached declaration IR, then release its phase-local
@@ -511,10 +559,10 @@ impl AnalyzerDb {
     /// this streaming lifecycle so resident memory tracks active workers, not
     /// project file count.
     pub fn syntax_indexes_uncached(&self, file: FileId) -> (Option<DeclIndex>, Option<ImportIndex>) {
-        let declarations = self.build_decl_index_uncached(file);
-        let imports = self.build_import_index_uncached(file);
-        self.release_syntax(file);
-        (declarations, imports)
+        let Some(object) = self.compiler_file_object_uncached(file) else {
+            return (None, None);
+        };
+        (object.declarations, object.imports)
     }
 
     /// Import index for `file`, computed once per `(file, version)`.
@@ -540,8 +588,16 @@ impl AnalyzerDb {
     }
 
     fn build_import_index_uncached(&self, file: FileId) -> Option<ImportIndex> {
+        self.build_import_index_with_diagnostics(file, &self.inner.diagnostics)
+    }
+
+    fn build_import_index_with_diagnostics(
+        &self,
+        file: FileId,
+        diagnostics: &RwLock<DiagnosticSink>,
+    ) -> Option<ImportIndex> {
         let adapter = self.adapter_for(file)?;
-        Some(self.adapter_context_with(|ctx| adapter.extract_imports(file, ctx)))
+        Some(self.adapter_context_with_diagnostics(diagnostics, |ctx| adapter.extract_imports(file, ctx)))
     }
 
     /// Build an import index for `file` without storing it in the
@@ -661,9 +717,10 @@ impl AnalyzerDb {
     ///
     /// The returned index owns stable global symbols and cross-file
     /// declaration/type metadata, but no function flow bodies or browse-only
-    /// facts. Callgraph and IDG builders re-lower exact file bodies through
+    /// facts. Callgraph and IDG builders stream exact file bodies through
     /// [`Self::decl_index_remapped_to_headers`] and release them at the next
-    /// file/segment boundary.
+    /// file/segment boundary; a fresh body comes from Tree-sitter or the exact
+    /// content-addressed compiler-object generation.
     #[must_use]
     pub fn build_global_header_index(&self) -> Arc<GlobalIndex> {
         self.build_streaming_global_index(GlobalIndex::insert_header_preprocessed)
@@ -952,6 +1009,18 @@ impl AnalyzerDb {
         cache.decl_index.retain(|(f, _), _| *f != file);
         cache.import_index.retain(|(f, _), _| *f != file);
         cache.adapter_languages.retain(|(f, _), _| *f != file);
+        let _diagnostics_gate = self.inner.compiler_diagnostics_gate.lock();
+        self.inner
+            .compiler_diagnostics_published
+            .write()
+            .retain(|(published_file, _)| *published_file != file);
+        let mut diagnostics = self.inner.diagnostics.write();
+        let retained_diagnostics = diagnostics
+            .snapshot()
+            .into_iter()
+            .filter(|diagnostic| diagnostic.span.file != file);
+        *diagnostics = DiagnosticSink::new();
+        diagnostics.extend(retained_diagnostics);
         cache.global_index = None;
         // CFGs are keyed on `(FuncId, file_version)` (see `cfg`).
         // For a file EDIT the version naturally bumps and the next

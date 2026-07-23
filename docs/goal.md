@@ -9,6 +9,10 @@
 > [Architecture](contributing/architecture.mdx), and
 > [Taint Engine Specification](contributing/taint-engine-spec.mdx) for current
 > behavior.
+> Current semantic prewarm first publishes SHA-256-addressed per-file compiler
+> objects, then streams them through callgraph, retrieval, linkage, and a
+> one-pass transfer/typed-replay IDG build. The historical sections below
+> predate that generation architecture.
 
 ## Original engineering brief
 

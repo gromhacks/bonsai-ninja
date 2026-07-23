@@ -54,6 +54,9 @@ use thiserror::Error;
 use transitive_callers::TransitiveCallersIndex;
 use value_flow::ValueFlowCache;
 
+pub use bonsai_db::{
+    compiler_object_sidecar_path, validate_compiler_object_sidecar_layout, COMPILER_OBJECT_CACHE_VERSION,
+};
 pub use cross_module::CrossModuleOptions;
 pub use decorators::decl_decorator_names;
 pub use semantic_context::{
@@ -448,6 +451,12 @@ struct Inner {
     /// Single-flight guard for the canonical default workspace IDG. Configured
     /// services use AnalyzerDb's per-fingerprint OnceLock map.
     idg_default_build_serial: Mutex<()>,
+    /// Exact compiler-pipeline identity for the current immutable in-memory
+    /// source generation and workspace root. Native export deliberately drops
+    /// the resident IDG between memory-heavy phases; retaining this small
+    /// validation token prevents the reload from rescanning every source and
+    /// dependency metadata file. Cleared with all semantic caches on edits.
+    idg_pipeline_hash: Mutex<Option<(Option<std::path::PathBuf>, u64)>>,
     /// Memoised transitive caller closures on the resolved call
     /// graph. The closure is rulepack-independent — selection by
     /// `source_returning_indices` is a post-hoc filter — so a
@@ -794,6 +803,7 @@ impl Workspace {
                 taint_index: TaintGraphIndex::new(),
                 taint_analysis_serial: Mutex::new(()),
                 idg_default_build_serial: Mutex::new(()),
+                idg_pipeline_hash: Mutex::new(None),
                 transitive_callers: TransitiveCallersIndex::new(),
                 class_members: ClassMemberIndex::new(),
                 enclosing: EnclosingIndex::new(),
@@ -923,6 +933,25 @@ impl Workspace {
         &self.inner.db
     }
 
+    /// Check whether the immutable compiler-object generation exactly matches
+    /// the current workspace snapshot.
+    #[must_use]
+    pub fn compiler_object_sidecar_is_current(&self, root: &Path) -> bool {
+        self.inner.db.compiler_object_sidecar_is_current(root)
+    }
+
+    /// Persist the complete generation of relocatable, adapter-lowered file
+    /// objects consumed by later compiler phases.
+    pub fn save_compiler_object_sidecar(&self, root: &Path) -> std::io::Result<usize> {
+        if !self.is_complete_workspace_index() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "compiler-object sidecars require a complete workspace index",
+            ));
+        }
+        self.inner.db.save_compiler_object_sidecar(root)
+    }
+
     pub fn vfs(&self) -> &Vfs {
         &self.inner.vfs
     }
@@ -1028,8 +1057,8 @@ impl Workspace {
     }
 
     /// Persist the complete linkage-header table. Full function bodies are
-    /// never part of this artifact; later IDG transfer re-lowers them from the
-    /// registered Tree-sitter adapters one compilation unit at a time.
+    /// never part of this artifact; later IDG transfer streams them from exact
+    /// adapter-lowered compiler objects one compilation unit at a time.
     pub fn save_compiler_linkage_sidecar(&self, root: &Path) -> std::io::Result<()> {
         if !self.is_complete_workspace_index() {
             return Err(std::io::Error::new(
@@ -1073,8 +1102,55 @@ impl Workspace {
         linkage
     }
 
-    /// Re-lower one exact file body and bind its local declaration identities
-    /// to the stable workspace symbols in [`Self::compiler_linkage_index`].
+    /// Release the resident canonical IDG between whole-workspace compiler
+    /// phases. This never removes the validated sidecar or changes source
+    /// state; the next semantic consumer reloads or rebuilds the same exact
+    /// graph on demand.
+    pub fn release_idg_service_cache(&self) {
+        self.inner.db.invalidate_idg_service();
+    }
+
+    /// Return the exact IDG pipeline identity for this workspace generation.
+    ///
+    /// Source snapshots are immutable until [`Self::apply_edit`] (or another
+    /// refresh path) advances the generation and clears this token. Keeping
+    /// the validated identity lets memory-bounded consumers unload and reload
+    /// the same sidecar without rehashing the entire source/dependency tree.
+    fn cached_idg_workspace_pipeline_hash(&self, root: Option<&Path>) -> u64 {
+        let root_key = root.map(Path::to_path_buf);
+        let mut cached = self.inner.idg_pipeline_hash.lock();
+        if let Some((cached_root, hash)) = cached.as_ref() {
+            if cached_root == &root_key {
+                return *hash;
+            }
+        }
+        let hash = idg_workspace_pipeline_hash(&self.inner.db, root);
+        *cached = Some((root_key, hash));
+        hash
+    }
+
+    fn cached_idg_transfer_pipeline_hash(&self, root: Option<&Path>, transfer_hash: u64) -> u64 {
+        self.cached_idg_workspace_pipeline_hash(root) ^ transfer_hash ^ 0x71A1_57E7_1D6D_A7A5_u64
+    }
+
+    /// Release the resident resolved call graph after a whole-workspace
+    /// consumer has finished with linkage edges. This is allocation lifetime
+    /// control, not a graph or traversal limit: a later consumer reloads or
+    /// rebuilds the complete graph on demand.
+    pub fn release_resolved_call_graph_cache(&self) {
+        *self.inner.resolved_call_graph.write() = None;
+    }
+
+    /// Release the standalone compiler linkage table at a compiler phase
+    /// boundary. A loaded IDG owns its canonical linkage table; keeping both
+    /// copies resident would duplicate every declaration header on large
+    /// workspaces.
+    pub fn release_compiler_linkage_cache(&self) {
+        *self.inner.compiler_linkage.write() = None;
+    }
+
+    /// Stream one exact file body from its compiler object (or lower a cache
+    /// miss) and bind local declaration identities to stable workspace symbols.
     #[must_use]
     pub fn exact_decl_index(&self, file: FileId) -> Option<DeclIndex> {
         let linkage = self.compiler_linkage_index();
@@ -1083,8 +1159,8 @@ impl Workspace {
             .decl_index_remapped_to_headers(linkage.as_ref(), file)
     }
 
-    /// Re-lower and return one exact declaration without materializing a
-    /// workspace-wide body index.
+    /// Return one exact declaration from the streamed compiler object without
+    /// materializing a workspace-wide body index.
     #[must_use]
     pub fn exact_decl(&self, symbol: SymbolId) -> Option<ExactDecl> {
         let linkage = self.compiler_linkage_index();
@@ -1111,33 +1187,34 @@ impl Workspace {
         if !sidecar.exists() {
             return Ok(None);
         }
-        let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, Some(root));
-        // Build the compact AST/resolver linkage before hydrating the graph.
+        let pipeline_hash = self.cached_idg_workspace_pipeline_hash(Some(root));
+        // Build the compact AST/resolver linkage before opening the paged graph.
         // Tree-sitter lowers one file at a time, but its C allocator may keep
         // released parser arenas mapped. Loading a multi-gigabyte IDG first
         // makes those transient frontend pages additive with the live graph.
         // In this order the later IDG decode can reuse the released pages; the
         // final service contains the exact same graph and linkage facts.
         let global = self.compiler_linkage_index();
-        let Some(loaded) = bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)?
+        let Some(service) = bonsai_idg::IdgQueryService::load_from_disk(&sidecar, pipeline_hash, global)?
         else {
             return Ok(None);
         };
-        let segment_count = loaded.segment_count();
-        let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global));
+        let segment_count = service.segment_count();
+        let service = Arc::new(service);
         self.inner.db.set_idg_service(service);
         Ok(Some(segment_count))
     }
 
     /// Validate the conventional IDG sidecar's exact compiler pipeline and
-    /// complete factstore layout without hydrating its graph. Query consumers
-    /// still use [`Self::load_idg_sidecar`], which decodes every payload.
+    /// complete factstore layout without opening graph pages. Query consumers
+    /// use [`Self::load_idg_sidecar`], which validates the complete layout,
+    /// scans segment headers once, and decodes exact relation pages on demand.
     pub fn validate_idg_sidecar_layout(&self, root: &Path) -> bonsai_idg::IdgResult<Option<usize>> {
         let sidecar = bonsai_idg::workspace::idg_sidecar_path(root);
         if !sidecar.exists() {
             return Ok(None);
         }
-        let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, Some(root));
+        let pipeline_hash = self.cached_idg_workspace_pipeline_hash(Some(root));
         bonsai_idg::workspace::IdgWorkspace::validate_sidecar_layout_with_pipeline(&sidecar, pipeline_hash)
             .map(Some)
     }
@@ -1421,7 +1498,7 @@ impl Workspace {
         // matches, even when no `refresh_file_from_disk` ran inside
         // bonsai-ninja (e.g. `git checkout` between two CLI calls).
         let root_path = self.root_path();
-        let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, root_path.as_deref());
+        let pipeline_hash = self.cached_idg_workspace_pipeline_hash(root_path.as_deref());
         let transfer_options = default_workspace_idg_transfer_options(&self.inner.db);
         // Try to hydrate the workspace IDG from the on-disk sidecar
         // before paying for a fresh build. Cold rebuild on Redis `src/`
@@ -1517,7 +1594,7 @@ impl Workspace {
             return Ok(None);
         };
         let _build_guard = self.inner.idg_default_build_serial.lock();
-        let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, Some(&root));
+        let pipeline_hash = self.cached_idg_workspace_pipeline_hash(Some(&root));
         let call_graph = self.cached_resolved_call_graph();
         let global = self.compiler_linkage_index();
         let transfer_options = default_workspace_idg_transfer_options(&self.inner.db);
@@ -1561,16 +1638,15 @@ impl Workspace {
         let global = self.compiler_linkage_index();
         let root_path = self.root_path();
         let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
-        let pipeline_hash = idg_transfer_pipeline_hash(&self.inner.db, root_path.as_deref(), transfer_hash);
+        let pipeline_hash = self.cached_idg_transfer_pipeline_hash(root_path.as_deref(), transfer_hash);
         let use_idg_sidecar = self.is_complete_workspace_index();
         if use_idg_sidecar {
             if let Some(root) = root_path.as_deref() {
                 let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
-                if let Ok(Some(loaded)) =
-                    bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
+                if let Ok(Some(service)) =
+                    bonsai_idg::IdgQueryService::load_from_disk(&sidecar, pipeline_hash, global.clone())
                 {
-                    let service =
-                        Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
+                    let service = Arc::new(service);
                     let service = self
                         .inner
                         .db
@@ -1643,13 +1719,13 @@ impl Workspace {
         let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
         let scope_hash = idg_file_scope_fingerprint(included_files);
         let scoped_hash = transfer_hash ^ scope_hash ^ 0x5C0F_ED1D_65C0_9E5D_u64;
-        let pipeline_hash = idg_transfer_pipeline_hash(&self.inner.db, root_path.as_deref(), scoped_hash);
+        let pipeline_hash = self.cached_idg_transfer_pipeline_hash(root_path.as_deref(), scoped_hash);
         if let Some(root) = root_path.as_deref() {
             let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
-            if let Ok(Some(loaded)) =
-                bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
+            if let Ok(Some(service)) =
+                bonsai_idg::IdgQueryService::load_from_disk(&sidecar, pipeline_hash, global.clone())
             {
-                let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
+                let service = Arc::new(service);
                 let service = self.inner.db.set_idg_service_for_semantics(scoped_hash, service);
                 return service;
             }
@@ -1816,6 +1892,7 @@ impl Workspace {
         self.inner.flow_ids.invalidate_all();
         self.inner.value_flow.clear();
         self.inner.db.invalidate_idg_service();
+        *self.inner.idg_pipeline_hash.lock() = None;
         self.delete_idg_sidecar();
         self.inner.inter_taint.clear();
         *self.inner.resolved_call_graph.write() = None;
@@ -2579,20 +2656,15 @@ impl Workspace {
         self.inner.dataflow.prewarm_all(&self.inner.db);
     }
 
-    /// Aggregate parser diagnostics across every workspace file plus
-    /// the db-level sink. Cheap when the parser cache is warm — each
-    /// file's diagnostics are already attached to its `ParsedFile`.
+    /// Aggregate parser/adapter diagnostics across every workspace file.
+    /// Compiler objects retain the exact diagnostics for their source
+    /// snapshot, so a warm query does not reparse the project merely to report
+    /// syntax coverage.
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
         for file in self.inner.vfs.all_files() {
-            if let Ok(parsed) = self.inner.db.parse(file) {
-                diagnostics.extend(parsed.diagnostics.iter().cloned());
-                drop(parsed);
-                self.inner.db.release_syntax(file);
-            }
+            let _ = self.inner.db.compiler_file_object_uncached(file);
         }
-        diagnostics.extend(self.inner.db.diagnostics());
-        diagnostics
+        self.inner.db.diagnostics()
     }
 
     /// Return deterministic parser-coverage reasons for an exact file scope.
@@ -2607,9 +2679,13 @@ impl Workspace {
         let mut syntax_error_files = AHashSet::new();
         let mut parse_timeout_files = AHashSet::new();
         let mut parse_failed_files = AHashSet::new();
+        let mut missing_object_files = Vec::new();
         let mut record_diagnostic = |diagnostic: &Diagnostic| {
             if file_set.contains(&diagnostic.span.file) {
                 match diagnostic.code.as_deref() {
+                    Some("parse-failed") => {
+                        parse_failed_files.insert(diagnostic.span.file);
+                    }
                     Some("parse-timeout") => {
                         parse_timeout_files.insert(diagnostic.span.file);
                     }
@@ -2622,22 +2698,21 @@ impl Workspace {
         };
 
         for &file in files {
-            match self.inner.db.parse(file) {
-                Ok(parsed) => {
-                    for diagnostic in &parsed.diagnostics {
+            match self.inner.db.compiler_file_object_uncached(file) {
+                Some(object) => {
+                    for diagnostic in &object.diagnostics {
                         record_diagnostic(diagnostic);
                     }
-                    drop(parsed);
-                    self.inner.db.release_syntax(file);
                 }
-                Err(_) => {
-                    parse_failed_files.insert(file);
+                None => {
+                    missing_object_files.push(file);
                 }
             }
         }
         for diagnostic in self.inner.db.diagnostics() {
             record_diagnostic(&diagnostic);
         }
+        parse_failed_files.extend(missing_object_files);
 
         let mut reasons = std::collections::BTreeSet::new();
         if !parse_failed_files.is_empty() {
@@ -3366,7 +3441,19 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // compact headers and retains return/callback scope facts in the compiler
     // linkage projection; cached taint graphs from the incomplete scope are
     // therefore invalid.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 44;
+    // v45 (2026-07-22): projected field forwarding reaches the finite
+    // AST-demanded suffix fixed point without split-view duplicate states,
+    // and contextual return composition matches exact structural
+    // caller/callee/span boundaries. Rebuild IDG and taint sidecars because
+    // recursive field and symbolic return reachability can change.
+    // v46 (2026-07-22): exact projected Read/Write nodes participate in
+    // synthetic write attribution. Rebuild taint sidecars so cached graphs
+    // cannot retain the former bare-local-only evidence surface.
+    // v47 (2026-07-22): taint evidence attribution renders reachable storage
+    // names directly from numeric IDG places and always hydrates the exact
+    // per-file compiler object instead of treating non-empty compact linkage
+    // headers as complete function bodies.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 47;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
@@ -3409,10 +3496,6 @@ fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
 
 fn default_workspace_idg_transfer_options(db: &AnalyzerDb) -> bonsai_idg::TransferOptions {
     bonsai_idg::TransferOptions::compiler_semantics(db.complete_field_place_languages())
-}
-
-fn idg_transfer_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>, transfer_hash: u64) -> u64 {
-    idg_workspace_pipeline_hash(db, root) ^ transfer_hash ^ 0x71A1_57E7_1D6D_A7A5_u64
 }
 
 fn idg_transfer_options_fingerprint(options: &bonsai_idg::TransferOptions) -> u64 {

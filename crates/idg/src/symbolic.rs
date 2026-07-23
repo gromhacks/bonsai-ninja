@@ -6,13 +6,50 @@
 //! `transform × concrete suffix` combination. All names in this table come
 //! from adapter-produced AST places; hot relations use numeric ids only.
 
-use ahash::AHashMap;
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
 use bonsai_common::{FuncId, Precision, Span};
+use hashbrown::HashTable;
 use serde::{Deserialize, Serialize};
 
 use crate::workspace::SegmentId;
 use crate::{place::Place, segment::IdgSegment};
+
+/// Exact hash-consing index over a canonical vector.
+///
+/// The table stores only numeric row ids. Hash collisions are resolved by the
+/// caller against the canonical vector, so this has the same identity contract
+/// as `HashMap<Value, u32>` without retaining a second copy of every compiler
+/// string/base key.
+#[derive(Clone, Debug, Default)]
+struct CompactCanonicalIndex {
+    table: HashTable<u32>,
+    hash_builder: ahash::RandomState,
+}
+
+impl CompactCanonicalIndex {
+    fn hash<T: std::hash::Hash + ?Sized>(&self, value: &T) -> u64 {
+        self.hash_builder.hash_one(value)
+    }
+
+    fn find(&self, hash: u64, mut matches: impl FnMut(u32) -> bool) -> Option<u32> {
+        self.table.find(hash, |id| matches(*id)).copied()
+    }
+
+    fn insert<T: std::hash::Hash>(&mut self, hash: u64, id: u32, canonical: &[T]) {
+        let hash_builder = self.hash_builder.clone();
+        self.table.insert_unique(hash, id, move |stored| {
+            hash_builder.hash_one(
+                canonical
+                    .get(*stored as usize)
+                    .expect("compact canonical index contains a valid row id"),
+            )
+        });
+    }
+
+    fn clear(&mut self) {
+        self.table.clear();
+    }
+}
 
 /// Canonical adapter-normalized storage components for one IDG read/write.
 ///
@@ -117,9 +154,9 @@ pub struct SymbolicFieldGraph {
     bases: Vec<SymbolicFieldBase>,
     transforms: Vec<SymbolicFieldTransform>,
     #[serde(skip)]
-    string_ids: AHashMap<String, u32>,
+    string_ids: CompactCanonicalIndex,
     #[serde(skip)]
-    base_ids: AHashMap<SymbolicFieldBase, u32>,
+    base_ids: CompactCanonicalIndex,
     #[serde(skip)]
     outgoing_by_source: Vec<Vec<u32>>,
 }
@@ -133,12 +170,17 @@ impl SymbolicFieldGraph {
 
     /// Intern one adapter-normalized AST place/string.
     pub fn intern_string(&mut self, value: &str) -> u32 {
-        if let Some(id) = self.string_ids.get(value).copied() {
+        let hash = self.string_ids.hash(value);
+        if let Some(id) = self.string_ids.find(hash, |id| {
+            self.strings
+                .get(id as usize)
+                .is_some_and(|stored| stored == value)
+        }) {
             return id;
         }
         let id = u32::try_from(self.strings.len()).expect("symbolic field string count exceeds u32");
         self.strings.push(value.to_string());
-        self.string_ids.insert(value.to_string(), id);
+        self.string_ids.insert(hash, id, &self.strings);
         id
     }
 
@@ -150,12 +192,16 @@ impl SymbolicFieldGraph {
             func,
             storage,
         };
-        if let Some(id) = self.base_ids.get(&base).copied() {
+        let hash = self.base_ids.hash(&base);
+        if let Some(id) = self
+            .base_ids
+            .find(hash, |id| self.bases.get(id as usize) == Some(&base))
+        {
             return id;
         }
         let id = u32::try_from(self.bases.len()).expect("symbolic field base count exceeds u32");
         self.bases.push(base);
-        self.base_ids.insert(base, id);
+        self.base_ids.insert(hash, id, &self.bases);
         id
     }
 
@@ -197,20 +243,26 @@ impl SymbolicFieldGraph {
     /// Look up an already-interned string without mutating the relation.
     #[must_use]
     pub fn string_id(&self, value: &str) -> Option<u32> {
-        self.string_ids.get(value).copied()
+        let hash = self.string_ids.hash(value);
+        self.string_ids.find(hash, |id| {
+            self.strings
+                .get(id as usize)
+                .is_some_and(|stored| stored == value)
+        })
     }
 
     /// Look up an already-interned base without mutating the relation.
     #[must_use]
     pub fn base_id(&self, segment: SegmentId, func: FuncId, storage: &str) -> Option<u32> {
         let storage = self.string_id(storage)?;
+        let base = SymbolicFieldBase {
+            segment,
+            func,
+            storage,
+        };
+        let hash = self.base_ids.hash(&base);
         self.base_ids
-            .get(&SymbolicFieldBase {
-                segment,
-                func,
-                storage,
-            })
-            .copied()
+            .find(hash, |id| self.bases.get(id as usize) == Some(&base))
     }
 
     /// Transform indices whose source is `base`.
@@ -224,20 +276,7 @@ impl SymbolicFieldGraph {
 
     /// Restore hash-consing indexes after deserialization.
     pub fn rebuild_indexes(&mut self) {
-        self.string_ids.clear();
-        self.base_ids.clear();
-        for (index, value) in self.strings.iter().enumerate() {
-            self.string_ids.insert(
-                value.clone(),
-                u32::try_from(index).expect("symbolic field string count exceeds u32"),
-            );
-        }
-        for (index, base) in self.bases.iter().copied().enumerate() {
-            self.base_ids.insert(
-                base,
-                u32::try_from(index).expect("symbolic field base count exceeds u32"),
-            );
-        }
+        self.rebuild_dictionary_indexes();
         self.outgoing_by_source = vec![Vec::new(); self.bases.len()];
         for (index, transform) in self.transforms.iter().enumerate() {
             if let Some(outgoing) = self.outgoing_by_source.get_mut(transform.source as usize) {
@@ -246,9 +285,24 @@ impl SymbolicFieldGraph {
         }
     }
 
+    fn rebuild_dictionary_indexes(&mut self) {
+        self.string_ids.clear();
+        self.base_ids.clear();
+        for (index, value) in self.strings.iter().enumerate() {
+            let id = u32::try_from(index).expect("symbolic field string count exceeds u32");
+            let hash = self.string_ids.hash(value);
+            self.string_ids.insert(hash, id, &self.strings);
+        }
+        for (index, base) in self.bases.iter().copied().enumerate() {
+            let id = u32::try_from(index).expect("symbolic field base count exceeds u32");
+            let hash = self.base_ids.hash(&base);
+            self.base_ids.insert(hash, id, &self.bases);
+        }
+    }
+
     pub(crate) fn release_indexes(&mut self) {
-        self.string_ids = AHashMap::new();
-        self.base_ids = AHashMap::new();
+        self.string_ids = CompactCanonicalIndex::default();
+        self.base_ids = CompactCanonicalIndex::default();
         self.outgoing_by_source = Vec::new();
     }
 
@@ -272,11 +326,28 @@ impl SymbolicFieldGraph {
             strings,
             bases,
             transforms,
-            string_ids: AHashMap::default(),
-            base_ids: AHashMap::default(),
+            string_ids: CompactCanonicalIndex::default(),
+            base_ids: CompactCanonicalIndex::default(),
             outgoing_by_source: Vec::new(),
         };
         graph.rebuild_indexes();
+        graph
+    }
+
+    /// Restore only the string/base dictionaries for a paged query graph.
+    /// Outgoing transform rows remain in the factstore and are addressed by
+    /// the query sidecar's compact numeric location table, so allocating one
+    /// empty `Vec` per base would add no query capability.
+    pub(crate) fn from_header_parts(strings: Vec<String>, bases: Vec<SymbolicFieldBase>) -> Self {
+        let mut graph = Self {
+            strings,
+            bases,
+            transforms: Vec::new(),
+            string_ids: CompactCanonicalIndex::default(),
+            base_ids: CompactCanonicalIndex::default(),
+            outgoing_by_source: Vec::new(),
+        };
+        graph.rebuild_dictionary_indexes();
         graph
     }
 

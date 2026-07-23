@@ -8,7 +8,7 @@
 use crate::ClassOut;
 use bonsai_common::{FileId, FuncId, Precision, Span, SpanMap, SymbolId};
 use bonsai_idg::CrossCallEdge;
-use bonsai_inspect::{chain_to_names, func_display_name, ChainCache};
+use bonsai_inspect::ChainCache;
 use bonsai_lang_api::{AssignValueKind, CallArg, CallKind, DeclKind, ExpressionFlow, FlowEvent, LoopKind};
 use bonsai_workspace::{decl_decorator_names, flow_ids::FlowIdLabelOptions, Workspace};
 use serde::ser::{SerializeMap, SerializeSeq};
@@ -49,6 +49,10 @@ struct ExportCompleteness {
 
 #[derive(Serialize)]
 struct ExportTaintFunction {
+    /// Compiler identity used by bounded file-at-a-time projections. This is
+    /// not part of the native export wire format.
+    #[serde(skip)]
+    file_id: FileId,
     func_id: u32,
     name: String,
     qualified_name: Option<String>,
@@ -59,13 +63,13 @@ struct ExportTaintFunction {
 }
 
 #[derive(Serialize)]
-struct ExportCallEdge {
+struct ExportCallEdge<'a> {
     from: u32,
     to: u32,
-    kind: String,
-    precision: String,
-    resolver_stage: String,
-    evidence: String,
+    kind: &'static str,
+    precision: &'static str,
+    resolver_stage: &'a str,
+    evidence: &'a str,
     confidence: u8,
 }
 
@@ -248,10 +252,10 @@ struct ExportFlowChain {
 /// One entry per callable decl: its caller/outgoing counts plus a flag
 /// indicating whether it's a workspace entry point (no callers).
 #[derive(Serialize)]
-struct ExportFlowNode {
-    function: String,
-    callers: Vec<String>,
-    outgoing: Vec<String>,
+struct ExportFlowNode<'a> {
+    function: &'a str,
+    callers: Vec<&'a str>,
+    outgoing: Vec<&'a str>,
     entry_point: bool,
 }
 
@@ -700,17 +704,17 @@ struct ExportString {
 }
 
 #[derive(Serialize)]
-struct CallEdgeOut {
-    caller: String,
-    caller_file: String,
+struct CallEdgeOut<'a> {
+    caller: &'a str,
+    caller_file: &'a str,
     caller_line: u32,
-    callee: String,
-    callee_kind: String,
+    callee: &'a str,
+    callee_kind: &'static str,
     call_site_line: u32,
     call_site_column: u32,
     precision: &'static str,
-    resolver_stage: String,
-    evidence: String,
+    resolver_stage: &'a str,
+    evidence: &'a str,
     confidence: u8,
 }
 
@@ -754,6 +758,13 @@ impl ExportSpanCache {
         };
         let line_col = map.line_col(span.start);
         (line_col.line, line_col.column)
+    }
+
+    fn path(&self, file: FileId) -> &str {
+        self.files
+            .get(&file)
+            .map(|(path, _)| path.as_str())
+            .unwrap_or("<unknown>")
     }
 
     fn end_line(&self, span: Span) -> u32 {
@@ -851,7 +862,45 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     writer: &mut W,
 ) -> serde_json::Result<()> {
     let total_started = Instant::now();
+    // Native export starts with the compact numeric IDG summary, releases it,
+    // and only then materializes callgraph/presentation projections. Reset any
+    // service inherited from an SDK query so the phase owns one exact sidecar
+    // working set and no stale derived indexes.
+    ws.release_idg_service_cache();
     let global = ws.compiler_linkage_index();
+
+    // Compile the complete numeric return-summary relation before materializing
+    // presentation-heavy structural rows, entry-point strings, and resolved
+    // callgraph projections. The relation is independent of JSON order and
+    // names; phase ordering therefore changes only allocation lifetimes. On a
+    // large workspace this prevents the compiler's transient function layouts
+    // from overlapping hundreds of thousands of rendered export records.
+    let summary_funcs: Vec<FuncId> = global
+        .all_files()
+        .flat_map(|file| {
+            global.decls_in(file).iter().filter_map(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                )
+                .then(|| FuncId::new(decl.symbol.raw()))
+            })
+        })
+        .collect();
+    let summary_idg = export_projection_idg_service(ws);
+    let return_taint_by_func = summary_idg.return_taint_param_indices_for_funcs_with_max_precision(
+        &summary_funcs,
+        Some(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
+    );
+    summary_idg.release_query_indexes();
+    drop(summary_idg);
+    ws.release_idg_service_cache();
+    export_phase_log(format_args!(
+        "taint.numeric_function_summaries: funcs={} rows={}",
+        summary_funcs.len(),
+        return_taint_by_func.len()
+    ));
+    drop(summary_funcs);
     let spans = ExportSpanCache::new(ws);
 
     let mut serializer = serde_json::Serializer::new(writer);
@@ -868,24 +917,29 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     map.serialize_entry("summary", &structural.summary)?;
     map.serialize_entry("files", &ExportFilesStreaming { ws, spans: &spans })?;
     map.serialize_entry("classes", &structural.classes)?;
-    map.serialize_entry("callgraph", &structural.callgraph)?;
+    map.serialize_entry(
+        "callgraph",
+        &ExportStructuralCallgraphStreaming {
+            ws,
+            global: global.as_ref(),
+            spans: &spans,
+        },
+    )?;
     drop(structural);
 
     let chain_cache = ChainCache::new(ws);
     let chain_limits = ExportChainLimits::bounded_materialization();
     let phase_started = Instant::now();
     let flow_sections = build_export_flow_sections(
-        ws,
         global.as_ref(),
         &chain_cache,
         chain_limits,
         config.complete_chains,
     );
     export_phase_log(format_args!(
-        "flow sections: {:.3}s chains={} graph_nodes={} truncated_targets={} mode={}",
+        "flow sections: {:.3}s chains={} truncated_targets={} mode={}",
         phase_started.elapsed().as_secs_f64(),
         flow_sections.flow_chains.len(),
-        flow_sections.flow_graph.len(),
         flow_sections.flow_chains_truncated_targets,
         flow_sections.flow_chains_mode
     ));
@@ -899,7 +953,13 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     if let Some(reason) = &flow_sections.flow_chains_incomplete_reason {
         map.serialize_entry("flow_chains_incomplete_reason", &reason)?;
     }
-    map.serialize_entry("flow_graph", &flow_sections.flow_graph)?;
+    map.serialize_entry(
+        "flow_graph",
+        &ExportFlowGraphStreaming {
+            global: global.as_ref(),
+            chain_cache: &chain_cache,
+        },
+    )?;
     let flow_chains_truncated_targets = flow_sections.flow_chains_truncated_targets;
     drop(flow_sections);
 
@@ -912,7 +972,13 @@ fn write_native_export_streaming<W: Write + ?Sized>(
         &functions,
         config.complete_chains,
     );
+    let completeness_started = Instant::now();
     let workspace_incomplete_reasons = export_workspace_incomplete_reasons(ws);
+    export_phase_log(format_args!(
+        "workspace completeness: {:.3}s reasons={}",
+        completeness_started.elapsed().as_secs_f64(),
+        workspace_incomplete_reasons.len()
+    ));
     let completeness = export_analysis_completeness(
         config,
         flow_chains_truncated_targets,
@@ -921,13 +987,21 @@ fn write_native_export_streaming<W: Write + ?Sized>(
         chain_limits,
         &workspace_incomplete_reasons,
     );
+    // Entry-point inference needs resolved caller membership. Compute it in
+    // the callgraph phase and carry only the compact rendered rows across the
+    // IDG phase boundary.
+    let entry_points = export_entry_points(ws, &spans);
+    drop(chain_cache);
+    drop(global);
     map.serialize_entry("analysis_complete", &completeness.complete)?;
     map.serialize_entry("analysis_incomplete_reasons", &completeness.incomplete_reasons)?;
     let taint_graph = ExportTaintGraphStreaming {
         ws,
         spans: &spans,
         functions: &functions,
+        entry_points: &entry_points,
         chain_rows: &chain_rows,
+        return_taint_by_func: &return_taint_by_func,
         config,
     };
     map.serialize_entry("taint_graph", &taint_graph)?;
@@ -942,7 +1016,6 @@ fn write_native_export_streaming<W: Write + ?Sized>(
 struct ExportStructuralMetadata {
     summary: ExportSummary,
     classes: Vec<ClassOut>,
-    callgraph: Vec<CallEdgeOut>,
 }
 
 fn build_export_structural_metadata(
@@ -1033,7 +1106,7 @@ fn build_export_structural_metadata(
         call_site_count
     ));
 
-    let callgraph = export_structural_callgraph(ws, global, spans);
+    let call_edge_count = export_structural_callgraph_count(ws, global);
 
     let mut languages: Vec<String> = languages_set.into_iter().collect();
     languages.sort();
@@ -1044,18 +1117,14 @@ fn build_export_structural_metadata(
         function_count,
         method_count,
         call_site_count,
-        call_edge_count: callgraph.len(),
+        call_edge_count,
         import_count,
         string_count,
         strings_by_category: serde_json::to_value(&by_cat)?,
         languages,
     };
 
-    Ok(ExportStructuralMetadata {
-        summary,
-        classes,
-        callgraph,
-    })
+    Ok(ExportStructuralMetadata { summary, classes })
 }
 
 fn export_files_in_path_order(ws: &Workspace) -> Vec<(FileId, String)> {
@@ -1362,7 +1431,6 @@ struct ExportFlowSections {
     flow_chains_mode: &'static str,
     flow_chains_truncated_targets: usize,
     flow_chains_incomplete_reason: Option<String>,
-    flow_graph: Vec<ExportFlowNode>,
 }
 
 fn chain_rows_complete(compressed_chains: bool, truncated_targets: usize) -> bool {
@@ -1447,7 +1515,6 @@ fn flow_id_labels_incomplete_reason(
 }
 
 fn build_export_flow_sections(
-    ws: &Workspace,
     global: &bonsai_index::GlobalIndex,
     chain_cache: &ChainCache<'_>,
     chain_limits: ExportChainLimits,
@@ -1462,7 +1529,6 @@ fn build_export_flow_sections(
     let compressed_chains = complete_chains;
     let mut flow_chains: Vec<ExportFlowChain> = Vec::new();
     let mut flow_chains_truncated_targets = 0usize;
-    let mut flow_graph: Vec<ExportFlowNode> = Vec::new();
     let flow_files: Vec<_> = global.all_files().collect();
     for file in flow_files {
         for d in global.functions_in(file) {
@@ -1480,7 +1546,12 @@ fn build_export_flow_sections(
                 let meaningful_chains: Vec<Vec<String>> = chains_r
                     .iter()
                     .filter(|c| c.funcs.len() > 1)
-                    .map(|c| chain_to_names(ws, &c.funcs))
+                    .map(|c| {
+                        c.funcs
+                            .iter()
+                            .map(|func| linkage_func_display_name(global, *func).to_string())
+                            .collect()
+                    })
                     .collect();
                 if !meaningful_chains.is_empty() {
                     flow_chains.push(ExportFlowChain {
@@ -1491,30 +1562,9 @@ fn build_export_flow_sections(
                     });
                 }
             }
-            let mut callers_vec: Vec<String> = chain_cache
-                .resolved_graph()
-                .callers_of(func)
-                .map(|e| func_display_name(ws, e.from))
-                .collect();
-            callers_vec.sort();
-            callers_vec.dedup();
-            let mut outgoing: Vec<String> = chain_cache
-                .resolved_graph()
-                .callees_of(func)
-                .map(|e| func_display_name(ws, e.to))
-                .collect();
-            outgoing.sort();
-            outgoing.dedup();
-            flow_graph.push(ExportFlowNode {
-                entry_point: callers_vec.is_empty(),
-                function: d.name.clone(),
-                callers: callers_vec,
-                outgoing,
-            });
         }
     }
     flow_chains.sort_by(|a, b| a.target.cmp(&b.target));
-    flow_graph.sort_by(|a, b| a.function.cmp(&b.function));
     ExportFlowSections {
         flow_chains,
         flow_chains_complete: chain_rows_complete(compressed_chains, flow_chains_truncated_targets),
@@ -1531,15 +1581,91 @@ fn build_export_flow_sections(
             chain_limits.max_entry_probes,
             complete_chains,
         ),
-        flow_graph,
     }
+}
+
+/// Deterministic flow graph serialization that owns only one rendered row at
+/// a time. The compact `FuncId` order vector is the external-sort index; caller
+/// and callee names remain canonical linkage facts and are never duplicated
+/// for the whole workspace in memory.
+struct ExportFlowGraphStreaming<'a> {
+    global: &'a bonsai_index::GlobalIndex,
+    chain_cache: &'a ChainCache<'a>,
+}
+
+impl Serialize for ExportFlowGraphStreaming<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut funcs: Vec<FuncId> = self
+            .global
+            .all_files()
+            .flat_map(|file| {
+                self.global
+                    .functions_in(file)
+                    .map(|decl| FuncId::new(decl.symbol.raw()))
+            })
+            .collect();
+        funcs.sort_by(|left, right| {
+            let left_name = self
+                .global
+                .decl_of(SymbolId::new(left.raw()))
+                .map(|decl| decl.name.as_str())
+                .unwrap_or_default();
+            let right_name = self
+                .global
+                .decl_of(SymbolId::new(right.raw()))
+                .map(|decl| decl.name.as_str())
+                .unwrap_or_default();
+            left_name.cmp(right_name)
+        });
+
+        let graph = self.chain_cache.resolved_graph();
+        let mut sequence = serializer.serialize_seq(Some(funcs.len()))?;
+        for func in funcs {
+            let mut callers: Vec<&str> = graph
+                .callers_of(func)
+                .map(|edge| linkage_func_display_name(self.global, edge.from))
+                .collect();
+            callers.sort_unstable();
+            callers.dedup();
+            let mut outgoing: Vec<&str> = graph
+                .callees_of(func)
+                .map(|edge| linkage_func_display_name(self.global, edge.to))
+                .collect();
+            outgoing.sort_unstable();
+            outgoing.dedup();
+            let function = self
+                .global
+                .decl_of(SymbolId::new(func.raw()))
+                .map(|decl| decl.name.as_str())
+                .unwrap_or_default();
+            sequence.serialize_element(&ExportFlowNode {
+                entry_point: callers.is_empty(),
+                function,
+                callers,
+                outgoing,
+            })?;
+        }
+        SerializeSeq::end(sequence)
+    }
+}
+
+fn linkage_func_display_name(global: &bonsai_index::GlobalIndex, func: FuncId) -> &str {
+    global
+        .decl_of(SymbolId::new(func.raw()))
+        .map(|decl| decl.name.as_str())
+        .unwrap_or("<unknown>")
 }
 
 struct ExportTaintGraphStreaming<'a> {
     ws: &'a Workspace,
     spans: &'a ExportSpanCache,
     functions: &'a [ExportTaintFunction],
+    entry_points: &'a [ExportEntryPoint],
     chain_rows: &'a ExportTaintChainsAndFlowLabels,
+    return_taint_by_func: &'a ahash::AHashMap<FuncId, Vec<u32>>,
     config: NativeExportConfig,
 }
 
@@ -1553,26 +1679,47 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
         let functions = self.functions;
         map.serialize_entry("functions", functions)?;
 
-        let call_edges = export_taint_call_edges(self.ws);
-        map.serialize_entry("call_edges", &call_edges)?;
-        drop(call_edges);
+        map.serialize_entry("call_edges", &ExportTaintCallEdgesStreaming { ws: self.ws })?;
 
-        let projection_idg = export_projection_idg_service(self.ws);
-        let function_summaries = export_function_summaries_from_idg(&projection_idg, functions);
+        // The remaining sections consume the canonical IDG and no longer
+        // need the resolved callgraph or its standalone linkage table. Drop
+        // those complete compiler artifacts before restoring the IDG so peak
+        // memory follows the largest phase instead of their sum.
+        self.ws.release_resolved_call_graph_cache();
+        self.ws.release_compiler_linkage_cache();
+
+        let function_summaries = export_function_summaries(self.return_taint_by_func, functions);
         map.serialize_entry("function_summaries", &function_summaries)?;
         drop(function_summaries);
 
-        let reachable_facts = export_reachable_facts(self.ws, functions);
-        map.serialize_entry("reachable_facts", &reachable_facts)?;
-        drop(reachable_facts);
+        let projection_idg = export_projection_idg_service(self.ws);
+        if !self.config.full_propagations {
+            projection_idg.release_query_indexes();
+        }
 
-        let assign_chains = export_assign_chains_from_idg(&projection_idg, functions);
-        map.serialize_entry("assign_chains", &assign_chains)?;
-        drop(assign_chains);
+        map.serialize_entry(
+            "reachable_facts",
+            &ExportReachableFactsStreaming {
+                ws: self.ws,
+                functions,
+            },
+        )?;
 
-        let intra_taint = export_intra_taint(self.ws, functions);
-        map.serialize_entry("intra_taint", &intra_taint)?;
-        drop(intra_taint);
+        map.serialize_entry(
+            "assign_chains",
+            &ExportAssignChainsStreaming {
+                idg: &projection_idg,
+                functions,
+            },
+        )?;
+
+        map.serialize_entry(
+            "intra_taint",
+            &ExportIntraTaintStreaming {
+                ws: self.ws,
+                functions,
+            },
+        )?;
 
         let alias_maps = export_alias_maps(self.ws);
         map.serialize_entry("alias_maps", &alias_maps)?;
@@ -1582,14 +1729,14 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
         map.serialize_entry("class_fields", &class_fields)?;
         drop(class_fields);
 
-        let entry_points = export_entry_points(self.ws, self.spans);
-        map.serialize_entry("entry_points", &entry_points)?;
+        let entry_points = self.entry_points;
+        map.serialize_entry("entry_points", entry_points)?;
 
         let propagation_rows = ExportTaintPropagationsStreaming {
             ws: self.ws,
             spans: self.spans,
             idg: &projection_idg,
-            entry_points: &entry_points,
+            entry_points,
             full_propagations: self.config.full_propagations,
         };
         map.serialize_entry("propagations", &propagation_rows)?;
@@ -1598,7 +1745,6 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
         if let Some(reason) = propagation_omitted_reason(self.config) {
             map.serialize_entry("propagations_omitted_reason", &reason)?;
         }
-        drop(entry_points);
         drop(projection_idg);
 
         let chain_rows = self.chain_rows;
@@ -1732,6 +1878,7 @@ fn export_taint_functions(ws: &Workspace, spans: &ExportSpanCache) -> Vec<Export
             }
             let (path, line, _) = spans.format(decl.name_span);
             functions.push(ExportTaintFunction {
+                file_id: file,
                 func_id: decl.symbol.raw(),
                 name: decl.name.clone(),
                 qualified_name: decl.qualified_name.clone(),
@@ -1751,103 +1898,177 @@ fn export_taint_functions(ws: &Workspace, spans: &ExportSpanCache) -> Vec<Export
     functions
 }
 
-fn export_structural_callgraph(
+fn export_structural_callgraph_indices(
     ws: &Workspace,
     global: &bonsai_index::GlobalIndex,
     spans: &ExportSpanCache,
-) -> Vec<CallEdgeOut> {
-    let phase_started = Instant::now();
+) -> Vec<usize> {
     let resolved = ws.cached_resolved_call_graph();
-    let mut out: Vec<CallEdgeOut> = Vec::new();
-    for edge in resolved
+    let mut indices: Vec<usize> = resolved
         .inner()
         .edges
         .iter()
-        .filter(|edge| edge.precision.is_semantic())
-    {
-        let Some(caller_decl) = global.decl_of(SymbolId::new(edge.from.raw())) else {
-            continue;
-        };
-        let Some(callee_decl) = global.decl_of(SymbolId::new(edge.to.raw())) else {
-            continue;
-        };
-        let (caller_file, caller_line, _) = spans.format(caller_decl.name_span);
-        let (_, call_site_line, call_site_column) = spans.format(edge.span);
-        out.push(CallEdgeOut {
-            caller: caller_decl.name.clone(),
-            caller_file,
-            caller_line,
-            callee: callee_decl.name.clone(),
-            callee_kind: format!("{:?}", callee_decl.kind).to_lowercase(),
-            call_site_line,
-            call_site_column,
-            precision: export_precision_label(edge.precision),
-            resolver_stage: edge.provenance.resolver_stage().to_string(),
-            evidence: edge.provenance.evidence().to_string(),
-            confidence: edge.provenance.confidence(),
-        });
-    }
-    out.sort_by(|a, b| {
-        a.caller_file
-            .cmp(&b.caller_file)
-            .then_with(|| a.caller_line.cmp(&b.caller_line))
-            .then_with(|| a.call_site_line.cmp(&b.call_site_line))
-            .then_with(|| a.call_site_column.cmp(&b.call_site_column))
-            .then_with(|| a.caller.cmp(&b.caller))
-            .then_with(|| a.callee.cmp(&b.callee))
-    });
-    export_phase_log(format_args!(
-        "structural.callgraph: {:.3}s count={}",
-        phase_started.elapsed().as_secs_f64(),
-        out.len()
-    ));
-    out
-}
-
-fn export_taint_call_edges(ws: &Workspace) -> Vec<ExportCallEdge> {
-    // ---- call_edges: every resolved FuncId→FuncId link ----
-    let phase_started = Instant::now();
-    let resolved = ws.cached_resolved_call_graph();
-    let mut call_edges: Vec<ExportCallEdge> = resolved
-        .inner()
-        .edges
-        .iter()
-        .filter(|edge| edge.precision.is_semantic())
-        .map(|e| ExportCallEdge {
-            from: e.from.raw(),
-            to: e.to.raw(),
-            kind: format!("{:?}", e.kind).to_lowercase(),
-            precision: format!("{:?}", e.precision).to_lowercase(),
-            resolver_stage: e.provenance.resolver_stage().to_string(),
-            evidence: e.provenance.evidence().to_string(),
-            confidence: e.provenance.confidence(),
+        .enumerate()
+        .filter(|(_, edge)| edge.precision.is_semantic())
+        .filter_map(|(index, edge)| {
+            (global.decl_of(SymbolId::new(edge.from.raw())).is_some()
+                && global.decl_of(SymbolId::new(edge.to.raw())).is_some())
+            .then_some(index)
         })
         .collect();
-    call_edges.sort_by(|a, b| a.from.cmp(&b.from).then_with(|| a.to.cmp(&b.to)));
-    export_phase_log(format_args!(
-        "taint.call_edges: {:.3}s count={}",
-        phase_started.elapsed().as_secs_f64(),
-        call_edges.len()
-    ));
-    call_edges
+    indices.sort_by(|left, right| {
+        let left = &resolved.inner().edges[*left];
+        let right = &resolved.inner().edges[*right];
+        let left_caller = global
+            .decl_of(SymbolId::new(left.from.raw()))
+            .expect("filtered structural caller");
+        let right_caller = global
+            .decl_of(SymbolId::new(right.from.raw()))
+            .expect("filtered structural caller");
+        let left_callee = global
+            .decl_of(SymbolId::new(left.to.raw()))
+            .expect("filtered structural callee");
+        let right_callee = global
+            .decl_of(SymbolId::new(right.to.raw()))
+            .expect("filtered structural callee");
+        let (left_line, left_column) = spans.line_col(left.span);
+        let (right_line, right_column) = spans.line_col(right.span);
+        spans
+            .path(left_caller.name_span.file)
+            .cmp(spans.path(right_caller.name_span.file))
+            .then_with(|| {
+                spans
+                    .line_col(left_caller.name_span)
+                    .0
+                    .cmp(&spans.line_col(right_caller.name_span).0)
+            })
+            .then_with(|| left_line.cmp(&right_line))
+            .then_with(|| left_column.cmp(&right_column))
+            .then_with(|| left_caller.name.cmp(&right_caller.name))
+            .then_with(|| left_callee.name.cmp(&right_callee.name))
+    });
+    indices
 }
 
-fn export_function_summaries_from_idg(
-    idg: &bonsai_idg::IdgQueryService,
+fn export_structural_callgraph_count(ws: &Workspace, global: &bonsai_index::GlobalIndex) -> usize {
+    ws.cached_resolved_call_graph()
+        .inner()
+        .edges
+        .iter()
+        .filter(|edge| edge.precision.is_semantic())
+        .filter(|edge| {
+            global.decl_of(SymbolId::new(edge.from.raw())).is_some()
+                && global.decl_of(SymbolId::new(edge.to.raw())).is_some()
+        })
+        .count()
+}
+
+struct ExportStructuralCallgraphStreaming<'a> {
+    ws: &'a Workspace,
+    global: &'a bonsai_index::GlobalIndex,
+    spans: &'a ExportSpanCache,
+}
+
+impl Serialize for ExportStructuralCallgraphStreaming<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let phase_started = Instant::now();
+        let resolved = self.ws.cached_resolved_call_graph();
+        let indices = export_structural_callgraph_indices(self.ws, self.global, self.spans);
+        let mut sequence = serializer.serialize_seq(Some(indices.len()))?;
+        for index in &indices {
+            let edge = &resolved.inner().edges[*index];
+            let caller_decl = self
+                .global
+                .decl_of(SymbolId::new(edge.from.raw()))
+                .expect("filtered structural caller");
+            let callee_decl = self
+                .global
+                .decl_of(SymbolId::new(edge.to.raw()))
+                .expect("filtered structural callee");
+            let caller_file = self.spans.path(caller_decl.name_span.file);
+            let (caller_line, _) = self.spans.line_col(caller_decl.name_span);
+            let (call_site_line, call_site_column) = self.spans.line_col(edge.span);
+            sequence.serialize_element(&CallEdgeOut {
+                caller: caller_decl.name.as_str(),
+                caller_file,
+                caller_line,
+                callee: callee_decl.name.as_str(),
+                callee_kind: export_decl_kind_label(callee_decl.kind),
+                call_site_line,
+                call_site_column,
+                precision: export_precision_label(edge.precision),
+                resolver_stage: edge.provenance.resolver_stage(),
+                evidence: edge.provenance.evidence(),
+                confidence: edge.provenance.confidence(),
+            })?;
+        }
+        export_phase_log(format_args!(
+            "structural.callgraph: {:.3}s count={}",
+            phase_started.elapsed().as_secs_f64(),
+            indices.len()
+        ));
+        SerializeSeq::end(sequence)
+    }
+}
+
+struct ExportTaintCallEdgesStreaming<'a> {
+    ws: &'a Workspace,
+}
+
+fn export_taint_call_edge_indices(resolved: &bonsai_callgraph::ResolvedCallGraph) -> Vec<usize> {
+    let mut indices: Vec<usize> = resolved
+        .inner()
+        .edges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, edge)| edge.precision.is_semantic().then_some(index))
+        .collect();
+    indices.sort_by_key(|index| {
+        let edge = &resolved.inner().edges[*index];
+        (edge.from.raw(), edge.to.raw())
+    });
+    indices
+}
+
+impl Serialize for ExportTaintCallEdgesStreaming<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let phase_started = Instant::now();
+        let resolved = self.ws.cached_resolved_call_graph();
+        let indices = export_taint_call_edge_indices(&resolved);
+        let mut sequence = serializer.serialize_seq(Some(indices.len()))?;
+        for index in &indices {
+            let edge = &resolved.inner().edges[*index];
+            sequence.serialize_element(&ExportCallEdge {
+                from: edge.from.raw(),
+                to: edge.to.raw(),
+                kind: export_edge_kind_label(edge.kind),
+                precision: export_taint_precision_label(edge.precision),
+                resolver_stage: edge.provenance.resolver_stage(),
+                evidence: edge.provenance.evidence(),
+                confidence: edge.provenance.confidence(),
+            })?;
+        }
+        export_phase_log(format_args!(
+            "taint.call_edges: {:.3}s count={}",
+            phase_started.elapsed().as_secs_f64(),
+            indices.len()
+        ));
+        SerializeSeq::end(sequence)
+    }
+}
+
+fn export_function_summaries(
+    return_taint_by_func: &ahash::AHashMap<FuncId, Vec<u32>>,
     functions: &[ExportTaintFunction],
 ) -> Vec<ExportFunctionSummary> {
-    use bonsai_common::FuncId;
-
     // ---- function_summaries: G1 return-value taint ----
     let phase_started = Instant::now();
-    let funcs: Vec<FuncId> = functions
-        .iter()
-        .map(|function| FuncId::new(function.func_id))
-        .collect();
-    let return_taint_by_func = idg.return_taint_param_indices_for_funcs_with_max_precision(
-        &funcs,
-        Some(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
-    );
     let mut function_summaries: Vec<ExportFunctionSummary> = functions
         .iter()
         .filter_map(|f| {
@@ -1879,139 +2100,194 @@ fn export_function_summaries_from_idg(
     function_summaries
 }
 
-fn export_reachable_facts(ws: &Workspace, functions: &[ExportTaintFunction]) -> Vec<ExportReachableFacts> {
-    use bonsai_common::FuncId;
-
-    // ---- reachable_facts: per-function kinded tokens ----
-    let phase_started = Instant::now();
-    let mut reachable_facts: Vec<ExportReachableFacts> = Vec::new();
-    for f in functions {
-        let func = FuncId::new(f.func_id);
-        // Workspace-cached structural reachability — same content
-        // as `bonsai_taint::name_reachable_through_func_kinded`
-        // but memoised across the export pass so two functions
-        // sharing a hop don't compute it twice.
-        let kinded = ws.name_reachable_kinded_for(func);
-        if kinded.by_kind.is_empty() {
-            continue;
-        }
-        let mut by_kind: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
-        for (kind, tokens) in &kinded.by_kind {
-            let mut v: Vec<String> = tokens.iter().cloned().collect();
-            v.sort();
-            by_kind.insert(format!("{kind:?}").to_lowercase(), v);
-        }
-        reachable_facts.push(ExportReachableFacts {
-            func_id: f.func_id,
-            function: f.name.clone(),
-            by_kind,
-        });
-    }
-    reachable_facts.sort_by_key(|r| r.func_id);
-    export_phase_log(format_args!(
-        "taint.reachable_facts: {:.3}s count={}",
-        phase_started.elapsed().as_secs_f64(),
-        reachable_facts.len()
-    ));
-    reachable_facts
+struct ExportReachableFactsStreaming<'a> {
+    ws: &'a Workspace,
+    functions: &'a [ExportTaintFunction],
 }
 
-fn export_assign_chains_from_idg(
-    idg: &bonsai_idg::IdgQueryService,
-    functions: &[ExportTaintFunction],
-) -> Vec<ExportAssignChain> {
-    use bonsai_common::FuncId;
-
-    let funcs: Vec<FuncId> = functions
-        .iter()
-        .map(|function| FuncId::new(function.func_id))
-        .collect();
-    let storage_by_func = idg.local_storage_taint_by_param_for_funcs_with_max_precision(
-        &funcs,
-        Some(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
-    );
-
-    // ---- assign_chains: per-param function-local IDG projection ----
-    let phase_started = Instant::now();
-    let mut assign_chains: Vec<ExportAssignChain> = functions
-        .iter()
-        .filter_map(|f| {
-            if f.params.is_empty() {
-                return None;
-            }
-            let func = FuncId::new(f.func_id);
-            let storage_by_param = storage_by_func.get(&func)?;
-            let mut per_param: Vec<ExportAssignChainParam> = Vec::new();
-            for (idx, param) in f.params.iter().enumerate() {
-                if param.is_empty() {
-                    continue;
-                }
-                let mut tainted: ahash::AHashSet<String> =
-                    storage_by_param.get(idx).into_iter().flatten().cloned().collect();
-                tainted.insert(param.clone());
-                // Drop the seed-only case (no propagation happened)
-                // to keep the export compact.
-                if tainted.len() <= 1 {
-                    continue;
-                }
-                let mut names: Vec<String> = tainted.into_iter().collect();
-                names.sort();
-                per_param.push(ExportAssignChainParam {
-                    param_index: idx,
-                    param_name: param.clone(),
-                    tainted: names,
-                });
-            }
-            if per_param.is_empty() {
-                return None;
-            }
-            Some(ExportAssignChain {
-                func_id: f.func_id,
-                function: f.name.clone(),
-                per_param,
-            })
-        })
-        .collect();
-    assign_chains.sort_by_key(|c| c.func_id);
-    export_phase_log(format_args!(
-        "taint.assign_chains: {:.3}s count={}",
-        phase_started.elapsed().as_secs_f64(),
-        assign_chains.len()
-    ));
-    assign_chains
-}
-
-fn export_intra_taint(ws: &Workspace, functions: &[ExportTaintFunction]) -> Vec<ExportIntraTaint> {
-    use rayon::prelude::*;
-
-    let function_ids: ahash::AHashSet<u32> = functions.iter().map(|function| function.func_id).collect();
-
-    // ---- intra_taint: per-function CFG dataflow ----
-    let phase_started = Instant::now();
-    let by_file: Vec<Vec<ExportIntraTaint>> = ws
-        .vfs()
-        .all_files()
-        .par_iter()
-        .map(|file| {
-            let Some(index) = ws.exact_decl_index(*file) else {
-                return Vec::new();
+impl Serialize for ExportReachableFactsStreaming<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let phase_started = Instant::now();
+        let mut sequence = serializer.serialize_seq(None)?;
+        let mut count = 0usize;
+        for functions in functions_by_file(self.functions) {
+            let Some(index) = self.ws.exact_decl_index(functions[0].file_id) else {
+                continue;
             };
-            index
+            let positions: ahash::AHashMap<u32, usize> = index
                 .defs
                 .iter()
-                .filter(|decl| function_ids.contains(&decl.symbol.raw()))
-                .filter_map(export_intra_taint_for_decl)
-                .collect()
-        })
-        .collect();
-    let mut intra_taint: Vec<ExportIntraTaint> = by_file.into_iter().flatten().collect();
-    intra_taint.sort_by_key(|t| t.func_id);
-    export_phase_log(format_args!(
-        "taint.intra_taint: {:.3}s count={}",
-        phase_started.elapsed().as_secs_f64(),
-        intra_taint.len()
-    ));
-    intra_taint
+                .enumerate()
+                .map(|(position, decl)| (decl.symbol.raw(), position))
+                .collect();
+            for function in functions {
+                let Some(decl) = positions
+                    .get(&function.func_id)
+                    .and_then(|position| index.defs.get(*position))
+                else {
+                    continue;
+                };
+                let kinded = bonsai_taint::name_reachable_through_decl_kinded(decl, &index);
+                if kinded.by_kind.is_empty() {
+                    continue;
+                }
+                let mut by_kind = std::collections::BTreeMap::new();
+                for (kind, tokens) in kinded.by_kind {
+                    let mut values: Vec<String> = tokens.into_iter().collect();
+                    values.sort();
+                    by_kind.insert(format!("{kind:?}").to_lowercase(), values);
+                }
+                sequence.serialize_element(&ExportReachableFacts {
+                    func_id: function.func_id,
+                    function: function.name.clone(),
+                    by_kind,
+                })?;
+                count += 1;
+            }
+        }
+        export_phase_log(format_args!(
+            "taint.reachable_facts: {:.3}s count={}",
+            phase_started.elapsed().as_secs_f64(),
+            count
+        ));
+        SerializeSeq::end(sequence)
+    }
+}
+
+struct ExportAssignChainsStreaming<'a> {
+    idg: &'a bonsai_idg::IdgQueryService,
+    functions: &'a [ExportTaintFunction],
+}
+
+impl Serialize for ExportAssignChainsStreaming<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let phase_started = Instant::now();
+        let funcs: Vec<FuncId> = self
+            .functions
+            .iter()
+            .map(|function| FuncId::new(function.func_id))
+            .collect();
+        let functions_by_id: ahash::AHashMap<u32, &ExportTaintFunction> = self
+            .functions
+            .iter()
+            .map(|function| (function.func_id, function))
+            .collect();
+        let mut sequence = serializer.serialize_seq(None)?;
+        let mut count = 0usize;
+        self.idg
+            .try_visit_local_storage_taint_by_param_for_funcs_with_max_precision(
+                &funcs,
+                Some(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
+                |func, storage_by_param| {
+                    let Some(function) = functions_by_id.get(&func.raw()).copied() else {
+                        return Ok(());
+                    };
+                    let mut per_param = Vec::new();
+                    for (index, param) in function.params.iter().enumerate() {
+                        if param.is_empty() {
+                            continue;
+                        }
+                        let mut tainted: ahash::AHashSet<String> = storage_by_param
+                            .get(index)
+                            .into_iter()
+                            .flatten()
+                            .cloned()
+                            .collect();
+                        tainted.insert(param.clone());
+                        if tainted.len() <= 1 {
+                            continue;
+                        }
+                        let mut names: Vec<String> = tainted.into_iter().collect();
+                        names.sort();
+                        per_param.push(ExportAssignChainParam {
+                            param_index: index,
+                            param_name: param.clone(),
+                            tainted: names,
+                        });
+                    }
+                    if !per_param.is_empty() {
+                        sequence.serialize_element(&ExportAssignChain {
+                            func_id: function.func_id,
+                            function: function.name.clone(),
+                            per_param,
+                        })?;
+                        count += 1;
+                    }
+                    Ok(())
+                },
+            )?;
+        export_phase_log(format_args!(
+            "taint.assign_chains: {:.3}s count={}",
+            phase_started.elapsed().as_secs_f64(),
+            count
+        ));
+        SerializeSeq::end(sequence)
+    }
+}
+
+struct ExportIntraTaintStreaming<'a> {
+    ws: &'a Workspace,
+    functions: &'a [ExportTaintFunction],
+}
+
+impl Serialize for ExportIntraTaintStreaming<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let phase_started = Instant::now();
+        let mut sequence = serializer.serialize_seq(None)?;
+        let mut count = 0usize;
+        for functions in functions_by_file(self.functions) {
+            let Some(index) = self.ws.exact_decl_index(functions[0].file_id) else {
+                continue;
+            };
+            let positions: ahash::AHashMap<u32, usize> = index
+                .defs
+                .iter()
+                .enumerate()
+                .map(|(position, decl)| (decl.symbol.raw(), position))
+                .collect();
+            for function in functions {
+                let Some(decl) = positions
+                    .get(&function.func_id)
+                    .and_then(|position| index.defs.get(*position))
+                else {
+                    continue;
+                };
+                if let Some(row) = export_intra_taint_for_decl(decl) {
+                    sequence.serialize_element(&row)?;
+                    count += 1;
+                }
+            }
+        }
+        export_phase_log(format_args!(
+            "taint.intra_taint: {:.3}s count={}",
+            phase_started.elapsed().as_secs_f64(),
+            count
+        ));
+        SerializeSeq::end(sequence)
+    }
+}
+
+fn functions_by_file(functions: &[ExportTaintFunction]) -> impl Iterator<Item = &[ExportTaintFunction]> {
+    let mut remaining = functions;
+    std::iter::from_fn(move || {
+        let first = remaining.first()?;
+        let end = remaining
+            .iter()
+            .position(|function| function.file_id != first.file_id)
+            .unwrap_or(remaining.len());
+        let (group, tail) = remaining.split_at(end);
+        remaining = tail;
+        Some(group)
+    })
 }
 
 fn export_intra_taint_for_decl(decl: &bonsai_lang_api::Decl) -> Option<ExportIntraTaint> {
@@ -2498,6 +2774,40 @@ fn export_edge_kind_rank(kind: bonsai_callgraph::EdgeKind) -> u8 {
         bonsai_callgraph::EdgeKind::Virtual => 1,
         bonsai_callgraph::EdgeKind::Indirect => 2,
         bonsai_callgraph::EdgeKind::Unknown => 3,
+    }
+}
+
+fn export_decl_kind_label(kind: DeclKind) -> &'static str {
+    match kind {
+        DeclKind::Module => "module",
+        DeclKind::Namespace => "namespace",
+        DeclKind::Function => "function",
+        DeclKind::Method => "method",
+        DeclKind::Constructor => "constructor",
+        DeclKind::Class => "class",
+        DeclKind::Struct => "struct",
+        DeclKind::Trait => "trait",
+        DeclKind::Interface => "interface",
+        DeclKind::Enum => "enum",
+        DeclKind::EnumVariant => "enumvariant",
+        DeclKind::TypeAlias => "typealias",
+        DeclKind::Global => "global",
+        DeclKind::Const => "const",
+        DeclKind::Static => "static",
+        DeclKind::Import => "import",
+        DeclKind::Field => "field",
+        DeclKind::Other => "other",
+    }
+}
+
+/// Preserve the original native taint-edge wire spelling, which predates the
+/// hyphenated presentation label used by structural callgraph rows.
+fn export_taint_precision_label(precision: Precision) -> &'static str {
+    match precision {
+        Precision::Exact => "exact",
+        Precision::Narrowed => "narrowed",
+        Precision::OverApproximate => "overapproximate",
+        Precision::Unknown => "unknown",
     }
 }
 

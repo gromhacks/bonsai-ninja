@@ -157,7 +157,7 @@ impl IdgSegment {
     /// Recreate the transient interning indexes for one compiler pass.
     ///
     /// Persistence builds deliberately release these tables after their first
-    /// lowering pass. A later deterministic re-lowering pass rebuilds them for
+    /// lowering pass. Typed stitch replay rebuilds them for
     /// only the active source-file segment, maps transfer-local ids back onto
     /// the canonical dictionaries, then releases them again. This keeps the
     /// memory bound proportional to one compilation unit without changing any

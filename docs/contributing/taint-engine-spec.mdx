@@ -48,6 +48,23 @@ corridor. This is the deployed source-to-sink path; direct raw-AST taint and
 whole-workspace per-source/per-sink traversal are not production evidence
 paths.
 
+The IDG frontend consumes the same content-addressed compiler objects used by
+callgraph, retrieval, linkage, inspect, and export. Persistence transfer
+lowering runs once per function. It writes the canonical segment plus a typed
+stitch record/node remap, then replays that record one segment at a time.
+There is no second AST lowering pass and no alternate taint IR. Disk spilling
+and memory-weighted scheduling change lifetimes/concurrency only; the closure
+still processes every exact edge to its fixed point.
+
+Return summaries use exact structural call boundaries rather than callee-name
+search. Each function-local CSR is reconstructed from the canonical segment,
+composed with current callee summaries, and discarded after compilation.
+Callers are requeued whenever a callee summary grows, so recursive and mutually
+recursive components converge to their least fixed point without an iteration
+or call-depth cap. Context-sensitive queries retain sparse sorted call/return
+rows and stream ordinary local edges into CSR instead of duplicating the full
+workspace relation.
+
 Rulepack-free inspect taint rows use `Workspace::syntax_flow_graph` from
 `crates/workspace/src/flow_query.rs`. That workspace facade is the only
 command-facing switch between a warmed IDG target cut and the canonical

@@ -120,7 +120,7 @@ pub struct GlobalIndex {
     finalized_bases_by_type: AHashMap<String, Vec<String>>,
     /// Exact, flattened syntax facts required after streamed body lowering.
     /// Persisting this compact compiler phase artifact lets a fresh semantic
-    /// worker bind re-lowered Tree-sitter bodies to the same stable symbols
+    /// worker bind streamed compiler-object bodies to the same stable symbols
     /// without reparsing every file merely to reconstruct linkage headers.
     linkage_by_symbol: AHashMap<SymbolId, FunctionLinkageFacts>,
 }
@@ -158,7 +158,7 @@ impl GlobalIndex {
     ///
     /// Function bodies and browse-only facts remain file-local compiler IR;
     /// retaining them for every source file makes peak memory proportional to
-    /// total project body size. A later phase can re-lower one exact file and
+    /// total project body size. A later phase can stream one exact file object and
     /// bind it to these stable symbols with
     /// [`Self::remap_file_to_existing_symbols`]. Aggregate layouts stay in the
     /// header because initializer lowering resolves those types across files.
@@ -338,8 +338,8 @@ impl GlobalIndex {
     /// The per-file slot map and finalized ancestry lookup are intentionally
     /// omitted from the wire payload because their source vectors are already
     /// present. A linkage-sidecar loader calls this once after decoding so
-    /// later exact file re-lowering has the same compiler behavior as an
-    /// index built directly from Tree-sitter facts.
+    /// later exact compiler-object replay has the same behavior as an index
+    /// built directly from Tree-sitter facts.
     pub fn rebuild_persisted_indexes(&mut self) {
         self.by_name.clear();
         self.refs_by_symbol.clear();

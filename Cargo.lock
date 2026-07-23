@@ -298,6 +298,7 @@ dependencies = [
  "bonsai_cfg",
  "bonsai_common",
  "bonsai_diagnostics",
+ "bonsai_factstore",
  "bonsai_idg",
  "bonsai_index",
  "bonsai_lang_api",
@@ -307,7 +308,11 @@ dependencies = [
  "bonsai_vfs",
  "parking_lot",
  "rayon",
+ "serde",
+ "sha2",
+ "tempfile",
  "tree-sitter",
+ "zstd",
 ]
 
 [[package]]
@@ -348,6 +353,7 @@ dependencies = [
  "bonsai_index",
  "bonsai_lang_api",
  "bonsai_resolve",
+ "hashbrown 0.16.1",
  "parking_lot",
  "rayon",
  "regex",

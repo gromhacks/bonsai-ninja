@@ -36,8 +36,9 @@
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
 use bonsai_common::{FuncId, Precision, Span};
-use bonsai_factstore::StrId;
+use bonsai_factstore::{StrId, StringPoolBuilder};
 use bonsai_lang_api::CallKind;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
@@ -55,8 +56,8 @@ use crate::workspace::{
     CrossFileEdge, IdgWorkspace, SegmentId, SymbolicFieldCompilerStorage, WireChunkSpool,
 };
 
-#[derive(Debug, Clone)]
-struct CalleeEndpoints {
+#[derive(Debug)]
+struct CalleeEndpointInput {
     segment: SegmentId,
     params: Vec<NodeId>,
     param_names: Vec<String>,
@@ -78,6 +79,204 @@ struct CalleeEndpoints {
     return_node: Option<NodeId>,
 }
 
+#[derive(Debug)]
+struct CalleeEndpoints {
+    segment: SegmentId,
+    params_end: u32,
+    param_names_end: u32,
+    param_write_nodes_end: u32,
+    capture_read_nodes_end: u32,
+    receiver_param_index: u32,
+    receiver_consumer_nodes_end: u32,
+    receiver_field_bases_end: u32,
+    implicit_receiver_bases_end: u32,
+    receiver_names_end: u32,
+    return_field_projections_end: u32,
+    return_passthrough_param_indices_end: u32,
+    return_node: NodeId,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct PackedRange {
+    start: u32,
+    len: u32,
+}
+
+impl PackedRange {
+    fn append<T>(pool: &mut Vec<T>, values: impl IntoIterator<Item = T>) -> Self {
+        let start = pool.len();
+        pool.extend(values);
+        let len = pool.len().saturating_sub(start);
+        Self {
+            start: u32::try_from(start).expect("callee endpoint arena exceeds u32"),
+            len: u32::try_from(len).expect("callee endpoint slice exceeds u32"),
+        }
+    }
+
+    fn slice<T>(self, pool: &[T]) -> &[T] {
+        let start = self.start as usize;
+        let end = start.saturating_add(self.len as usize);
+        pool.get(start..end)
+            .expect("callee endpoint range belongs to its canonical arena")
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct PackedReturnFieldProjection {
+    base: StrId,
+    field: StrId,
+}
+
+#[derive(Copy, Clone)]
+struct ReturnFieldProjectionView<'a> {
+    base: &'a str,
+    field: &'a str,
+}
+
+#[derive(Copy, Clone)]
+struct CalleeEndpointView<'a> {
+    row_index: usize,
+    row: &'a CalleeEndpoints,
+    index: &'a CalleeEndpointIndex,
+}
+
+impl std::ops::Deref for CalleeEndpointView<'_> {
+    type Target = CalleeEndpoints;
+
+    fn deref(&self) -> &Self::Target {
+        self.row
+    }
+}
+
+impl<'a> CalleeEndpointView<'a> {
+    fn previous(self) -> Option<&'a CalleeEndpoints> {
+        self.row_index
+            .checked_sub(1)
+            .and_then(|index| self.index.rows.get(index))
+    }
+
+    fn row_slice<T>(
+        self,
+        pool: &'a [T],
+        end: u32,
+        previous_end: impl Fn(&CalleeEndpoints) -> u32,
+    ) -> &'a [T] {
+        let start = self.previous().map_or(0, previous_end) as usize;
+        pool.get(start..end as usize)
+            .expect("callee endpoint row boundary belongs to its canonical arena")
+    }
+
+    fn receiver_param_index(self) -> Option<usize> {
+        (self.row.receiver_param_index != u32::MAX).then_some(self.row.receiver_param_index as usize)
+    }
+
+    fn return_node(self) -> Option<NodeId> {
+        (!self.row.return_node.is_sentinel()).then_some(self.row.return_node)
+    }
+
+    fn params(self) -> &'a [NodeId] {
+        self.row_slice(&self.index.params, self.row.params_end, |row| row.params_end)
+    }
+
+    fn param_name(self, index: usize) -> Option<&'a str> {
+        self.row_slice(&self.index.param_names, self.row.param_names_end, |row| {
+            row.param_names_end
+        })
+        .get(index)
+        .and_then(|id| self.index.strings.get(*id))
+    }
+
+    fn param_names(self) -> impl Iterator<Item = &'a str> + 'a {
+        self.row_slice(&self.index.param_names, self.row.param_names_end, |row| {
+            row.param_names_end
+        })
+        .iter()
+        .filter_map(|id| self.index.strings.get(*id))
+    }
+
+    fn param_write_nodes(self, index: usize) -> &'a [NodeId] {
+        self.row_slice(
+            &self.index.param_write_nodes,
+            self.row.param_write_nodes_end,
+            |row| row.param_write_nodes_end,
+        )
+        .get(index)
+        .copied()
+        .map_or(&[], |range| range.slice(&self.index.param_write_node_values))
+    }
+
+    fn receiver_consumer_nodes(self) -> &'a [NodeId] {
+        self.row_slice(
+            &self.index.receiver_consumer_nodes,
+            self.row.receiver_consumer_nodes_end,
+            |row| row.receiver_consumer_nodes_end,
+        )
+    }
+
+    fn receiver_field_bases(self) -> impl Iterator<Item = &'a str> + 'a {
+        self.row_slice(
+            &self.index.receiver_field_bases,
+            self.row.receiver_field_bases_end,
+            |row| row.receiver_field_bases_end,
+        )
+        .iter()
+        .filter_map(|id| self.index.strings.get(*id))
+    }
+
+    fn implicit_receiver_bases(self) -> impl Iterator<Item = &'a str> + 'a {
+        self.row_slice(
+            &self.index.implicit_receiver_bases,
+            self.row.implicit_receiver_bases_end,
+            |row| row.implicit_receiver_bases_end,
+        )
+        .iter()
+        .filter_map(|id| self.index.strings.get(*id))
+    }
+
+    fn receiver_names(self) -> impl Iterator<Item = &'a str> + 'a {
+        self.row_slice(&self.index.receiver_names, self.row.receiver_names_end, |row| {
+            row.receiver_names_end
+        })
+        .iter()
+        .filter_map(|id| self.index.strings.get(*id))
+    }
+
+    fn return_field_projections(self) -> impl Iterator<Item = ReturnFieldProjectionView<'a>> + 'a {
+        self.row_slice(
+            &self.index.return_field_projections,
+            self.row.return_field_projections_end,
+            |row| row.return_field_projections_end,
+        )
+        .iter()
+        .filter_map(|projection| {
+            Some(ReturnFieldProjectionView {
+                base: self.index.strings.get(projection.base)?,
+                field: self.index.strings.get(projection.field)?,
+            })
+        })
+    }
+
+    fn capture_reads(self) -> impl Iterator<Item = (&'a str, NodeId)> + 'a {
+        self.row_slice(
+            &self.index.capture_read_nodes,
+            self.row.capture_read_nodes_end,
+            |row| row.capture_read_nodes_end,
+        )
+        .iter()
+        .filter_map(|(name, node)| self.index.strings.get(*name).map(|name| (name, *node)))
+    }
+
+    fn return_passthrough_param_indices(self) -> impl Iterator<Item = usize> + 'a {
+        self.row_slice(
+            &self.index.param_indices,
+            self.row.return_passthrough_param_indices_end,
+            |row| row.return_passthrough_param_indices_end,
+        )
+        .iter()
+        .map(|index| *index as usize)
+    }
+}
+
 /// Packed endpoint records with a dense compiler-id indirection.
 ///
 /// `CalleeEndpoints` is intentionally rich and therefore large. Storing it
@@ -88,6 +287,18 @@ struct CalleeEndpoints {
 struct CalleeEndpointIndex {
     rows: Vec<CalleeEndpoints>,
     row_by_func: Vec<u32>,
+    strings: StringPoolBuilder,
+    params: Vec<NodeId>,
+    param_names: Vec<StrId>,
+    param_write_nodes: Vec<PackedRange>,
+    param_write_node_values: Vec<NodeId>,
+    capture_read_nodes: Vec<(StrId, NodeId)>,
+    receiver_consumer_nodes: Vec<NodeId>,
+    receiver_field_bases: Vec<StrId>,
+    implicit_receiver_bases: Vec<StrId>,
+    receiver_names: Vec<StrId>,
+    return_field_projections: Vec<PackedReturnFieldProjection>,
+    param_indices: Vec<u32>,
 }
 
 impl CalleeEndpointIndex {
@@ -97,10 +308,22 @@ impl CalleeEndpointIndex {
         Self {
             rows: Vec::with_capacity(function_count),
             row_by_func: Vec::new(),
+            strings: StringPoolBuilder::new(),
+            params: Vec::new(),
+            param_names: Vec::new(),
+            param_write_nodes: Vec::new(),
+            param_write_node_values: Vec::new(),
+            capture_read_nodes: Vec::new(),
+            receiver_consumer_nodes: Vec::new(),
+            receiver_field_bases: Vec::new(),
+            implicit_receiver_bases: Vec::new(),
+            receiver_names: Vec::new(),
+            return_field_projections: Vec::new(),
+            param_indices: Vec::new(),
         }
     }
 
-    fn insert(&mut self, func: FuncId, endpoints: CalleeEndpoints) {
+    fn insert(&mut self, func: FuncId, endpoints: CalleeEndpointInput) {
         let func_index = func.raw() as usize;
         if self.row_by_func.len() <= func_index {
             self.row_by_func.resize(func_index + 1, Self::MISSING);
@@ -112,15 +335,107 @@ impl CalleeEndpointIndex {
             func.raw()
         );
         let row = u32::try_from(self.rows.len()).expect("callee endpoint row overflow");
-        self.rows.push(endpoints);
+        let CalleeEndpointInput {
+            segment,
+            params,
+            param_names,
+            param_write_nodes,
+            capture_read_nodes,
+            receiver_param_index,
+            receiver_consumer_nodes,
+            receiver_field_bases,
+            implicit_receiver_bases,
+            receiver_names,
+            return_field_projections,
+            return_passthrough_param_indices,
+            return_node,
+        } = endpoints;
+        let params_end = Self::append_end(&mut self.params, params);
+        let param_names_end = Self::pack_strings(&mut self.strings, &mut self.param_names, param_names);
+        for nodes in param_write_nodes {
+            self.param_write_nodes
+                .push(PackedRange::append(&mut self.param_write_node_values, nodes));
+        }
+        let param_write_nodes_end =
+            u32::try_from(self.param_write_nodes.len()).expect("callee parameter range arena exceeds u32");
+        let capture_read_nodes = capture_read_nodes
+            .into_iter()
+            .map(|(name, node)| (self.strings.intern(&name), node));
+        let capture_read_nodes_end = Self::append_end(&mut self.capture_read_nodes, capture_read_nodes);
+        let receiver_consumer_nodes_end =
+            Self::append_end(&mut self.receiver_consumer_nodes, receiver_consumer_nodes);
+        let receiver_field_bases_end = Self::pack_strings(
+            &mut self.strings,
+            &mut self.receiver_field_bases,
+            receiver_field_bases,
+        );
+        let implicit_receiver_bases_end = Self::pack_strings(
+            &mut self.strings,
+            &mut self.implicit_receiver_bases,
+            implicit_receiver_bases,
+        );
+        let receiver_names_end =
+            Self::pack_strings(&mut self.strings, &mut self.receiver_names, receiver_names);
+        let return_field_projections =
+            return_field_projections
+                .into_iter()
+                .map(|projection| PackedReturnFieldProjection {
+                    base: self.strings.intern(&projection.base),
+                    field: self.strings.intern(&projection.field),
+                });
+        let return_field_projections_end =
+            Self::append_end(&mut self.return_field_projections, return_field_projections);
+        let return_passthrough_param_indices_end = Self::append_end(
+            &mut self.param_indices,
+            return_passthrough_param_indices
+                .into_iter()
+                .map(|index| u32::try_from(index).expect("callee parameter index exceeds u32")),
+        );
+        self.rows.push(CalleeEndpoints {
+            segment,
+            params_end,
+            param_names_end,
+            param_write_nodes_end,
+            capture_read_nodes_end,
+            receiver_param_index: receiver_param_index
+                .map(|index| u32::try_from(index).expect("receiver parameter index exceeds u32"))
+                .unwrap_or(u32::MAX),
+            receiver_consumer_nodes_end,
+            receiver_field_bases_end,
+            implicit_receiver_bases_end,
+            receiver_names_end,
+            return_field_projections_end,
+            return_passthrough_param_indices_end,
+            return_node: return_node.unwrap_or(NodeId::SENTINEL),
+        });
         self.row_by_func[func_index] = row;
     }
 
-    fn get(&self, func: FuncId) -> Option<&CalleeEndpoints> {
+    fn append_end<T>(pool: &mut Vec<T>, values: impl IntoIterator<Item = T>) -> u32 {
+        pool.extend(values);
+        u32::try_from(pool.len()).expect("callee endpoint arena exceeds u32")
+    }
+
+    fn pack_strings(strings: &mut StringPoolBuilder, pool: &mut Vec<StrId>, values: Vec<String>) -> u32 {
+        pool.extend(values.into_iter().map(|value| strings.intern(&value)));
+        u32::try_from(pool.len()).expect("callee endpoint string arena exceeds u32")
+    }
+
+    fn finish_build(&mut self) {
+        self.strings.release_lookup();
+    }
+
+    fn get(&self, func: FuncId) -> Option<CalleeEndpointView<'_>> {
         let row = *self.row_by_func.get(func.raw() as usize)?;
-        (row != Self::MISSING)
-            .then(|| self.rows.get(row as usize))
-            .flatten()
+        if row == Self::MISSING {
+            return None;
+        }
+        let row_index = row as usize;
+        self.rows.get(row_index).map(|row| CalleeEndpointView {
+            row_index,
+            row,
+            index: self,
+        })
     }
 
     fn contains_key(&self, func: FuncId) -> bool {
@@ -132,7 +447,7 @@ impl CalleeEndpointIndex {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct FunctionStitchData {
     params: Vec<String>,
     call_sites: Vec<CallSiteRef>,
@@ -1094,7 +1409,7 @@ impl WorkspaceStitchState {
 }
 
 /// Stitch lazily lowered segment batches for an in-process query graph.
-/// Persistence builds use [`stitch_idg_from_relowered_segment_batches`] so
+/// Persistence builds use [`stitch_idg_from_spooled_segment_batches`] so
 /// caller IR never accumulates across source-file segments.
 pub(crate) fn stitch_idg_from_segment_batches<B, I>(
     batches: B,
@@ -1184,6 +1499,7 @@ where
         "stitch endpoint-index: streamed funcs={}",
         callee_endpoints.len()
     ));
+    callee_endpoints.finish_build();
 
     let mut state = WorkspaceStitchState::new(stitch_data.len());
     // Phase 3b: stitch cross-function edges. `stitch_data` is an
@@ -1231,16 +1547,8 @@ where
         .expect("resident IDG stitching does not perform fallible spill I/O")
 }
 
-/// Build a persistence graph with two deterministic lowering passes.
-///
-/// The first pass creates canonical per-file segments and the compact callee
-/// endpoint index. It intentionally discards every function's call-site IR and
-/// local-node remap at the segment boundary. The second pass re-lowers the same
-/// AST facts one segment at a time, maps its stable local ids onto the existing
-/// segment dictionaries, stitches calls, and discards that transient state.
-/// This is a compiler memory-lifetime boundary, not a semantic budget: both
-/// passes cover every scheduled function and all closure phases still run.
-pub(crate) struct ReloweredStitchOptions<'a> {
+/// Persistence options for one-pass lowering followed by exact typed replay.
+pub(crate) struct SpooledStitchOptions<'a> {
     pub spool_path: &'a std::path::Path,
     pub include_field_argument_forwarding: bool,
     pub symbolic_field_forwarding: bool,
@@ -1252,20 +1560,39 @@ pub(crate) struct ReloweredStitchOptions<'a> {
     pub capture_funcs: Option<&'a AHashSet<FuncId>>,
 }
 
-pub(crate) fn stitch_idg_from_relowered_segment_batches<B1, I1, B2, I2>(
-    canonical_batches: B1,
-    stitch_batches: B2,
+#[derive(Debug, Serialize, Deserialize)]
+struct StitchFunctionRecord {
+    caller: FuncId,
+    remap: NodeRemap,
+    data: FunctionStitchData,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StitchSegmentRecord {
+    scheduled_segment: SegmentId,
+    functions: Vec<StitchFunctionRecord>,
+}
+
+/// Build a persistence graph from one deterministic lowering pass.
+///
+/// Each file segment is lowered exactly once. The canonical segment is spilled
+/// immediately, while its much smaller typed call-stitch object and stable
+/// local-to-segment node map are written to a temporary spool. The replay phase
+/// hydrates one canonical segment and consumes those facts directly; it never
+/// reparses source or reruns transfer lowering. This is a memory-lifetime
+/// boundary, not a semantic budget: every scheduled function and closure fact
+/// is still processed.
+pub(crate) fn stitch_idg_from_spooled_segment_batches<B, I>(
+    canonical_batches: B,
     function_count: usize,
     resolver: &dyn CalleeResolver,
-    options: ReloweredStitchOptions<'_>,
+    options: SpooledStitchOptions<'_>,
 ) -> crate::IdgResult<IdgWorkspace>
 where
-    B1: IntoIterator<Item = I1>,
-    I1: IntoIterator<Item = (SegmentId, Vec<TransferOutput>)>,
-    B2: IntoIterator<Item = I2>,
-    I2: IntoIterator<Item = (SegmentId, Vec<TransferOutput>)>,
+    B: IntoIterator<Item = I>,
+    I: IntoIterator<Item = (SegmentId, Vec<TransferOutput>)>,
 {
-    let ReloweredStitchOptions {
+    let SpooledStitchOptions {
         spool_path,
         include_field_argument_forwarding,
         symbolic_field_forwarding,
@@ -1278,6 +1605,7 @@ where
     ws.disable_cross_file_indexes();
     let mut callee_endpoints = CalleeEndpointIndex::with_capacity(function_count);
     let mut schedule_to_workspace: AHashMap<SegmentId, SegmentId> = AHashMap::new();
+    let mut stitch_spool = WireChunkSpool::new(spool_path, 1, "IDG stitch object")?;
     let mut previous_placeholder = None;
     let mut canonical_function_count = 0usize;
 
@@ -1294,13 +1622,15 @@ where
             let edge_capacity = outputs.iter().map(|out| out.edges.len()).sum();
             let mut segment = IdgSegment::with_capacity(place_capacity, node_capacity, edge_capacity);
             let mut data_by_func = AHashMap::with_capacity(outputs.len());
+            let mut remap_by_func = AHashMap::with_capacity(outputs.len());
             let mut segment_funcs = Vec::with_capacity(outputs.len());
             for out in outputs {
-                merge_transfer_into_segment(&mut segment, &out);
+                let remap = merge_transfer_into_segment(&mut segment, &out);
                 let (func, data) = take_function_stitch_data(out);
                 segment.record_func(func);
                 segment_funcs.push(func);
                 data_by_func.insert(func, data);
+                remap_by_func.insert(func, remap);
             }
             canonical_function_count = canonical_function_count.saturating_add(segment_funcs.len());
             let segment_id = ws.register_segment(segment);
@@ -1317,6 +1647,21 @@ where
                 &mut callee_endpoints,
                 capture_funcs,
             );
+            let functions = segment_funcs
+                .iter()
+                .copied()
+                .map(|caller| StitchFunctionRecord {
+                    caller,
+                    remap: remap_by_func.remove(&caller).expect("canonical function remap"),
+                    data: data_by_func
+                        .remove(&caller)
+                        .expect("canonical function stitch data"),
+                })
+                .collect();
+            stitch_spool.push(StitchSegmentRecord {
+                scheduled_segment: placeholder,
+                functions,
+            });
             if let Some(segment) = ws.segment_mut(segment_id) {
                 segment.release_build_lookups();
             }
@@ -1327,6 +1672,8 @@ where
         canonical_function_count, function_count,
         "canonical lowering pass must cover the complete function schedule"
     );
+    stitch_spool.check_error()?;
+    callee_endpoints.finish_build();
     stitch_debug_log(format_args!(
         "stitch canonical-pass: {:.3}s segments={} funcs={} endpoints={}",
         started.elapsed().as_secs_f64(),
@@ -1340,11 +1687,12 @@ where
     let mut stitched_function_count = 0usize;
     let mut previous_placeholder = None;
     ws.begin_spool_generation()?;
-    for batch in stitch_batches {
-        for (scheduled_segment, mut outputs) in batch {
+    stitch_spool.into_visit(|batches| {
+        for batch in batches {
+            let scheduled_segment = batch.scheduled_segment;
             debug_assert!(
                 previous_placeholder.is_none_or(|previous| previous < scheduled_segment),
-                "stitch segment batches must be strictly ordered"
+                "stitch object segments must be strictly ordered"
             );
             previous_placeholder = Some(scheduled_segment);
             let segment_id = schedule_to_workspace
@@ -1357,29 +1705,12 @@ where
                     )
                 });
             ws.hydrate_segment(segment_id)?;
-            outputs.sort_by_key(|out| out.func.raw());
             let Some(segment) = ws.segment_mut(segment_id) else {
-                panic!("stitch pass referenced missing segment {}", segment_id.0);
+                panic!("stitch object referenced missing segment {}", segment_id.0);
             };
             segment.rebuild_build_lookups();
-            for out in outputs {
-                let before = ws
-                    .segment(segment_id)
-                    .expect("active stitch segment")
-                    .dimensions();
-                let remap = remap_transfer_into_segment(
-                    ws.segment_mut(segment_id).expect("active stitch segment"),
-                    &out,
-                );
-                let after = ws
-                    .segment(segment_id)
-                    .expect("active stitch segment")
-                    .dimensions();
-                assert_eq!(
-                    before, after,
-                    "deterministic stitch re-lowering must reuse every canonical dictionary id"
-                );
-                let (caller, data) = take_function_stitch_data(out);
+            for record in batch.functions {
+                let StitchFunctionRecord { caller, remap, data } = record;
                 assert_eq!(
                     ws.segment_for_func(caller),
                     Some(segment_id),
@@ -1413,7 +1744,8 @@ where
             ws.check_cross_file_spool()?;
             state.check_symbolic_spool()?;
         }
-    }
+        Ok(())
+    })?;
     assert_eq!(
         stitched_function_count, function_count,
         "stitch lowering pass must cover the complete function schedule"
@@ -1427,7 +1759,7 @@ where
     drop(callee_endpoints);
     drop(schedule_to_workspace);
     stitch_debug_log(format_args!(
-        "stitch relower-pass: {:.3}s segments={} funcs={}",
+        "stitch typed-replay: {:.3}s segments={} funcs={}",
         stitch_started.elapsed().as_secs_f64(),
         ws.segment_count(),
         stitched_function_count
@@ -1501,7 +1833,7 @@ fn extend_callee_endpoints_for_segment(
         };
         out.insert(
             func,
-            CalleeEndpoints {
+            CalleeEndpointInput {
                 segment: segment_id,
                 params,
                 param_names,
@@ -1703,7 +2035,7 @@ fn push_call_arg_node(segment: &IdgSegment, func: FuncId, site: CallSiteId, idx:
 
 /// Per-function remap from `TransferOutput`-local NodeIds to
 /// segment-global NodeIds. Built during [`merge_transfer_into_segment`].
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 struct NodeRemap {
     /// `local_node_id → segment_node_id`. Indexed by local id.
     map: Vec<NodeId>,
@@ -1756,9 +2088,9 @@ impl NodeRemap {
 /// Place values accordingly.
 fn merge_transfer_into_segment(segment: &mut IdgSegment, out: &TransferOutput) -> NodeRemap {
     let remap = remap_transfer_into_segment(segment, out);
-    // Append remapped intra-procedural edges only on the canonical lowering
-    // pass. Persistence builds re-lower later to recover disposable call-site
-    // IR; that pass reuses this remap but must not duplicate canonical edges.
+    // Append remapped intra-procedural edges on the canonical lowering pass.
+    // Persistence builds spool the returned remap with typed call-site IR and
+    // replay it directly, so these edges are never produced twice.
     for edge in &out.edges {
         segment.add_edge(IdgEdge {
             from: remap.get(edge.from),
@@ -1769,8 +2101,9 @@ fn merge_transfer_into_segment(segment: &mut IdgSegment, out: &TransferOutput) -
     remap
 }
 
-/// Map a deterministically re-lowered transfer onto an existing segment.
-/// Existing dictionaries return the original stable ids; no edge is appended.
+/// Map a function-local transfer into a segment dictionary. The returned map
+/// is stable for the canonical segment and can be replayed without lowering
+/// the function again.
 fn remap_transfer_into_segment(segment: &mut IdgSegment, out: &TransferOutput) -> NodeRemap {
     let mut remap = NodeRemap::with_capacity(out.nodes.len());
     // Build per-function StrId remap by walking every interned
@@ -2135,7 +2468,7 @@ struct ResolvedCandidateStitch<'a> {
     caller_receiver: &'a CallerReceiverContext<'a>,
     resolver: &'a dyn CalleeResolver,
     candidate: &'a ResolvedCallee,
-    endpoints: &'a CalleeEndpoints,
+    endpoints: CalleeEndpointView<'a>,
 }
 
 struct ResolvedCandidateOutputs<'a> {
@@ -2211,9 +2544,9 @@ fn stitch_candidate_receiver_inputs(
     // their source-language order.
     if matches!(site.call_kind, CallKind::Method) {
         if let (Some(receiver_arg_node), Some(receiver_idx)) =
-            (site.receiver_arg_node, endpoints.receiver_param_index)
+            (site.receiver_arg_node, endpoints.receiver_param_index())
         {
-            if let Some(&callee_param_node) = endpoints.params.get(receiver_idx) {
+            if let Some(&callee_param_node) = endpoints.params().get(receiver_idx) {
                 if !callee_param_node.is_sentinel() {
                     let caller_call_arg = caller_remap.get(receiver_arg_node);
                     if !caller_call_arg.is_sentinel() {
@@ -2236,7 +2569,7 @@ fn stitch_candidate_receiver_inputs(
                     .as_deref()
                     .map(str::trim)
                     .filter(|receiver| !receiver.is_empty()),
-                endpoints.param_names.get(receiver_idx).map(String::as_str),
+                endpoints.param_name(receiver_idx),
             ) {
                 let actual_receiver = receiver_field_forwarding_base(
                     site,
@@ -2288,11 +2621,11 @@ fn stitch_candidate_receiver_inputs(
                 }
             }
         }
-        if endpoints.receiver_param_index.is_none() && !endpoints.receiver_consumer_nodes.is_empty() {
+        if endpoints.receiver_param_index().is_none() && !endpoints.receiver_consumer_nodes().is_empty() {
             if let Some(receiver_arg_node) = site.receiver_arg_node {
                 let caller_call_arg = caller_remap.get(receiver_arg_node);
                 if !caller_call_arg.is_sentinel() {
-                    for &callee_receiver_consumer in &endpoints.receiver_consumer_nodes {
+                    for &callee_receiver_consumer in endpoints.receiver_consumer_nodes() {
                         if callee_receiver_consumer.is_sentinel() {
                             continue;
                         }
@@ -2311,10 +2644,10 @@ fn stitch_candidate_receiver_inputs(
                 }
             }
         }
-        if endpoints.receiver_param_index.is_none()
-            && (!endpoints.implicit_receiver_bases.is_empty()
-                || !endpoints.receiver_field_bases.is_empty()
-                || !endpoints.return_field_projections.is_empty())
+        if endpoints.receiver_param_index().is_none()
+            && (endpoints.implicit_receiver_bases().next().is_some()
+                || endpoints.receiver_field_bases().next().is_some()
+                || endpoints.return_field_projections().next().is_some())
         {
             if let Some(receiver) = site
                 .receiver
@@ -2331,10 +2664,9 @@ fn stitch_candidate_receiver_inputs(
                 );
                 let projection_bases = return_projection_bases(endpoints);
                 for param_name in endpoints
-                    .implicit_receiver_bases
-                    .iter()
-                    .chain(endpoints.receiver_field_bases.iter())
-                    .chain(projection_bases.iter())
+                    .implicit_receiver_bases()
+                    .chain(endpoints.receiver_field_bases())
+                    .chain(projection_bases.iter().map(String::as_str))
                 {
                     push_receiver_field_arg_site(
                         field_arg_sites,
@@ -2354,10 +2686,10 @@ fn stitch_candidate_receiver_inputs(
         }
     }
     if site.receiver.is_none()
-        && endpoints.receiver_param_index.is_none()
-        && (!endpoints.implicit_receiver_bases.is_empty()
-            || !endpoints.receiver_field_bases.is_empty()
-            || !endpoints.return_field_projections.is_empty())
+        && endpoints.receiver_param_index().is_none()
+        && (endpoints.implicit_receiver_bases().next().is_some()
+            || endpoints.receiver_field_bases().next().is_some()
+            || endpoints.return_field_projections().next().is_some())
     {
         push_bare_implicit_member_field_arg_sites(
             field_arg_sites,
@@ -2401,12 +2733,11 @@ fn stitch_candidate_explicit_arguments(
             .call_arg_names
             .get(i)
             .and_then(|name| {
-                name.as_deref().and_then(|name| {
-                    named_arg_param_index(name, &endpoints.param_names, endpoints.receiver_param_index)
-                })
+                name.as_deref()
+                    .and_then(|name| named_arg_param_index(name, endpoints, endpoints.receiver_param_index()))
             })
-            .unwrap_or_else(|| explicit_arg_param_index(i, endpoints.receiver_param_index));
-        let Some(&callee_param_node) = endpoints.params.get(callee_param_idx) else {
+            .unwrap_or_else(|| explicit_arg_param_index(i, endpoints.receiver_param_index()));
+        let Some(&callee_param_node) = endpoints.params().get(callee_param_idx) else {
             continue;
         };
         if callee_param_node.is_sentinel() {
@@ -2427,7 +2758,7 @@ fn stitch_candidate_explicit_arguments(
         place_inter_edge(caller_seg, endpoints.segment, edge, ws);
         if let (Some(actual_arg), Some(param_name)) = (
             site.call_arg_places.get(i).map(String::as_str),
-            endpoints.param_names.get(callee_param_idx).map(String::as_str),
+            endpoints.param_name(callee_param_idx),
         ) {
             if !actual_arg.trim().is_empty() && !param_name.trim().is_empty() {
                 field_arg_sites.push(FieldArgStitch {
@@ -2452,11 +2783,7 @@ fn stitch_candidate_explicit_arguments(
                 caller_seg,
                 cand.func,
                 endpoints.segment,
-                endpoints
-                    .param_write_nodes
-                    .get(callee_param_idx)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
+                endpoints.param_write_nodes(callee_param_idx),
                 target_base,
                 site.site.0,
                 cand.precision,
@@ -2492,7 +2819,7 @@ fn stitch_candidate_capture_inputs(
             caller,
             caller_seg,
             endpoints.segment,
-            &endpoints.capture_read_nodes,
+            endpoints,
             site.site.0,
             cand.precision,
             cand.edge_kind,
@@ -2523,7 +2850,7 @@ fn stitch_candidate_return_outputs(
     } = request;
     // Emit `callee.Return → caller.CallRet(site)`.
     let caller_call_ret = caller_remap.get(site.call_ret_node);
-    if let Some(callee_return) = endpoints.return_node {
+    if let Some(callee_return) = endpoints.return_node() {
         if !caller_call_ret.is_sentinel() {
             let edge = IdgEdge::inter_return(
                 callee_return,
@@ -2546,8 +2873,8 @@ fn stitch_candidate_return_outputs(
             // scalar return flow: a bare tainted object remains scalar,
             // while an explicit `param.*` seed or exact field write can
             // flow to the corresponding field on the assigned result.
-            for &param_idx in &endpoints.return_passthrough_param_indices {
-                let explicit_arg_idx = match endpoints.receiver_param_index {
+            for param_idx in endpoints.return_passthrough_param_indices() {
+                let explicit_arg_idx = match endpoints.receiver_param_index() {
                     Some(receiver_idx) if param_idx == receiver_idx => None,
                     Some(receiver_idx) if param_idx > receiver_idx => Some(param_idx - 1),
                     _ => Some(param_idx),
@@ -2615,14 +2942,14 @@ fn stitch_candidate_return_outputs(
                     });
                     continue;
                 }
-                for projection in &endpoints.return_field_projections {
+                for projection in endpoints.return_field_projections() {
                     scalar_return_sites.push(ScalarReturnStitch {
                         caller,
                         caller_seg,
                         callee: cand.func,
                         callee_seg: endpoints.segment,
-                        source_base: projection.base.clone(),
-                        source_field: projection.field.clone(),
+                        source_base: projection.base.to_string(),
+                        source_field: projection.field.to_string(),
                         target_base: target_base.clone(),
                         call_span: site.site.0,
                         write_span: *write_span,
@@ -2760,21 +3087,21 @@ fn stitch_lexical_capture_reads(
     caller: FuncId,
     caller_seg: SegmentId,
     callee_seg: SegmentId,
-    capture_reads: &[(String, NodeId)],
+    endpoints: CalleeEndpointView<'_>,
     call_span: Span,
     precision: Precision,
     call_kind: CallEdgeKind,
     ws: &mut IdgWorkspace,
 ) -> usize {
     let mut added = 0usize;
-    for (capture_name, capture_read) in capture_reads {
+    for (capture_name, capture_read) in endpoints.capture_reads() {
         for source in scalar_producers_live_at_span(ws, caller_seg, caller, capture_name, call_span) {
             place_inter_edge(
                 caller_seg,
                 callee_seg,
                 IdgEdge {
                     from: source,
-                    to: *capture_read,
+                    to: capture_read,
                     meta: crate::edge::EdgeMeta {
                         precision,
                         kind: crate::edge::IdgEdgeKind::InterCallArg,
@@ -2976,8 +3303,8 @@ fn stitch_source_callback_args(
             };
             for &source_param_index in &shape.source_param_indices {
                 let callee_param_idx =
-                    explicit_arg_param_index(source_param_index, endpoints.receiver_param_index);
-                let Some(&callee_param_node) = endpoints.params.get(callee_param_idx) else {
+                    explicit_arg_param_index(source_param_index, endpoints.receiver_param_index());
+                let Some(&callee_param_node) = endpoints.params().get(callee_param_idx) else {
                     continue;
                 };
                 if callee_param_node.is_sentinel() {
@@ -3065,8 +3392,8 @@ fn stitch_indirect_callback_inputs(
         let Some(endpoints) = callee_endpoints.get(cand.func) else {
             continue;
         };
-        let callback_param_idx = explicit_arg_param_index(0, endpoints.receiver_param_index);
-        let Some(&callee_param_node) = endpoints.params.get(callback_param_idx) else {
+        let callback_param_idx = explicit_arg_param_index(0, endpoints.receiver_param_index());
+        let Some(&callee_param_node) = endpoints.params().get(callback_param_idx) else {
             continue;
         };
         if callee_param_node.is_sentinel() {
@@ -3123,16 +3450,15 @@ fn constructor_receiver_target_base(
     trimmed.to_string()
 }
 
-fn constructor_receiver_bases(endpoints: &CalleeEndpoints) -> Vec<String> {
+fn constructor_receiver_bases(endpoints: CalleeEndpointView<'_>) -> Vec<String> {
     let mut out: Vec<String> = endpoints
-        .receiver_param_index
-        .and_then(|idx| endpoints.param_names.get(idx).cloned())
+        .receiver_param_index()
+        .and_then(|idx| endpoints.param_name(idx).map(str::to_string))
         .into_iter()
         .collect();
     for base in endpoints
-        .receiver_field_bases
-        .iter()
-        .chain(endpoints.implicit_receiver_bases.iter())
+        .receiver_field_bases()
+        .chain(endpoints.implicit_receiver_bases())
     {
         let base = base.trim();
         if !base.is_empty() && !out.iter().any(|existing| existing == base) {
@@ -3145,11 +3471,10 @@ fn constructor_receiver_bases(endpoints: &CalleeEndpoints) -> Vec<String> {
     // token first; retaining it lets descendant state flow through each
     // constructor in the hierarchy without spelling any language receiver in
     // the IDG.
-    if endpoints.receiver_param_index.is_none() {
+    if endpoints.receiver_param_index().is_none() {
         if let Some(receiver) = endpoints
-            .receiver_names
-            .first()
-            .map(String::as_str)
+            .receiver_names()
+            .next()
             .map(str::trim)
             .filter(|receiver| !receiver.is_empty())
         {
@@ -3305,17 +3630,16 @@ fn push_nested_receiver_field_arg_sites(
     callee_seg: SegmentId,
     actual_receiver: &str,
     receiver_param_name: &str,
-    endpoints: &CalleeEndpoints,
+    endpoints: CalleeEndpointView<'_>,
     call_span: Span,
     precision: Precision,
     call_kind: CallEdgeKind,
 ) {
     let projection_bases = return_projection_bases(endpoints);
     let nested_bases = endpoints
-        .receiver_field_bases
-        .iter()
-        .chain(endpoints.implicit_receiver_bases.iter())
-        .chain(projection_bases.iter());
+        .receiver_field_bases()
+        .chain(endpoints.implicit_receiver_bases())
+        .chain(projection_bases.iter().map(String::as_str));
     let mut seen = AHashSet::new();
     for nested_param_base in nested_bases {
         let nested_param_base = nested_param_base.trim();
@@ -3353,7 +3677,7 @@ fn push_bare_implicit_member_field_arg_sites(
     caller_seg: SegmentId,
     callee: FuncId,
     callee_seg: SegmentId,
-    endpoints: &CalleeEndpoints,
+    endpoints: CalleeEndpointView<'_>,
     caller_implicit_receiver_bases: &[String],
     caller_receiver_names: &[String],
     call_span: Span,
@@ -3366,10 +3690,9 @@ fn push_bare_implicit_member_field_arg_sites(
     }
     let projection_bases = return_projection_bases(endpoints);
     let nested_bases = endpoints
-        .receiver_field_bases
-        .iter()
-        .chain(endpoints.implicit_receiver_bases.iter())
-        .chain(projection_bases.iter());
+        .receiver_field_bases()
+        .chain(endpoints.implicit_receiver_bases())
+        .chain(projection_bases.iter().map(String::as_str));
     let mut seen = AHashSet::new();
     for nested_param_base in nested_bases {
         let nested_param_base = nested_param_base.trim();
@@ -3377,7 +3700,7 @@ fn push_bare_implicit_member_field_arg_sites(
             continue;
         }
         for root in &roots {
-            let actual_arg = implicit_member_actual_base(root, nested_param_base, &endpoints.receiver_names);
+            let actual_arg = implicit_member_actual_base(root, nested_param_base, endpoints.receiver_names());
             if !seen.insert((actual_arg.clone(), nested_param_base.to_string())) {
                 continue;
             }
@@ -3402,9 +3725,9 @@ fn push_bare_implicit_member_field_arg_sites(
     }
 }
 
-fn return_projection_bases(endpoints: &CalleeEndpoints) -> Vec<String> {
+fn return_projection_bases(endpoints: CalleeEndpointView<'_>) -> Vec<String> {
     let mut out = Vec::new();
-    for projection in &endpoints.return_field_projections {
+    for projection in endpoints.return_field_projections() {
         let base = projection.base.trim();
         if !base.is_empty() && !out.iter().any(|existing| existing == base) {
             out.push(base.to_string());
@@ -3439,8 +3762,12 @@ fn implicit_member_actual_roots(
     roots
 }
 
-fn implicit_member_actual_base(root: &str, nested_param_base: &str, receiver_names: &[String]) -> String {
-    if receiver_root_if_declared(nested_param_base, receiver_names).is_some() {
+fn implicit_member_actual_base<'a>(
+    root: &str,
+    nested_param_base: &str,
+    receiver_names: impl IntoIterator<Item = &'a str>,
+) -> String {
+    if receiver_root_if_declared_names(nested_param_base, receiver_names).is_some() {
         nested_param_base.trim().to_string()
     } else {
         format!("{}.{}", root.trim(), nested_param_base.trim())
@@ -3474,12 +3801,22 @@ fn project_receiver_base(actual_base: &str, receiver_root: &str, receiver_base: 
 }
 
 fn receiver_root_if_declared<'a>(receiver_base: &'a str, receiver_names: &[String]) -> Option<&'a str> {
+    receiver_root_if_declared_names(receiver_base, receiver_names.iter().map(String::as_str))
+}
+
+fn receiver_root_if_declared_names<'a, 'b>(
+    receiver_base: &'a str,
+    receiver_names: impl IntoIterator<Item = &'b str>,
+) -> Option<&'a str> {
     let root = receiver_base
         .trim()
         .split('.')
         .find(|part| !part.trim().is_empty())?
         .trim();
-    receiver_name_matches(root, receiver_names).then_some(root)
+    receiver_names
+        .into_iter()
+        .any(|name| receiver_tokens_equal(root, name))
+        .then_some(root)
 }
 
 fn receiver_projection_needed(receiver: &str, receiver_type: &str) -> bool {
@@ -3497,15 +3834,15 @@ fn explicit_arg_param_index(arg_idx: usize, receiver_param_index: Option<usize>)
 
 fn named_arg_param_index(
     arg_name: &str,
-    param_names: &[String],
+    endpoints: CalleeEndpointView<'_>,
     receiver_param_index: Option<usize>,
 ) -> Option<usize> {
     let arg_name = arg_name.trim();
     if arg_name.is_empty() {
         return None;
     }
-    param_names
-        .iter()
+    endpoints
+        .param_names()
         .enumerate()
         .find(|(idx, param)| Some(*idx) != receiver_param_index && param.trim() == arg_name)
         .map(|(idx, _)| idx)

@@ -10,6 +10,50 @@ fn span(file: u32, start: u64, end: u64) -> Span {
 }
 
 #[test]
+fn packed_symbolic_strings_preserve_exact_sorted_utf8_identity() {
+    let values = vec![
+        "0.deep.field".to_string(),
+        "alpha".to_string(),
+        "alpha.beta".to_string(),
+        "λ.field".to_string(),
+    ];
+    let table = PackedStringTable::from_sorted(values.clone());
+    assert_eq!(table.len(), values.len());
+    for (index, value) in values.iter().enumerate() {
+        let id = u32::try_from(index).expect("test field index fits u32");
+        assert_eq!(table.get(id), Some(value.as_str()));
+        assert_eq!(table.find(value), Some(id));
+    }
+    assert_eq!(table.find("alpha.gamma"), None);
+    assert_eq!(table.get(values.len() as u32), None);
+}
+
+#[test]
+fn symbolic_fact_pager_round_trips_sparse_fixed_width_pages() {
+    let mut pager = SymbolicFactPager::new(3);
+    let page = SymbolicFactPage {
+        offsets: vec![0, 1, 1].into_boxed_slice(),
+        facts: vec![SymbolicFactTemplate {
+            base: 7,
+            field: 11,
+            span: Some(span(2, 13, 29)),
+        }]
+        .into_boxed_slice(),
+    };
+    pager.write_page(SegmentId(2), &page);
+
+    assert!(pager.page(SegmentId(0)).is_none());
+    let decoded = pager.page(SegmentId(2)).expect("written symbolic fact page");
+    assert!(decoded.get(NodeId(1)).is_empty());
+    let facts = decoded.get(NodeId(0));
+    assert_eq!(facts.len(), 1);
+    assert_eq!(
+        (facts[0].base, facts[0].field, facts[0].span),
+        (7, 11, Some(span(2, 13, 29)))
+    );
+}
+
+#[test]
 fn root_closure_visited_promotes_from_sparse_to_dense_without_changing_membership() {
     let node_count = 4096usize;
     let dense_bytes = node_count.div_ceil(u8::BITS as usize);
@@ -938,6 +982,11 @@ fn symbolic_return_summary_matches_the_originating_call_site() {
         });
     }
     workspace.set_symbolic_field(symbolic);
+    let sidecar_dir = tempfile::tempdir().expect("tempdir");
+    let sidecar = sidecar_dir.path().join("symbolic-context.factstore");
+    workspace
+        .save_to_disk(&sidecar, 0x51DE_CAFE)
+        .expect("save symbolic query sidecar");
     let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
     let summaries =
         service.return_taint_param_indices_for_funcs_with_max_precision(&[caller], Some(Precision::Narrowed));
@@ -961,6 +1010,19 @@ fn symbolic_return_summary_matches_the_originating_call_site() {
         !mixed_closure.contains(&caller_return),
         "a live field in the first call must not combine with a dead field that activates the returned call"
     );
+
+    let paged = IdgWorkspace::load_query_from_disk(&sidecar, 0x51DE_CAFE)
+        .expect("open symbolic query sidecar")
+        .expect("current symbolic query sidecar");
+    let paged = IdgQueryService::new(Arc::new(paged), Arc::new(GlobalIndex::new()));
+    let paged_summaries =
+        paged.return_taint_param_indices_for_funcs_with_max_precision(&[caller], Some(Precision::Narrowed));
+    assert_eq!(paged_summaries.get(&caller), Some(&vec![1]));
+    let paged_params = paged.param_nodes_of(caller);
+    let paged_return = paged.return_node_of(caller).expect("paged caller return");
+    assert!(!paged.forward_closure(&[paged_params[0]]).contains(&paged_return));
+    assert!(paged.forward_closure(&[paged_params[1]]).contains(&paged_return));
+    assert!(!paged.forward_closure(&[paged_params[2]]).contains(&paged_return));
 }
 
 #[test]
@@ -1102,6 +1164,57 @@ fn read_or_write_nodes_for_names_locates_local_assign_target() {
     let f_id = func_for("f");
     let nodes = svc.read_or_write_nodes_for_names(f_id, &["local".to_string()]);
     assert!(!nodes.is_empty(), "should locate IDG nodes for `local`");
+}
+
+#[test]
+fn reachable_name_lookup_preserves_exact_projected_writes() {
+    let mut f = empty_decl(1, 0, "set_header");
+    f.params = vec!["response".to_string(), "user_input".to_string()];
+    f.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "cd".to_string(),
+            source_name: Some("user_input".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["user_input".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: span(0, 30, 50),
+            target: "response.headers.Content-Disposition".to_string(),
+            source_name: Some("cd".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["cd".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: span(0, 60, 70),
+            target: "response.headers.Location".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Literal),
+        },
+    ];
+    let (idx, ws) = build(vec![f]);
+    let func = func_id(&idx, "set_header");
+    let service = IdgQueryService::new(ws, idx.clone());
+    let seeds = service.param_nodes_for_names(func, &["user_input".to_string()], idx.as_ref());
+    let closure: AHashSet<_> = service.forward_closure(&seeds).into_iter().collect();
+    let names = service.read_or_write_names_in_reachable_nodes(func, &closure);
+
+    assert!(names.contains("cd"));
+    assert!(names.contains("response.headers.Content-Disposition"));
+    assert!(
+        !names.contains("response.headers.Location"),
+        "exact projected lookup must not taint sibling header fields"
+    );
 }
 
 #[test]

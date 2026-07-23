@@ -21,6 +21,15 @@ security, debug dataflow, and export. A fact that cannot be resolved is omitted
 from authoritative output and recorded as incomplete; it is not widened into a
 guessed edge.
 
+Semantic prewarm publishes a generation of immutable per-file compiler
+objects. An object contains the adapter's typed declarations, imports, flow
+facts, and parser/adapter diagnostics—not a Tree-sitter pointer or source-text
+guess. Reuse requires the same relative path, selected adapter, frontend ABI,
+and SHA-256 source digest. This lets every later phase consume one syntax
+interpretation while a changed file alone falls back to Tree-sitter lowering.
+The completed generation is replaced atomically; queries never observe half
+old and half new compiler state.
+
 ## Sources
 
 A source is a rule-matched fact that introduces untrusted data: request parameters, headers, CLI input, queue messages, environment values, calldata, database rows, or other boundary values. Source rules live under `security-patterns/langs/<lang>/sources/`.
@@ -51,6 +60,12 @@ iteration budget, or semantic result cap. The same closure supplies security,
 source analysis, dump-taint, compatibility APIs, and native export. Bounded
 path enumeration exists only for requested previews and diagnostics; those
 surfaces report truncation and never alter reachability.
+
+Large closures page fixed-width node facts and AST-derived field transforms
+from temporary compiler relations. Available memory controls only how many
+pages stay hot; it does not select files, names, paths, iterations, or edges.
+On a smaller machine the same fixed point can perform more I/O and take
+longer, but it does not silently become a smaller analysis.
 
 Receiver-method flow is semantic: adapters emit type aliases and parent
 links, the index path enriches receiver type facts, and resolver-backed

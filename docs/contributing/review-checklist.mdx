@@ -39,6 +39,13 @@ class and verify each box.
 - [ ] **Fixed point stays uncapped.** No BFS name search, hidden call-depth
       ceiling, iteration budget, or result cap is introduced into the
       semantic IDG closure. Preview/path limits remain presentation-only.
+- [ ] **One frontend/transfer interpretation remains.** Broad phases consume
+      `CompiledFileObject`; persisted IDG construction spools typed stitch
+      records and does not add a second Tree-sitter or transfer-lowering pass.
+- [ ] **Compiler ABI bumped when required.** A change to persisted adapter IR,
+      diagnostic semantics, or frontend post-processing bumps
+      `COMPILER_OBJECT_CACHE_VERSION`; an IDG semantic change also bumps its
+      normal pipeline fingerprint.
 - [ ] **Documentation updated.** `docs/contributing/taint-engine-spec.mdx` reflects the
       new behaviour.
 
@@ -59,6 +66,9 @@ class and verify each box.
       language id or accumulate a cross-language spelling union.
 - [ ] **Adapter never reaches into core analysis.** Imports are limited
       to `bonsai_lang_api` and tree-sitter.
+- [ ] **Fresh/object parity holds.** The adapter's typed output is fully
+      serializable in `CompiledFileObject`; a warm decode cannot omit a fact or
+      diagnostic that fresh Tree-sitter lowering emits.
 - [ ] **Documentation updated.** `docs/contributing/architecture.mdx` per-language
       summary reflects new GrammarHandler config.
 

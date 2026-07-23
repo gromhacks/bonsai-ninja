@@ -45,6 +45,17 @@ fixed-point closure. It has no BFS name search, call-depth ceiling, iteration
 limit, or result cap. Paging and diagnostic path limits affect rendering only
 and must report truncation explicitly.
 
+`index --semantic` first publishes an immutable content-addressed generation
+of per-file compiler objects. Each object is exact adapter-lowered IR plus
+diagnostics, validated by path, adapter, frontend ABI, and SHA-256 source
+content. Later phases stream those objects; they must not reparse source or
+invent a parallel lowering path. Persisted IDG construction lowers transfer
+facts once, spools typed stitch records/node maps, and replays them per segment.
+Memory scheduling may weight or serialize units, but must never cap semantic
+work. After the isolated workers finish, the parent validates that every
+sidecar describes one current workspace snapshot and reruns the exact sequence
+if a file changed between phases.
+
 Always treat pagination as correctness. If output says more pages exist,
 continue with `--page 2`, `--page next`, or the printed `P:...` cursor
 before claiming coverage. Use `--all` only for tight filters or explicit

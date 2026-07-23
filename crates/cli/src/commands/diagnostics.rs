@@ -92,39 +92,55 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
 /// while their peak resident sets cannot become additive.
 pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
     let executable = std::env::current_exe()?;
-    for phase in [
-        SemanticWorkerPhase::Callgraph,
-        SemanticWorkerPhase::Retrieval,
-        SemanticWorkerPhase::Linkage,
-        SemanticWorkerPhase::Idg,
-    ] {
-        let phase_name = match phase {
-            SemanticWorkerPhase::Retrieval => "retrieval",
-            SemanticWorkerPhase::Callgraph => "callgraph",
-            SemanticWorkerPhase::Linkage => "linkage",
-            SemanticWorkerPhase::Idg => "idg",
-        };
-        let mut command = Command::new(&executable);
-        command
-            .arg("index")
-            .arg("--semantic")
-            .arg("--semantic-worker")
-            .arg(phase_name)
-            .arg(root);
-        if let Some(timeout_ms) = crate::PARSE_TIMEOUT_MS.get().copied().flatten() {
-            command.arg("--parse-timeout").arg(timeout_ms.to_string());
+    loop {
+        for phase in [
+            SemanticWorkerPhase::Compiler,
+            SemanticWorkerPhase::Callgraph,
+            SemanticWorkerPhase::Retrieval,
+            SemanticWorkerPhase::Linkage,
+            SemanticWorkerPhase::Idg,
+        ] {
+            let phase_name = match phase {
+                SemanticWorkerPhase::Compiler => "compiler",
+                SemanticWorkerPhase::Retrieval => "retrieval",
+                SemanticWorkerPhase::Callgraph => "callgraph",
+                SemanticWorkerPhase::Linkage => "linkage",
+                SemanticWorkerPhase::Idg => "idg",
+            };
+            let mut command = Command::new(&executable);
+            command
+                .arg("index")
+                .arg("--semantic")
+                .arg("--semantic-worker")
+                .arg(phase_name)
+                .arg(root);
+            if let Some(timeout_ms) = crate::PARSE_TIMEOUT_MS.get().copied().flatten() {
+                command.arg("--parse-timeout").arg(timeout_ms.to_string());
+            }
+            let status = command.status()?;
+            if !status.success() {
+                anyhow::bail!("semantic {phase_name} worker exited with {status}");
+            }
         }
-        let status = command.status()?;
-        if !status.success() {
-            anyhow::bail!("semantic {phase_name} worker exited with {status}");
+        // Each worker publishes atomically. This final validation proves every
+        // artifact describes the same current snapshot. An edit between
+        // workers reruns the exact compiler pipeline until it reaches a
+        // quiescent generation; there is no semantic retry cap.
+        let project = open_project_sidecar_validation_only(root)?;
+        if project.cache().structural_sidecars_are_current()? {
+            return Ok(());
         }
+        let retry = progress::ScopedSpinner::new(
+            "workspace changed between semantic workers; rebuilding one coherent generation",
+        );
+        retry.finish();
     }
-    Ok(())
 }
 
 fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Result<()> {
     let project = open_project_sidecar_validation_only(root)?;
     match phase {
+        SemanticWorkerPhase::Compiler => project.cache().warm_compiler_object_sidecar(),
         SemanticWorkerPhase::Retrieval => project.cache().warm_retrieval_sidecar(),
         SemanticWorkerPhase::Callgraph => project.cache().warm_callgraph_sidecar(),
         SemanticWorkerPhase::Linkage => project.cache().warm_compiler_linkage_sidecar(),

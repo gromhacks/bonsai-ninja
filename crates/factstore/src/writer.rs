@@ -487,16 +487,16 @@ impl FactStoreWriter {
         let handle = std::thread::Builder::new()
             .name("factstore-writer".to_string())
             .spawn(move || {
-                let outcome = run_writer_thread(
+                let outcome = run_writer_thread(WriterThreadInit {
                     file,
                     receiver,
                     table_id,
                     pipeline_hash,
                     tmp_path,
                     target_path,
-                    pending,
+                    entries: pending,
                     next_payload_offset,
-                );
+                });
                 if let Err(err) = outcome {
                     // The Finish path already replies through the
                     // one-shot. This branch covers a write error in
@@ -752,17 +752,32 @@ impl Drop for FactStoreWriter {
     }
 }
 
-/// Writer-thread main loop.
-fn run_writer_thread(
+/// Complete state transferred to the single owner of a FactStore generation.
+/// Grouping it makes the thread boundary explicit and keeps newly added writer
+/// state from turning the launch call into an error-prone positional protocol.
+struct WriterThreadInit {
     file: File,
     receiver: Receiver<WriteCmd>,
     table_id: u32,
     pipeline_hash: u64,
     tmp_path: PathBuf,
     target_path: PathBuf,
-    mut entries: Vec<PendingIndexEntry>,
-    mut next_payload_offset: u64,
-) -> FactStoreResult<()> {
+    entries: Vec<PendingIndexEntry>,
+    next_payload_offset: u64,
+}
+
+/// Writer-thread main loop.
+fn run_writer_thread(init: WriterThreadInit) -> FactStoreResult<()> {
+    let WriterThreadInit {
+        file,
+        receiver,
+        table_id,
+        pipeline_hash,
+        tmp_path,
+        target_path,
+        mut entries,
+        mut next_payload_offset,
+    } = init;
     let mut buf = BufWriter::new(file);
 
     loop {

@@ -36,6 +36,38 @@ pub struct ReachabilityIndex {
     n_nodes: usize,
 }
 
+/// Forward-only compiler relation used by contextual summary evaluation.
+///
+/// User-facing reachability keeps [`ReachabilityIndex`]'s two directions for
+/// cuts and diagnostics. Function-summary compilation only advances facts,
+/// so retaining the complete transpose would duplicate hundreds of
+/// megabytes on a large workspace for no query operation.
+#[derive(Clone, Debug)]
+pub(crate) struct ForwardReachabilityIndex {
+    forward: EdgeCsr,
+    n_nodes: usize,
+}
+
+impl ForwardReachabilityIndex {
+    pub(crate) fn from_pair_visitor<F>(n_nodes: usize, visit_pairs: F) -> Self
+    where
+        F: Fn(&mut dyn FnMut(u32, u32)),
+    {
+        Self {
+            forward: EdgeCsr::forward_from_pair_visitor(n_nodes, visit_pairs),
+            n_nodes,
+        }
+    }
+
+    pub(crate) fn forward_closure_nodes(&self, seeds: &[NodeId]) -> Vec<NodeId> {
+        sparse_closure_nodes(&self.forward, self.n_nodes, seeds)
+    }
+
+    pub(crate) fn forward_neighbours(&self, node: NodeId) -> &[u32] {
+        self.forward.neighbours(node)
+    }
+}
+
 impl ReachabilityIndex {
     /// Construct the index from a graph's edge list and node count.
     /// Builds both forward and backward CSRs so neither direction
@@ -57,6 +89,21 @@ impl ReachabilityIndex {
         Self {
             forward: EdgeCsr::forward_pairs(n_nodes, edges),
             backward: EdgeCsr::backward_pairs(n_nodes, edges),
+            n_nodes,
+        }
+    }
+
+    /// Construct both directional CSRs from a repeatable exact pair visitor.
+    /// This accepts heterogeneous borrowed compiler relations without a
+    /// workspace-sized staging vector.
+    pub(crate) fn from_pair_visitor<F>(n_nodes: usize, visit_pairs: F) -> Self
+    where
+        F: Fn(&mut dyn FnMut(u32, u32)),
+    {
+        let (forward, backward) = EdgeCsr::bidirectional_from_pair_visitor(n_nodes, visit_pairs);
+        Self {
+            forward,
+            backward,
             n_nodes,
         }
     }
@@ -95,12 +142,6 @@ impl ReachabilityIndex {
     #[must_use]
     pub fn forward_closure_nodes(&self, seeds: &[NodeId]) -> Vec<NodeId> {
         sparse_closure_nodes(&self.forward, self.n_nodes, seeds)
-    }
-
-    /// Direct forward successors for compiler clients that compose another
-    /// monotone relation with the ordinary IDG without restarting closure.
-    pub(crate) fn forward_neighbours(&self, node: NodeId) -> &[u32] {
-        self.forward.neighbours(node)
     }
 
     /// Forward closure restricted to `allowed` nodes.

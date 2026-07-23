@@ -2658,12 +2658,12 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
             && !security_taint_body.contains("Unknown"),
         "security taint-analysis must run one semantic taint precision mode without exposing diagnostic precision filters"
     );
-    let export_callgraph_body = function_body(&native_export, "export_structural_callgraph");
+    let export_callgraph_body = function_body(&native_export, "export_structural_callgraph_indices");
     assert!(
         export_callgraph_body.contains("edge.precision.is_semantic()"),
         "native export structural callgraph must emit semantic call edges only"
     );
-    let export_taint_call_edges_body = function_body(&native_export, "export_taint_call_edges");
+    let export_taint_call_edges_body = function_body(&native_export, "export_taint_call_edge_indices");
     assert!(
         export_taint_call_edges_body.contains("edge.precision.is_semantic()"),
         "native export taint call_edges must emit semantic call edges only"
@@ -2986,9 +2986,60 @@ fn retrieval_streams_callgraph_candidates_by_compiler_unit() {
 }
 
 #[test]
-fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
+fn compiler_objects_are_exact_single_frontend_inputs() {
     let root = repo_root();
     let db = read(&root.join("crates/db/src/lib.rs"));
+    let compiler_object = read(&root.join("crates/db/src/compiler_object.rs"));
+    let sdk = read(&root.join("crates/sdk/src/lib.rs"));
+    let service = read(&root.join("crates/idg/src/service.rs"));
+    let csr = read(&root.join("crates/idg/src/csr.rs"));
+
+    let load = function_body(&compiler_object, "compressed_payload");
+    let prepare = function_body(&compiler_object, "prepare_compiler_object");
+    let save = function_body(&compiler_object, "save_compiler_object_sidecar");
+    assert!(
+        compiler_object.contains("pub struct CompiledFileObject")
+            && compiler_object.contains("Sha256")
+            && function_body(&compiler_object, "source_descriptor").contains("strip_prefix")
+            && load.contains("metadata.path != descriptor.path")
+            && load.contains("metadata.language != descriptor.language")
+            && load.contains("metadata.source_digest != descriptor.source_digest")
+            && load.contains("digest_bytes(&hit.payload)")
+            && prepare.matches("ensure_source_version").count() == 3
+            && prepare.contains("Ok(Some(prepared)) => {")
+            && save.contains("PreparedFactStorePayload")
+            && save.contains("compiler_weighted_batches")
+            && !save.contains(".take(")
+            && !save.contains(".truncate("),
+        "compiler objects must be atomic, strongly content-identified, relocatable by relative path, and complete"
+    );
+    assert!(
+        function_body(&db, "decl_index_uncached").contains("compiler_file_object_uncached")
+            && function_body(&db, "syntax_indexes_uncached").contains("compiler_file_object_uncached")
+            && sdk.contains("\"compiler_objects\"")
+            && function_body(&sdk, "cache_manifest_coverage")
+                .contains("stats.compiler_object_sidecar_exists"),
+        "broad syntax consumers and semantic readiness must share the canonical compiler-object generation"
+    );
+
+    let build_reach = function_body(&service, "build_reach");
+    let direct_csr = function_body(&csr, "bidirectional_from_pair_visitor");
+    assert!(
+        build_reach.contains("ReachabilityIndex::from_pair_visitor")
+            && !build_reach.contains("Vec<(u32, u32)>")
+            && direct_csr.matches("visit_pairs(").count() == 2
+            && direct_csr.contains("forward_offsets")
+            && direct_csr.contains("backward_offsets"),
+        "query adjacency must be built directly from canonical numeric edges without a workspace-sized staging projection"
+    );
+}
+
+#[test]
+fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
+    let root = repo_root();
+    let resources = read(&root.join("crates/common/src/resources.rs"));
+    let db = read(&root.join("crates/db/src/lib.rs"));
+    let compiler_object = read(&root.join("crates/db/src/compiler_object.rs"));
     let callgraph = read(&root.join("crates/callgraph/src/lib.rs"));
     let idg = read(&root.join("crates/idg/src/workspace_adapter.rs"));
     let idg_builder = read(&root.join("crates/idg/src/builder.rs"));
@@ -3011,14 +3062,19 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             "compiler_worker_count",
         ),
         (
+            "compiler objects",
+            function_body(&compiler_object, "save_compiler_object_sidecar"),
+            "compiler_weighted_batches",
+        ),
+        (
             "callgraph",
             function_body(&callgraph, "callgraph_resolver_worker_count"),
             "compiler_worker_count",
         ),
         (
             "IDG transfer",
-            function_body(&idg, "idg_transfer_batch_segment_count"),
-            "compiler_worker_count",
+            function_body(&idg, "idg_transfer_batches"),
+            "compiler_weighted_batches",
         ),
     ] {
         assert!(
@@ -3032,6 +3088,21 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             );
         }
     }
+    assert!(
+        function_body(&idg, "idg_transfer_batches").contains("file_to_source_bytes")
+            && function_body(&idg, "idg_transfer_batches").contains("compiler_weighted_batches"),
+        "IDG transfer concurrency must use exact compiler-unit size where the syntax provider exposes it"
+    );
+    assert!(
+        function_body(&resources, "compiler_weighted_batches").contains("compiler_worker_count")
+            && function_body(&resources, "compiler_weighted_batches")
+                .contains("current_process_resident_bytes")
+            && function_body(&resources, "compiler_weighted_batches_for_limit_and_resident")
+                .contains("weighted_working_memory_bytes")
+            && function_body(&resources, "weighted_working_memory_bytes").contains("resident_bytes")
+            && function_body(&resources, "weighted_working_memory_bytes").contains("headroom"),
+        "weighted compiler schedules must apply the conservative worker profile, subtract measured resident state, and retain safety headroom"
+    );
     assert!(
         function_body(&db, "build_global_header_index").contains("insert_header_preprocessed")
             && function_body(&taint_idg, "build_resolved_call_graph_snapshot_scoped")
@@ -3059,14 +3130,16 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 .contains("span_contains(*arg_span, *target_span)")
             && !function_body(&workspace, "call_edge_passes_target_callback")
                 .contains("callable_reference_variants"),
-        "IDG persistence must retain only linkage headers and lower exact file bodies at segment boundaries"
+        "IDG persistence must retain linkage headers and stream exact compiler-object bodies at segment boundaries"
     );
-    let stitch = function_body(&idg_builder, "stitch_idg_from_relowered_segment_batches");
+    let stitch = function_body(&idg_builder, "stitch_idg_from_spooled_segment_batches");
     assert!(
         stitch.contains("extend_callee_endpoints_for_segment")
             && stitch.contains("segment.release_build_lookups()")
             && stitch.contains("segment.rebuild_build_lookups()")
-            && stitch.contains("remap_transfer_into_segment")
+            && stitch.contains("StitchSegmentRecord")
+            && stitch.contains("stitch_spool.push")
+            && stitch.contains("stitch_spool.into_visit")
             && stitch.contains("enable_segment_spool(spool_path)")
             && stitch.contains("spill_segment")
             && stitch.contains("begin_spool_generation()")
@@ -3076,9 +3149,13 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && stitch.contains("stitched_function_count")
             && stitch.contains("disable_cross_file_indexes()")
             && function_body(&idg, "build_with_file_info_and_options_scoped")
-                .contains("stitch_idg_from_relowered_segment_batches")
+                .contains("stitch_idg_from_spooled_segment_batches")
+            && function_body(&idg, "build_with_file_info_and_options_scoped")
+                .matches("lower_transfer_segment_batch")
+                .count()
+                == 1
             && function_body(&idg_workspace, "rebuild_indexes").contains("self.maintain_indexes = true"),
-        "sidecar IDG builds must re-lower and spill every compiler unit without semantic caps, release transient indexes at segment boundaries, and defer query-only edge indexes to warm load"
+        "sidecar IDG builds must lower each compiler unit once, spool typed stitch objects without semantic caps, release transient indexes at segment boundaries, and defer query-only edge indexes to warm load"
     );
     assert!(
         struct_body(&idg_workspace, "IdgSegmentSpool").contains("PreparedFactStorePayload")
@@ -3441,6 +3518,8 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
             && index_body.contains("open_project_parse_only(root)?")
             && function_body(&diagnostics, "run_semantic_workers").contains("std::env::current_exe()")
             && function_body(&diagnostics, "run_semantic_workers")
+                .contains("SemanticWorkerPhase::Compiler")
+            && function_body(&diagnostics, "run_semantic_workers")
                 .contains("SemanticWorkerPhase::Retrieval")
             && function_body(&diagnostics, "run_semantic_workers")
                 .contains("SemanticWorkerPhase::Callgraph")
@@ -3516,17 +3595,20 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     let workspace = read(&repo_root().join("crates/workspace/src/lib.rs"));
     let warm = function_body(&sdk, "warm_structural_sidecars");
     assert!(
-        warm.contains("warm_retrieval_and_callgraph_sidecars()?")
+        warm.contains("warm_compiler_object_sidecar()?")
+            && warm.contains("warm_retrieval_and_callgraph_sidecars()?")
             && warm.contains("warm_idg_sidecar_and_manifest()"),
         "SDK semantic warming must expose the same explicit compiler phase boundary"
     );
     let frontend = function_body(&sdk, "warm_retrieval_and_callgraph_sidecars");
+    let compiler = function_body(&sdk, "warm_compiler_object_sidecar");
     let retrieval = function_body(&sdk, "warm_retrieval_sidecar");
     let callgraph = function_body(&sdk, "warm_callgraph_sidecar");
     let linkage = function_body(&sdk, "warm_compiler_linkage_sidecar");
     let idg = function_body(&sdk, "warm_idg_sidecar_and_manifest");
     assert!(
-        frontend.contains("warm_retrieval_sidecar()?")
+        compiler.contains("save_compiler_object_sidecar")
+            && frontend.contains("warm_retrieval_sidecar()?")
             && frontend.contains("warm_callgraph_sidecar()?")
             && frontend.contains("warm_compiler_linkage_sidecar()")
             && retrieval.contains("bonsai_retrieval::ensure_sidecar")
@@ -3538,11 +3620,12 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
             && idg.contains("load_compiler_linkage_sidecar_checked")
             && idg.contains("build_and_persist_idg_sidecar")
             && idg.contains("write_manifest"),
-        "retrieval, callgraph, linkage, and IDG persistence must be independently executable exact phases"
+        "compiler objects, retrieval, callgraph, linkage, and IDG persistence must be independently executable exact phases"
     );
     let workers = function_body(&diagnostics, "run_semantic_workers");
     assert!(
         workers.contains("Command::new(&executable)")
+            && workers.contains("SemanticWorkerPhase::Compiler")
             && workers.contains("SemanticWorkerPhase::Retrieval")
             && workers.contains("SemanticWorkerPhase::Callgraph")
             && workers.contains("SemanticWorkerPhase::Linkage")
@@ -3552,7 +3635,18 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
         "CLI semantic prewarm must run exact phases sequentially across OS-reclaimed process boundaries"
     );
     assert!(
+        workers.contains("loop")
+            && workers.contains("structural_sidecars_are_current")
+            && !workers.contains(".take(")
+            && !workers.contains(".truncate("),
+        "semantic workers must publish one coherent current generation without a retry or semantic-work cap"
+    );
+    assert!(
         workers
+            .find("SemanticWorkerPhase::Compiler")
+            .zip(workers.find("SemanticWorkerPhase::Callgraph"))
+            .is_some_and(|(compiler, callgraph)| compiler < callgraph)
+            && workers
             .find("SemanticWorkerPhase::Callgraph")
             .zip(workers.find("SemanticWorkerPhase::Retrieval"))
             .is_some_and(|(callgraph, retrieval)| callgraph < retrieval)
@@ -3580,7 +3674,7 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     let unified = function_body(&idg_service, "build_unified");
     let local_lookup = function_body(&idg_service, "local_node_for");
     assert!(
-        unified.contains("nodes.sort_unstable_by_key")
+        unified.contains("func_nodes[start..end].sort_unstable_by_key")
             && local_lookup.contains("binary_search_by_key")
             && !idg_service.contains("segment.nodes.lookup(func, pid)"),
         "warm query lookup must use compact exact per-function ordering, not linear segment scans or full reverse hash tables"
@@ -3599,7 +3693,7 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
         hydrate
             .find("compiler_linkage_index()")
             .is_some_and(|linkage| hydrate
-                .find("IdgWorkspace::load_from_disk")
+                .find("IdgQueryService::load_from_disk")
                 .is_some_and(|idg| linkage < idg)),
         "warm query open must finish streamed Tree-sitter linkage before hydrating the live IDG"
     );
@@ -3633,7 +3727,7 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
     assert!(
         scan.contains("FactRetention::Transient")
             && scan.contains("decl_index_remapped_to_headers(global, file)"),
-        "transient matcher scans must re-lower one exact AST body and bind it to stable workspace symbols"
+        "transient matcher scans must stream one exact compiler body and bind it to stable workspace symbols"
     );
 
     let inferred = function_body(&matcher, "infer_entry_point_sources_for_files_with_progress");
@@ -3754,14 +3848,14 @@ fn workspace_context_does_not_run_an_unneeded_compiler_pass() {
 fn db_applies_receiver_type_enrichment_centrally() {
     let root = repo_root();
     let db_lib = read(&root.join("crates/db/src/lib.rs"));
-    let body = function_body(&db_lib, "build_decl_index_uncached");
+    let body = function_body(&db_lib, "build_decl_index_with_diagnostics");
     assert!(
         body.contains("adapter.extract_declarations(file, ctx)")
             && body.contains("apply_constructor_result_type_aliases")
             && body.contains("apply_assign_value_kind")
             && body.contains("apply_assign_call_result_types")
             && body.contains("apply_call_receiver_types"),
-        "AnalyzerDb::build_decl_index_uncached must centrally enrich FlowEvent::Call::receiver_types after adapter extraction"
+        "AnalyzerDb::build_decl_index_with_diagnostics must centrally enrich FlowEvent::Call::receiver_types after adapter extraction"
     );
 
     let kit = read(&root.join("crates/lang_api/src/kit/mod.rs"));
