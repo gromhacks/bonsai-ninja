@@ -30,6 +30,7 @@ pub use names::{
 };
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;
+pub use resources::compiler_weighted_batches;
 pub use resources::compiler_worker_count;
 pub use resources::effective_memory_limit_bytes;
 pub use resources::memory_bounded_worker_count;

@@ -76,6 +76,7 @@ use bonsai_lang_api::{
     call_receiver_fact_for_span, kit::SYNTHETIC_TUPLE_RESULT_PREFIX, AssignValueKind, AssignmentValueFact,
     CallArg, CallKind, CallReceiverFact, Decl, DeclKind, ExpressionFlow, ExpressionProjection, FlowEvent,
 };
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -415,7 +416,7 @@ pub struct SourceOutputArgSpec {
 }
 
 /// Declarative source call shape whose callback receives untrusted data.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceCallbackArgSpec {
     /// Callee name or `regex:`-prefixed matcher.
     pub callee: String,
@@ -464,7 +465,7 @@ pub struct ReceiverStatePropagationSpec {
 
 /// One call site recorded by the transfer pass for the Phase 3
 /// builder to stitch cross-function edges.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CallSiteRef {
     /// Stable identifier (the call's source span).
     pub site: CallSiteId,
@@ -560,7 +561,7 @@ pub struct ThrowSite {
 
 /// Field projection returned as a scalar value, e.g.
 /// `return self.data.cmd` / `&self.data.cmd`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReturnFieldProjection {
     /// Storage base that owns the returned field, e.g. `self.data`.
     pub base: String,
@@ -572,7 +573,7 @@ pub struct ReturnFieldProjection {
 /// `yield value` or `return value`. Phase 3 turns this into a field-copy
 /// transform so descendant fields materialized by interprocedural stitching
 /// later in the build are preserved as well.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DescendantCopy {
     /// Local aggregate place whose known descendants are forwarded.
     pub source_base: String,
@@ -589,7 +590,7 @@ pub struct DescendantCopy {
 /// context, matching the CFG: only body execution participates in the
 /// loop's back-edge.  Phase 3 uses this to distinguish a real loop-carried
 /// reaching definition from a lexically later straight-line write.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct FlowControlFacts {
     /// Parent context by one-based context id. Context zero is the
     /// implicit non-loop root and is not stored.

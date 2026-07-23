@@ -11,11 +11,12 @@
 //! crate)
 //!
 //! `bonsai_idg` already depends on `bonsai_index` and
-//! `bonsai_callgraph`; pulling the adapter into a sibling crate
-//! would force a cycle. The adapter is small (~200 LoC) and the
-//! [`CalleeResolver`] / [`FuncToSegment`] traits insulate the
-//! [`crate::builder::stitch_idg`] core from this code, so unit tests still don't
-//! need a workspace.
+//! `bonsai_callgraph`; pulling this integration boundary into a sibling crate
+//! would force a cycle. The module owns workspace streaming, persistence, and
+//! exact linkage adaptation. The [`crate::builder::CalleeResolver`] and
+//! [`crate::builder::FuncToSegment`] traits keep
+//! [`crate::builder::stitch_idg`] independent of those concerns, so builder
+//! tests still do not need a workspace.
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
@@ -27,8 +28,8 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{path::Path, time::Instant};
 
 use crate::builder::{
-    stitch_idg_from_relowered_segment_batches, stitch_idg_from_segment_batches, CalleeResolver,
-    ReloweredStitchOptions, ResolvedCallee, ReverseLookupRetention,
+    stitch_idg_from_segment_batches, stitch_idg_from_spooled_segment_batches, CalleeResolver, ResolvedCallee,
+    ReverseLookupRetention, SpooledStitchOptions,
 };
 use crate::transfer::{
     declared_receiver_names, receiver_name_matches, transfer_function_for_with_options_and_syntax_facts,
@@ -81,6 +82,9 @@ struct WorkspaceMaps {
     file_to_module_default_export_names: AHashMap<FileId, &'static [&'static str]>,
     /// Adapter-owned rooted qualified-name syntax for each source file.
     file_to_module_path_syntax: AHashMap<FileId, bonsai_lang_api::ModulePathSyntax>,
+    /// Exact VFS source size used only for memory-weighted transfer scheduling.
+    /// Semantic graph construction never branches on this value.
+    file_to_source_bytes: AHashMap<FileId, u64>,
 }
 
 impl WorkspaceMaps {
@@ -102,6 +106,7 @@ impl WorkspaceMaps {
         let mut file_to_module_default_export_names: AHashMap<FileId, &'static [&'static str]> =
             AHashMap::new();
         let mut file_to_module_path_syntax = AHashMap::new();
+        let mut file_to_source_bytes = AHashMap::new();
         let mut file_to_seg: AHashMap<FileId, SegmentId> = AHashMap::new();
         let mut next_seg = 0u32;
         for file in global.all_files() {
@@ -130,6 +135,9 @@ impl WorkspaceMaps {
             if module_path_syntax != bonsai_lang_api::ModulePathSyntax::none() {
                 file_to_module_path_syntax.insert(file, module_path_syntax);
             }
+            if let Some(source_bytes) = semantics.source_bytes(file) {
+                file_to_source_bytes.insert(file, source_bytes);
+            }
             let seg = SegmentId(next_seg);
             next_seg = next_seg.wrapping_add(1);
             file_to_seg.insert(file, seg);
@@ -150,6 +158,7 @@ impl WorkspaceMaps {
             file_to_module_resolution_extensions,
             file_to_module_default_export_names,
             file_to_module_path_syntax,
+            file_to_source_bytes,
         }
     }
 }
@@ -241,8 +250,25 @@ struct WorkspaceCalleeResolver<'a> {
     /// whose functional-invocation forms the callgraph doesn't model.
     local_callable_bindings: &'a AHashMap<FuncId, AHashMap<String, FuncId>>,
     call_edge_site_cache: RwLock<Option<CallerCallSiteEdges>>,
-    callback_cache: RwLock<AHashMap<(FuncId, u32), Vec<ResolvedCallee>>>,
-    ancestor_dispatch_cache: RwLock<AHashMap<(FuncId, FuncId), bool>>,
+    callback_cache: RwLock<Option<CallerCallbackBindings>>,
+    ancestor_dispatch_cache: RwLock<Option<CallerAncestorDispatch>>,
+}
+
+/// Resolver memo scoped to the caller currently being stitched.
+///
+/// Callers are consumed in stable `FuncId` order. Retaining answers for every
+/// completed caller made a compiler cache grow with the whole program even
+/// though those answers had already been encoded into IDG edges. An
+/// interleaved caller simply replaces this memo and recomputes the same exact
+/// callgraph-derived answer; eviction never changes semantics.
+struct CallerCallbackBindings {
+    caller: FuncId,
+    by_param: AHashMap<u32, Vec<ResolvedCallee>>,
+}
+
+struct CallerAncestorDispatch {
+    caller: FuncId,
+    by_callee: AHashMap<FuncId, bool>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -767,12 +793,29 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
     }
 
     fn is_ancestor_dispatch(&self, caller: FuncId, callee: FuncId) -> bool {
-        let key = (caller, callee);
-        if let Some(cached) = self.ancestor_dispatch_cache.read().get(&key).copied() {
+        if let Some(cached) = self
+            .ancestor_dispatch_cache
+            .read()
+            .as_ref()
+            .filter(|cache| cache.caller == caller)
+            .and_then(|cache| cache.by_callee.get(&callee))
+            .copied()
+        {
             return cached;
         }
         let result = self.callee_parent_is_declared_ancestor(caller, callee);
-        self.ancestor_dispatch_cache.write().insert(key, result);
+        let mut cache = self.ancestor_dispatch_cache.write();
+        if cache.as_ref().is_none_or(|cache| cache.caller != caller) {
+            *cache = Some(CallerAncestorDispatch {
+                caller,
+                by_callee: AHashMap::new(),
+            });
+        }
+        cache
+            .as_mut()
+            .expect("ancestor dispatch cache initialized above")
+            .by_callee
+            .insert(callee, result);
         result
     }
 
@@ -1026,8 +1069,14 @@ impl WorkspaceCalleeResolver<'_> {
 
 impl WorkspaceCalleeResolver<'_> {
     fn callback_bindings_indexed(&self, host: FuncId, param_idx: u32) -> Vec<ResolvedCallee> {
-        let cache_key = (host, param_idx);
-        if let Some(cached) = self.callback_cache.read().get(&cache_key).cloned() {
+        if let Some(cached) = self
+            .callback_cache
+            .read()
+            .as_ref()
+            .filter(|cache| cache.caller == host)
+            .and_then(|cache| cache.by_param.get(&param_idx))
+            .cloned()
+        {
             return cached;
         }
         // For every caller of `host`, find AST Call events whose exact-site
@@ -1076,7 +1125,18 @@ impl WorkspaceCalleeResolver<'_> {
                 }
             }
         }
-        self.callback_cache.write().insert(cache_key, out.clone());
+        let mut cache = self.callback_cache.write();
+        if cache.as_ref().is_none_or(|cache| cache.caller != host) {
+            *cache = Some(CallerCallbackBindings {
+                caller: host,
+                by_param: AHashMap::new(),
+            });
+        }
+        cache
+            .as_mut()
+            .expect("callback cache initialized above")
+            .by_param
+            .insert(param_idx, out.clone());
         out
     }
 }
@@ -2072,6 +2132,11 @@ pub trait IdgFileSemanticsProvider {
     fn language(&self, file: FileId) -> Option<&'static str>;
     /// Return the canonical VFS path used for directory/module scoping.
     fn path(&self, file: FileId) -> Option<String>;
+    /// Return the exact source byte length for resource scheduling. This value
+    /// can change concurrency only; it is never a language or flow fact.
+    fn source_bytes(&self, _file: FileId) -> Option<u64> {
+        None
+    }
     /// Return adapter-owned module suffixes for path-like import resolution.
     fn module_resolution_extensions(&self, file: FileId) -> &'static [&'static str];
     /// Return adapter-emitted declaration names that represent a callable
@@ -2783,8 +2848,8 @@ where
         class_methods_by_parent: &class_methods_by_parent,
         local_callable_bindings: &local_callable_bindings,
         call_edge_site_cache: RwLock::new(None),
-        callback_cache: RwLock::new(AHashMap::new()),
-        ancestor_dispatch_cache: RwLock::new(AHashMap::new()),
+        callback_cache: RwLock::new(None),
+        ancestor_dispatch_cache: RwLock::new(None),
     };
     let symbolic_languages: AHashSet<&str> = transfer_options
         .symbolic_field_languages
@@ -2811,32 +2876,40 @@ where
         transfer_inputs_by_segment(global, &maps.func_to_seg, included_files, included_funcs);
     let function_count = transfer_inputs.iter().map(|(_, _, funcs)| funcs.len()).sum();
     let aggregate_layouts = unambiguous_aggregate_layouts(global);
-    let transfer_batch_width = idg_transfer_batch_segment_count();
+    let transfer_batches = idg_transfer_batches(global, &maps.file_to_source_bytes, &transfer_inputs);
+    let maximum_batch_width = transfer_batches
+        .iter()
+        .map(std::ops::Range::len)
+        .max()
+        .unwrap_or(0);
     idg_build_log(format_args!(
-        "transfer schedule: {:.3}s funcs={} segments={} batch_segments={}",
+        "transfer schedule: {:.3}s funcs={} segments={} batches={} max_batch_segments={}",
         phase_started.elapsed().as_secs_f64(),
         function_count,
         transfer_inputs.len(),
-        transfer_batch_width
+        transfer_batches.len(),
+        maximum_batch_width
     ));
     let phase_started = Instant::now();
     let stream_sidecar_segments = reverse_lookup_retention == ReverseLookupRetention::SidecarOnly
         && spool_path.is_some()
         && !transfer_options.include_diagnostic_field_flows
         && !transfer_options.include_receiver_method_propagation;
+    let batches = transfer_batches.iter().map(|range| {
+        lower_transfer_segment_batch(
+            global,
+            transfer_options,
+            &aggregate_layouts,
+            &transfer_inputs[range.clone()],
+            body_for_file,
+        )
+    });
     let mut ws = if stream_sidecar_segments {
-        let canonical_batches = transfer_inputs.chunks(transfer_batch_width).map(|batch| {
-            lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch, body_for_file)
-        });
-        let stitch_batches = transfer_inputs.chunks(transfer_batch_width).map(|batch| {
-            lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch, body_for_file)
-        });
-        stitch_idg_from_relowered_segment_batches(
-            canonical_batches,
-            stitch_batches,
+        stitch_idg_from_spooled_segment_batches(
+            batches,
             function_count,
             &resolver,
-            ReloweredStitchOptions {
+            SpooledStitchOptions {
                 spool_path: spool_path.expect("streaming sidecar path checked above"),
                 include_field_argument_forwarding: transfer_options.include_field_argument_forwarding,
                 symbolic_field_forwarding: transfer_options.symbolic_field_forwarding,
@@ -2845,9 +2918,6 @@ where
             },
         )
     } else {
-        let batches = transfer_inputs.chunks(transfer_batch_width).map(|batch| {
-            lower_transfer_segment_batch(global, transfer_options, &aggregate_layouts, batch, body_for_file)
-        });
         Ok(stitch_idg_from_segment_batches(
             batches,
             function_count,
@@ -4709,7 +4779,11 @@ fn lower_transfer_segment_batch(
     lowered
 }
 
-fn idg_transfer_batch_segment_count() -> usize {
+fn idg_transfer_batches(
+    global: &GlobalIndex,
+    file_to_source_bytes: &AHashMap<FileId, u64>,
+    inputs: &[SegmentTransferInputs],
+) -> Vec<std::ops::Range<usize>> {
     let cpu_workers = rayon::current_num_threads().max(1);
     let requested = std::env::var("BONSAI_IDG_TRANSFER_BATCH_SEGMENTS")
         .ok()
@@ -4717,9 +4791,24 @@ fn idg_transfer_batch_segment_count() -> usize {
         .unwrap_or(cpu_workers)
         .max(1)
         .min(cpu_workers);
-    // Persistent segments are consumed between batches. The shared compiler
-    // profile affects batch concurrency only, never segments or facts.
-    bonsai_common::compiler_worker_count(requested)
+    let source_bytes = inputs
+        .iter()
+        .map(|(_, file, _)| {
+            file_to_source_bytes.get(file).copied().unwrap_or_else(|| {
+                global
+                    .decls_in(*file)
+                    .iter()
+                    .map(|decl| decl.span.end)
+                    .max()
+                    .unwrap_or(0)
+            })
+        })
+        .collect::<Vec<_>>();
+    // Persistent segments are consumed between batches. Weight comes from
+    // the exact VFS byte length (or adapter-derived declaration-span fallback
+    // for embedders that do not expose it), never a language table. Scheduling
+    // affects concurrency only; every input range is returned exactly once.
+    bonsai_common::compiler_weighted_batches(&source_bytes, requested)
 }
 
 fn unambiguous_aggregate_layouts(global: &GlobalIndex) -> AHashMap<String, Vec<String>> {

@@ -21,6 +21,14 @@ adapter pipeline (decls + refs + per-function flow events) in a single
 call. Most adapters delegate fully to this helper and add language-
 specific patches in their own `decl_index` implementation.
 
+The database packages the completed declaration index, import index,
+`FlowEvent` trees, auxiliary syntax facts, and diagnostics into one immutable
+`CompiledFileObject`. That is the only persisted frontend unit. Adapters must
+not write their own cache or make semantics depend on a later consumer: a
+fresh Tree-sitter lowering and a decoded compiler object must be identical.
+Object reuse is validated by relative path/module context, selected adapter,
+frontend ABI, and SHA-256 source content.
+
 ## Where language-specific code belongs
 
 In the adapter, not in `kit`. A useful test: if the rule applies to

@@ -47,6 +47,16 @@ there is no semantic call-depth ceiling, iteration limit, or result cap.
 Pagination and diagnostic path previews are separate presentation layers
 and report any truncation explicitly.
 
+For semantic prewarm, each immutable source snapshot is lowered once into a
+content-addressed compiler object containing declarations, imports, flow
+events, syntax facts, and diagnostics. Objects are keyed by workspace-relative
+path, selected adapter, frontend ABI, and a full SHA-256 source digest, then
+published as one atomic generation. Callgraph, retrieval, linkage, IDG,
+security, inspect, and export stream that same typed generation. The persisted
+IDG path also lowers transfer facts once: it spools the compact typed stitch
+record and canonical node map, then replays them one file segment at a time
+without reparsing or a second transfer pass.
+
 ## Open Source On Purpose
 
 Enterprise-grade code intelligence should not be locked behind paywalls.
@@ -86,20 +96,25 @@ Explicit semantic producers write binary factstores for speed and
 `.bonsai/manifest.json` for visibility. The manifest records sidecar
 coverage, producer fingerprints, paths, and missing reasons; commands still
 validate and read the binary sidecars before reusing analysis facts. Cache
-stats validate sidecar payloads, not just path/size metadata, so a corrupt
+coverage includes the immutable compiler-object generation; an edit rebuilds
+only mismatched objects while unchanged compressed payloads are copied into
+the next atomic generation. Compiler concurrency is weighted by actual source
+unit size, the process's current resident set, safety headroom, and the detected
+host/container memory budget. A 3 GiB budget serializes exact compiler units;
+resource scheduling can reduce parallelism but never files, graph closure, or
+facts. Cache stats validate sidecar payloads, not just path/size metadata, so a corrupt
 same-size factstore is reported stale instead of silently treated as warm.
 The retrieval sidecar is a deterministic candidate index over persisted
 facts. Exact indexes decide candidates; canonical facts and semantic graph
 verification decide truth. Vector similarity is never evidence. Search and
 literal-filtered browse commands can validate a fresh retrieval sidecar from
 source/dependency/build fingerprints before candidate lookup; large-workspace
-inspect can use that warmed sidecar only before opening a scoped workspace.
-All displayed rows/chains are hydrated through canonical APIs. If the sidecar
-is absent or stale, commands fall back to canonical syntax facts. Search may
-build retrieval on demand for small complete workspaces; inspect does not
-build a retrieval sidecar as part of normal query-time hydration, and scoped
-large-repo query workspaces never publish partial retrieval state under the
-full workspace `.bonsai/` directory.
+inspect can use that warmed sidecar only to select a pre-open file scope. All
+displayed rows and chains are then hydrated through canonical APIs. Missing or
+stale sidecars fall back to exact syntax facts. Search may build retrieval on
+demand for a small complete workspace; inspect does not build it during normal
+query hydration, and a scoped workspace never publishes partial retrieval
+state under the complete workspace's `.bonsai/` directory.
 
 Interactive commands render progress on stderr for each visible stage:
 workspace ingest/parse, sidecar/cache checks, optional sidecar prewarms,

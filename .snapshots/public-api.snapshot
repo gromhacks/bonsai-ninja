@@ -90,6 +90,7 @@ pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, Ty
 pub use names::{
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;
+pub use resources::compiler_weighted_batches;
 pub use resources::compiler_worker_count;
 pub use resources::effective_memory_limit_bytes;
 pub use resources::memory_bounded_worker_count;
@@ -106,6 +107,7 @@ pub struct ConformanceRunner {
 pub struct AnalyzerDb {
 pub struct AnalyzerDbOptions {
 pub struct DbStats {
+pub use compiler_object::{
 
 === diagnostics ===
 pub enum Severity {
@@ -125,7 +127,7 @@ pub use error::{FactStoreError, FactStoreResult};
 pub use format::{Header, IndexEntry, FORMAT_VERSION, HEADER_SIZE, INDEX_ENTRY_SIZE, MAGIC};
 pub use reader::{EntryIter, FactStoreReader, LookupHit, PayloadReader};
 pub use string_pool::{StrId, StringPoolBuilder, StringPoolView};
-pub use writer::FactStoreWriter;
+pub use writer::{FactStoreWriter, PreparedFactStoreEntry, PreparedFactStorePayload};
 
 === hash ===
 pub fn fnv1a_bytes64(bytes: &[u8]) -> u64 {
@@ -503,12 +505,14 @@ pub mod enclosing_index;
 pub mod flow_ids;
 pub mod flow_ids_disk;
 pub mod flow_query;
+pub mod linkage_sidecar;
 pub mod semantic_context;
 pub mod taint_index;
 pub mod taint_index_disk;
 pub mod transitive_callers;
 pub mod value_flow;
 pub mod value_flow_disk;
+pub struct ExactDecl {
 pub struct FileRefresh {
 pub struct PrecisionReport {
 pub struct SourceFileFingerprint {
@@ -517,6 +521,7 @@ pub struct SourceReachableCallGraph {
 pub struct Workspace {
 pub struct WorkspaceOpenOptions {
 pub struct WorkspaceStats {
+pub use bonsai_db::{
 pub use cross_module::CrossModuleOptions;
 pub use decorators::decl_decorator_names;
 pub use semantic_context::{

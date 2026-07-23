@@ -111,7 +111,7 @@ impl ResolutionIndex {
         // module segment. Precompute that exact relation once. The previous
         // implementation walked every workspace file for every imported call
         // site, which made coverage superlinear on large repositories.
-        let global = ws.db().global_index();
+        let global = ws.compiler_linkage_index();
         let workspace_module_tails = global
             .all_files()
             .filter_map(|file| ws.vfs().path(file).ok())
@@ -161,7 +161,7 @@ pub fn resolution_coverage(
     ws: &Workspace,
     filters: &ResolutionCoverageFilters<'_>,
 ) -> Vec<ResolutionCoverageFileRow> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let index = ResolutionIndex::new(ws);
 
     let mut rows = Vec::new();
@@ -180,11 +180,14 @@ pub fn resolution_coverage(
             file: file_path,
             ..ResolutionCoverageFileRow::default()
         };
+        let Some(file_index) = ws.exact_decl_index(file) else {
+            continue;
+        };
         let file_alias_targets: AHashMap<String, AliasTarget> =
             bonsai_lang_api::alias_map_from_import_specs(&ws.db().imports_for(file))
                 .into_iter()
                 .collect();
-        for decl in global.decls_in(file) {
+        for decl in &file_index.defs {
             if !is_callable_decl(decl.kind) {
                 continue;
             }
@@ -220,7 +223,7 @@ pub fn resolution_coverage(
 /// native export. This intentionally avoids retaining the detailed per-file
 /// and per-declaration rows produced by [`resolution_coverage`].
 pub(crate) fn resolution_incomplete_reasons(ws: &Workspace) -> Vec<String> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let index = ResolutionIndex::new(ws);
     let mut unresolved_call_sites = 0usize;
     let mut dynamic_call_sites = 0usize;
@@ -228,11 +231,14 @@ pub(crate) fn resolution_incomplete_reasons(ws: &Workspace) -> Vec<String> {
     let mut receiver_type_gaps = 0usize;
 
     for file in global.all_files() {
+        let Some(file_index) = ws.exact_decl_index(file) else {
+            continue;
+        };
         let file_alias_targets: AHashMap<String, AliasTarget> =
             bonsai_lang_api::alias_map_from_import_specs(&ws.db().imports_for(file))
                 .into_iter()
                 .collect();
-        for decl in global.decls_in(file) {
+        for decl in &file_index.defs {
             if !is_callable_decl(decl.kind) {
                 continue;
             }

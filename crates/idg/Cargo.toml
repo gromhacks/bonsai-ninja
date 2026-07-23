@@ -16,14 +16,13 @@ bonsai_hash.workspace = true
 bonsai_index.workspace = true
 bonsai_lang_api.workspace = true
 bonsai_resolve.workspace = true
+hashbrown.workspace = true
 parking_lot.workspace = true
 rayon.workspace = true
 regex.workspace = true
 serde.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
 
 [lints]

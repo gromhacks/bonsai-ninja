@@ -27,9 +27,9 @@ behavioural contract; cross-cutting details live in
 4. Degrade explicitly — every step carries `Precision::{Exact, Narrowed,
    OverApproximate, Unknown}`. Semantic call edges also carry resolver
    stage, evidence, and confidence. Never silently invent precision.
-5. Scale incrementally after edits — parser cache keyed on `(FileId,
-   version)`, dataflow sidecar keyed on content hash + matcher policy
-   fingerprint.
+5. Scale incrementally after edits — immutable per-file compiler objects are
+   keyed by relative path, adapter, frontend ABI, and SHA-256 source content;
+   dependent sidecars add their exact pipeline fingerprints.
 6. Be easy to extend with a new language without modifying the engine —
    each adapter implements the trait in `crates/lang_api`; the engine
    never names a language directly.
@@ -40,6 +40,12 @@ constructors, types, and `FlowEvent` lowering. Shared passes consume the
 typed IR; a language-specific syntax fix must not become a language-id branch
 or cross-language spelling inventory in the resolver, IDG, taint, security, or
 export crates.
+
+Semantic prewarm publishes one atomic compiler-object generation and all broad
+phases stream it. Persisted IDG transfer lowers each function once, then
+replays a typed stitch object against the canonical segment. Caching or disk
+spilling must not create a second semantic frontend, omit diagnostics, or cap
+the fixed point.
 
 ## 2. Output schema
 

@@ -58,6 +58,18 @@ form when a derived path family could be quadratic. Add
 every materialized propagation record; compression changes representation,
 not graph meaning.
 
+In `compiled_idg` mode, `taint_graph.propagations` is intentionally an empty
+materialized-row array and `propagations_complete` remains false for that row
+array. `analysis_scope.propagations_mode` identifies the complete canonical
+relation, so top-level completeness does not mistake unmaterialized rows for
+missing compiler analysis.
+
+Native JSON is streamed directly to the selected writer. Compiler summaries,
+structural presentation, and taint projections run as separate allocation
+phases; the IDG can be unloaded and reloaded between them from the same
+validated generation. Large output files therefore do not need a matching
+in-memory JSON document.
+
 ```bash
 bonsai-ninja export ./src --format networkx --output-path graph.node_link.json
 bonsai-ninja export ./src --format graphml --output-path graph.graphml

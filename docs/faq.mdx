@@ -17,6 +17,17 @@ in its adapter, not in a shared union of token or method names.
 
 </Accordion>
 
+<Accordion title="Does semantic prewarm parse every file repeatedly?">
+
+No. It first publishes an atomic generation of content-addressed per-file
+compiler objects containing typed adapter IR and diagnostics. Callgraph,
+retrieval, linkage, IDG, security, inspect, and export stream those objects.
+The persisted IDG path lowers transfer facts once and replays a compact typed
+stitch spool; it does not run a second AST/transfer pass. Changed objects are
+recompiled, while exact unchanged payloads are reused.
+
+</Accordion>
+
 <Accordion title="Is taint analysis capped or implemented as BFS?">
 
 No. Production taint reachability is a sparse monotone closure over numeric

@@ -994,8 +994,8 @@ fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
     let call_graph = ws.cached_resolved_call_graph();
     let mut edge_indices = index_semantic_edges_by_file(&call_graph);
     // The graph carries the compact endpoint identity this phase needs. Drop
-    // the heavyweight workspace declaration-body cache before re-lowering
-    // bounded file units; later queries can reconstruct it exactly.
+    // the heavyweight workspace declaration-body cache before streaming
+    // memory-bounded compiler-object units; later queries reconstruct it exactly.
     ws.db().release_global_index();
     let mut file_ids = ws.vfs().all_files();
     file_ids.extend(edge_indices.keys().copied());

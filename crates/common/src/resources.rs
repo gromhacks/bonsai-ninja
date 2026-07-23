@@ -4,7 +4,7 @@
 //! parser, lowering, or serialization jobs in flight, but must never reduce
 //! the source-file set, graph scope, fixed-point closure, or rendered facts.
 
-use std::sync::OnceLock;
+use std::{ops::Range, sync::OnceLock};
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
@@ -12,6 +12,10 @@ const SYNTAX_UNIT_TRANSIENT_BYTES: u64 = 768 * BYTES_PER_MIB;
 const SYNTAX_RESIDENT_RESERVE_BYTES: u64 = 512 * BYTES_PER_MIB;
 const COMPILER_UNIT_TRANSIENT_BYTES: u64 = BYTES_PER_GIB;
 const COMPILER_RESIDENT_RESERVE_BYTES: u64 = 2 * BYTES_PER_GIB;
+const WEIGHTED_COMPILER_UNIT_BASE_BYTES: u64 = 64 * BYTES_PER_MIB;
+const WEIGHTED_COMPILER_SOURCE_AMPLIFICATION: u64 = 40;
+const WEIGHTED_COMPILER_MIN_HEADROOM_BYTES: u64 = 128 * BYTES_PER_MIB;
+const WEIGHTED_COMPILER_HEADROOM_DIVISOR: u64 = 5;
 
 /// Return the effective memory limit available to the analyzer process.
 ///
@@ -55,6 +59,88 @@ pub fn memory_bounded_worker_count(cpu_workers: usize, bytes_per_worker: u64, re
 #[must_use]
 pub fn compiler_worker_count(cpu_workers: usize) -> usize {
     compiler_worker_count_for_limit(cpu_workers, effective_memory_limit_bytes())
+}
+
+/// Partition source units into deterministic, memory-weighted parallel
+/// batches.
+///
+/// Unlike a single worst-case cost per worker, this accounts for the actual
+/// byte size of each compilation unit. Small files can compile concurrently;
+/// a very large file automatically runs alone. The returned ranges cover every
+/// input exactly once and preserve source order, so this is purely a resource
+/// schedule and cannot alter compiler semantics.
+#[must_use]
+pub fn compiler_weighted_batches(source_bytes: &[u64], cpu_workers: usize) -> Vec<Range<usize>> {
+    let cpu_workers = compiler_worker_count(cpu_workers);
+    compiler_weighted_batches_for_limit_and_resident(
+        source_bytes,
+        cpu_workers,
+        effective_memory_limit_bytes(),
+        current_process_resident_bytes(),
+    )
+}
+
+#[cfg(test)]
+fn compiler_weighted_batches_for_limit(
+    source_bytes: &[u64],
+    cpu_workers: usize,
+    limit: Option<u64>,
+) -> Vec<Range<usize>> {
+    compiler_weighted_batches_for_limit_and_resident(source_bytes, cpu_workers, limit, None)
+}
+
+fn compiler_weighted_batches_for_limit_and_resident(
+    source_bytes: &[u64],
+    cpu_workers: usize,
+    limit: Option<u64>,
+    resident_bytes: Option<u64>,
+) -> Vec<Range<usize>> {
+    let cpu_workers = cpu_workers.max(1);
+    let working_bytes = limit.map(|limit| weighted_working_memory_bytes(limit, resident_bytes));
+    let mut batches = Vec::new();
+    let mut start = 0usize;
+    while start < source_bytes.len() {
+        let mut end = start;
+        let mut batch_bytes = 0_u64;
+        while end < source_bytes.len() && end - start < cpu_workers {
+            let unit_bytes = weighted_compiler_unit_bytes(source_bytes[end]);
+            if end > start
+                && working_bytes.is_some_and(|budget| batch_bytes.saturating_add(unit_bytes) > budget)
+            {
+                break;
+            }
+            batch_bytes = batch_bytes.saturating_add(unit_bytes);
+            end += 1;
+        }
+        // Even a compilation unit larger than the detected working set must
+        // run once: splitting an AST would change language semantics.
+        if end == start {
+            end += 1;
+        }
+        batches.push(start..end);
+        start = end;
+    }
+    batches
+}
+
+fn weighted_working_memory_bytes(limit: u64, resident_bytes: Option<u64>) -> u64 {
+    let headroom = (limit / WEIGHTED_COMPILER_HEADROOM_DIVISOR)
+        .max(WEIGHTED_COMPILER_MIN_HEADROOM_BYTES)
+        .min(limit.saturating_sub(1));
+    // If this platform cannot report RSS, retain the earlier conservative
+    // half-budget assumption in addition to safety headroom. On supported
+    // platforms, account for the real resolver/graph state already resident
+    // when the schedule is constructed.
+    let resident_bytes = resident_bytes.unwrap_or(limit / 2);
+    limit
+        .saturating_sub(resident_bytes)
+        .saturating_sub(headroom)
+        .max(1)
+}
+
+fn weighted_compiler_unit_bytes(source_bytes: u64) -> u64 {
+    WEIGHTED_COMPILER_UNIT_BASE_BYTES
+        .saturating_add(source_bytes.saturating_mul(WEIGHTED_COMPILER_SOURCE_AMPLIFICATION))
 }
 
 /// Bound the lighter Tree-sitter validation/lowering frontend.
@@ -130,6 +216,49 @@ fn physical_memory_bytes() -> Option<u64> {
     kib.checked_mul(1024)
 }
 
+#[cfg(target_os = "linux")]
+fn current_process_resident_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kib = status.lines().find_map(|line| {
+        let value = line.strip_prefix("VmRSS:")?.trim();
+        value.split_whitespace().next()?.parse::<u64>().ok()
+    })?;
+    kib.checked_mul(1024)
+}
+
+#[cfg(target_os = "macos")]
+fn current_process_resident_bytes() -> Option<u64> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().parse::<u64>().ok())
+        .flatten()?
+        .checked_mul(1024)
+}
+
+#[cfg(target_os = "windows")]
+fn current_process_resident_bytes() -> Option<u64> {
+    let query = format!("(Get-Process -Id {}).WorkingSet64", std::process::id());
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &query])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().parse::<u64>().ok())
+        .flatten()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+const fn current_process_resident_bytes() -> Option<u64> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn physical_memory_bytes() -> Option<u64> {
     let output = std::process::Command::new("/usr/sbin/sysctl")
@@ -193,6 +322,7 @@ fn min_present(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
+        compiler_weighted_batches_for_limit, compiler_weighted_batches_for_limit_and_resident,
         compiler_worker_count_for_limit, min_present, syntax_worker_count_for_limit, worker_count_for_limit,
         BYTES_PER_GIB,
     };
@@ -231,5 +361,35 @@ mod tests {
         assert_eq!(syntax_worker_count_for_limit(32, Some(3 * BYTES_PER_GIB)), 3);
         assert_eq!(syntax_worker_count_for_limit(2, Some(3 * BYTES_PER_GIB)), 2);
         assert_eq!(syntax_worker_count_for_limit(32, Some(BYTES_PER_GIB)), 1);
+    }
+
+    #[test]
+    fn weighted_batches_cover_every_unit_and_isolate_large_files() {
+        let mib = 1024 * 1024;
+        let batches =
+            compiler_weighted_batches_for_limit(&[mib, mib, 100 * mib, mib], 8, Some(3 * BYTES_PER_GIB));
+        assert_eq!(batches, vec![0..2, 2..3, 3..4]);
+        assert_eq!(batches.iter().map(|range| range.len()).sum::<usize>(), 4);
+    }
+
+    #[test]
+    fn weighted_batches_are_cpu_bounded_without_a_memory_limit() {
+        assert_eq!(
+            compiler_weighted_batches_for_limit(&[1, 1, 1, 1, 1], 2, None),
+            vec![0..2, 2..4, 4..5]
+        );
+    }
+
+    #[test]
+    fn weighted_batches_subtract_resident_state_and_safety_headroom() {
+        assert_eq!(
+            compiler_weighted_batches_for_limit_and_resident(
+                &[1; 10],
+                8,
+                Some(3 * BYTES_PER_GIB),
+                Some(2 * BYTES_PER_GIB),
+            ),
+            vec![0..6, 6..10]
+        );
     }
 }

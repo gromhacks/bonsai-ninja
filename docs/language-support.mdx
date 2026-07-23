@@ -14,6 +14,13 @@ implicit/super receivers, constructor method forms, universal types, and field
 place completeness. Shared resolver, callgraph, IDG, security, and export
 passes consume those facts without branching on the language id.
 
+The completed frontend output is persisted as an immutable per-file compiler
+object, including its diagnostics. Warm callgraph, IDG, security, and export
+phases decode that typed object instead of interpreting source a second time.
+The cache does not erase language ownership: each object records the selected
+adapter and is rejected unless its path, frontend ABI, and SHA-256 source
+digest match.
+
 The production taint engine computes a sparse monotone fixed point over the
 resolved IDG for every supported language. Cross-procedural semantics do not
 have a BFS depth, iteration, or result cap. Explicit trace/path previews and

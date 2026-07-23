@@ -214,7 +214,7 @@ fn single_function_no_calls_creates_one_segment() {
 }
 
 #[test]
-fn relowered_stitch_preserves_the_exact_canonical_graph() {
+fn spooled_stitch_preserves_the_exact_canonical_graph() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["x".to_string()];
     decl.flow_events = vec![FlowEvent::Return {
@@ -229,13 +229,12 @@ fn relowered_stitch_preserves_the_exact_canonical_graph() {
 
     let queryable = stitch_idg_from_segment_batches(batches(), 1, &resolver, true, false, None);
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("relowered-idg.factstore");
-    let relowered = stitch_idg_from_relowered_segment_batches(
-        batches(),
+    let path = dir.path().join("spooled-idg.factstore");
+    let persisted = stitch_idg_from_spooled_segment_batches(
         batches(),
         1,
         &resolver,
-        ReloweredStitchOptions {
+        SpooledStitchOptions {
             spool_path: &path,
             include_field_argument_forwarding: true,
             symbolic_field_forwarding: false,
@@ -243,21 +242,21 @@ fn relowered_stitch_preserves_the_exact_canonical_graph() {
             capture_funcs: None,
         },
     )
-    .expect("spooled relowering");
-    relowered
+    .expect("spooled stitch");
+    persisted
         .save_into_disk(&path, 0x51DE_CAFE)
         .expect("persist spooled graph");
-    let relowered = IdgWorkspace::load_from_disk(&path, 0x51DE_CAFE)
+    let persisted = IdgWorkspace::load_from_disk(&path, 0x51DE_CAFE)
         .expect("load spooled graph")
         .expect("spooled graph exists");
 
     let queryable_wire = bonsai_common::wire::encode(&queryable).expect("encode queryable IDG");
-    let relowered_wire = bonsai_common::wire::encode(&relowered).expect("encode relowered IDG");
-    assert_eq!(relowered_wire, queryable_wire);
+    let persisted_wire = bonsai_common::wire::encode(&persisted).expect("encode persisted IDG");
+    assert_eq!(persisted_wire, queryable_wire);
 }
 
 #[test]
-fn relowered_sidecar_preserves_cross_segment_calls_byte_for_byte() {
+fn spooled_sidecar_preserves_cross_segment_calls_byte_for_byte() {
     let mut caller = empty_decl(1, "caller");
     caller.params = vec!["source".to_string()];
     caller.flow_events = vec![FlowEvent::Call {
@@ -299,12 +298,11 @@ fn relowered_sidecar_preserves_cross_segment_calls_byte_for_byte() {
     let queryable = stitch_idg_from_segment_batches(batches(), 2, &resolver, true, false, None);
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cross-segment.factstore");
-    let relowered = stitch_idg_from_relowered_segment_batches(
-        batches(),
+    let persisted = stitch_idg_from_spooled_segment_batches(
         batches(),
         2,
         &resolver,
-        ReloweredStitchOptions {
+        SpooledStitchOptions {
             spool_path: &path,
             include_field_argument_forwarding: true,
             symbolic_field_forwarding: false,
@@ -312,32 +310,32 @@ fn relowered_sidecar_preserves_cross_segment_calls_byte_for_byte() {
             capture_funcs: None,
         },
     )
-    .expect("spooled relowering");
+    .expect("spooled stitch");
     assert_eq!(
-        relowered.cross_file_edge_count(),
+        persisted.cross_file_edge_count(),
         queryable.cross_file().len(),
         "sidecar compilation must count every disk-spooled cross edge"
     );
     assert!(
-        relowered.cross_file().is_empty(),
+        persisted.cross_file().is_empty(),
         "sidecar compilation must not retain its canonical cross-edge vector in memory"
     );
-    relowered
+    persisted
         .save_into_disk(&path, 0xC205_5E6A)
         .expect("persist cross-segment spool");
-    let relowered = IdgWorkspace::load_from_disk(&path, 0xC205_5E6A)
+    let persisted = IdgWorkspace::load_from_disk(&path, 0xC205_5E6A)
         .expect("load cross-segment sidecar")
         .expect("cross-segment sidecar exists");
 
     assert_eq!(queryable.cross_file().len(), 2);
     assert_eq!(
-        bonsai_common::wire::encode(&relowered).expect("encode relowered cross-segment IDG"),
+        bonsai_common::wire::encode(&persisted).expect("encode persisted cross-segment IDG"),
         bonsai_common::wire::encode(&queryable).expect("encode queryable cross-segment IDG")
     );
 }
 
 #[test]
-fn relowered_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
+fn spooled_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
     let mut caller = empty_decl(1, "caller");
     caller.params = vec!["source".to_string()];
     caller.flow_events = vec![
@@ -422,12 +420,11 @@ fn relowered_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
                 "fixture must exercise the symbolic copy spool"
             );
         }
-        let relowered = stitch_idg_from_relowered_segment_batches(
-            batches(),
+        let persisted = stitch_idg_from_spooled_segment_batches(
             batches(),
             2,
             &resolver,
-            ReloweredStitchOptions {
+            SpooledStitchOptions {
                 spool_path: &path,
                 include_field_argument_forwarding: true,
                 symbolic_field_forwarding: true,
@@ -435,25 +432,25 @@ fn relowered_sidecar_preserves_symbolic_field_graph_byte_for_byte() {
                 capture_funcs: None,
             },
         )
-        .expect("spooled symbolic relowering");
+        .expect("spooled symbolic stitch");
         assert_eq!(
-            relowered.symbolic_transform_count(),
+            persisted.symbolic_transform_count(),
             queryable.symbolic_field().transforms().len(),
             "sidecar compilation must count every disk-spooled symbolic transform"
         );
         assert!(
-            relowered.symbolic_field().transforms().is_empty(),
+            persisted.symbolic_field().transforms().is_empty(),
             "sidecar compilation must not retain symbolic transforms in memory"
         );
-        relowered
+        persisted
             .save_into_disk(&path, 0x51A0_B01C)
             .expect("persist symbolic transform spool");
-        let relowered = IdgWorkspace::load_from_disk(&path, 0x51A0_B01C)
+        let persisted = IdgWorkspace::load_from_disk(&path, 0x51A0_B01C)
             .expect("load symbolic sidecar")
             .expect("symbolic sidecar exists");
 
         assert_eq!(
-            bonsai_common::wire::encode(&relowered).expect("encode relowered symbolic IDG"),
+            bonsai_common::wire::encode(&persisted).expect("encode persisted symbolic IDG"),
             bonsai_common::wire::encode(&queryable).expect("encode queryable symbolic IDG")
         );
     }
@@ -2462,12 +2459,11 @@ fn lexical_capture_stitch_is_name_preserving_and_local_binding_scoped() {
     let capture_funcs = AHashSet::from_iter([FuncId::new(2)]);
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("local-capture.factstore");
-    let relowered = stitch_idg_from_relowered_segment_batches(
-        batches(),
+    let persisted = stitch_idg_from_spooled_segment_batches(
         batches(),
         2,
         &local_resolver,
-        ReloweredStitchOptions {
+        SpooledStitchOptions {
             spool_path: &path,
             include_field_argument_forwarding: true,
             symbolic_field_forwarding: false,
@@ -2475,15 +2471,15 @@ fn lexical_capture_stitch_is_name_preserving_and_local_binding_scoped() {
             capture_funcs: Some(&capture_funcs),
         },
     )
-    .expect("spooled capture relowering");
-    relowered
+    .expect("spooled capture stitch");
+    persisted
         .save_into_disk(&path, 0xCA97_0AEE)
         .expect("persist capture graph");
-    let relowered = IdgWorkspace::load_from_disk(&path, 0xCA97_0AEE)
+    let persisted = IdgWorkspace::load_from_disk(&path, 0xCA97_0AEE)
         .expect("load capture graph")
         .expect("capture graph exists");
     assert!(
-        has_capture_edge(&relowered),
+        has_capture_edge(&persisted),
         "persistence capture filtering must retain resolver-proven callable targets"
     );
 

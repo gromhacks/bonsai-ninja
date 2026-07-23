@@ -10,6 +10,7 @@ description = "Incremental analyzer database."
 [dependencies]
 bonsai_common = { workspace = true }
 bonsai_diagnostics = { workspace = true }
+bonsai_factstore = { workspace = true }
 bonsai_vfs = { workspace = true }
 bonsai_parser = { workspace = true }
 bonsai_lang_api = { workspace = true }
@@ -21,9 +22,13 @@ bonsai_idg = { workspace = true }
 parking_lot = { workspace = true }
 ahash = { workspace = true }
 rayon = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 bonsai_lang_python = { workspace = true }
+tempfile = { workspace = true }
 tree-sitter = { workspace = true }
 
 [lints]

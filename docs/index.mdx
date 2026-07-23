@@ -7,6 +7,10 @@ description: "Entry points for using, understanding, integrating, and extending 
 
 bonsai-ninja indexes source code, resolves cross-file call paths, and runs rulepack-driven security analysis across 21 parser adapters. The security model is split deliberately: 20 general-purpose app/web languages use the canonical source/sink/sanitizer taint taxonomy, while Solidity uses a smart-contract taxonomy for on-chain hazards. These docs are plain MDX: readable on GitHub and enhanced by Mintlify where supported.
 
+The analyzer is a content-addressed compiler: Tree-sitter adapters publish
+immutable per-file typed objects, the linker and one-pass IDG compiler consume
+one atomic generation, and all query/security/export modes share those facts.
+
 - [Getting Started](getting-started.mdx) - install the CLI, run a first scan, and learn how to read the finding IDs and flow output.
 - [Platform And Architecture Support](platform-support.mdx) - understand release targets, source-build targets, and cross-target checks.
 - [Concepts](concepts.mdx) - understand sources, sinks, sanitizers, taint propagation, lifecycle rules, must-alias constraints, and missing-call checks.

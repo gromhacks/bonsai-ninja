@@ -6,10 +6,11 @@ goal and benchmark documents are historical records.
 
 ## Status
 
-The production-code baseline `b341cb5` is green across compilation, lint,
-rustdoc, focused behavioral suites, architecture invariants, rulepack replay,
-self-analysis, and a complete Elasticsearch production scan. The documentation
-update recorded here does not change engine semantics.
+The current local `main` has been validated across compilation, lint, rustdoc,
+behavioral suites, architecture invariants, rulepack replay, self-analysis, a
+complete Elasticsearch production scan, and a memory-bounded native export.
+The measurements below identify the exact command and whether the selected
+analysis scope was complete.
 
 The analyzer is one compiler-style pipeline:
 
@@ -24,16 +25,19 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated on 2026-07-20:
+Validated on 2026-07-23:
 
-- `cargo check --workspace --all-targets --locked` passed.
-- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed;
+  this strict gate compiled the complete workspace and every test target.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --locked` passed.
 - `cargo fmt --all -- --check` and `git diff --check` passed.
-- Focused compiler/engine suites passed 641 tests:
-  callgraph 76, IDG 304, resolver 37, taint 86, workspace 62,
-  architecture invariants 62, and CLI page-cache 14.
-- `cargo test -p bonsai_security --test rulepack_conformance` passed 28/28.
+- Release suites passed for callgraph (81/81), resolver (37/37), IDG (322
+  unit plus 5 integration), taint (all binaries, including the 1,440-case
+  language contract matrix), security (all binaries), and conformance (all
+  binaries, including 68/68 architecture invariants).
+- Focused regressions passed for generation-scoped IDG pipeline-hash reuse,
+  fixed-width symbolic fact/transform paging, external-run merge boundaries,
+  and every symbolic transform algebra variant.
 - Layering, public-API, hardcoded-knowledge, adapter-capability, and adapter
   `FlowEvent` snapshot audits passed. All 21 adapters explicitly declare the
   compiler capability fields consumed by shared analysis; the reviewed
@@ -127,6 +131,53 @@ that prevents required facts must remain visible as an incomplete reason.
 The current measured production scan reports `analysis_complete: true` with
 an empty reason list, so that older caveat no longer describes the current
 binary.
+
+### Native export under a 3 GiB compiler budget
+
+The unfiltered whole-checkout native export was measured on 2026-07-23 with:
+
+```bash
+BONSAI_MEMORY_BUDGET_MB=3072 MIMALLOC_PURGE_DELAY=0 \
+  ./target/release/bonsai-ninja export ../elasticsearch \
+  --all \
+  --format json \
+  --output-path /tmp/bonsai-es-export.json \
+  --no-color \
+  --no-progress
+```
+
+| Measure | Result |
+|---|---:|
+| Compiler functions summarized | 359,716 |
+| Symbolic-sensitive functions | 129,082 |
+| Contextual summary edges | 877,014 |
+| Parsed call facts | 3,495,591 |
+| Proven structural call records | 3,163,650 |
+| Numeric summary/runtime ready | 127.68 s |
+| Total wall time | 386.94 s |
+| JSON bytes | 5,683,867,076 |
+| Peak physical footprint | 3,088,476,608 bytes (about 2.88 GiB) |
+| macOS maximum RSS | 4,249,305,088 bytes |
+| Swaps | 0 |
+| Streaming JSON validation | passed (`jq --stream`) |
+| `analysis_complete` | `false` |
+
+The export finished without a file, edge, closure, call-depth, iteration, or
+elapsed-time cap. `--all` kept propagation in complete canonical `compiled_idg`
+form; it did not materialize the much larger per-entry transitive row product.
+Its incomplete status is an evidence boundary, not resource saturation: the
+unfiltered checkout reports `dynamic-call-sites:903`,
+`receiver-type-gaps:558627`, and `unresolved-call-sites:1276805`. Those calls
+cannot be presented as resolved compiler facts when their implementation/type
+evidence is absent or dynamic. The production security profile above is a
+different, explicitly filtered first-party scope and remains complete.
+
+The export streams top-level JSON sections and uses exact compressed graph
+representations for potentially quadratic path families. Fixed-width symbolic
+fact/transform pages and bounded external sort runs keep the semantic relation
+on disk while source-index offsets remain resident. A smaller cache can add
+I/O and wall time; it does not remove facts. The final measured binary includes
+generation-scoped pipeline-hash reuse for the IDG unload/reload boundary.
 
 ## Historical external benchmark snapshot
 

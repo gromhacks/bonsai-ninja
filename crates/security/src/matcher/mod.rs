@@ -1265,7 +1265,7 @@ fn matcher_global_headers(ws: &Workspace, retention: FactRetention) -> Arc<bonsa
 
 /// Return the compact, workspace-wide compiler linkage table shared with the
 /// IDG. Broad security phases use this for stable symbols and cross-file
-/// resolution, then re-lower exact Tree-sitter bodies one file at a time.
+/// resolution, then stream exact compiler-object bodies one file at a time.
 /// Keeping those two lifetimes separate prevents a second whole-project body
 /// index from becoming resident beside the IDG on large workspaces.
 fn streaming_global_linkage(ws: &Workspace) -> Arc<bonsai_index::GlobalIndex> {

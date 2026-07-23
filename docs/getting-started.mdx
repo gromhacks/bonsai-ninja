@@ -82,6 +82,16 @@ lookup, then hydrate the selected candidate files/facts through canonical
 APIs. Large or scoped queries that are not prewarmed fall back to canonical
 syntax-backed facts instead of writing partial retrieval cache state.
 
+`--semantic` starts with a content-addressed compiler-object generation, then
+builds callgraph, retrieval, linkage, and IDG artifacts in separate processes.
+Unchanged files reuse their validated compressed objects. Process exits are
+hard memory-reclamation boundaries; file-size-weighted scheduling subtracts
+current RSS and safety headroom before adapting concurrency to the detected
+machine/container budget. A 3 GiB budget serializes exact compiler units
+without reducing analysis scope. The parent validates one coherent workspace
+generation after
+all phases and restarts them if a source changed between workers.
+
 Each adapter parses its own language with Tree-sitter and lowers syntax into
 typed compiler facts. Shared resolver, callgraph, IDG, security, and export
 passes consume those facts without hardcoded per-language name lists. Taint

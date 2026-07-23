@@ -33,6 +33,25 @@ fn empty_workspace_has_zero_segments() {
 }
 
 #[test]
+fn consuming_wire_spool_preserves_a_partial_final_chunk() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("owned-chunks.factstore");
+    let mut spool = WireChunkSpool::new(&path, 2, "test item").expect("spool");
+    spool.push(1_u32);
+    spool.push(2_u32);
+    spool.push(3_u32);
+
+    let mut chunks = Vec::new();
+    spool
+        .into_visit(|items| {
+            chunks.push(items);
+            Ok(())
+        })
+        .expect("consume spool");
+    assert_eq!(chunks, vec![vec![1, 2], vec![3]]);
+}
+
+#[test]
 fn register_segment_indexes_funcs() {
     let mut w = IdgWorkspace::new();
     let mut seg = IdgSegment::new();
@@ -274,6 +293,82 @@ fn save_load_round_trip_preserves_segments_and_indexes() {
         Some(NodeId(1)),
         "workspace sidecar lookups must remain exact without eager reverse hash tables"
     );
+}
+
+#[test]
+fn paged_query_sidecar_preserves_exact_segments_edges_and_transforms() {
+    let mut workspace = IdgWorkspace::new();
+    let mut source_segment = IdgSegment::new();
+    populate_segment(&mut source_segment, FuncId::new(11));
+    let mut target_segment = IdgSegment::new();
+    populate_segment(&mut target_segment, FuncId::new(22));
+    let source_segment = workspace.register_segment(source_segment);
+    let target_segment = workspace.register_segment(target_segment);
+    workspace.cross_file_mut().push(CrossFileEdge {
+        from_segment: source_segment,
+        to_segment: target_segment,
+        edge: IdgEdge::inter_call_arg(
+            NodeId(0),
+            NodeId(0),
+            span(),
+            Precision::Exact,
+            CallEdgeKind::Direct,
+        ),
+    });
+    let mut symbolic = SymbolicFieldGraph::new();
+    let source = symbolic.intern_base(source_segment, FuncId::new(11), "payload");
+    let target = symbolic.intern_base(target_segment, FuncId::new(22), "arg");
+    symbolic.push_transform(SymbolicFieldTransform {
+        source,
+        target,
+        exact_field: NO_SYMBOLIC_STRING,
+        call_span: span(),
+        write_span: span(),
+        precision: Precision::Exact,
+        call_kind: CallEdgeKind::Direct,
+        kind: SymbolicFieldTransformKind::Argument,
+        arg_idx: 0,
+        param_idx: 0,
+        allow_out_of_order_source: false,
+    });
+    workspace.set_symbolic_field(symbolic);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("paged-idg.factstore");
+    workspace.save_to_disk(&path, 0x51DE_CAFE).expect("save");
+    let paged = IdgWorkspace::load_query_from_disk(&path, 0x51DE_CAFE)
+        .expect("open paged query sidecar")
+        .expect("current query sidecar");
+
+    assert_eq!(paged.segment_count(), 2);
+    assert_eq!(paged.func_count(), 2);
+    assert_eq!(paged.intra_edge_count(), 2);
+    assert_eq!(paged.cross_file_edge_count(), 1);
+    assert_eq!(paged.segment_for_func(FuncId::new(22)), Some(target_segment));
+    assert_eq!(
+        paged
+            .segment_view(source_segment)
+            .expect("paged segment")
+            .nodes
+            .len(),
+        2
+    );
+    let mut cross = Vec::new();
+    paged
+        .visit_cross_file_edges(|edges| cross.extend_from_slice(edges))
+        .expect("stream cross-file relation");
+    assert_eq!(cross.len(), 1);
+    let mut outgoing = 0usize;
+    paged
+        .visit_symbolic_transforms(|transforms| {
+            outgoing += transforms
+                .iter()
+                .filter(|transform| transform.source == source)
+                .count();
+            Ok(())
+        })
+        .expect("stream symbolic transforms");
+    assert_eq!(outgoing, 1);
 }
 
 #[test]

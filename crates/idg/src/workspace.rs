@@ -21,6 +21,9 @@ use ahash::AHashMap;
 use bonsai_common::{wire, FuncId};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
+use std::num::NonZeroUsize;
+use std::ops::Deref;
+use std::sync::Arc;
 
 use crate::edge::IdgEdge;
 use crate::segment::{IdgSegment, IDG_SEGMENT_VERSION};
@@ -30,6 +33,28 @@ use crate::symbolic::{SymbolicFieldBase, SymbolicFieldGraph, SymbolicFieldTransf
 /// Distinct from `FuncId`; multiple FuncIds map to one SegmentId.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SegmentId(pub u32);
+
+/// Borrowed or page-cached view of one source-file IDG segment.
+///
+/// Resident compiler workspaces borrow their canonical segment directly.
+/// Warm query workspaces retain an `Arc` only for the cache working set; the
+/// same API therefore preserves exact segment contents without forcing every
+/// persisted compilation unit into memory.
+pub(crate) enum SegmentView<'a> {
+    Resident(&'a IdgSegment),
+    Paged(Arc<IdgSegment>),
+}
+
+impl Deref for SegmentView<'_> {
+    type Target = IdgSegment;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Resident(segment) => segment,
+            Self::Paged(segment) => segment,
+        }
+    }
+}
 
 /// One cross-file edge: an inter-procedural edge whose source and
 /// destination live in different segments.
@@ -219,6 +244,37 @@ impl<T> WireChunkSpool<T> {
             visit(&items)?;
         }
         visit(&self.buffer)
+    }
+
+    /// Consume the spool and visit owned decoded chunks. Compiler replay uses
+    /// this form so a record moves directly into the next phase without a
+    /// second in-memory clone of its typed IR.
+    pub(crate) fn into_visit<F>(mut self, mut visit: F) -> crate::IdgResult<()>
+    where
+        T: serde::de::DeserializeOwned,
+        F: FnMut(Vec<T>) -> crate::IdgResult<()>,
+    {
+        self.check_error()?;
+        let mut file = self.file.try_clone_file()?;
+        for entry in &self.entries {
+            file.seek(SeekFrom::Start(entry.offset))?;
+            let mut payload = vec![0_u8; entry.encoded_len as usize];
+            file.read_exact(&mut payload)?;
+            let items: Vec<T> = wire::decode(&payload).map_err(|error| {
+                crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            })?;
+            if items.len() != self.chunk_len {
+                return Err(crate::IdgError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{} spool contains a non-canonical full chunk", self.kind),
+                )));
+            }
+            visit(items)?;
+        }
+        if !self.buffer.is_empty() {
+            visit(std::mem::take(&mut self.buffer))?;
+        }
+        Ok(())
     }
 
     fn write_chunks(
@@ -728,6 +784,12 @@ impl CrossFileEdges {
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IdgWorkspace {
     segments: Vec<IdgSegment>,
+    /// Validated positioned-reader backend for warm queries. Segment,
+    /// cross-edge, and symbolic-transform payloads stay in the factstore and
+    /// page through a resource-sized cache. Compiler-built/test workspaces
+    /// leave this unset and use the resident vectors above.
+    #[serde(skip)]
+    query_sidecar: Option<Arc<IdgQuerySidecar>>,
     /// Sidecar-only builds keep inactive segment payloads in an anonymous
     /// compiler spool. Query workspaces never enable this field.
     #[serde(skip)]
@@ -809,6 +871,20 @@ impl IdgWorkspace {
             return None;
         }
         self.segments.get(id.0 as usize)
+    }
+
+    pub(crate) fn segment_view(&self, id: SegmentId) -> Option<SegmentView<'_>> {
+        if let Some(sidecar) = &self.query_sidecar {
+            return sidecar.segment(id).ok().flatten().map(SegmentView::Paged);
+        }
+        self.segment(id).map(SegmentView::Resident)
+    }
+
+    pub(crate) fn segment_views(&self) -> impl Iterator<Item = (SegmentId, SegmentView<'_>)> + '_ {
+        (0..self.segment_count()).filter_map(|index| {
+            let id = SegmentId(u32::try_from(index).ok()?);
+            self.segment_view(id).map(|segment| (id, segment))
+        })
     }
 
     /// Mutably borrow segment `id`.
@@ -987,7 +1063,11 @@ impl IdgWorkspace {
     /// Number of segments registered.
     #[must_use]
     pub fn segment_count(&self) -> usize {
-        self.segments.len()
+        self.query_sidecar
+            .as_ref()
+            .map_or(self.segments.len(), |sidecar| {
+                sidecar.metadata.segment_count as usize
+            })
     }
 
     /// Total number of functions across all segments.
@@ -999,6 +1079,9 @@ impl IdgWorkspace {
     /// Total number of intra-segment edges across the workspace.
     #[must_use]
     pub fn intra_edge_count(&self) -> usize {
+        if let Some(sidecar) = &self.query_sidecar {
+            return usize::try_from(sidecar.intra_edge_count).unwrap_or(usize::MAX);
+        }
         self.segments
             .iter()
             .enumerate()
@@ -1025,6 +1108,9 @@ impl IdgWorkspace {
     /// Exact cross-file edge count across resident and sidecar-only storage.
     #[must_use]
     pub fn cross_file_edge_count(&self) -> usize {
+        if let Some(sidecar) = &self.query_sidecar {
+            return usize::try_from(sidecar.metadata.cross_file_edge_count).unwrap_or(usize::MAX);
+        }
         self.cross_file_spool
             .as_ref()
             .map_or_else(|| self.cross_file.len(), CrossFileEdgeSpool::len)
@@ -1035,7 +1121,9 @@ impl IdgWorkspace {
     where
         F: FnMut(&[CrossFileEdge]),
     {
-        if let Some(spool) = &self.cross_file_spool {
+        if let Some(sidecar) = &self.query_sidecar {
+            sidecar.visit_cross_file_edges(visit)
+        } else if let Some(spool) = &self.cross_file_spool {
             spool.visit(|edges| {
                 visit(edges);
                 Ok(())
@@ -1077,6 +1165,31 @@ impl IdgWorkspace {
     #[must_use]
     pub fn symbolic_field(&self) -> &SymbolicFieldGraph {
         &self.symbolic_field
+    }
+
+    pub(crate) fn has_symbolic_transforms(&self) -> bool {
+        self.query_sidecar.as_ref().map_or_else(
+            || {
+                self.symbolic_transform_spool.as_ref().map_or_else(
+                    || !self.symbolic_field.transforms().is_empty(),
+                    |spool| spool.len() != 0,
+                )
+            },
+            |sidecar| sidecar.metadata.symbolic_transform_count != 0,
+        )
+    }
+
+    pub(crate) fn visit_symbolic_transforms<F>(&self, mut visit: F) -> crate::IdgResult<()>
+    where
+        F: FnMut(&[SymbolicFieldTransform]) -> crate::IdgResult<()>,
+    {
+        if let Some(sidecar) = &self.query_sidecar {
+            sidecar.visit_symbolic_transforms(visit)
+        } else if let Some(spool) = &self.symbolic_transform_spool {
+            spool.visit(visit)
+        } else {
+            visit(self.symbolic_field.transforms())
+        }
     }
 
     /// Replace the symbolic access-path relation after Phase 3 stitching.
@@ -1156,6 +1269,7 @@ impl IdgWorkspace {
         self.spill_resident_segments()?;
         let Self {
             mut segments,
+            query_sidecar,
             segment_spool,
             resident_segments,
             cross_file_spool,
@@ -1165,6 +1279,7 @@ impl IdgWorkspace {
             field_flow,
             mut symbolic_field,
         } = self;
+        drop(query_sidecar);
         drop(resident_segments);
         drop(by_func);
         cross_file.release_indexes();
@@ -1266,6 +1381,7 @@ impl IdgWorkspace {
         }
         let mut ws = Self {
             segments: Vec::with_capacity(metadata.segment_count as usize),
+            query_sidecar: None,
             segment_spool: None,
             resident_segments: Vec::new(),
             cross_file_spool: None,
@@ -1425,6 +1541,129 @@ impl IdgWorkspace {
         Ok(Some(ws))
     }
 
+    /// Open a validated warm-query workspace without hydrating its complete
+    /// graph. Source-file segments, cross-file chunks, and symbolic transform
+    /// chunks remain in the factstore and are decoded through a memory-sized
+    /// working-set cache. The initial segment scan rebuilds only the compact
+    /// `FuncId -> SegmentId` directory and exact edge count; decoded segments
+    /// are evicted immediately afterward.
+    pub(crate) fn load_query_from_disk(
+        path: &std::path::Path,
+        pipeline_hash: u64,
+    ) -> crate::IdgResult<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let reader =
+            match bonsai_factstore::FactStoreReader::open(path, IDG_WORKSPACE_TABLE_ID, pipeline_hash) {
+                Ok(reader) => reader,
+                Err(error) => {
+                    bonsai_diagnostics::debug_log!(
+                        "idg-build",
+                        "workspace query sidecar miss: path={} error={}",
+                        path.display(),
+                        error
+                    );
+                    return Ok(None);
+                }
+            };
+        let Some(metadata_hit) = reader.get(0)? else {
+            return Ok(None);
+        };
+        if metadata_hit.body_hash != IDG_WORKSPACE_VERSION as u64 {
+            return Ok(None);
+        }
+        let metadata: IdgWorkspaceMetadataOwned =
+            wire::decode(&metadata_hit.payload).map_err(invalid_sidecar_payload)?;
+        if metadata.version != IDG_WORKSPACE_VERSION {
+            return Ok(None);
+        }
+        let expected_entries = 1_u64
+            .saturating_add(u64::from(metadata.segment_count))
+            .saturating_add(u64::from(metadata.cross_file_chunk_count))
+            .saturating_add(u64::from(metadata.field_flow_chunk_count))
+            .saturating_add(1)
+            .saturating_add(u64::from(metadata.symbolic_transform_chunk_count));
+        if reader.len() as u64 != expected_entries
+            || (0..expected_entries).any(|key| !reader.contains_key(key))
+        {
+            return Ok(None);
+        }
+
+        let symbolic_header = symbolic_field_header_key(
+            metadata.segment_count,
+            metadata.cross_file_chunk_count,
+            metadata.field_flow_chunk_count,
+        );
+        let Some(symbolic_hit) = reader.get(symbolic_header)? else {
+            return Ok(None);
+        };
+        let (strings, bases): (Vec<String>, Vec<SymbolicFieldBase>) =
+            wire::decode(&symbolic_hit.payload).map_err(invalid_sidecar_payload)?;
+        if strings.len() as u64 != metadata.symbolic_string_count
+            || bases.len() as u64 != metadata.symbolic_base_count
+        {
+            return Ok(None);
+        }
+        let symbolic_field = SymbolicFieldGraph::from_header_parts(strings, bases);
+
+        let mut sidecar = IdgQuerySidecar::open(path, pipeline_hash, metadata)?;
+        let mut by_func = AHashMap::new();
+        let mut intra_edge_count = 0_u64;
+        for index in 0..metadata.segment_count {
+            let id = SegmentId(index);
+            let Some(segment) = sidecar.segment(id)? else {
+                return Ok(None);
+            };
+            intra_edge_count = intra_edge_count.saturating_add(segment.edges.len() as u64);
+            for &func in &segment.funcs {
+                by_func.insert(func, id);
+            }
+        }
+        sidecar.segment_cache.clear();
+        sidecar.intra_edge_count = intra_edge_count;
+
+        let mut field_flow = Vec::with_capacity(metadata.field_flow_count.min(usize::MAX as u64) as usize);
+        let field_base = first_field_flow_chunk_key(metadata.segment_count, metadata.cross_file_chunk_count);
+        let field_complete = visit_sidecar_chunks::<FieldFlowLink, _>(
+            &reader,
+            path,
+            field_base,
+            metadata.field_flow_chunk_count,
+            "field-flow",
+            |chunk| field_flow.extend(chunk),
+        )?;
+        if !field_complete || field_flow.len() as u64 != metadata.field_flow_count {
+            return Ok(None);
+        }
+
+        let mut cross_file = CrossFileEdges::new();
+        cross_file.release_indexes();
+        let workspace = Self {
+            segments: Vec::new(),
+            query_sidecar: Some(Arc::new(sidecar)),
+            segment_spool: None,
+            resident_segments: Vec::new(),
+            cross_file_spool: None,
+            symbolic_transform_spool: None,
+            by_func,
+            cross_file,
+            field_flow,
+            symbolic_field,
+        };
+        bonsai_diagnostics::debug_log!(
+            "idg-build",
+            "workspace query sidecar opened: path={} segments={} funcs={} intra_edges={} cross_edges={} symbolic_transforms={}",
+            path.display(),
+            workspace.segment_count(),
+            workspace.func_count(),
+            workspace.intra_edge_count(),
+            workspace.cross_file_edge_count(),
+            metadata.symbolic_transform_count
+        );
+        Ok(Some(workspace))
+    }
+
     /// Validate that a workspace IDG sidecar is structurally readable and
     /// decodes with the pipeline hash stamped in its factstore header.
     /// This does not prove the sidecar is fresh for a specific workspace;
@@ -1452,8 +1691,10 @@ impl IdgWorkspace {
     /// Validate the cheap-to-read sidecar contract for an exact pipeline
     /// without hydrating the complete graph. This checks the factstore header,
     /// section/index bounds, metadata schema, and the complete expected key
-    /// layout. Query consumers still call [`Self::load_from_disk`], which
-    /// decodes and validates every segment and relation payload before use.
+    /// layout. Query consumers open the sidecar through
+    /// [`crate::IdgQueryService::load_from_disk`], which scans each segment
+    /// once for the compact function directory and pages exact relation
+    /// payloads on demand.
     pub fn validate_sidecar_layout_with_pipeline(
         path: &std::path::Path,
         pipeline_hash: u64,
@@ -1857,7 +2098,7 @@ struct IdgWorkspaceMetadata {
 }
 
 /// Owned mirror of [`IdgWorkspaceMetadata`] used by the load path.
-#[derive(serde::Deserialize)]
+#[derive(Copy, Clone, Debug, serde::Deserialize)]
 struct IdgWorkspaceMetadataOwned {
     version: u32,
     segment_count: u32,
@@ -1869,6 +2110,123 @@ struct IdgWorkspaceMetadataOwned {
     symbolic_base_count: u64,
     symbolic_transform_count: u64,
     symbolic_transform_chunk_count: u32,
+}
+
+struct IdgQuerySidecar {
+    metadata: IdgWorkspaceMetadataOwned,
+    segment_cache: bonsai_factstore::FactCache<IdgSegment>,
+    relation_reader: bonsai_factstore::FactStoreReader,
+    intra_edge_count: u64,
+}
+
+impl std::fmt::Debug for IdgQuerySidecar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdgQuerySidecar")
+            .field("metadata", &self.metadata)
+            .field("resident_segments", &self.segment_cache.resident())
+            .field("intra_edge_count", &self.intra_edge_count)
+            .finish()
+    }
+}
+
+impl IdgQuerySidecar {
+    fn segment_cache_capacity() -> NonZeroUsize {
+        // A cross-segment compiler relation has two canonical endpoints. Two
+        // pages keep the source page resident while target segments change;
+        // this is an I/O working set, never a semantic edge or file cap.
+        let workers = bonsai_common::compiler_worker_count(rayon::current_num_threads()).max(2);
+        NonZeroUsize::new(workers).expect("segment cache capacity is non-zero")
+    }
+
+    fn open(
+        path: &std::path::Path,
+        pipeline_hash: u64,
+        metadata: IdgWorkspaceMetadataOwned,
+    ) -> crate::IdgResult<Self> {
+        let segment_reader =
+            bonsai_factstore::FactStoreReader::open(path, IDG_WORKSPACE_TABLE_ID, pipeline_hash)?;
+        let relation_reader =
+            bonsai_factstore::FactStoreReader::open(path, IDG_WORKSPACE_TABLE_ID, pipeline_hash)?;
+        Ok(Self {
+            metadata,
+            segment_cache: bonsai_factstore::FactCache::new(segment_reader, Self::segment_cache_capacity()),
+            relation_reader,
+            intra_edge_count: 0,
+        })
+    }
+
+    fn segment(&self, id: SegmentId) -> crate::IdgResult<Option<Arc<IdgSegment>>> {
+        let key = u64::from(id.0) + 1;
+        match self.segment_cache.get(key)? {
+            bonsai_factstore::CacheGet::Hit(segment) => Ok(Some(segment)),
+            bonsai_factstore::CacheGet::Absent => Ok(None),
+            bonsai_factstore::CacheGet::Miss(hit) => {
+                let segment: IdgSegment = wire::decode(&hit.payload).map_err(|error| {
+                    crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+                })?;
+                if segment.version != IDG_SEGMENT_VERSION {
+                    return Err(crate::IdgError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("IDG segment {} version mismatch", id.0),
+                    )));
+                }
+                let segment = Arc::new(segment);
+                self.segment_cache.insert_decoded(key, Arc::clone(&segment));
+                Ok(Some(segment))
+            }
+        }
+    }
+
+    fn visit_cross_file_edges<F>(&self, mut visit: F) -> crate::IdgResult<()>
+    where
+        F: FnMut(&[CrossFileEdge]),
+    {
+        let first = first_cross_file_chunk_key(self.metadata.segment_count);
+        for chunk in 0..self.metadata.cross_file_chunk_count {
+            let hit = self
+                .relation_reader
+                .get(first + u64::from(chunk))?
+                .ok_or_else(|| missing_sidecar_entry("cross-file", chunk))?;
+            let edges: Vec<CrossFileEdge> = wire::decode(&hit.payload).map_err(invalid_sidecar_payload)?;
+            visit(&edges);
+        }
+        Ok(())
+    }
+
+    fn visit_symbolic_transforms<F>(&self, mut visit: F) -> crate::IdgResult<()>
+    where
+        F: FnMut(&[SymbolicFieldTransform]) -> crate::IdgResult<()>,
+    {
+        let first = symbolic_field_header_key(
+            self.metadata.segment_count,
+            self.metadata.cross_file_chunk_count,
+            self.metadata.field_flow_chunk_count,
+        ) + 1;
+        for chunk in 0..self.metadata.symbolic_transform_chunk_count {
+            let hit = self
+                .relation_reader
+                .get(first + u64::from(chunk))?
+                .ok_or_else(|| missing_sidecar_entry("symbolic-transform", chunk))?;
+            let transforms: Vec<SymbolicFieldTransform> =
+                wire::decode(&hit.payload).map_err(invalid_sidecar_payload)?;
+            visit(&transforms)?;
+        }
+        Ok(())
+    }
+}
+
+fn missing_sidecar_entry(kind: &str, index: u32) -> crate::IdgError {
+    crate::IdgError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("workspace IDG sidecar is missing {kind} entry {index}"),
+    ))
+}
+
+fn invalid_sidecar_payload(error: impl std::fmt::Display) -> crate::IdgError {
+    crate::IdgError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        error.to_string(),
+    ))
 }
 
 /// Decode independent factstore chunks in resource-bounded batches and pass

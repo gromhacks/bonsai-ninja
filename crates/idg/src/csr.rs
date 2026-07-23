@@ -67,6 +67,96 @@ impl EdgeCsr {
         Self::build_pairs(n_nodes, edges, |(from, to)| (*to, *from))
     }
 
+    /// Build both directional CSRs from a repeatable pair visitor.
+    ///
+    /// This form can stream relations borrowed from several differently
+    /// shaped compiler stores without boxing an iterator or staging their
+    /// endpoints. The visitor runs exactly twice: once to size both CSRs and
+    /// once to fill them.
+    pub(crate) fn bidirectional_from_pair_visitor<F>(n_nodes: usize, visit_pairs: F) -> (Self, Self)
+    where
+        F: Fn(&mut dyn FnMut(u32, u32)),
+    {
+        let mut forward_offsets = vec![0_u32; n_nodes + 1];
+        let mut backward_offsets = vec![0_u32; n_nodes + 1];
+        visit_pairs(&mut |from, to| {
+            if (from as usize) >= n_nodes || (to as usize) >= n_nodes {
+                return;
+            }
+            forward_offsets[from as usize + 1] += 1;
+            backward_offsets[to as usize + 1] += 1;
+        });
+        for index in 1..forward_offsets.len() {
+            forward_offsets[index] += forward_offsets[index - 1];
+            backward_offsets[index] += backward_offsets[index - 1];
+        }
+
+        let mut forward_targets = vec![0_u32; *forward_offsets.last().unwrap_or(&0) as usize];
+        let mut backward_targets = vec![0_u32; *backward_offsets.last().unwrap_or(&0) as usize];
+        let mut forward_cursor = forward_offsets.clone();
+        let mut backward_cursor = backward_offsets.clone();
+        visit_pairs(&mut |from, to| {
+            if (from as usize) >= n_nodes || (to as usize) >= n_nodes {
+                return;
+            }
+            let forward_position = forward_cursor[from as usize] as usize;
+            forward_targets[forward_position] = to;
+            forward_cursor[from as usize] += 1;
+
+            let backward_position = backward_cursor[to as usize] as usize;
+            backward_targets[backward_position] = from;
+            backward_cursor[to as usize] += 1;
+        });
+
+        (
+            Self {
+                offsets: forward_offsets,
+                targets: forward_targets,
+                n_nodes,
+            },
+            Self {
+                offsets: backward_offsets,
+                targets: backward_targets,
+                n_nodes,
+            },
+        )
+    }
+
+    /// Build only the forward relation from a repeatable exact pair visitor.
+    /// Compiler-summary evaluation never asks for the transpose; avoiding it
+    /// saves one node-offset table and one complete edge array on large warm
+    /// workspaces without changing the traversed relation.
+    pub(crate) fn forward_from_pair_visitor<F>(n_nodes: usize, visit_pairs: F) -> Self
+    where
+        F: Fn(&mut dyn FnMut(u32, u32)),
+    {
+        let mut offsets = vec![0_u32; n_nodes + 1];
+        visit_pairs(&mut |from, to| {
+            if (from as usize) < n_nodes && (to as usize) < n_nodes {
+                offsets[from as usize + 1] += 1;
+            }
+        });
+        for index in 1..offsets.len() {
+            offsets[index] += offsets[index - 1];
+        }
+
+        let mut targets = vec![0_u32; *offsets.last().unwrap_or(&0) as usize];
+        let mut cursor = offsets.clone();
+        visit_pairs(&mut |from, to| {
+            if (from as usize) >= n_nodes || (to as usize) >= n_nodes {
+                return;
+            }
+            let position = cursor[from as usize] as usize;
+            targets[position] = to;
+            cursor[from as usize] += 1;
+        });
+        Self {
+            offsets,
+            targets,
+            n_nodes,
+        }
+    }
+
     /// Build a backward CSR from compact `(from, to, precision)` edge records.
     #[must_use]
     pub fn backward_precision(n_nodes: usize, edges: &[(u32, u32, Precision)]) -> Self {

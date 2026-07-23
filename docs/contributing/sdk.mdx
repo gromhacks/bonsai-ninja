@@ -79,7 +79,7 @@ let bonsai = Bonsai::new()
 | `.index_with_progress(root, callback)` | Same with `WorkspaceOpenEvent` callbacks |
 | `.index_structural(root)` | Explicit spelling for `.index(root)` |
 | `.index_structural_with_progress(root, callback)` | Same with `WorkspaceOpenEvent` callbacks |
-| `.index_semantic(root)` | Explicitly prebuild structural semantic sidecars: resolved callgraph, streamed workspace IDG, and retrieval factstore |
+| `.index_semantic(root)` | Explicitly prebuild immutable compiler objects, resolved callgraph, retrieval factstore, compiler linkage, and streamed workspace IDG |
 | `.index_semantic_with_progress(root, callback)` | Same with `WorkspaceOpenEvent` callbacks |
 | `.open_query(root)` | Load sidecar, compute requested missing facts on demand |
 | `.open_query_matching_literal_with_progress(root, literal, cb)` | Open only files whose text contains a literal and emit ingest/parse progress |
@@ -92,7 +92,7 @@ let bonsai = Bonsai::new()
 | `.open_with_options(root, opts)` | Explicit sidecar / prewarm control |
 | `.open_with_options_and_progress(root, opts, cb)` | Same plus progress callbacks |
 | `.cache(root)` | Rootless cache handle (clear, stats, default export cache) |
-| `.rebuild_structural_cache(root, warm_export)` | SDK equivalent of `bonsai-ninja cache rebuild`: refresh callgraph/IDG/retrieval sidecars and optionally the default export cache |
+| `.rebuild_structural_cache(root, warm_export)` | SDK equivalent of `bonsai-ninja cache rebuild`: refresh compiler-object/callgraph/linkage/IDG/retrieval sidecars and optionally the default export cache |
 | `.security_pack()` | Direct rulepack access |
 
 ### `Project` — analysis facade
@@ -372,14 +372,15 @@ let stats = project.cache().rebuild_structural_with_export(true)?;
 ```
 
 `rebuild_structural_cache` and `Project::cache().rebuild_structural*`
-match CLI `cache rebuild`: they refresh the reusable callgraph, IDG, and
-retrieval sidecars and warm the default export cache only when requested.
+match CLI `cache rebuild`: they refresh the reusable compiler-object,
+callgraph, linkage, IDG, and retrieval sidecars and warm the default export
+cache only when requested.
 They do not run the full dataflow prewarm; use
 `open_with_options(root, WorkspaceOpenOptions::full_prewarm())` when reusable
 dataflow, flow-id, callgraph, and IDG sidecars should be built up front. The
 per-entry compatibility value-flow projection remains on demand because
 eagerly closing the whole IDG once per callable is quadratic-scale work. SDK
-full-prewarm opens also refresh structural callgraph/IDG/retrieval coverage
+full-prewarm opens also refresh compiler-object/callgraph/linkage/IDG/retrieval coverage
 and publish `.bonsai/manifest.json`, so subsequent cache stats can validate
 every produced sidecar instead of treating them as orphaned files.
 Security `taint_analysis*` and `source_analysis*` facades refresh the same

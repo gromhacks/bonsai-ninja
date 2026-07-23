@@ -8,7 +8,7 @@ use anyhow::Result;
 use bonsai_sdk::GraphExportFormat;
 
 use crate::args::ExportFormat;
-use crate::commands::open_project_index_only as open_project;
+use crate::commands::open_project_with_options;
 use crate::output;
 use crate::progress;
 
@@ -38,7 +38,14 @@ pub(crate) fn cmd_export(
         }
     }
 
-    let (project, _footer) = open_project(root)?;
+    // Export consumes callgraph sections first and IDG sections second. Do
+    // not eagerly decode both multi-gigabyte compiler artifacts during open;
+    // the renderer restores the exact IDG after releasing the callgraph.
+    let mut open_options = bonsai_sdk::OpenOptions::query_only();
+    open_options.load_dataflow_sidecar = false;
+    open_options.load_value_flow_sidecar = false;
+    open_options.load_idg_sidecar = false;
+    let (project, _footer) = open_project_with_options(root, open_options)?;
     if let Some(format) = graph_export_format(format) {
         let spin = progress::ScopedSpinner::new("rendering graph export");
         let rendered = project.export().graph(format)?;

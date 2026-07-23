@@ -129,6 +129,37 @@ const JAVASCRIPT_AGGREGATE_FIRES: &str = r#"- id: javascript.test.send_mail
   description: external whole-object consumer observes exact tainted fields.
 "#;
 
+const PYTHON_PROJECTED_WRITE_FIRES: &str = r#"- id: python.test.response_header_write
+  enabled: true
+  language: python
+  tag: header-injection
+  severity: high
+  packages: [aiohttp]
+  cwe: [CWE-113]
+  match:
+    kind: write
+    target:
+      regex: Content-Disposition
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted projected response header
+    code: |
+      from aiohttp import web
+      def set_header(response, user_input):
+          cd = f'attachment; filename="{user_input}"'
+          response.headers["Content-Disposition"] = cd
+    expect_match_text: [response.headers.Content-Disposition]
+  - name: literal projected response header
+    code: |
+      from aiohttp import web
+      def set_header(response):
+          response.headers["Content-Disposition"] = "attachment; filename=report.txt"
+    expect_no_match: true
+  description: An exact projected response-header write retains its tainted RHS.
+"#;
+
 #[test]
 fn taint_replay_accepts_firing_example() {
     let tmp = TempDir::new("replay-fires");
@@ -165,6 +196,21 @@ fn taint_replay_accepts_tainted_field_in_whole_external_argument() {
     assert!(
         !taint_miss_ids(&report).contains(&"javascript.test.send_mail".to_string()),
         "an exact tainted field consumed by a whole external argument must satisfy replay: {:#?}",
+        report.issues
+    );
+}
+
+#[test]
+fn taint_replay_accepts_exact_projected_write() {
+    let tmp = TempDir::new("replay-python-projected-write");
+    write(
+        &tmp.path().join("langs/python/sinks/header.yml"),
+        PYTHON_PROJECTED_WRITE_FIRES,
+    );
+    let report = validate(tmp.path(), true);
+    assert!(
+        !taint_miss_ids(&report).contains(&"python.test.response_header_write".to_string()),
+        "a projected write reached by exact IDG field flow must satisfy replay: {:#?}",
         report.issues
     );
 }
