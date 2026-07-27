@@ -1427,11 +1427,13 @@ impl RootClosureVisited {
         }
     }
 
-    fn append_nodes(&self, nodes: &mut Vec<NodeId>) {
+    fn union_into(&self, nodes: &mut NodeBitSet) {
         match self {
-            Self::Dense(reached) => nodes.extend(reached.iter()),
+            Self::Dense(reached) => nodes.union_inplace(reached),
             Self::Sparse { reached, .. } => {
-                nodes.extend(reached.iter().copied().map(NodeId));
+                for node in reached.iter().copied() {
+                    nodes.set(NodeId(node));
+                }
             }
         }
     }
@@ -1472,10 +1474,6 @@ impl ContextualClosureVisited {
         true
     }
 
-    fn append_nodes(&self, nodes: &mut Vec<NodeId>) {
-        nodes.extend(self.nodes.iter());
-    }
-
     fn len(&self) -> u64 {
         self.states.len()
     }
@@ -1498,12 +1496,15 @@ impl ClosureVisited {
     }
 
     fn nodes(&self) -> Vec<NodeId> {
-        let mut nodes = Vec::new();
-        self.root.append_nodes(&mut nodes);
-        self.contextual.append_nodes(&mut nodes);
-        nodes.sort_unstable_by_key(|node| node.0);
-        nodes.dedup();
-        nodes
+        // Both root and realizable-context states erase to the same public
+        // node domain. Union their already-maintained bitsets directly instead
+        // of materialising duplicate vectors and sorting the complete closure.
+        // Iteration is ascending, so this preserves the deterministic result
+        // order while reducing closure finalisation from O(R log R) to
+        // O(N / word + R).
+        let mut nodes = self.contextual.nodes.clone();
+        self.root.union_into(&mut nodes);
+        nodes.iter().collect()
     }
 }
 
@@ -1683,13 +1684,26 @@ fn returned_fact_store() -> SpillSet {
     )
 }
 
+/// Scalar return summaries can also grow as `(call context, returned node)`.
+/// Keep that complete relation external-memory and prefix-addressable so a
+/// highly shared recursive boundary cannot turn return replay into an
+/// unbounded resident map or one giant temporary vector.
+fn returned_node_store() -> SpillSet {
+    let resident_bytes = bounded_relation_bytes(1024, 8, 8);
+    let bloom_bytes = bounded_relation_bytes(512, 8, 8);
+    SpillSet::new(
+        resident_bytes / 56,
+        bloom_bytes,
+        recent_positive_bytes(resident_bytes),
+        true,
+    )
+}
+
 struct CallContexts {
     ids: AHashMap<ContextBoundaryKey, u32>,
     boundaries: Vec<Option<ContextBoundaryKey>>,
     callers: Vec<CompactSet<u32>>,
-    /// Most call contexts never complete a distinct return fact. Sparse maps
-    /// avoid retaining two empty set headers for every boundary.
-    returned_nodes: AHashMap<u32, AHashSet<NodeId>>,
+    returned_nodes: SpillSet,
     returned_facts: SpillSet,
 }
 
@@ -1699,7 +1713,7 @@ impl CallContexts {
             boundaries: vec![None],
             ids: AHashMap::default(),
             callers: vec![CompactSet::default()],
-            returned_nodes: AHashMap::default(),
+            returned_nodes: returned_node_store(),
             returned_facts: returned_fact_store(),
         }
     }
@@ -1726,11 +1740,12 @@ impl CallContexts {
         (context, true)
     }
 
-    fn returned_nodes_for(&self, context: u32) -> Vec<NodeId> {
+    fn returned_node_batch(&mut self, context: u32, after: Option<u128>) -> Vec<NodeId> {
         self.returned_nodes
-            .get(&context)
-            .map(|values| values.iter().copied().collect())
-            .unwrap_or_default()
+            .keys_with_prefix_batch(context, after, CONTEXT_REPLAY_BATCH_ENTRIES)
+            .into_iter()
+            .map(|key| NodeId(key as u32))
+            .collect()
     }
 
     fn returned_fact_batch(&mut self, context: u32, after: Option<u128>) -> Vec<SymbolicFactIdentity> {
@@ -1749,8 +1764,8 @@ impl CallContexts {
         if self.boundaries.get(context as usize).is_none() {
             return Vec::new();
         }
-        let returned = self.returned_nodes.entry(context).or_default();
-        if !returned.insert(node) {
+        let key = (u128::from(context) << 96) | u128::from(node.0);
+        if !self.returned_nodes.insert(key) {
             return Vec::new();
         }
         self.callers
@@ -4916,15 +4931,22 @@ impl IdgQueryService {
         if !newly_registered {
             return context;
         }
-        let returned_nodes = worklist.contexts.returned_nodes_for(context);
-        Self::replay_context_outputs(
-            unified,
-            runtime,
-            caller_context,
-            returned_nodes,
-            Vec::new(),
-            worklist,
-        );
+        let mut after = None;
+        loop {
+            let returned_nodes = worklist.contexts.returned_node_batch(context, after);
+            let Some(last) = returned_nodes.last().copied() else {
+                break;
+            };
+            after = Some((u128::from(context) << 96) | u128::from(last.0));
+            Self::replay_context_outputs(
+                unified,
+                runtime,
+                caller_context,
+                returned_nodes,
+                Vec::new(),
+                worklist,
+            );
+        }
 
         let mut after = None;
         loop {

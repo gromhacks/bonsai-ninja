@@ -80,8 +80,8 @@ with:
 
 - `analysis_complete: true` and no incomplete reasons.
 - 0 findings at the production profile's severity threshold.
-- 41.50 seconds wall time.
-- 442,220,544 bytes maximum resident memory (about 421.7 MiB).
+- 41.54 seconds wall time.
+- 443,482,112 bytes maximum resident memory (about 422.9 MiB).
 - 0 swaps under `BONSAI_MEMORY_BUDGET_MB=3072`.
 
 This is a correctness smoke, not a claim that an empty finding set proves the
@@ -102,7 +102,7 @@ checkout with:
   --no-progress
 ```
 
-The 2026-07-25 run completed successfully under
+The 2026-07-26 run completed successfully under
 `BONSAI_MEMORY_BUDGET_MB=3072`:
 
 | Measure | Result |
@@ -118,8 +118,8 @@ The 2026-07-25 run completed successfully under
 | Findings at production threshold | 0 |
 | `analysis_complete` | `true` |
 | Incomplete reasons | 0 |
-| Wall time | 169.10 s |
-| Maximum RSS | 1,675,771,904 bytes (about 1.56 GiB) |
+| Wall time | 170.55 s |
+| Maximum RSS | 1,661,304,832 bytes (about 1.55 GiB) |
 | Swaps | 0 |
 
 The result is not capped. `--all` removes output paging, while the semantic
@@ -128,6 +128,14 @@ sidecar has no source-file-count ceiling. Exact compressed export is used for
 potentially quadratic derived path families; `--full-propagations` is the
 explicit opt-in when a consumer requires every propagation record
 materialized.
+
+The same multi-file Python compiler flow was also run with 512 MiB and
+3,072 MiB scheduling budgets. Both runs completed with one finding and
+byte-identical JSON (SHA-256
+`4f15f82d48a161e517e4ddbb75ccf40d809567c5f3671e2f0139b63a26ec3cdd`).
+This is a direct regression check that a smaller budget changes concurrency,
+cache retention, and spill frequency only—not analyzed syntax or semantic
+results.
 
 Earlier notes reported parser diagnostics and
 `analysis_complete: false` on this checkout. That was a real frontend/adapter
