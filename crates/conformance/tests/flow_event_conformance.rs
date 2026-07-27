@@ -76,6 +76,12 @@ fn run_conformance(c: &Conformance) -> Vec<ShapeResult> {
     let ws = bonsai_testkit::workspace_with(vec![adapter], &[(c.fixture_path, c.fixture_source)]);
     let func_decl = find_decl(&ws, c.function_name)
         .unwrap_or_else(|| panic!("function `{}` not found in {}", c.function_name, c.lang));
+    let diagnostics = ws.diagnostics();
+    assert!(
+        diagnostics.is_empty(),
+        "{}: valid canonical fixture produced parser/adapter diagnostics:\n{diagnostics:#?}",
+        c.lang
+    );
     let mut results: Vec<ShapeResult> = Vec::new();
     for shape in [
         CanonicalShape::BareRename,
@@ -176,18 +182,33 @@ fn matches_shape(event: &FlowEvent, shape: CanonicalShape, c: &Conformance) -> b
             CanonicalShape::LiteralWrite,
             FlowEvent::Assign {
                 target,
+                source_name,
+                source_call,
+                source_names,
                 value_kind: Some(AssignValueKind::Literal),
                 ..
             },
-        ) => sigil_strip(target) == "lit",
+        ) => {
+            sigil_strip(target) == "lit"
+                && literal_source_metadata_is_valid(c, source_name.as_deref())
+                && source_call.is_none()
+                && source_names.is_empty()
+        }
         (
             CanonicalShape::DirectCall,
             FlowEvent::Assign {
                 target,
+                source_name,
                 source_call: Some(callee),
+                source_names,
                 ..
             },
-        ) => sigil_strip(target) == "z" && call_member_name(callee) == "f",
+        ) => {
+            sigil_strip(target) == "z"
+                && call_member_name(callee) == "f"
+                && source_name.is_none()
+                && source_names.is_empty()
+        }
         (
             CanonicalShape::SingleConditionBranch,
             FlowEvent::Branch {
@@ -219,6 +240,21 @@ fn matches_shape(event: &FlowEvent, shape: CanonicalShape, c: &Conformance) -> b
         }
         _ => false,
     }
+}
+
+fn literal_source_metadata_is_valid(c: &Conformance, source_name: Option<&str>) -> bool {
+    let Some(source) = source_name.map(str::trim).filter(|source| !source.is_empty()) else {
+        return true;
+    };
+    let capabilities = adapter_for_lang(c.lang).capabilities();
+    if !capabilities.quoted_callable_literals {
+        return false;
+    }
+    let bytes = source.as_bytes();
+    bytes.len() >= 2
+        && matches!(bytes[0], b'\'' | b'"')
+        && bytes.last().copied() == Some(bytes[0])
+        && !source[1..source.len() - 1].trim().is_empty()
 }
 
 /// Strip the leading sigil so PHP/Perl `$y` matches `y` in the
@@ -879,6 +915,47 @@ fn flow_event_shape_conformance() {
     assert!(
         failures.is_empty(),
         "flow-event conformance gaps ({} total):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn malformed_tail_is_diagnostic_and_marks_parser_scope_incomplete() {
+    let mut failures = Vec::new();
+    for adapter in bonsai_adapters::all_adapters() {
+        let lang = adapter.language_id().as_str().to_string();
+        let fixture = fixture_for(&lang);
+        let malformed_tail = if lang == "scala" {
+            "def BONSAI_INVALID( = {"
+        } else {
+            "<<< BONSAI_INVALID >>>"
+        };
+        let malformed = format!("{}\n{malformed_tail}\n", fixture.fixture_source);
+        let ws = bonsai_testkit::workspace_with(vec![adapter], &[(fixture.fixture_path, malformed.as_str())]);
+
+        let diagnostics = ws.diagnostics();
+        if !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("syntax-error"))
+        {
+            failures.push(format!(
+                "{lang}: malformed source did not produce a syntax-error diagnostic: \
+                 {diagnostics:#?}"
+            ));
+        }
+        let files = ws.vfs().all_files();
+        let incomplete = ws.parser_incomplete_reasons_for_files(&files);
+        if incomplete != ["syntax-error-files:1"] {
+            failures.push(format!(
+                "{lang}: parser completeness did not preserve the syntax failure: {incomplete:?}"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "cross-language parser recovery gaps ({} total):\n{}",
         failures.len(),
         failures.join("\n")
     );

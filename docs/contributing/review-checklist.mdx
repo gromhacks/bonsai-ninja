@@ -60,6 +60,16 @@ class and verify each box.
       reports the expected finding count.
 - [ ] **Capabilities declaration matches reality.** `fn capabilities()`
       reflects the actual coverage; `Unsupported` levels are honest.
+- [ ] **Cross-language frontend contracts stay green.** Run
+      `cargo test -p bonsai_conformance --test capability_matrix` and
+      `--test flow_event_conformance`. Applicable capability cells may not be
+      `Missing`; valid fixtures must be diagnostic-free, and malformed input
+      must report parser incompleteness instead of silently claiming complete
+      analysis.
+- [ ] **Positive and negative taint contracts execute.** Run
+      `cargo test -p bonsai_taint --test matrix`. Every applicable
+      scenario/language cell executes the real engine, and every language must
+      retain positive propagation, clean-overwrite, and over-taint negatives.
 - [ ] **Syntax ownership stays in the adapter.** New source tokens, grammar
       node kinds, constructor/receiver forms, module roots, and broad type
       spellings are emitted as adapter facts. Shared crates do not branch on

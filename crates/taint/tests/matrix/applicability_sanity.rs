@@ -731,3 +731,46 @@ fn applicable_count_per_language_matches_doc_estimate() {
         );
     }
 }
+
+#[test]
+fn every_language_executes_positive_and_negative_taint_contracts() {
+    for &lang in LANGUAGES {
+        let applicable =
+            |scenario: &&crate::scenarios::Scenario| status(lang, scenario.id) == Status::Applicable;
+        let positive = SCENARIOS
+            .iter()
+            .filter(applicable)
+            .filter(|scenario| scenario.polarity == Polarity::Positive)
+            .count();
+        let negative = SCENARIOS
+            .iter()
+            .filter(applicable)
+            .filter(|scenario| scenario.polarity == Polarity::Negative)
+            .count();
+        let intra_negative = SCENARIOS
+            .iter()
+            .filter(applicable)
+            .filter(|scenario| {
+                scenario.category == Category::Intra && scenario.polarity == Polarity::Negative
+            })
+            .count();
+        let over_taint_negative = SCENARIOS
+            .iter()
+            .filter(applicable)
+            .filter(|scenario| {
+                scenario.category == Category::OverTaint && scenario.polarity == Polarity::Negative
+            })
+            .count();
+
+        assert!(
+            positive > 0 && negative > 0,
+            "{lang}: every adapter must execute both positive and negative taint contracts \
+             (positive={positive}, negative={negative})"
+        );
+        assert!(
+            intra_negative > 0 && over_taint_negative > 0,
+            "{lang}: every adapter must prove clean overwrite and over-taint precision \
+             (intra_negative={intra_negative}, over_taint_negative={over_taint_negative})"
+        );
+    }
+}

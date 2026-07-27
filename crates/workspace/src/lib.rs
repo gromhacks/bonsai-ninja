@@ -4126,7 +4126,11 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // write-back demand, and target-emission corridors compile only demanded
     // return/mutation providers. Rebuild IDG and linkage sidecars so an older
     // broad provider projection cannot be reused as the compiler contract.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 48;
+    // v49 (2026-07-27): call-result source pruning canonicalizes adapter-owned
+    // identifier sigils before separating argument carriers from independent
+    // RHS sources. Rebuild IDG/taint sidecars so warm Perl/PHP workspaces
+    // cannot retain the former spurious argument-source edges.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 49;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 

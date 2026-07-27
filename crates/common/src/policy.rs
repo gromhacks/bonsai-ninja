@@ -15,5 +15,5 @@
 /// per `docs/contributing/design-patterns.mdx::Semantic Resolution Always`),
 /// or when IDG/taint propagation semantics change enough to affect
 /// source-to-sink reachability.
-pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_0034_u128;
+pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_0035_u128;
 const _: () = assert!(MATCHER_POLICY_FINGERPRINT != 0);

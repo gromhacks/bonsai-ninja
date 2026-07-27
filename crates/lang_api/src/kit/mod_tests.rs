@@ -642,6 +642,21 @@ fn call_result_assignment_pruning_removes_callee_and_arg_carriers() {
 }
 
 #[test]
+fn call_result_assignment_pruning_normalizes_identifier_sigils() {
+    let mut events = vec![assign_call("z", "f", &["x"], &["$x", "$xy"])];
+
+    normalize_call_result_assignment_sources(&mut events);
+
+    let FlowEvent::Assign { source_names, .. } = &events[0] else {
+        panic!("expected assign event")
+    };
+    assert!(
+        source_names == &["$xy"],
+        "Perl/PHP sigils are syntax on the same argument binding, while a distinct prefixed name must remain an independent source"
+    );
+}
+
+#[test]
 fn call_result_assignment_pruning_preserves_method_receivers() {
     let mut events = vec![assign_call(
         "ok",

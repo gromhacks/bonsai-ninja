@@ -161,7 +161,7 @@ fn fixture_for(lang: &str) -> (&'static str, &'static str, &'static [Capability]
         ),
         "erlang" => (
             "app.erl",
-            "-module(app).\n-export([run/2, handle/2]).\n\nrun(Conn, Items) ->\n  try\n    lists:foreach(fun(It) ->\n      case It of\n        undefined -> ok;\n        _ -> handle(Conn, It)\n      end\n    end, Items)\n  catch\n    _:E -> {error, E}\n  end.\n\nhandle(Conn, X) ->\n  Y = transform(Conn, X),\n  Y.\n\ntransform(_Conn, X) -> X.\n",
+            "-module(app).\n-export([run/2, handle/2]).\n\nrun(Conn, Items) ->\n  try\n    lists:foreach(fun(It) ->\n      case It of\n        undefined -> ok;\n        _ -> handle(Conn, It)\n      end\n    end, Items)\n  catch\n    _:E -> {error, E}\n  end.\n\nhandle(Conn, X) ->\n  Joined = Conn ++ X,\n  Y = transform(Joined, X),\n  Y.\n\ntransform(_Conn, X) -> X.\n",
             &[
                 Capability::ParamAnnotations,
                 Capability::TypeAliases,
@@ -180,6 +180,7 @@ fn fixture_for(lang: &str) -> (&'static str, &'static str, &'static [Capability]
                 Capability::TypeAliases,
                 Capability::TryEvents,
                 Capability::ReceiverParamIndex,
+                Capability::ImplicitReturns,
             ],
         ),
         "c" => (
@@ -245,6 +246,17 @@ fn capability_matrix_report() {
         "expected {} cells, got {}",
         21 * Capability::ALL.len(),
         cells.len()
+    );
+    let missing: Vec<_> = cells
+        .iter()
+        .filter(|cell| matches!(cell.status, CellStatus::Missing))
+        .map(|cell| format!("{}:{}", cell.language, cell.capability.label()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "all applicable compiler capabilities must be covered; mark truly unsupported syntax \
+         NotApplicable with a language rationale instead of leaving silent red cells:\n{}",
+        missing.join("\n")
     );
 }
 

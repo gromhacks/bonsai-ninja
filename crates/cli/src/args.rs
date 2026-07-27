@@ -2470,12 +2470,16 @@ pub(crate) enum Cmd {
         action: SecurityAction,
     },
 
-    /// Workspace tree with finding / flow / cross-file edge annotations.
+    /// Fast structural workspace tree with optional semantic annotations.
     #[command(
         display_order = 23,
         long_about = themed_subcommand_long_about(
-            "Hierarchical workspace view with each file row carrying \
-             the connections that exist on top of it: finding ids \
+            "Fast hierarchical filesystem view for workspace navigation. \
+             The default path does not open the compiler or run security \
+             analysis. Pass `--findings`, `--severity`, or `--rules-dir` \
+             when you explicitly want semantic annotations.\n\
+             \n\
+             The annotated view can carry finding ids \
              (`S:<16-hex>`), flow ids (`F:<16-hex>`), the most-severe \
              flow's entry/exit, and the cross-file caller / callee \
              edges that thread into and out of the file. Directory \
@@ -2489,15 +2493,17 @@ pub(crate) enum Cmd {
              `--compact` drops those rows for a one-line-per-entry \
              tree.\n\
              \n\
-             Findings populate when a rulepack is present (auto-\
-             discovered at `./security-patterns/` or via \
-             `--rules-dir`); without one, the tree still shows \
-             cross-file edges and file structure."
+             `--findings` auto-discovers a rulepack using the ordinary \
+             workspace lookup. `--rules-dir` selects one explicitly, and \
+             `--severity` both enables annotations and filters the result."
         ),
         after_help = themed_subcommand_after_help(
             "EXAMPLES\n\n  \
-             # Workspace navigation with finding annotations\n  \
+             # Fast structural workspace navigation\n  \
              $ bonsai-ninja tree ./src\n  \
+             \n  \
+             # Opt into security and cross-file annotations\n  \
+             $ bonsai-ninja tree ./src --findings\n  \
              \n  \
              # Cap depth and use the compact one-line tree\n  \
              $ bonsai-ninja tree ./src --max-depth 3 --compact\n  \
@@ -2525,6 +2531,10 @@ pub(crate) enum Cmd {
         /// Only files whose findings reach at least this severity.
         #[arg(long)]
         severity: Option<String>,
+        /// Opt into security findings and cross-file semantic annotations.
+        /// The default tree is filesystem-only and does not open the compiler.
+        #[arg(long, default_value_t = false)]
+        findings: bool,
         /// Children-per-dir cap (`0` = uncapped).
         #[arg(long, default_value_t = 200)]
         limit: usize,
@@ -2546,8 +2556,9 @@ pub(crate) enum Cmd {
         format: String,
         #[command(flatten)]
         output: OutputPathArg,
-        /// Directory containing the rulepack tree (for finding /
-        /// severity annotations). Lookup when omitted:
+        /// Directory containing the rulepack tree. Supplying this option
+        /// enables finding / severity annotations. Lookup for `--findings`
+        /// when this option is omitted:
         /// `BONSAI_RULES_DIR` env var, then
         /// `<workspace>/security-patterns/`, then
         /// `<workspace>/../security-patterns/`, then

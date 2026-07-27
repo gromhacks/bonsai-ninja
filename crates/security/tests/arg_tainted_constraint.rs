@@ -653,14 +653,17 @@ fn matcher_policy_fingerprint_was_bumped_for_arg_tainted() {
     // Bumped 0x002c → 0x002d when resolver/call-flow semantics
     // stopped using broad public-name fallback for cross-file class
     // dispatch and synthetic anonymous callback entrypoints.
-    // Bumped 0x002d → 0x0034 across the package-gate, receiver-type,
+    // Bumped 0x002d → 0x0035 across the package-gate, receiver-type,
     // IDG callback-source, and field-sensitive flow policy changes:
     // cached graph facts can now change for FQN-gated calls,
     // typed receiver/factory dispatch, configured callback source
     // arguments, and member/subscript assignment precision.
+    // Bumped 0x0034 → 0x0035 when call-result argument-carrier pruning
+    // started canonicalizing adapter-owned identifier sigils, changing
+    // Perl/PHP IDG reachability and invalidating warm graph facts.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_0034_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_0035_u128
     );
 }
 

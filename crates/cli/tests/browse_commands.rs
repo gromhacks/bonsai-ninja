@@ -2763,10 +2763,65 @@ fn tree_file_filter_is_workspace_relative_in_fast_mode() {
 }
 
 #[test]
-fn tree_fast_mode_skips_internal_case_probe_files() {
+fn tree_annotated_paths_are_workspace_relative() {
+    fn assert_relative_locators(node: &serde_json::Value) {
+        let locator = node["locator"]["file"]
+            .as_str()
+            .expect("every tree node carries a file locator");
+        assert!(
+            !Path::new(locator).is_absolute(),
+            "annotated tree locator must be workspace-relative: {locator}"
+        );
+        for edge_field in ["cross_file_callers_in", "cross_file_callees_out"] {
+            for edge in node[edge_field].as_array().into_iter().flatten() {
+                for endpoint in ["caller", "callee", "call_site"] {
+                    let file = edge[endpoint]["file"]
+                        .as_str()
+                        .expect("cross-file endpoint locator");
+                    assert!(
+                        file == "external" || !Path::new(file).is_absolute(),
+                        "annotated tree edge locator must be workspace-relative: {file}"
+                    );
+                }
+            }
+        }
+        for child in node["children"].as_array().into_iter().flatten() {
+            assert_relative_locators(child);
+        }
+    }
+
+    let ws = ws_path();
+    let rules = repo_root().join("security-patterns");
+    let Some(out) = run(&[
+        "tree",
+        ws.to_str().unwrap(),
+        "--findings",
+        "--rules-dir",
+        rules.to_str().unwrap(),
+        "--all",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("tree JSON must parse");
+    let roots = parsed["roots"].as_array().expect("tree roots");
+    assert_eq!(roots.len(), 1, "selected workspace must have one tree root");
+    assert_eq!(
+        roots[0]["name"].as_str(),
+        Some("micro"),
+        "annotated tree must root at the selected workspace:\n{out}"
+    );
+    assert_relative_locators(&roots[0]);
+}
+
+#[test]
+fn tree_fast_mode_skips_internal_tool_state() {
     let root = tempdir_for_test("tree-internal-probe");
     std::fs::write(root.join("app.py"), "def app_marker():\n    return 1\n").expect("write app");
     std::fs::write(root.join(".bonsai_case_probe_123_456"), "").expect("write probe-like file");
+    std::fs::create_dir_all(root.join(".bonsai-agent")).expect("create agent state");
+    std::fs::write(root.join(".bonsai-agent/notes.sqlite"), b"scanner state").expect("write agent state");
     std::fs::write(
         root.join(".bonsai_case_probe_notes.py"),
         "def user_owned_probe_notes():\n    return 1\n",
@@ -2785,10 +2840,30 @@ fn tree_fast_mode_skips_internal_case_probe_files() {
         "tree must not render transient internal case-probe files:\n{out}"
     );
     assert!(
+        !out.contains(".bonsai-agent") && !out.contains("notes.sqlite"),
+        "tree must not render scanner-owned metadata as project content:\n{out}"
+    );
+    assert!(
         out.contains(".bonsai_case_probe_notes.py"),
         "tree must not hide user-owned similarly prefixed source files:\n{out}"
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn tree_default_and_all_modes_stay_structural() {
+    let ws = ws_path();
+    for extra in [Vec::<&str>::new(), vec!["--all"]] {
+        let mut args = vec!["tree", ws.to_str().unwrap(), "--compact"];
+        args.extend(extra);
+        let Some(out) = run(&args) else {
+            return;
+        };
+        assert!(
+            !out.contains("finding") && !out.contains("[ severity ]"),
+            "structural tree must not imply that it ran security analysis:\n{out}"
+        );
+    }
 }
 
 #[test]
@@ -2798,8 +2873,8 @@ fn tree_compact_text_marks_depth_limited_view_incomplete() {
         return;
     };
     assert!(
-        out.contains("semantic-only tree incomplete"),
-        "compact tree output must surface incomplete semantic context:\n{out}"
+        out.contains("tree view incomplete"),
+        "compact tree output must surface incomplete tree context:\n{out}"
     );
     assert!(
         out.contains("tree-files-truncated:"),

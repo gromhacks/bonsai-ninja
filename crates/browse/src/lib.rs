@@ -50,7 +50,7 @@ pub use classes::{classes, ClassOut, ClassesFilters};
 pub use comments::{comments, CommentOut, CommentsFilters};
 pub use common::{
     collect_callee_names, file_path_excluded_by_filters, file_path_matches_filter, format_span,
-    make_name_filter, Locator, NameFilter, Span,
+    make_name_filter, workspace_relative_path, Locator, NameFilter, Span,
 };
 pub use defs::{defs, DefOut, DefsFilters};
 pub use dumps::{
