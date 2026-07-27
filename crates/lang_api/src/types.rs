@@ -1486,6 +1486,11 @@ pub struct Ref {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssignmentValueFact {
     pub assignment_span: Span,
+    /// Adapter-normalized target place when the parsed assignment binds one
+    /// addressable value. Multi-target patterns deliberately leave this
+    /// unset; their individual flow bindings remain in [`FlowEvent::Assign`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     /// Exact parsed target/pattern node, when the grammar exposes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_span: Option<Span>,
@@ -1502,6 +1507,16 @@ pub struct AssignmentValueFact {
     /// that rendering.
     #[serde(default, skip_serializing_if = "ExpressionFlow::is_empty")]
     pub value_flow: ExpressionFlow,
+    /// Exact return value of a callable assigned by this syntax node when the
+    /// language frontend proves that the callable body consists of one
+    /// unconditional return. Absent for multi-path, fallthrough, or otherwise
+    /// non-exact callable bodies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_callable_return: Option<ExpressionFlow>,
+    /// Exact scalar arguments of the direct RHS call when every argument was
+    /// decoded by the owning language frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_static_call_args: Option<Vec<StaticScalarValue>>,
     /// Canonical callee when the RHS is (or transparently wraps) one direct
     /// call. This comes from the Tree-sitter call node selected by the
     /// adapter, never from scanning the rendered RHS.
@@ -1511,6 +1526,44 @@ pub struct AssignmentValueFact {
     /// is receiver-qualified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_call_receiver: Option<String>,
+}
+
+/// One exact key/value entry in a statically initialized string map.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaticStringMapEntry {
+    pub key: String,
+    pub value: String,
+}
+
+/// A complete, spread-free string map lowered by a language frontend.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaticStringMapFact {
+    pub assignment_span: Span,
+    pub target: String,
+    pub entries: Vec<StaticStringMapEntry>,
+}
+
+/// Domain on which a character-substitution helper applies its static map.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CharacterSubstitutionDomain {
+    /// Every input character is looked up and missing entries preserve the
+    /// original character.
+    TableKeysWithIdentityFallback,
+    /// Only these exact compiler-decoded characters enter the replacement
+    /// callback (for example an exact regular-expression character class).
+    ExactCharacters { characters: Vec<String> },
+}
+
+/// A local function whose return value is a character-wise static-map
+/// substitution of one input parameter.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterSubstitutionFact {
+    pub function_span: Span,
+    pub transform_span: Span,
+    pub input_param_index: usize,
+    pub table: String,
+    pub domain: CharacterSubstitutionDomain,
 }
 
 /// One branch-local runtime type refinement proven by parsed guard syntax.
@@ -1535,6 +1588,101 @@ pub enum BranchConditionPolarity {
     Negated,
 }
 
+/// Compiler-owned operands for a membership test in a branch condition.
+///
+/// `then_contains` describes the semantic condition under which the parsed
+/// `then` arm executes. For example, `item in allowed` records `true`, while
+/// both `item not in allowed` and `not item in allowed` record `false`.
+/// Consumers therefore never need to recover `in`/`not in` tokens from
+/// rendered condition text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipConditionFact {
+    pub subject: String,
+    pub collection: String,
+    pub then_contains: bool,
+}
+
+/// Equality relation lowered from a language adapter's Tree-sitter grammar.
+///
+/// The shared analyzer needs only semantic equality here. Operator spellings
+/// (`==`, `!=`, and language-specific equivalents) remain adapter syntax and
+/// never leak into downstream policy.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionEquality {
+    Equal,
+    NotEqual,
+}
+
+/// One operand in a compiler-lowered branch expression.
+///
+/// `static_string` is populated only when the language adapter can decode the
+/// complete literal without approximation. Dynamic/interpolated/escaped
+/// forms remain `None`, preserving soundness for exact guard proofs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConditionOperandFact {
+    pub span: Span,
+    #[serde(default, skip_serializing_if = "ExpressionFlow::is_empty")]
+    pub value_flow: ExpressionFlow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_string: Option<String>,
+}
+
+/// Typed boolean expression for one parsed branch condition.
+///
+/// Language adapters own the mapping from their grammar's operator nodes to
+/// these semantic forms. Shared analyses can consequently prove conjunction,
+/// disjunction, negation, and equality without tokenizing rendered condition
+/// text or carrying a cross-language operator inventory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConditionExpressionFact {
+    Atom {
+        span: Span,
+    },
+    Not {
+        span: Span,
+        operand: Box<ConditionExpressionFact>,
+    },
+    All {
+        span: Span,
+        operands: Vec<ConditionExpressionFact>,
+    },
+    Any {
+        span: Span,
+        operands: Vec<ConditionExpressionFact>,
+    },
+    Equality {
+        span: Span,
+        relation: ConditionEquality,
+        left: ConditionOperandFact,
+        right: ConditionOperandFact,
+    },
+    /// Compiler-proven collection membership. Method spellings, index syntax,
+    /// and negation tokens remain owned by the language frontend.
+    Membership {
+        span: Span,
+        subject: ConditionOperandFact,
+        collection: ConditionOperandFact,
+        then_contains: bool,
+    },
+}
+
+impl ConditionExpressionFact {
+    /// Exact parsed expression boundary represented by this node.
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        match self {
+            Self::Atom { span }
+            | Self::Not { span, .. }
+            | Self::All { span, .. }
+            | Self::Any { span, .. }
+            | Self::Equality { span, .. }
+            | Self::Membership { span, .. } => *span,
+        }
+    }
+}
+
 /// Compiler-owned condition boundary for one parsed branch. Consumers use
 /// `condition_span` to relate calls to the condition and `polarity` instead of
 /// reparsing [`FlowEvent::Branch::condition`] rendering.
@@ -1543,6 +1691,12 @@ pub struct BranchConditionFact {
     pub branch_span: Span,
     pub condition_span: Span,
     pub polarity: BranchConditionPolarity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership: Option<MembershipConditionFact>,
+    /// Adapter-lowered boolean expression when that language has declared
+    /// exact condition syntax support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<ConditionExpressionFact>,
 }
 
 /// Locate the condition fact for an exact branch span in the sorted file
@@ -1567,7 +1721,37 @@ pub fn branch_condition_fact_for_span(
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallReceiverFact {
     pub call_span: Span,
+    pub receiver_span: Span,
     pub value_flow: ExpressionFlow,
+    /// Exact scalar receiver decoded by the owning language frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_value: Option<StaticScalarValue>,
+}
+
+/// Compiler-owned value shape for one call argument.
+///
+/// `call_span` is the exact callee span used by the sibling
+/// [`FlowEvent::Call`], while `argument_index` follows adapter-normalized
+/// argument order. Consumers use `value_flow` for nested aggregate/object
+/// semantics instead of reparsing [`CallArg::value_text`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallArgumentValueFact {
+    pub call_span: Span,
+    pub argument_index: usize,
+    pub argument_span: Span,
+    pub value_flow: ExpressionFlow,
+    /// Exact scalar value decoded by the owning language frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_value: Option<StaticScalarValue>,
+}
+
+/// Language-decoded scalar literal used by exact semantic guards.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum StaticScalarValue {
+    String(String),
+    Boolean(bool),
+    Null,
 }
 
 /// Locate receiver-flow facts for a semantic call in the sorted file table.
@@ -1577,6 +1761,21 @@ pub fn call_receiver_fact_for_span(facts: &[CallReceiverFact], call_span: Span) 
     let wanted = key(call_span);
     let index = facts.partition_point(|fact| key(fact.call_span) < wanted);
     facts.get(index).filter(|fact| fact.call_span == call_span)
+}
+
+/// Locate one compiler-owned call-argument value fact.
+#[must_use]
+pub fn call_argument_value_fact(
+    facts: &[CallArgumentValueFact],
+    call_span: Span,
+    argument_index: usize,
+) -> Option<&CallArgumentValueFact> {
+    let key = |span: Span, index: usize| (span.file.raw(), span.start, span.end, index);
+    let wanted = key(call_span, argument_index);
+    let index = facts.partition_point(|fact| key(fact.call_span, fact.argument_index) < wanted);
+    facts
+        .get(index)
+        .filter(|fact| fact.call_span == call_span && fact.argument_index == argument_index)
 }
 
 /// Locate one exact assignment syntax fact in the sorted file-local fact
@@ -1694,6 +1893,16 @@ pub struct DeclIndex {
     /// Parsed receiver-expression dependencies keyed by semantic call span.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub call_receivers: Vec<CallReceiverFact>,
+    /// Parsed argument-expression value shapes keyed by semantic call span
+    /// and adapter-normalized argument index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_argument_values: Vec<CallArgumentValueFact>,
+    /// Complete static string maps decoded by the owning language frontend.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_string_maps: Vec<StaticStringMapFact>,
+    /// Local character-substitution helper summaries decoded from syntax.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub character_substitutions: Vec<CharacterSubstitutionFact>,
     /// Parsed branch-local type refinements keyed by their guarded arm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_type_narrowings: Vec<RuntimeTypeNarrowingFact>,
@@ -1818,6 +2027,12 @@ pub struct StringLiteral {
     pub span: Span,
     pub text: String,
     pub category: StringCategory,
+    /// Exact decoded scalar value when the owning language adapter can prove
+    /// one from its Tree-sitter grammar. Interpolated strings and literal
+    /// forms requiring unsupported escape decoding remain `None`; semantic
+    /// consumers must never recover a value by trimming `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_value: Option<String>,
 }
 
 /// Rough, adapter-agnostic category derived from content heuristics. Never

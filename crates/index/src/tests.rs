@@ -37,14 +37,7 @@ fn len_and_empty_track_live_decls_after_removal() {
     index.insert(DeclIndex {
         file,
         defs: vec![decl(file, 0, "one"), decl(file, 1, "two")],
-        refs: Vec::new(),
-        assignment_values: Vec::new(),
-        aggregate_layouts: Vec::new(),
-        strings: Vec::new(),
-        comments: Vec::new(),
-        call_receivers: Vec::new(),
-        runtime_type_narrowings: Vec::new(),
-        branch_conditions: Vec::new(),
+        ..DeclIndex::default()
     });
 
     assert_eq!(index.len(), 2);
@@ -64,14 +57,7 @@ fn insert_dedupes_identical_adapter_declarations() {
     index.insert(DeclIndex {
         file,
         defs: vec![decl(file, 0, "dupe"), decl(file, 1, "dupe")],
-        refs: Vec::new(),
-        assignment_values: Vec::new(),
-        aggregate_layouts: Vec::new(),
-        strings: Vec::new(),
-        comments: Vec::new(),
-        call_receivers: Vec::new(),
-        runtime_type_narrowings: Vec::new(),
-        branch_conditions: Vec::new(),
+        ..DeclIndex::default()
     });
 
     assert_eq!(index.len(), 1);
@@ -113,14 +99,7 @@ fn insert_merges_duplicate_declaration_facts() {
     index.insert(DeclIndex {
         file,
         defs: vec![decl(file, 0, "dupe"), duplicate],
-        refs: Vec::new(),
-        assignment_values: Vec::new(),
-        aggregate_layouts: Vec::new(),
-        strings: Vec::new(),
-        comments: Vec::new(),
-        call_receivers: Vec::new(),
-        runtime_type_narrowings: Vec::new(),
-        branch_conditions: Vec::new(),
+        ..DeclIndex::default()
     });
 
     let decl = index
@@ -190,6 +169,7 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
     let arg_span = Span::new(file, 30, 34);
     let return_span = Span::new(file, 40, 57);
     let mut function = decl(file, 9, "value");
+    function.body_span = Some(Span::new(file, 0, 100));
     function.flow_events.push(FlowEvent::Branch {
         span: Span::new(file, 10, 60),
         condition: Some("ready".to_string()),
@@ -202,7 +182,7 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
                 call_kind: bonsai_lang_api::CallKind::Method,
                 args: vec![bonsai_lang_api::CallArg {
                     span: arg_span,
-                    passing_mode: bonsai_lang_api::ArgumentPassingMode::Value,
+                    passing_mode: bonsai_lang_api::ArgumentPassingMode::WriteBack,
                     name: None,
                     value_text: "input".to_string(),
                     place: Some("input".to_string()),
@@ -223,7 +203,10 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
                 span: return_span,
                 value_text: Some("self.value".to_string()),
                 value_name: None,
-                value_flow: bonsai_lang_api::ExpressionFlow::from_place("self.value"),
+                value_flow: bonsai_lang_api::ExpressionFlow {
+                    call_sites: vec![call_span],
+                    ..bonsai_lang_api::ExpressionFlow::from_place("self.value")
+                },
             },
         ],
         else_events: Vec::new(),
@@ -233,6 +216,33 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
     global.insert_linkage_header_preprocessed(DeclIndex {
         file,
         defs: vec![function],
+        call_argument_values: vec![bonsai_lang_api::CallArgumentValueFact {
+            call_span,
+            argument_index: 0,
+            argument_span: arg_span,
+            value_flow: bonsai_lang_api::ExpressionFlow {
+                call_sites: vec![call_span],
+                ..Default::default()
+            },
+            static_value: None,
+        }],
+        static_string_maps: vec![bonsai_lang_api::StaticStringMapFact {
+            assignment_span: Span::new(file, 1, 9),
+            target: "lookup".to_string(),
+            entries: vec![bonsai_lang_api::StaticStringMapEntry {
+                key: "a".to_string(),
+                value: "b".to_string(),
+            }],
+        }],
+        character_substitutions: vec![bonsai_lang_api::CharacterSubstitutionFact {
+            function_span: Span::new(file, 1, 90),
+            transform_span: Span::new(file, 5, 80),
+            input_param_index: 0,
+            table: "lookup".to_string(),
+            domain: bonsai_lang_api::CharacterSubstitutionDomain::ExactCharacters {
+                characters: vec!["a".to_string()],
+            },
+        }],
         ..DeclIndex::default()
     });
 
@@ -245,10 +255,16 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
     assert_eq!(&*facts.calls[0].name, "receiver.run");
     assert_eq!(facts.calls[0].receiver.as_deref(), Some("receiver"));
     assert_eq!(&*facts.calls[0].arg_spans, &[arg_span]);
+    assert!(facts.calls[0].has_writeback_arg);
     assert_eq!(facts.call_result_assignments.len(), 1);
     assert!(facts.call_result_assignments[0].has_explicit_args);
+    assert_eq!(facts.consumed_call_results, vec![call_span]);
     assert_eq!(&*facts.returned_projection_tails[0], "value");
     assert!(facts.has_summary_output);
+    let retained = global.decl_index_in(file).expect("retained linkage header");
+    assert!(retained.call_argument_values.is_empty());
+    assert!(retained.static_string_maps.is_empty());
+    assert!(retained.character_substitutions.is_empty());
 
     global.remove_file(file);
     assert!(global.linkage_facts(symbol).is_none());
@@ -292,6 +308,55 @@ fn linkage_wire_is_canonical_and_rebuilds_compiler_indexes() {
     restored.remove_file(file);
     assert!(restored.decl_of(symbol).is_none());
     assert!(restored.find_by_name("handler").is_empty());
+}
+
+#[test]
+fn projected_linkage_enriches_existing_headers_without_replacing_symbols() {
+    let file = FileId::new(26);
+    let call_span = Span::new(file, 10, 20);
+    let mut function = decl(file, 4, "handler");
+    function.body_span = Some(Span::new(file, 0, 40));
+    function.flow_events.extend([
+        FlowEvent::Call {
+            span: call_span,
+            name: "consume".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: Vec::new(),
+        },
+        FlowEvent::Return {
+            span: Span::new(file, 10, 25),
+            value_text: Some("consume()".to_string()),
+            value_name: None,
+            value_flow: bonsai_lang_api::ExpressionFlow {
+                call_sites: vec![call_span],
+                ..Default::default()
+            },
+        },
+    ]);
+    let body = DeclIndex {
+        file,
+        defs: vec![function],
+        ..DeclIndex::default()
+    };
+
+    let mut global = GlobalIndex::new();
+    global.insert_header_preprocessed(body.clone());
+    let symbol = global.decls_in(file)[0].symbol;
+    assert!(global.linkage_facts(symbol).is_none());
+
+    let rebound = global.remap_file_to_existing_symbols(body);
+    let projected = global.project_linkage_from_remapped_file(&rebound);
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].0, symbol);
+    global.install_projected_linkage(projected);
+
+    let facts = global.linkage_facts(symbol).expect("installed linkage");
+    assert_eq!(facts.calls.len(), 1);
+    assert_eq!(facts.consumed_call_results, vec![call_span]);
+    assert!(facts.has_summary_output);
+    assert!(global.decls_in(file)[0].flow_events.is_empty());
 }
 
 #[test]
@@ -339,7 +404,7 @@ fn returned_constructor_survives_as_a_compact_type_fact() {
             value_text: Some("new(data)".to_string()),
             value_name: None,
             value_flow: bonsai_lang_api::ExpressionFlow {
-                call_sites: vec![return_span],
+                call_sites: vec![call_span],
                 ..Default::default()
             },
         },
@@ -378,26 +443,12 @@ fn reinserting_file_replaces_name_lookup_entries() {
     index.insert(DeclIndex {
         file,
         defs: vec![decl(file, 0, "old")],
-        refs: Vec::new(),
-        assignment_values: Vec::new(),
-        aggregate_layouts: Vec::new(),
-        strings: Vec::new(),
-        comments: Vec::new(),
-        call_receivers: Vec::new(),
-        runtime_type_narrowings: Vec::new(),
-        branch_conditions: Vec::new(),
+        ..DeclIndex::default()
     });
     index.insert(DeclIndex {
         file,
         defs: vec![decl(file, 0, "new")],
-        refs: Vec::new(),
-        assignment_values: Vec::new(),
-        aggregate_layouts: Vec::new(),
-        strings: Vec::new(),
-        comments: Vec::new(),
-        call_receivers: Vec::new(),
-        runtime_type_narrowings: Vec::new(),
-        branch_conditions: Vec::new(),
+        ..DeclIndex::default()
     });
 
     assert_eq!(index.len(), 1);
@@ -408,4 +459,24 @@ fn reinserting_file_replaces_name_lookup_entries() {
         index.decl_of(new_symbols[0]).map(|d| d.name.as_str()),
         Some("new")
     );
+}
+
+#[test]
+fn global_index_identity_is_clone_stable_and_advances_on_semantic_mutation() {
+    let file = FileId::new(31);
+    let mut index = GlobalIndex::new();
+    let empty_identity = index.identity();
+    assert_eq!(empty_identity, index.clone().identity());
+
+    index.insert(DeclIndex {
+        file,
+        defs: vec![decl(file, 0, "value")],
+        ..DeclIndex::default()
+    });
+    let populated_identity = index.identity();
+    assert_ne!(empty_identity, populated_identity);
+    assert_eq!(populated_identity, index.clone().identity());
+
+    index.finalize_semantic_facts();
+    assert_ne!(populated_identity, index.identity());
 }

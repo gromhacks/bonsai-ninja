@@ -101,9 +101,28 @@ FAMILY_FILE_ALIASES: dict[str, tuple[str, ...]] = {
 # Rules whose match shape uses a single `name:` (not `attribute:` or `regex:`)
 # are considered "bare-name" risks unless they have a package/import constraint.
 BARE_NAME_VERBS = {
-    "open", "load", "exec", "execute", "query", "write", "read", "copy",
-    "create", "parse", "send", "run", "eval", "fetch", "get", "post",
-    "put", "delete", "patch", "call", "invoke", "spawn",
+    "open",
+    "load",
+    "exec",
+    "execute",
+    "query",
+    "write",
+    "read",
+    "copy",
+    "create",
+    "parse",
+    "send",
+    "run",
+    "eval",
+    "fetch",
+    "get",
+    "post",
+    "put",
+    "delete",
+    "patch",
+    "call",
+    "invoke",
+    "spawn",
 }
 
 # Bare-name rules that have been manually reviewed and are intentionally
@@ -202,7 +221,9 @@ def normalise_for_signature(value):
 
 
 def signature_json(value) -> str:
-    return json.dumps(normalise_for_signature(value), sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        normalise_for_signature(value), sort_keys=True, separators=(",", ":")
+    )
 
 
 def match_signature(rule: dict) -> str:
@@ -244,25 +265,20 @@ def location(rule: dict) -> dict:
     }
 
 
-def duplicate_audit() -> dict:
-    rules = [
-        r
-        for r in iter_rules()
-        if not r.get("_parse_error") and not r.get("_shape_error")
-    ]
-
+def duplicate_ids_for(rules: list[dict]) -> list[dict]:
     by_id: dict[str, list[dict]] = defaultdict(list)
     for rule in rules:
         rid = rule.get("id")
         if rid:
             by_id[str(rid)].append(rule)
-    duplicate_ids = [
+    return [
         {"id": rid, "rules": [location(rule) for rule in group]}
         for rid, group in sorted(by_id.items())
         if len(group) > 1
     ]
 
-    enabled = [r for r in rules if r.get("enabled", True)]
+
+def duplicate_match_shapes(enabled: list[dict]) -> list[dict]:
     by_shape: dict[tuple[str, str, str, str], list[dict]] = defaultdict(list)
     for rule in enabled:
         key = (
@@ -272,7 +288,7 @@ def duplicate_audit() -> dict:
             match_signature(rule),
         )
         by_shape[key].append(rule)
-    duplicate_enabled_match_shapes = [
+    return [
         {
             "language": lang,
             "category": category,
@@ -284,6 +300,8 @@ def duplicate_audit() -> dict:
         if len(group) > 1
     ]
 
+
+def cross_family_collisions(enabled: list[dict]) -> list[dict]:
     by_api: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for rule in enabled:
         sig = api_signature(rule)
@@ -295,12 +313,12 @@ def duplicate_audit() -> dict:
             sig,
         )
         by_api[key].append(rule)
-    cross_family_api_collisions = []
+    collisions = []
     for (lang, category, sig), group in sorted(by_api.items()):
         families = sorted({rule_family_from_id(rule) for rule in group})
         if len(families) <= 1:
             continue
-        cross_family_api_collisions.append(
+        collisions.append(
             {
                 "language": lang,
                 "category": category,
@@ -309,8 +327,11 @@ def duplicate_audit() -> dict:
                 "rules": [location(rule) for rule in group],
             }
         )
+    return collisions
 
-    family_file_mismatches = []
+
+def family_file_mismatches_for(rules: list[dict]) -> list[dict]:
+    mismatches = []
     for rule in rules:
         if rule.get("_category") != "sinks":
             continue
@@ -319,7 +340,7 @@ def duplicate_audit() -> dict:
         allowed = {file_family, *FAMILY_FILE_ALIASES.get(file_family, ())}
         if id_family in allowed or id_family == "<missing>":
             continue
-        family_file_mismatches.append(
+        mismatches.append(
             {
                 "id": rule.get("id"),
                 "path": rule.get("_path"),
@@ -330,12 +351,22 @@ def duplicate_audit() -> dict:
                 "enabled": rule.get("enabled", True),
             }
         )
+    return mismatches
+
+
+def duplicate_audit() -> dict:
+    rules = [
+        rule
+        for rule in iter_rules()
+        if not rule.get("_parse_error") and not rule.get("_shape_error")
+    ]
+    enabled = [rule for rule in rules if rule.get("enabled", True)]
 
     return {
-        "duplicate_ids": duplicate_ids,
-        "duplicate_enabled_match_shapes": duplicate_enabled_match_shapes,
-        "cross_family_api_collisions": cross_family_api_collisions,
-        "family_file_mismatches": family_file_mismatches,
+        "duplicate_ids": duplicate_ids_for(rules),
+        "duplicate_enabled_match_shapes": duplicate_match_shapes(enabled),
+        "cross_family_api_collisions": cross_family_collisions(enabled),
+        "family_file_mismatches": family_file_mismatches_for(rules),
     }
 
 
@@ -427,67 +458,75 @@ def is_fragile(rule: dict) -> tuple[bool, str | None]:
         return False, None
     if str(rule.get("id") or "") in REVIEWED_BARE_NAME_RULES:
         return False, None
-    has_scope = any(rule.get(k) for k in ("packages", "imports", "frameworks", "namespace"))
+    has_scope = any(
+        rule.get(k) for k in ("packages", "imports", "frameworks", "namespace")
+    )
     if has_scope:
         return False, None
     return True, f"bare-name '{bare}' without packages/imports/frameworks scope"
 
 
+def load_category_rules(base: Path) -> tuple[list[Path], list[dict], list[dict]]:
+    files = sorted(base.glob("*.yml")) if base.exists() else []
+    rules = []
+    parse_errors = []
+    for path in files:
+        for rule in load_yaml(path):
+            if rule.get("_parse_error") or rule.get("_shape_error"):
+                parse_errors.append(rule)
+                continue
+            rule["_file"] = path.name
+            rules.append(rule)
+    return files, rules, parse_errors
+
+
+def tag_counts(rules: list[dict]) -> Counter[str]:
+    tags: Counter[str] = Counter()
+    for rule in rules:
+        tag = rule.get("tag")
+        if isinstance(tag, str):
+            tags[tag] += 1
+        elif isinstance(tag, list):
+            tags.update(str(value) for value in tag)
+    return tags
+
+
+def fragile_rules(rules: list[dict]) -> list[dict]:
+    fragile = []
+    for rule in rules:
+        bad, why = is_fragile(rule)
+        if bad:
+            fragile.append(
+                {
+                    "id": rule.get("id"),
+                    "file": rule.get("_file"),
+                    "issue": why,
+                }
+            )
+    return fragile
+
+
+def missing_canonical_families(
+    lang: str, category: str, families: Counter[str]
+) -> list[str]:
+    if category != "sinks" or lang in ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS:
+        return []
+    return [
+        canonical
+        for canonical in CANONICAL_SINK_FAMILIES
+        if (lang, canonical) not in FAMILY_NOT_APPLICABLE and canonical not in families
+    ]
+
+
 def summarize_lang_category(lang: str, cat: str) -> dict:
     base = PACK / lang / cat
-    files = sorted(base.glob("*.yml")) if base.exists() else []
-    rules: list[dict] = []
-    parse_errors: list[dict] = []
-    for f in files:
-        for r in load_yaml(f):
-            if r.get("_parse_error") or r.get("_shape_error"):
-                parse_errors.append(r)
-                continue
-            r["_file"] = f.name
-            rules.append(r)
-
-    enabled = [r for r in rules if r.get("enabled", True)]
-    disabled = [r for r in rules if r.get("enabled") is False]
-
-    # rule-id family from id/aliases like "<lang>.<family>.<name>".
-    # Aliases are coverage evidence for intentionally merged rules (for
-    # example, upload findings covered by path writes), so count them here
-    # the same way the built-in pack audit does.
+    files, rules, parse_errors = load_category_rules(base)
+    enabled = [rule for rule in rules if rule.get("enabled", True)]
+    disabled = [rule for rule in rules if rule.get("enabled") is False]
     families: Counter[str] = Counter()
-    for r in enabled:
-        for family in rule_coverage_families(r):
+    for rule in enabled:
+        for family in rule_coverage_families(rule):
             families[family] += 1
-
-    shapes = Counter(classify_match_shape(r) for r in enabled)
-    precisions = Counter(classify_precision(r) for r in enabled)
-    severities = Counter((r.get("severity") or "<none>") for r in enabled)
-    tags_raw: Counter[str] = Counter()
-    for r in enabled:
-        t = r.get("tag")
-        if isinstance(t, str):
-            tags_raw[t] += 1
-        elif isinstance(t, list):
-            for tt in t:
-                tags_raw[str(tt)] += 1
-
-    fragile = []
-    for r in enabled:
-        bad, why = is_fragile(r)
-        if bad:
-            fragile.append({
-                "id": r.get("id"),
-                "file": r.get("_file"),
-                "issue": why,
-            })
-
-    missing_families = []
-    if cat == "sinks" and lang not in ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS:
-        present = set(families)
-        for canonical in CANONICAL_SINK_FAMILIES:
-            if (lang, canonical) in FAMILY_NOT_APPLICABLE:
-                continue
-            if canonical not in present:
-                missing_families.append(canonical)
 
     return {
         "lang": lang,
@@ -498,46 +537,66 @@ def summarize_lang_category(lang: str, cat: str) -> dict:
         "rule_disabled": len(disabled),
         "parse_errors": parse_errors,
         "families": dict(families),
-        "match_shapes": dict(shapes),
-        "match_precision": dict(precisions),
-        "severities": dict(severities),
-        "tags": dict(tags_raw.most_common()),
-        "fragile": fragile,
-        "missing_canonical_families": missing_families,
+        "match_shapes": dict(Counter(classify_match_shape(rule) for rule in enabled)),
+        "match_precision": dict(Counter(classify_precision(rule) for rule in enabled)),
+        "severities": dict(
+            Counter((rule.get("severity") or "<none>") for rule in enabled)
+        ),
+        "tags": dict(tag_counts(enabled).most_common()),
+        "fragile": fragile_rules(enabled),
+        "missing_canonical_families": missing_canonical_families(lang, cat, families),
     }
 
 
+def category_text(report: dict) -> list[str]:
+    out = [
+        f"  [{report['category']}] files={len(report['files'])} "
+        f"rules={report['rule_total']} enabled={report['rule_enabled']} "
+        f"disabled={report['rule_disabled']}"
+    ]
+    if report["parse_errors"]:
+        out.append(f"    PARSE ERRORS: {len(report['parse_errors'])}")
+    if report["families"]:
+        families = ", ".join(
+            f"{name}={count}"
+            for name, count in sorted(
+                report["families"].items(), key=lambda item: -item[1]
+            )
+        )
+        out.append(f"    families: {families}")
+    if report["match_shapes"]:
+        out.append(f"    shapes: {dict(report['match_shapes'])}")
+    if report["match_precision"]:
+        out.append(f"    precision: {dict(report['match_precision'])}")
+    if report["missing_canonical_families"]:
+        out.append(
+            "    MISSING canonical families: "
+            + ", ".join(report["missing_canonical_families"])
+        )
+    if report["fragile"]:
+        out.append(f"    FRAGILE rules: {len(report['fragile'])}")
+        for fragile in report["fragile"][:5]:
+            out.append(
+                f"      - {fragile['id']} ({fragile['file']}): {fragile['issue']}"
+            )
+        if len(report["fragile"]) > 5:
+            out.append(f"      ... +{len(report['fragile']) - 5} more")
+    return out
+
+
 def render_text(report: list[dict]) -> str:
-    out = []
     by_lang: dict[str, dict[str, dict]] = defaultdict(dict)
-    for r in report:
-        by_lang[r["lang"]][r["category"]] = r
+    for row in report:
+        by_lang[row["lang"]][row["category"]] = row
+    out = []
     for lang in sorted(by_lang):
         out.append("=" * 72)
         out.append(f"LANG: {lang}")
         out.append("=" * 72)
         for cat in CATEGORIES:
-            r = by_lang[lang].get(cat)
-            if not r:
-                continue
-            out.append(f"  [{cat}] files={len(r['files'])} rules={r['rule_total']} enabled={r['rule_enabled']} disabled={r['rule_disabled']}")
-            if r["parse_errors"]:
-                out.append(f"    PARSE ERRORS: {len(r['parse_errors'])}")
-            if r["families"]:
-                fams = ", ".join(f"{k}={v}" for k, v in sorted(r["families"].items(), key=lambda x: -x[1]))
-                out.append(f"    families: {fams}")
-            if r["match_shapes"]:
-                out.append(f"    shapes: {dict(r['match_shapes'])}")
-            if r["match_precision"]:
-                out.append(f"    precision: {dict(r['match_precision'])}")
-            if r["missing_canonical_families"]:
-                out.append(f"    MISSING canonical families: {', '.join(r['missing_canonical_families'])}")
-            if r["fragile"]:
-                out.append(f"    FRAGILE rules: {len(r['fragile'])}")
-                for fr in r["fragile"][:5]:
-                    out.append(f"      - {fr['id']} ({fr['file']}): {fr['issue']}")
-                if len(r["fragile"]) > 5:
-                    out.append(f"      ... +{len(r['fragile']) - 5} more")
+            category = by_lang[lang].get(cat)
+            if category:
+                out.extend(category_text(category))
         out.append("")
     return "\n".join(out)
 
@@ -577,7 +636,8 @@ def main() -> int:
             )
             return 2
         if not args.allow_collisions and (
-            report["duplicate_enabled_match_shapes"] or report["cross_family_api_collisions"]
+            report["duplicate_enabled_match_shapes"]
+            or report["cross_family_api_collisions"]
         ):
             print(
                 "pack_audit found duplicate enabled match shapes or cross-family API collisions",

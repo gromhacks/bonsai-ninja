@@ -44,7 +44,18 @@ Semantic workers publish compiler objects first. Unchanged compressed objects
 are copied into the next generation; only source/path/adapter/ABI misses are
 lowered again. Callgraph, retrieval, linkage, and IDG then consume that one
 generation. The IDG persistence phase replays typed stitch records from its
-first transfer pass instead of running transfer lowering twice.
+first transfer pass instead of running transfer lowering twice. IDG writers
+hold a target-specific advisory lock for the complete generation, recheck a
+peer's completed sidecar before rebuilding, and remove only lock-proven
+FactStore staging files left by a terminated writer. Lock files under
+`.bonsai/` are ownership metadata and may remain after the process exits; the
+operating system releases their locks automatically.
+
+Broad consumers keep a compact linkage index of declarations, types, modules,
+imports, inheritance, and stable symbols. They stream exact per-file bodies
+from compiler objects and remap those bodies to the retained symbols. The
+memory-derived body cache is an optimization only: eviction or an oversize
+body causes exact replay, never omission.
 
 Cache and render limits never change analysis semantics. The IDG factstore is
 streamed and has no source-file-count ceiling. A rendered page that exceeds
@@ -74,9 +85,15 @@ paths.
 |---|---|---|---|
 | `BONSAI_RULES_DIR` | path | Auto-discover | Rulepack directory. |
 | `BONSAI_PARSE_TIMEOUT_MS` | integer milliseconds | unset (uncapped) | Optional per-file tree-sitter parse timeout. `0` disables the timeout guard. |
-| `BONSAI_MEMORY_BUDGET_MB` | positive integer MiB | detected host/container limit | Lower the compiler's detected memory limit. Weighted phases first apply the conservative worker profile (one exact unit at 3 GiB), then subtract current process RSS and safety headroom before admitting transient units. This controls concurrency only and cannot reduce analyzed files or graph closure. |
+| `BONSAI_MEMORY_BUDGET_MB` | positive integer MiB | detected host/container limit | Lower the compiler's detected memory limit. Linux resolves the current process's nested cgroup v1/v2 memory controller, not only the root controller. Weighted phases first apply the conservative worker profile (one transient exact unit at 3 GiB), then subtract current process RSS and safety headroom before admitting more units. The exact-body hot cache is also byte-weighted from this limit. A smaller value can serialize work, evict bodies sooner, and cause exact recomputation; it cannot reduce analyzed files, facts, or graph closure. |
 | `BONSAI_COMPILER_JOBS` | positive integer | available CPU count | Upper bound on compiler-object workers before file-size/memory weighting. Every file is still compiled. |
 | `BONSAI_IDG_TRANSFER_BATCH_SEGMENTS` | positive integer | available Rayon workers | Upper bound on concurrently lowered IDG source-file segments before exact VFS-size/memory weighting. Every segment and transfer fact is still compiled. |
+| `BONSAI_SECURITY_JOBS` | positive integer | available CPU count | Upper bound on concurrent Tree-sitter matcher units before the shared syntax-memory scheduler. It changes throughput only, never the scanned file or rule set. |
+| `BONSAI_SOURCE_ANALYSIS_JOBS` | positive integer | available CPU count | Upper bound on concurrent source-analysis compiler units before the shared memory scheduler. |
+| `BONSAI_TAINT_ANALYSIS_JOBS` | positive integer | `RAYON_NUM_THREADS` or available CPU count | Upper bound on concurrent exact source closures. Constrained machines run the same closures serially. |
+| `BONSAI_SECURITY_STACK_BYTES` | integer bytes, at least 1 MiB | 16 MiB | Stack size for security matcher workers. |
+| `BONSAI_TAINT_GRAPH_CACHE_MB` | non-negative integer MiB | memory-budget-derived, normally 64 MiB without detection | Byte budget for decoded source-seeded graph retention. Oversize/evicted graphs are still computed and persisted exactly; only in-process reuse changes. |
+| `BONSAI_TAINT_GRAPH_CACHE_ENTRIES` | non-negative integer | 512 | Secondary entry-count bound for decoded taint graph retention. `0` disables resident retention, not analysis or persistence. |
 | `BONSAI_NO_DATAFLOW` | boolean-like | unset | Skip explicit dataflow prewarm and trace eager hydration. Query commands still compute required facts on demand. |
 | `BONSAI_THEME` | string | `moss` | Terminal theme: `moss`, `earthy-dark`, `dracula`, or `retro-amber`. |
 | `BONSAI_WORKSPACE_DIR` | path | Workspace root | Per-workspace state directory override. |

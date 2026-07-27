@@ -119,9 +119,11 @@ Public type field names in the SDK and CLI output are stable across
 minor versions. Adding a field is a minor change; renaming or removing
 one is a breaking change requiring a major version bump.
 
-The `MATCHER_POLICY_FINGERPRINT` and analyzer build/pipeline fingerprints
-version matcher and engine semantics. Source, dependency, configuration, and
-pipeline mismatches invalidate sidecars before reuse.
+The `MATCHER_POLICY_FINGERPRINT` and explicit sidecar schema/semantic ABI
+versions identify matcher and engine semantics. Source, dependency,
+configuration, rulepack, transfer, or ABI mismatches invalidate sidecars
+before reuse. The analyzer release/commit fingerprint is producer provenance,
+not a replacement for those exact cache inputs.
 
 ## 4. Engine standalone contract
 

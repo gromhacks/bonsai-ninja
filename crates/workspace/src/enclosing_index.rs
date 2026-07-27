@@ -9,14 +9,12 @@
 
 use ahash::AHashMap;
 use bonsai_common::FileId;
-use bonsai_db::AnalyzerDb;
+use bonsai_index::{GlobalIndex, GlobalIndexIdentity};
 use parking_lot::RwLock;
+use std::cmp::Reverse;
 use std::sync::Arc;
 
-/// One entry in the per-file enclosing-decl array. Sorted by
-/// `body.start` so binary search finds the rightmost decl whose
-/// body covers a queried position. Decl bodies in a single file
-/// never overlap at the same start.
+/// One entry in the per-file enclosing-decl array.
 #[derive(Clone, Debug)]
 pub struct EnclosingEntry {
     pub start: u64,
@@ -25,9 +23,71 @@ pub struct EnclosingEntry {
     pub symbol: bonsai_common::SymbolId,
 }
 
+#[derive(Debug)]
+struct EnclosingFileIndex {
+    entries: Arc<Vec<EnclosingEntry>>,
+    /// Range-maximum tree over entry end offsets. It lets a point lookup skip
+    /// completed nested lambdas and find the still-containing outer
+    /// declaration in `O(log declarations)` time.
+    max_end_tree: Box<[u64]>,
+    leaf_count: usize,
+}
+
+impl EnclosingFileIndex {
+    fn new(mut entries: Vec<EnclosingEntry>) -> Self {
+        // For equal starts, put the narrowest interval last so the rightmost
+        // containing lookup returns the innermost compiler declaration.
+        entries.sort_unstable_by_key(|entry| (entry.start, Reverse(entry.end)));
+        let leaf_count = entries.len().next_power_of_two().max(1);
+        let mut max_end_tree = vec![0_u64; leaf_count.saturating_mul(2)];
+        for (index, entry) in entries.iter().enumerate() {
+            max_end_tree[leaf_count + index] = entry.end;
+        }
+        for node in (1..leaf_count).rev() {
+            max_end_tree[node] = max_end_tree[node * 2].max(max_end_tree[node * 2 + 1]);
+        }
+        Self {
+            entries: Arc::new(entries),
+            max_end_tree: max_end_tree.into_boxed_slice(),
+            leaf_count,
+        }
+    }
+
+    fn enclosing(&self, pos: u64) -> Option<EnclosingEntry> {
+        let upper = self.entries.partition_point(|entry| entry.start <= pos);
+        let index = self.rightmost_covering(1, 0, self.leaf_count, upper, pos)?;
+        self.entries.get(index).cloned()
+    }
+
+    fn rightmost_covering(
+        &self,
+        node: usize,
+        start: usize,
+        end: usize,
+        upper: usize,
+        pos: u64,
+    ) -> Option<usize> {
+        if start >= upper || self.max_end_tree.get(node).copied().unwrap_or_default() <= pos {
+            return None;
+        }
+        if end - start == 1 {
+            return (start < self.entries.len()).then_some(start);
+        }
+        let middle = start + (end - start) / 2;
+        self.rightmost_covering(node * 2 + 1, middle, end, upper, pos)
+            .or_else(|| self.rightmost_covering(node * 2, start, middle, upper, pos))
+    }
+}
+
+#[derive(Default, Debug)]
+struct EnclosingIndexState {
+    identity: Option<GlobalIndexIdentity>,
+    files: AHashMap<FileId, Arc<EnclosingFileIndex>>,
+}
+
 #[derive(Default, Debug)]
 pub struct EnclosingIndex {
-    inner: RwLock<AHashMap<FileId, Arc<Vec<EnclosingEntry>>>>,
+    inner: RwLock<EnclosingIndexState>,
 }
 
 impl EnclosingIndex {
@@ -37,68 +97,72 @@ impl EnclosingIndex {
     }
 
     /// Look up the innermost decl whose body covers `pos` in `file`.
-    /// Builds the per-file array on first access.
-    pub fn enclosing_for(&self, db: &AnalyzerDb, file: FileId, pos: u64) -> Option<EnclosingEntry> {
-        let entries = self.entries_for(db, file);
-        if entries.is_empty() {
-            return None;
-        }
-        let partition = entries.partition_point(|entry| entry.start <= pos);
-        if partition == 0 {
-            return None;
-        }
-        let entry = &entries[partition - 1];
-        if pos < entry.end {
-            Some(entry.clone())
-        } else {
-            None
-        }
+    /// Builds the per-file interval index on first access.
+    pub fn enclosing_for(&self, headers: &GlobalIndex, file: FileId, pos: u64) -> Option<EnclosingEntry> {
+        self.index_for(headers, file).enclosing(pos)
     }
 
     /// Just the name of the enclosing decl; convenience for
     /// callers that already have a position-only query path.
-    pub fn enclosing_name(&self, db: &AnalyzerDb, file: FileId, pos: u64) -> Option<String> {
-        self.enclosing_for(db, file, pos).map(|e| e.name)
+    pub fn enclosing_name(&self, headers: &GlobalIndex, file: FileId, pos: u64) -> Option<String> {
+        self.enclosing_for(headers, file, pos).map(|e| e.name)
     }
 
     /// Per-file sorted entry list.
-    pub fn entries_for(&self, db: &AnalyzerDb, file: FileId) -> Arc<Vec<EnclosingEntry>> {
+    pub fn entries_for(&self, headers: &GlobalIndex, file: FileId) -> Arc<Vec<EnclosingEntry>> {
+        Arc::clone(&self.index_for(headers, file).entries)
+    }
+
+    fn index_for(&self, headers: &GlobalIndex, file: FileId) -> Arc<EnclosingFileIndex> {
+        let identity = headers.identity();
         // Drop the read guard's temporary before the write upgrade.
-        let cached = self.inner.read().get(&file).cloned();
+        let cached = {
+            let state = self.inner.read();
+            (state.identity.as_ref() == Some(&identity))
+                .then(|| state.files.get(&file).cloned())
+                .flatten()
+        };
         if let Some(hit) = cached {
             return hit;
         }
-        let entries = build_entries(db, file);
-        let arc = Arc::new(entries);
-        let mut inner = self.inner.write();
-        if let Some(existing) = inner.get(&file).cloned() {
+        // Keep construction ordered with per-file invalidation. Building
+        // outside the write lock let an old compiler-header snapshot insert
+        // after an edit had already removed the prior entry.
+        let mut state = self.inner.write();
+        if state.identity.as_ref() != Some(&identity) {
+            state.files.clear();
+            state.identity = Some(identity);
+        }
+        if let Some(existing) = state.files.get(&file).cloned() {
             return existing;
         }
-        inner.insert(file, arc.clone());
-        arc
+        let index = Arc::new(EnclosingFileIndex::new(build_entries(headers, file)));
+        state.files.insert(file, Arc::clone(&index));
+        index
     }
 
     /// Drop a single file's cached array. Workspace edit paths call
     /// this so subsequent queries rebuild.
     pub fn invalidate_file(&self, file: FileId) {
-        self.inner.write().remove(&file);
+        self.inner.write().files.remove(&file);
     }
 
     /// Drop every cached entry — used at workspace open or by the
     /// coarse `clear` path.
     pub fn clear(&self) {
-        self.inner.write().clear();
+        let mut state = self.inner.write();
+        state.files.clear();
+        state.identity = None;
     }
 
     #[must_use]
     pub fn is_built_for(&self, file: FileId) -> bool {
-        self.inner.read().contains_key(&file)
+        self.inner.read().files.contains_key(&file)
     }
 }
 
-fn build_entries(db: &AnalyzerDb, file: FileId) -> Vec<EnclosingEntry> {
-    let global = db.global_index();
-    let mut entries: Vec<EnclosingEntry> = global
+fn build_entries(headers: &GlobalIndex, file: FileId) -> Vec<EnclosingEntry> {
+    let entries: Vec<EnclosingEntry> = headers
         .decls_in(file)
         .iter()
         .map(|d| {
@@ -111,6 +175,5 @@ fn build_entries(db: &AnalyzerDb, file: FileId) -> Vec<EnclosingEntry> {
             }
         })
         .collect();
-    entries.sort_unstable_by_key(|e| e.start);
     entries
 }

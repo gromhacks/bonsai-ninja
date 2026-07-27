@@ -54,7 +54,10 @@ lowering runs once per function. It writes the canonical segment plus a typed
 stitch record/node remap, then replays that record one segment at a time.
 There is no second AST lowering pass and no alternate taint IR. Disk spilling
 and memory-weighted scheduling change lifetimes/concurrency only; the closure
-still processes every exact edge to its fixed point.
+still processes every exact edge to its fixed point. Reached relations use
+sorted external runs; pending LIFO frontiers append chunks to one temporary
+file and truncate each consumed tail, so lowering the memory budget does not
+multiply open file descriptors.
 
 Return summaries use exact structural call boundaries rather than callee-name
 search. Each function-local CSR is reconstructed from the canonical segment,
@@ -406,11 +409,6 @@ lookup instead of a fresh propagation pass.
   prepare/finish decision through `AnalysisProgress::Note` so callers can
   see scope, memory/disk hit or miss, config invalidation, and
   write-through status.
-- **`TransitiveCallersIndex`** (`crates/workspace/src/transitive_callers.rs`) —
-  cached, explicitly depth-scoped caller-frontier queries on the resolved
-  call graph. They are an operational candidate/scheduling aid for callers
-  that request such a frontier, not the semantic taint closure and not an
-  accuracy boundary. The canonical IDG fixed point remains uncapped.
 - **`Workspace::cached_resolved_call_graph()`** — singleton
   `Arc<ResolvedCallGraph>` shared across `inspect`, `security`,
   `dump callgraph`, the `DataFlowCache`, and the `FlowIdCache`. The
@@ -522,7 +520,10 @@ interprocedural engine and not an alternate source-to-sink result.
 
 Language syntax and ABI intrinsics remain in adapter/compiler lowering (for
 example C variadic builtins). Library/framework API behavior belongs only in
-rulepack/config transfer semantics.
+rulepack/config transfer semantics. Package-gated rules require adapter import
+facts, resolved workspace-import facts, or dependency-manifest evidence;
+directory names and conventional parameter spellings do not manufacture a
+framework identity.
 
 `InterTaintResult` returns:
 

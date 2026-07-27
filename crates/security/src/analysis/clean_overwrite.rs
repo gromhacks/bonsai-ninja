@@ -828,7 +828,7 @@ fn local_call_returns_clean_value(
     if callee_tail.is_empty() {
         return false;
     }
-    let Some(file_index) = policy.ws.exact_decl_index(call_span.file) else {
+    let Some(file_index) = policy.ws.exact_decl_index_shared(call_span.file) else {
         return false;
     };
     let candidates: Vec<_> = file_index
@@ -1848,10 +1848,13 @@ mod numeric_constant_tests {
     fn assignment_fact(assignment_span: Span, target_span: Span, value_span: Span) -> AssignmentValueFact {
         AssignmentValueFact {
             assignment_span,
+            target: None,
             target_span: Some(target_span),
             value_span,
             call_sites: Vec::new(),
             value_flow: Default::default(),
+            exact_callable_return: None,
+            exact_static_call_args: None,
             direct_call_name: None,
             direct_call_receiver: None,
         }

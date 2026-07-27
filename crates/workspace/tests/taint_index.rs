@@ -183,6 +183,37 @@ fn zero_capacity_cache_does_not_retain_graphs() {
 }
 
 #[test]
+fn resident_cache_evicts_by_estimated_graph_bytes() {
+    let graph = Arc::new(EntryTaintGraph::default());
+    let graph_bytes = graph.estimated_resident_bytes();
+    let idx = TaintGraphIndex::with_resident_budget_bytes(graph_bytes);
+
+    idx.insert_if_absent(FuncId::new(1), vec!["a".into()], Arc::clone(&graph));
+    idx.insert_if_absent(
+        FuncId::new(2),
+        vec!["b".into()],
+        Arc::new(EntryTaintGraph::default()),
+    );
+
+    assert_eq!(idx.resident_len(), 1);
+    assert!(idx.resident_bytes() <= graph_bytes);
+    assert!(idx.get(FuncId::new(1), &["a".into()]).is_none());
+    assert!(idx.get(FuncId::new(2), &["b".into()]).is_some());
+}
+
+#[test]
+fn graph_larger_than_byte_budget_is_returned_but_not_retained() {
+    let graph = Arc::new(EntryTaintGraph::default());
+    let graph_bytes = graph.estimated_resident_bytes();
+    let idx = TaintGraphIndex::with_resident_budget_bytes(graph_bytes.saturating_sub(1));
+
+    let returned = idx.insert_if_absent(FuncId::new(1), vec!["a".into()], Arc::clone(&graph));
+    assert!(Arc::ptr_eq(&returned, &graph));
+    assert_eq!(idx.resident_len(), 0);
+    assert_eq!(idx.resident_bytes(), 0);
+}
+
+#[test]
 fn write_through_persists_evicted_graphs() {
     let dir = tempdir_for("bonsai-taint-write-through");
     let path = dir.join("taint_graph.bin");
@@ -262,6 +293,71 @@ fn cleanup_removes_abandoned_taint_graph_temp_files() {
     assert_eq!(removed, 1);
     assert!(!abandoned.exists());
     assert!(unrelated.exists());
+}
+
+#[test]
+fn write_through_prunes_only_lock_proven_abandoned_taint_temps() {
+    let root = tempdir_for("bonsai-taint-automatic-temp-cleanup");
+    let path_a = TaintGraphIndex::sidecar_path_for_config_namespace(&root, "taint-analysis", 0xAA);
+    let path_b = TaintGraphIndex::sidecar_path_for_config_namespace(&root, "taint-analysis", 0xBB);
+    let path_c = TaintGraphIndex::sidecar_path_for_config_namespace(&root, "taint-analysis", 0xCC);
+    let ws = ws_with_python_source("def app(x):\n    return x\n");
+
+    let active = TaintGraphIndex::new();
+    active.clear_for_config(0xBB);
+    assert!(active
+        .begin_persist_to_disk(&path_b, ws.db(), 0xBB)
+        .expect("begin active writer"));
+    let active_prefix = format!("{}.tmp.", path_b.file_name().unwrap().to_string_lossy());
+    let active_temp = std::fs::read_dir(path_b.parent().expect("cache dir"))
+        .expect("read cache dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&active_prefix))
+        })
+        .expect("active FactStore temp");
+
+    let stale_a = PathBuf::from(format!("{}.tmp.12345.0", path_a.display()));
+    let stale_c = PathBuf::from(format!("{}.tmp.23456.1", path_c.display()));
+    let malformed = PathBuf::from(format!("{}.tmp.not-a-pid.0", path_c.display()));
+    let other_version = path_a
+        .parent()
+        .expect("cache dir")
+        .join("taint_graph.v110.taint-analysis.deadbeef.factstore.tmp.34567.2");
+    std::fs::write(&stale_a, b"partial").expect("write current-target stale temp");
+    std::fs::write(&stale_c, b"partial").expect("write other-target stale temp");
+    std::fs::write(&malformed, b"partial").expect("write malformed temp");
+    std::fs::write(&other_version, b"partial").expect("write other-version temp");
+
+    let owner = TaintGraphIndex::new();
+    owner.clear_for_config(0xAA);
+    let report = owner
+        .begin_persist_to_disk_report(&path_a, ws.db(), 0xAA)
+        .expect("begin owner with cleanup");
+    assert!(report.started);
+    assert_eq!(report.temp_files_removed, 2);
+    assert!(!stale_a.exists());
+    assert!(!stale_c.exists());
+    assert!(malformed.exists(), "unrecognized filenames must not be swept");
+    assert!(
+        other_version.exists(),
+        "another taint-sidecar schema version must not be swept"
+    );
+    assert!(
+        active_temp.exists(),
+        "another process/session's locked temp must remain"
+    );
+
+    owner
+        .finish_persist_to_disk(ws.db())
+        .expect("finish cleanup owner");
+    active
+        .finish_persist_to_disk(ws.db())
+        .expect("finish active owner");
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

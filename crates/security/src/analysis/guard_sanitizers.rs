@@ -38,9 +38,10 @@ pub(super) fn dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMat
         return None;
     }
     let snapshot = ws.vfs().snapshot(hit.span.file).ok()?;
+    let headers = ws.compiler_linkage_index();
     let entry = ws
         .enclosing_index()
-        .enclosing_for(ws.db(), hit.span.file, hit.span.start)?;
+        .enclosing_for(headers.as_ref(), hit.span.file, hit.span.start)?;
     let decl = ws.exact_decl(entry.symbol)?;
     let mut branches = Vec::new();
     collect_completed_branches_on_path(&decl.flow_events, hit.span, &mut branches);
@@ -103,7 +104,7 @@ pub(super) fn path_containment_guard_sanitizer(
         return None;
     }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let file_index = ws.db().decl_index(snk.span.file)?;
+    let file_index = ws.exact_decl_index_shared(snk.span.file)?;
     let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let mut branches = Vec::new();
     collect_following_branches_on_path(&decl.flow_events, snk.span, &mut branches);
@@ -114,7 +115,8 @@ pub(super) fn path_containment_guard_sanitizer(
             branch,
             &candidate,
             &base,
-            guard,
+            &guard.containment_check,
+            &guard.boundary_places,
         ) {
             continue;
         }
@@ -131,6 +133,753 @@ pub(super) fn path_containment_guard_sanitizer(
         );
     }
     None
+}
+
+pub(super) fn path_consumer_containment_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<FindingMatch> {
+    let semantics = sink_rule.analysis_semantics.as_ref()?;
+    if semantics.guard_profile != Some(GuardProfile::PathConsumerContainment) {
+        return None;
+    }
+    let guard = semantics.path_consumer_containment_guard.as_ref()?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let guarded_span = path_consumer_guard_span(ws, &decl, sink.span, guard.sink_path_arg_index, guard, None)
+        .or_else(|| {
+            let call_graph = ws.cached_resolved_call_graph();
+            let guarded = call_graph
+                .callers_of(sink_func)
+                .filter(|edge| edge.precision.is_semantic())
+                .find_map(|edge| {
+                    let caller = ws.exact_decl(SymbolId::new(edge.from.raw()))?;
+                    path_consumer_guard_span(
+                        ws,
+                        &caller,
+                        edge.span,
+                        guard.sink_path_arg_index,
+                        guard,
+                        Some(&decl.name),
+                    )
+                });
+            guarded
+        })?;
+    finding_for_guard_span_in_workspace(
+        ws,
+        sink,
+        guarded_span,
+        "engine.sanitizer.path_consumer_containment_guard",
+        "path-sanitize",
+        "canonical-path-consumer-containment",
+    )
+}
+
+pub(super) fn receiver_factory_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<FindingMatch> {
+    let guard = sink_rule
+        .analysis_semantics
+        .as_ref()?
+        .receiver_factory_guard
+        .as_ref()?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    let receiver = calls
+        .iter()
+        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?
+        .receiver
+        .and_then(clean_overwrite_target_key)?;
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let assignment = file_index
+        .assignment_values
+        .iter()
+        .filter(|fact| {
+            fact.assignment_span.start < sink.span.start
+                && fact
+                    .target
+                    .as_deref()
+                    .and_then(clean_overwrite_target_key)
+                    .as_deref()
+                    == Some(receiver.as_str())
+        })
+        .max_by_key(|fact| (fact.assignment_span.start, fact.assignment_span.end))?;
+    let factory = assignment.direct_call_name.as_deref()?;
+    if !guard
+        .factories
+        .iter()
+        .any(|target| rule_target_matches_call(factory, &[], target))
+    {
+        return None;
+    }
+    let sink_tag = sink_rule.tag.as_deref()?;
+    finding_for_guard_span_in_workspace(
+        ws,
+        sink,
+        assignment.assignment_span,
+        "engine.sanitizer.receiver_factory_guard",
+        sink_tag,
+        "receiver-factory-guard",
+    )
+}
+
+pub(super) fn character_escape_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<FindingMatch> {
+    let semantics = sink_rule.analysis_semantics.as_ref()?.character_escape.as_ref()?;
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let sink_decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let verified_helpers = verified_character_substitution_helpers(&file_index, semantics);
+    if verified_helpers.is_empty() {
+        return None;
+    }
+    let mut calls = Vec::new();
+    collect_structured_calls(&sink_decl.flow_events, &mut calls);
+    let helper_calls: Vec<_> = calls
+        .iter()
+        .filter_map(|call| {
+            let helper = callee_spelling_tail(call.name);
+            verified_helpers
+                .iter()
+                .find(|candidate| candidate.name == helper)
+                .map(|candidate| (*call, *candidate))
+        })
+        .collect();
+    if helper_calls.is_empty() {
+        return None;
+    }
+
+    let proof = if semantics.value_arg_indices.is_empty() {
+        let return_flow = return_value_flow_at_match(&sink_decl.flow_events, sink.span)?;
+        character_escape_flow_is_safe(
+            return_flow,
+            sink.span,
+            &file_index,
+            &helper_calls,
+            &mut AHashSet::new(),
+        )
+    } else {
+        let sink_call = calls
+            .iter()
+            .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+        semantics.value_arg_indices.iter().all(|index| {
+            let Some(flow) = bonsai_lang_api::call_argument_value_fact(
+                &file_index.call_argument_values,
+                sink_call.span,
+                *index,
+            )
+            .map(|fact| &fact.value_flow) else {
+                return false;
+            };
+            character_escape_flow_is_safe(flow, sink.span, &file_index, &helper_calls, &mut AHashSet::new())
+        })
+    };
+    if !proof {
+        return None;
+    }
+    let transform_span = helper_calls
+        .iter()
+        .map(|(_, helper)| helper.transform_span)
+        .min_by_key(|span| (span.start, span.end))?;
+    let sink_tag = sink_rule.tag.as_deref()?;
+    finding_for_guard_span_in_workspace(
+        ws,
+        sink,
+        transform_span,
+        "engine.sanitizer.character_escape",
+        sink_tag,
+        "compiler-proven-character-substitution",
+    )
+}
+
+#[derive(Copy, Clone)]
+struct VerifiedCharacterHelper<'a> {
+    name: &'a str,
+    transform_span: Span,
+}
+
+fn verified_character_substitution_helpers<'a>(
+    file_index: &'a bonsai_lang_api::DeclIndex,
+    semantics: &crate::rule::CharacterEscapeSemantics,
+) -> Vec<VerifiedCharacterHelper<'a>> {
+    let mut helpers = Vec::new();
+    for fact in &file_index.character_substitutions {
+        let Some(decl) = file_index
+            .defs
+            .iter()
+            .find(|decl| decl.span == fact.function_span)
+        else {
+            continue;
+        };
+        if fact.input_param_index >= decl.params.len() {
+            continue;
+        }
+        let Some(map) = file_index
+            .static_string_maps
+            .iter()
+            .filter(|map| map.target == fact.table && map.assignment_span.start < fact.transform_span.start)
+            .max_by_key(|map| (map.assignment_span.start, map.assignment_span.end))
+        else {
+            continue;
+        };
+        if !semantics.required_mappings.iter().all(|required| {
+            map.entries
+                .iter()
+                .any(|entry| entry.key == required.input && entry.value == required.output)
+        }) {
+            continue;
+        }
+        let domain_covers_required = match &fact.domain {
+            bonsai_lang_api::CharacterSubstitutionDomain::TableKeysWithIdentityFallback => true,
+            bonsai_lang_api::CharacterSubstitutionDomain::ExactCharacters { characters } => semantics
+                .required_mappings
+                .iter()
+                .all(|required| characters.contains(&required.input)),
+        };
+        if domain_covers_required {
+            helpers.push(VerifiedCharacterHelper {
+                name: &decl.name,
+                transform_span: fact.transform_span,
+            });
+        }
+    }
+    helpers.sort_by_key(|helper| (helper.name, helper.transform_span.start));
+    helpers.dedup_by_key(|helper| (helper.name, helper.transform_span));
+    helpers
+}
+
+fn return_value_flow_at_match<'a>(
+    events: &'a [FlowEvent],
+    matched_span: Span,
+) -> Option<&'a bonsai_lang_api::ExpressionFlow> {
+    for event in events {
+        match event {
+            FlowEvent::Return { span, value_flow, .. }
+                if spans_overlap(*span, matched_span)
+                    || span_contains(*span, matched_span)
+                    || span_contains(matched_span, *span) =>
+            {
+                return Some(value_flow);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(flow) = return_value_flow_at_match(then_events, matched_span)
+                    .or_else(|| return_value_flow_at_match(else_events, matched_span))
+                {
+                    return Some(flow);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(flow) = return_value_flow_at_match(body, matched_span) {
+                    return Some(flow);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(flow) = return_value_flow_at_match(body, matched_span)
+                    .or_else(|| return_value_flow_at_match(catch_events, matched_span))
+                    .or_else(|| return_value_flow_at_match(finally_events, matched_span))
+                {
+                    return Some(flow);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn character_escape_flow_is_safe(
+    flow: &bonsai_lang_api::ExpressionFlow,
+    before: Span,
+    file_index: &bonsai_lang_api::DeclIndex,
+    helper_calls: &[(StructuredCall<'_>, VerifiedCharacterHelper<'_>)],
+    visited_places: &mut AHashSet<String>,
+) -> bool {
+    if !flow.spreads.is_empty() {
+        return false;
+    }
+    if !flow.call_sites.is_empty() {
+        if !flow.source_names.is_empty()
+            || flow.place.is_some()
+            || flow.projection.is_some()
+            || !flow.aggregate_fields.is_empty()
+            || !flow.tuple_items.is_empty()
+        {
+            return false;
+        }
+        return flow.call_sites.iter().all(|call_site| {
+            helper_calls.iter().any(|(call, _)| {
+                spans_overlap(call.span, *call_site)
+                    || span_contains(*call_site, call.span)
+                    || span_contains(call.span, *call_site)
+            })
+        });
+    }
+    if let Some(place) = flow.place.as_deref().and_then(clean_overwrite_target_key) {
+        if !visited_places.insert(place.clone()) {
+            return false;
+        }
+        let assignment = file_index
+            .assignment_values
+            .iter()
+            .filter(|fact| {
+                fact.assignment_span.start < before.start
+                    && fact
+                        .target
+                        .as_deref()
+                        .and_then(clean_overwrite_target_key)
+                        .as_deref()
+                        == Some(place.as_str())
+            })
+            .max_by_key(|fact| (fact.assignment_span.start, fact.assignment_span.end));
+        let safe = assignment.is_some_and(|assignment| {
+            character_escape_flow_is_safe(
+                &assignment.value_flow,
+                assignment.assignment_span,
+                file_index,
+                helper_calls,
+                visited_places,
+            )
+        });
+        visited_places.remove(&place);
+        return safe;
+    }
+    if !flow.source_names.is_empty() || flow.projection.is_some() {
+        return false;
+    }
+    flow.aggregate_fields.iter().all(|field| {
+        character_escape_flow_is_safe(&field.value, before, file_index, helper_calls, visited_places)
+    }) && flow
+        .tuple_items
+        .iter()
+        .all(|item| character_escape_flow_is_safe(item, before, file_index, helper_calls, visited_places))
+}
+
+fn path_consumer_guard_span(
+    ws: &Workspace,
+    decl: &bonsai_lang_api::Decl,
+    consumer_span: Span,
+    path_arg_index: usize,
+    guard: &crate::rule::PathConsumerContainmentGuardSemantics,
+    expected_callee: Option<&str>,
+) -> Option<Span> {
+    let file_index = ws.exact_decl_index_shared(consumer_span.file)?;
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    let consumer_call = calls
+        .iter()
+        .filter(|call| call.span == consumer_span || spans_overlap(call.span, consumer_span))
+        .find(|call| {
+            expected_callee
+                .is_none_or(|expected| callee_spelling_tail(call.name) == callee_spelling_tail(expected))
+        })?;
+    let candidate = consumer_call
+        .args
+        .get(path_arg_index)?
+        .place
+        .as_deref()
+        .and_then(clean_overwrite_target_key)?;
+
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(&decl.flow_events, consumer_span, &mut assignments);
+    let candidate_assignment = assignments.iter().rev().find(|assignment| {
+        clean_overwrite_target_key(assignment.target).as_deref() == Some(candidate.as_str())
+            && assignment
+                .source_call
+                .is_some_and(|call| rule_target_matches_call(call, &[], &guard.canonicalizer))
+    })?;
+    let path_constructor_calls: Vec<_> = calls
+        .iter()
+        .filter(|call| {
+            span_contains(candidate_assignment.span, call.span)
+                && rule_target_matches_call(call.name, &[], &guard.path_constructor)
+        })
+        .collect();
+    if path_constructor_calls.len() != 1 {
+        return None;
+    }
+    let base = path_constructor_calls[0]
+        .args
+        .get(guard.path_constructor_base_arg_index)?
+        .place
+        .as_deref()
+        .and_then(clean_overwrite_target_key)?;
+
+    let exact_file_decls: Vec<_> = file_index
+        .defs
+        .iter()
+        .filter_map(|candidate| ws.exact_decl(candidate.symbol))
+        .collect();
+    let mut file_assignments = Vec::new();
+    for candidate_decl in &exact_file_decls {
+        collect_structured_assignments_before(
+            &candidate_decl.flow_events,
+            candidate_assignment.span,
+            &mut file_assignments,
+        );
+    }
+    file_assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    file_assignments.dedup_by_key(|assignment| assignment.span);
+    if !place_has_static_canonical_provenance(
+        &base,
+        &file_assignments,
+        &file_index.assignment_values,
+        guard.base_canonicalizer.as_ref().unwrap_or(&guard.canonicalizer),
+        candidate_assignment.span,
+    ) {
+        return None;
+    }
+
+    let mut branches = Vec::new();
+    collect_completed_branches_on_path(&decl.flow_events, consumer_span, &mut branches);
+    let branch = branches.into_iter().rev().find(|branch| {
+        branch_arm_abruptly_exits(branch.then_events)
+            && path_containment_guard_condition(
+                &decl.flow_events,
+                &file_index.branch_conditions,
+                *branch,
+                &candidate,
+                &base,
+                &guard.containment_check,
+                &guard.boundary_places,
+            )
+    })?;
+    Some(branch.span)
+}
+
+pub(super) fn relative_path_containment_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    let semantics = sink_rule.analysis_semantics.as_ref()?;
+    if semantics.guard_profile != Some(GuardProfile::RelativePathContainment) {
+        return None;
+    }
+    let guard = semantics.relative_path_containment_guard.as_ref()?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    let sink_call = calls
+        .iter()
+        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(&decl.flow_events, sink.span, &mut assignments);
+
+    let (candidate, candidate_assignment) =
+        guarded_relative_path_candidate(sink_call, sink, guard, &assignments)?;
+    if !candidate_assignment
+        .source_call
+        .is_some_and(|call| rule_target_matches_call(call, &[], &guard.candidate_canonicalizer))
+    {
+        return None;
+    }
+
+    let relative_call = calls.iter().find(|call| {
+        call.span.start > candidate_assignment.span.start
+            && rule_target_matches_call(call.name, &[], &guard.relative_path)
+            && call
+                .args
+                .get(guard.relative_candidate_arg_index)
+                .and_then(|argument| argument.place.as_deref())
+                .and_then(clean_overwrite_target_key)
+                .as_deref()
+                == Some(candidate.as_str())
+    })?;
+    let base = relative_call
+        .args
+        .get(guard.relative_base_arg_index)?
+        .place
+        .as_deref()
+        .and_then(clean_overwrite_target_key)?;
+    if sink_tainted_args
+        .iter()
+        .flat_map(tainted_arg_target_keys)
+        .any(|target| target == base)
+    {
+        return None;
+    }
+
+    let exact_file_decls: Vec<_> = file_index
+        .defs
+        .iter()
+        .filter_map(|candidate| ws.exact_decl(candidate.symbol))
+        .collect();
+    let mut file_assignments = Vec::new();
+    for candidate_decl in &exact_file_decls {
+        collect_structured_assignments_before(
+            &candidate_decl.flow_events,
+            relative_call.span,
+            &mut file_assignments,
+        );
+    }
+    file_assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    if !place_has_static_canonical_provenance(
+        &base,
+        &file_assignments,
+        &file_index.assignment_values,
+        &guard.base_canonicalizer,
+        relative_call.span,
+    ) {
+        return None;
+    }
+
+    let relative_result = file_assignments.iter().rev().find_map(|assignment| {
+        (assignment.span.file == relative_call.span.file
+            && span_contains(assignment.span, relative_call.span)
+            && assignment
+                .source_call
+                .is_some_and(|call| rule_target_matches_call(call, &[], &guard.relative_path))
+            && bonsai_lang_api::tuple_result_projection_index(assignment.source_names)
+                == Some(guard.relative_path_result_index))
+        .then(|| clean_overwrite_target_key(assignment.target))
+        .flatten()
+    })?;
+
+    let mut branches = Vec::new();
+    if guard.guarded_path_arg_index.is_some() {
+        collect_completed_branches_on_path(&decl.flow_events, sink.span, &mut branches);
+    } else {
+        collect_following_branches_on_path(&decl.flow_events, sink.span, &mut branches);
+    }
+    let branch = branches.into_iter().rev().find(|branch| {
+        branch.span.start > relative_call.span.start
+            && branch_arm_abruptly_exits(branch.then_events)
+            && relative_path_rejection_condition(
+                &file_index.branch_conditions,
+                &decl.flow_events,
+                *branch,
+                &relative_result,
+                guard,
+            )
+    })?;
+
+    let snapshot = ws.vfs().snapshot(sink.span.file).ok()?;
+    finding_for_guard_span(
+        sink,
+        snapshot.text.as_ref(),
+        branch.span,
+        "engine.sanitizer.relative_path_containment_guard",
+        "path-sanitize",
+        "canonical-relative-path-containment",
+    )
+}
+
+fn guarded_relative_path_candidate<'a>(
+    sink_call: &StructuredCall<'_>,
+    sink: &RuleMatch,
+    guard: &RelativePathContainmentGuardSemantics,
+    assignments: &'a [StructuredAssignment<'a>],
+) -> Option<(String, &'a StructuredAssignment<'a>)> {
+    if let Some(argument_index) = guard.guarded_path_arg_index {
+        let candidate = sink_call
+            .args
+            .get(argument_index)?
+            .place
+            .as_deref()
+            .and_then(clean_overwrite_target_key)?;
+        let assignment = assignments.iter().rev().find(|assignment| {
+            clean_overwrite_target_key(assignment.target).as_deref() == Some(candidate.as_str())
+                && assignment.span.start < sink.span.start
+        })?;
+        return Some((candidate, assignment));
+    }
+    let assignment = assignments
+        .iter()
+        .rev()
+        .find(|assignment| span_contains(assignment.span, sink.span))?;
+    let candidate = clean_overwrite_target_key(assignment.target)?;
+    Some((candidate, assignment))
+}
+
+fn relative_path_rejection_condition(
+    condition_facts: &[BranchConditionFact],
+    events: &[FlowEvent],
+    branch: StructuredBranch<'_>,
+    relative_result: &str,
+    guard: &RelativePathContainmentGuardSemantics,
+) -> bool {
+    let Some(ConditionExpressionFact::Any { operands, .. }) =
+        branch_condition_fact_for_span(condition_facts, branch.span)
+            .and_then(|condition| condition.expression.as_ref())
+    else {
+        return false;
+    };
+    let exact_rejection = operands.iter().any(|operand| {
+        let ConditionExpressionFact::Equality {
+            relation: ConditionEquality::Equal,
+            left,
+            right,
+            ..
+        } = operand
+        else {
+            return false;
+        };
+        condition_place_equals(left, relative_result)
+            .then_some(right)
+            .or_else(|| condition_place_equals(right, relative_result).then_some(left))
+            .and_then(|literal| literal.static_string.as_deref())
+            .is_some_and(|literal| {
+                guard
+                    .rejected_exact_values
+                    .iter()
+                    .any(|rejected| rejected == literal)
+            })
+    });
+    if !exact_rejection {
+        return false;
+    }
+    operands.iter().any(|operand| {
+        let ConditionExpressionFact::Atom { span } = operand else {
+            return false;
+        };
+        let query = RelativeRejectionCallQuery {
+            condition_span: *span,
+            relative_result,
+            guard,
+        };
+        relative_rejection_call_in_span(events, &query)
+    })
+}
+
+fn condition_place_equals(operand: &ConditionOperandFact, expected: &str) -> bool {
+    operand
+        .value_flow
+        .place
+        .as_deref()
+        .and_then(clean_overwrite_target_key)
+        .as_deref()
+        == Some(expected)
+}
+
+struct RelativeRejectionCallQuery<'a> {
+    condition_span: Span,
+    relative_result: &'a str,
+    guard: &'a RelativePathContainmentGuardSemantics,
+}
+
+fn relative_rejection_call_in_span(events: &[FlowEvent], query: &RelativeRejectionCallQuery<'_>) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver_types,
+                args,
+                ..
+            } if span_contains(query.condition_span, *span)
+                && rule_target_matches_call(name, receiver_types, &query.guard.rejection_check) =>
+            {
+                if args
+                    .get(query.guard.rejection_check_arg_index)
+                    .and_then(|argument| argument.place.as_deref())
+                    .and_then(clean_overwrite_target_key)
+                    .as_deref()
+                    == Some(query.relative_result)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if relative_rejection_call_in_span(then_events, query)
+                    || relative_rejection_call_in_span(else_events, query)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if relative_rejection_call_in_span(body, query) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if relative_rejection_call_in_span(body, query)
+                    || relative_rejection_call_in_span(catch_events, query)
+                    || relative_rejection_call_in_span(finally_events, query)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn place_has_static_canonical_provenance(
+    place: &str,
+    assignments: &[StructuredAssignment<'_>],
+    assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+    canonicalizer: &RuleTarget,
+    before: Span,
+) -> bool {
+    let mut current = place.to_string();
+    let mut visited = AHashSet::new();
+    while visited.insert(current.clone()) {
+        let Some(assignment) = assignments.iter().rev().find(|assignment| {
+            clean_overwrite_target_key(assignment.target).as_deref() == Some(current.as_str())
+        }) else {
+            return assignment_values.iter().rev().any(|fact| {
+                fact.assignment_span.file == before.file
+                    && fact.assignment_span.start < before.start
+                    && fact.target.as_deref() == Some(current.as_str())
+                    && fact.direct_call_name.is_none()
+                    && expression_flow_is_literal(&fact.value_flow)
+            });
+        };
+        let Some(value) = assignment_values
+            .iter()
+            .find(|fact| fact.assignment_span == assignment.span)
+        else {
+            return false;
+        };
+        if value.direct_call_name.is_none() && expression_flow_is_literal(&value.value_flow) {
+            return true;
+        }
+        let Some(call) = assignment.source_call else {
+            return false;
+        };
+        if !rule_target_matches_call(call, &[], canonicalizer) {
+            return false;
+        }
+        let Some(next) = assignment
+            .source_call_args
+            .first()
+            .and_then(|argument| clean_overwrite_target_key(argument))
+        else {
+            return false;
+        };
+        current = next;
+    }
+    false
 }
 
 pub(super) fn python_compiled_regex_guard_sanitizer(
@@ -231,7 +980,7 @@ fn python_compiled_regex_declared_safe_before(
     regex_name: &str,
     sink_tag: Option<&str>,
 ) -> bool {
-    let Some(file_index) = ws.db().decl_index(file) else {
+    let Some(file_index) = ws.exact_decl_index_shared(file) else {
         return false;
     };
     let mut assignments = Vec::new();
@@ -501,7 +1250,8 @@ fn path_containment_guard_condition(
     branch: StructuredBranch<'_>,
     candidate: &str,
     base: &str,
-    guard: &PathContainmentGuardSemantics,
+    containment_check: &RuleTarget,
+    boundary_places: &[String],
 ) -> bool {
     let Some(condition) = branch_condition_fact_for_span(condition_facts, branch.span) else {
         return false;
@@ -513,7 +1263,8 @@ fn path_containment_guard_condition(
         condition_span: condition.condition_span,
         candidate,
         base,
-        guard,
+        containment_check,
+        boundary_places,
     };
     containment_check_call_before_body(events, &query)
 }
@@ -523,7 +1274,8 @@ struct ContainmentCheckQuery<'a> {
     condition_span: Span,
     candidate: &'a str,
     base: &'a str,
-    guard: &'a PathContainmentGuardSemantics,
+    containment_check: &'a RuleTarget,
+    boundary_places: &'a [String],
 }
 
 fn containment_check_call_before_body(events: &[FlowEvent], query: &ContainmentCheckQuery<'_>) -> bool {
@@ -542,7 +1294,7 @@ fn containment_check_call_before_body(events: &[FlowEvent], query: &ContainmentC
                     .and_then(clean_overwrite_target_key)
                     .is_some_and(|receiver| receiver == query.candidate);
                 if !receiver_matches
-                    || !rule_target_matches_call(name, receiver_types, &query.guard.containment_check)
+                    || !rule_target_matches_call(name, receiver_types, query.containment_check)
                 {
                     continue;
                 }
@@ -561,7 +1313,6 @@ fn containment_check_call_before_body(events: &[FlowEvent], query: &ContainmentC
                         .any(|source| source == query.base);
                 if base_is_operand
                     && query
-                        .guard
                         .boundary_places
                         .iter()
                         .all(|boundary| argument.source_names.iter().any(|source| source == boundary))
@@ -604,150 +1355,772 @@ fn containment_check_call_before_body(events: &[FlowEvent], query: &ContainmentC
     false
 }
 
-pub(super) fn python_lxml_parser_keyword_sanitizer(
+pub(super) fn configured_argument_factory_guard_sanitizer(
     ws: &Workspace,
     sink_func: FuncId,
-    snk: &RuleMatch,
+    sink: &RuleMatch,
     sink_rule: &Rule,
 ) -> Option<FindingMatch> {
-    if snk.language != "python" || sink_rule.tag.as_deref() != Some("xxe") {
+    let guard = sink_rule
+        .analysis_semantics
+        .as_ref()?
+        .configured_argument_factory_guard
+        .as_ref()?;
+    let sink_decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let mut sink_calls = Vec::new();
+    collect_structured_calls(&sink_decl.flow_events, &mut sink_calls);
+    let sink_call = sink_calls
+        .iter()
+        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let guarded_place = sink_call
+        .args
+        .get(guard.sink_argument_index)?
+        .place
+        .as_deref()
+        .and_then(clean_overwrite_target_key)?;
+
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let local_assignment = latest_structured_assignment_to(&sink_decl.flow_events, sink.span, &guarded_place);
+    let file_decls: Vec<_> = file_index
+        .defs
+        .iter()
+        .filter(|candidate| candidate.symbol != sink_decl.symbol)
+        .filter_map(|candidate| ws.exact_decl(candidate.symbol))
+        .collect();
+    let assignment_span = local_assignment.or_else(|| {
+        file_decls
+            .iter()
+            .filter(|candidate| candidate.name == "__module__")
+            .filter_map(|candidate| {
+                latest_structured_assignment_to(&candidate.flow_events, sink.span, &guarded_place)
+            })
+            .max_by_key(|span| (span.start, span.end))
+    })?;
+    let assignment =
+        bonsai_lang_api::assignment_value_fact_for_span(&file_index.assignment_values, assignment_span)?;
+    if !assignment
+        .direct_call_name
+        .as_deref()
+        .is_some_and(|callee| rule_target_matches_call(callee, &[], &guard.factory))
+    {
         return None;
     }
-    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
-    let parser_arg = find_call_arg_named_at(&decl.flow_events, snk.span, "parser")?;
-    let parser_var = clean_overwrite_target_key(&parser_arg.value_text)?;
-    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let assignment_span =
-        python_hardened_lxml_parser_assignment_span(&decl.flow_events, snk.span, &parser_var)?;
-    finding_for_guard_span(
-        snk,
-        snapshot.text.as_ref(),
-        assignment_span,
-        "engine.sanitizer.python_lxml_hardened_parser_arg",
-        "xxe-sanitizer",
-        "hardened-parser-argument",
+
+    let mut file_calls = sink_calls;
+    for candidate in &file_decls {
+        collect_structured_calls(&candidate.flow_events, &mut file_calls);
+    }
+    let factory_call = file_calls.iter().find(|call| {
+        assignment
+            .call_sites
+            .iter()
+            .any(|call_site| span_contains(*call_site, call.span))
+            && rule_target_matches_call(call.name, call.receiver_types, &guard.factory)
+    })?;
+    let configured = guard.required_named_arguments.iter().all(|required| {
+        let Some((argument_index, _)) = factory_call
+            .args
+            .iter()
+            .enumerate()
+            .find(|(_, argument)| argument.name.as_deref() == Some(required.name.as_str()))
+        else {
+            return false;
+        };
+        bonsai_lang_api::call_argument_value_fact(
+            &file_index.call_argument_values,
+            factory_call.span,
+            argument_index,
+        )
+        .and_then(|fact| fact.static_value.as_ref())
+            == Some(&required.value)
+    });
+    if !configured {
+        return None;
+    }
+
+    finding_for_guard_span_in_workspace(
+        ws,
+        sink,
+        assignment.assignment_span,
+        "engine.sanitizer.configured_argument_factory_guard",
+        sink_rule.tag.as_deref()?,
+        "compiler-proven-configured-argument-factory",
     )
 }
 
-fn python_hardened_lxml_parser_assignment_span(
-    events: &[FlowEvent],
-    before: Span,
-    parser_var: &str,
-) -> Option<Span> {
+fn latest_structured_assignment_to(events: &[FlowEvent], before: Span, place: &str) -> Option<Span> {
     let mut assignments = Vec::new();
     collect_structured_assignments_before(events, before, &mut assignments);
-    assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    assignments
+        .into_iter()
+        .filter(|assignment| clean_overwrite_target_key(assignment.target).as_deref() == Some(place))
+        .map(|assignment| assignment.span)
+        .max_by_key(|span| (span.start, span.end))
+}
+
+pub(super) fn url_network_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<FindingMatch> {
+    let guard = sink_rule
+        .analysis_semantics
+        .as_ref()?
+        .url_network_guard
+        .as_ref()?;
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let exact_file_decls: Vec<_> = file_index
+        .defs
+        .iter()
+        .filter_map(|candidate| ws.exact_decl(candidate.symbol))
+        .collect();
+    let mut file_calls = Vec::new();
+    for file_decl in &exact_file_decls {
+        collect_structured_calls(&file_decl.flow_events, &mut file_calls);
+    }
     let mut calls = Vec::new();
-    collect_structured_calls(events, &mut calls);
-    for assignment in assignments.into_iter().rev() {
-        if clean_overwrite_target_key(assignment.target).as_deref() != Some(parser_var) {
-            continue;
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    let sink_call = calls
+        .iter()
+        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(
+        &decl.flow_events,
+        Span::empty(sink.span.file, decl.span.end),
+        &mut assignments,
+    );
+    assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    let parsed = url_guard_root_place(sink_call, sink.span, guard, &calls, &assignments)?;
+    let parser_assignment = assignments.iter().rev().find(|assignment| {
+        assignment.span.start <= sink.span.start
+            && clean_overwrite_target_key(assignment.target).as_deref() == Some(parsed.as_str())
+            && assignment
+                .source_call
+                .is_some_and(|call| rule_target_matches_call(call, &[], &guard.parser))
+    })?;
+    let validation_end = if matches!(
+        &guard.root,
+        crate::rule::UrlGuardRootSemantics::SinkAssignmentTarget
+    ) {
+        decl.span.end
+    } else {
+        sink.span.start
+    };
+
+    let mut branches = Vec::new();
+    collect_all_structured_branches(&decl.flow_events, &mut branches);
+    let scheme_guard = branches
+        .iter()
+        .filter(|branch| {
+            parser_assignment.span.start < branch.span.start
+                && branch.span.start < validation_end
+                && branch_arm_abruptly_exits(branch.then_events)
+        })
+        .find(|branch| {
+            branch_condition_fact_for_span(&file_index.branch_conditions, branch.span)
+                .and_then(|fact| fact.expression.as_ref())
+                .is_some_and(|expression| {
+                    url_scheme_rejection_is_exact(expression, &parsed, &guard.scheme, &calls, &file_index)
+                })
+        })?;
+    let host_guard = branches
+        .iter()
+        .filter(|branch| {
+            scheme_guard.span.start <= branch.span.start
+                && branch.span.start < validation_end
+                && branch_arm_abruptly_exits(branch.then_events)
+        })
+        .find(|branch| {
+            branch_condition_fact_for_span(&file_index.branch_conditions, branch.span)
+                .and_then(|fact| fact.expression.as_ref())
+                .and_then(|expression| {
+                    url_rejected_host_collection(expression, &parsed, &guard.host_allowlist, &calls)
+                })
+                .is_some_and(|collection| {
+                    url_collection_is_static(
+                        &collection,
+                        branch.span,
+                        &file_index,
+                        &file_calls,
+                        &guard.host_allowlist.static_collection_factories,
+                    )
+                })
+        })?;
+
+    let resolver_call = calls.iter().find(|call| {
+        host_guard.span.start < call.span.start
+            && call.span.start < validation_end
+            && rule_target_matches_call(call.name, call.receiver_types, &guard.dns.resolver)
+            && call.args.iter().any(|argument| {
+                url_span_reads_component(argument.span, &parsed, &guard.host_allowlist.component, &calls)
+            })
+    })?;
+    let resolver_targets: Vec<String> = assignments
+        .iter()
+        .filter(|assignment| {
+            span_contains(assignment.span, resolver_call.span)
+                && assignment
+                    .source_call
+                    .is_some_and(|call| rule_target_matches_call(call, &[], &guard.dns.resolver))
+        })
+        .filter_map(|assignment| clean_overwrite_target_key(assignment.target))
+        .collect();
+    if resolver_targets.is_empty() {
+        return None;
+    }
+    let _private_guard = branches
+        .iter()
+        .filter(|branch| {
+            resolver_call.span.start < branch.span.start
+                && branch.span.start < validation_end
+                && branch_arm_abruptly_exits(branch.then_events)
+        })
+        .find(|branch| {
+            let Some(condition) = branch_condition_fact_for_span(&file_index.branch_conditions, branch.span)
+            else {
+                return false;
+            };
+            let Some(expression) = condition.expression.as_ref() else {
+                return false;
+            };
+            if !url_condition_is_disjunction(expression) {
+                return false;
+            }
+            let mut predicate_receiver: Option<String> = None;
+            for predicate in &guard.dns.private_address_predicates {
+                let Some(call) = calls.iter().find(|call| {
+                    span_contains(condition.condition_span, call.span)
+                        && rule_target_matches_call(call.name, call.receiver_types, predicate)
+                }) else {
+                    return false;
+                };
+                let Some(receiver) = call.receiver.and_then(clean_overwrite_target_key) else {
+                    return false;
+                };
+                if predicate_receiver
+                    .as_ref()
+                    .is_some_and(|existing| existing != &receiver)
+                {
+                    return false;
+                }
+                predicate_receiver = Some(receiver);
+            }
+            predicate_receiver.is_some_and(|receiver| {
+                url_place_derives_from_any(
+                    &receiver,
+                    &resolver_targets,
+                    &assignments,
+                    branch.span,
+                    &mut AHashSet::new(),
+                )
+            })
+        })?;
+    if !url_redirect_guard_is_exact(
+        &decl.flow_events,
+        decl.span,
+        sink_call,
+        sink.span,
+        &parsed,
+        guard.redirect.as_ref(),
+        &file_index,
+    ) {
+        return None;
+    }
+    let sink_tag = sink_rule.tag.as_deref()?;
+    finding_for_guard_span_in_workspace(
+        ws,
+        sink,
+        scheme_guard.span,
+        "engine.sanitizer.url_network_guard",
+        sink_tag,
+        "compiler-proven-url-network-guard",
+    )
+}
+
+fn url_guard_root_place(
+    sink_call: &StructuredCall<'_>,
+    sink_span: Span,
+    guard: &crate::rule::UrlNetworkGuardSemantics,
+    calls: &[StructuredCall<'_>],
+    assignments: &[StructuredAssignment<'_>],
+) -> Option<String> {
+    match &guard.root {
+        crate::rule::UrlGuardRootSemantics::SinkReceiver => {
+            sink_call.receiver.and_then(clean_overwrite_target_key)
         }
-        let hardened = calls.iter().any(|call| {
-            span_contains(assignment.span, call.span)
-                && clean_overwrite_callee_tail(call.name) == "xmlparser"
-                && call.args.iter().any(|arg| {
-                    arg.name.as_deref() == Some("resolve_entities")
-                        && arg.value_text.trim().eq_ignore_ascii_case("false")
+        crate::rule::UrlGuardRootSemantics::SinkAssignmentTarget => assignments
+            .iter()
+            .rev()
+            .find(|assignment| {
+                span_contains(assignment.span, sink_span)
+                    && assignment
+                        .source_call
+                        .is_some_and(|call| rule_target_matches_call(call, &[], &guard.parser))
+            })
+            .and_then(|assignment| clean_overwrite_target_key(assignment.target)),
+        crate::rule::UrlGuardRootSemantics::SinkArgumentAccessor {
+            argument_index,
+            accessor,
+        } => {
+            let argument = sink_call.args.get(*argument_index)?;
+            let mut matching = calls.iter().filter(|call| {
+                span_contains(argument.span, call.span)
+                    && rule_target_matches_call(call.name, call.receiver_types, accessor)
+            });
+            let root = matching.next()?.receiver.and_then(clean_overwrite_target_key)?;
+            matching.next().is_none().then_some(root)
+        }
+    }
+}
+
+fn url_scheme_rejection_is_exact(
+    expression: &ConditionExpressionFact,
+    parsed: &str,
+    guard: &crate::rule::UrlSchemeGuardSemantics,
+    calls: &[StructuredCall<'_>],
+    file_index: &bonsai_lang_api::DeclIndex,
+) -> bool {
+    let terms: &[ConditionExpressionFact] = match expression {
+        ConditionExpressionFact::Any { operands, .. } => operands,
+        expression => std::slice::from_ref(expression),
+    };
+    terms.iter().any(|term| match term {
+        ConditionExpressionFact::Equality {
+            relation: ConditionEquality::NotEqual,
+            left,
+            right,
+            ..
+        } => {
+            url_scheme_equality_matches(left, right, parsed, guard, calls)
+                || url_scheme_equality_matches(right, left, parsed, guard, calls)
+        }
+        ConditionExpressionFact::Not { operand, .. } => match operand.as_ref() {
+            ConditionExpressionFact::Equality {
+                relation: ConditionEquality::Equal,
+                left,
+                right,
+                ..
+            } => {
+                url_scheme_equality_matches(left, right, parsed, guard, calls)
+                    || url_scheme_equality_matches(right, left, parsed, guard, calls)
+            }
+            ConditionExpressionFact::Atom { span } => {
+                guard.comparison_predicate.as_ref().is_some_and(|predicate| {
+                    url_scheme_predicate_matches(*span, parsed, guard, predicate, calls, file_index)
+                })
+            }
+            _ => false,
+        },
+        _ => false,
+    })
+}
+
+fn url_scheme_equality_matches(
+    component: &ConditionOperandFact,
+    literal: &ConditionOperandFact,
+    parsed: &str,
+    guard: &crate::rule::UrlSchemeGuardSemantics,
+    calls: &[StructuredCall<'_>],
+) -> bool {
+    url_operand_reads_component(component, parsed, &guard.component, calls)
+        && literal
+            .static_string
+            .as_ref()
+            .is_some_and(|value| guard.allowed_values.iter().any(|allowed| allowed == value))
+}
+
+fn url_scheme_predicate_matches(
+    atom_span: Span,
+    parsed: &str,
+    guard: &crate::rule::UrlSchemeGuardSemantics,
+    predicate: &RuleTarget,
+    calls: &[StructuredCall<'_>],
+    file_index: &bonsai_lang_api::DeclIndex,
+) -> bool {
+    calls.iter().any(|call| {
+        if !span_contains(atom_span, call.span)
+            || !rule_target_matches_call(call.name, call.receiver_types, predicate)
+        {
+            return false;
+        }
+        let receiver_fact =
+            bonsai_lang_api::call_receiver_fact_for_span(&file_index.call_receivers, call.span);
+        let receiver_is_allowed = receiver_fact
+            .and_then(|fact| fact.static_value.as_ref())
+            .and_then(|value| match value {
+                bonsai_lang_api::StaticScalarValue::String(value) => Some(value),
+                _ => None,
+            })
+            .is_some_and(|value| guard.allowed_values.iter().any(|allowed| allowed == value));
+        let argument_reads_component = call
+            .args
+            .iter()
+            .any(|argument| url_span_reads_component(argument.span, parsed, &guard.component, calls));
+        if receiver_is_allowed && argument_reads_component {
+            return true;
+        }
+        let receiver_reads_component = receiver_fact.is_some_and(|fact| {
+            url_span_reads_component(fact.receiver_span, parsed, &guard.component, calls)
+        });
+        receiver_reads_component
+            && call.args.iter().enumerate().any(|(index, _)| {
+                bonsai_lang_api::call_argument_value_fact(&file_index.call_argument_values, call.span, index)
+                    .and_then(|fact| fact.static_value.as_ref())
+                    .and_then(|value| match value {
+                        bonsai_lang_api::StaticScalarValue::String(value) => Some(value),
+                        _ => None,
+                    })
+                    .is_some_and(|value| guard.allowed_values.iter().any(|allowed| allowed == value))
+            })
+    })
+}
+
+fn url_operand_reads_component(
+    operand: &ConditionOperandFact,
+    parsed: &str,
+    component: &crate::rule::UrlComponentSemantics,
+    calls: &[StructuredCall<'_>],
+) -> bool {
+    if let Some(field) = component.field.as_deref() {
+        return operand.value_flow.projection.as_ref().is_some_and(|projection| {
+            projection.base == parsed
+                && projection.path.len() == 1
+                && projection.path.first().is_some_and(|segment| segment == field)
+        });
+    }
+    url_span_reads_component(operand.span, parsed, component, calls)
+}
+
+fn url_span_reads_component(
+    span: Span,
+    parsed: &str,
+    component: &crate::rule::UrlComponentSemantics,
+    calls: &[StructuredCall<'_>],
+) -> bool {
+    component.accessor.as_ref().is_some_and(|accessor| {
+        calls.iter().any(|call| {
+            span_contains(span, call.span)
+                && rule_target_matches_call(call.name, call.receiver_types, accessor)
+                && call.receiver.and_then(clean_overwrite_target_key).as_deref() == Some(parsed)
+        })
+    })
+}
+
+fn url_rejected_host_collection(
+    expression: &ConditionExpressionFact,
+    parsed: &str,
+    guard: &crate::rule::UrlHostAllowlistSemantics,
+    calls: &[StructuredCall<'_>],
+) -> Option<String> {
+    let terms: &[ConditionExpressionFact] = match expression {
+        ConditionExpressionFact::Any { operands, .. } => operands,
+        expression => std::slice::from_ref(expression),
+    };
+    terms.iter().find_map(|term| match term {
+        ConditionExpressionFact::Membership {
+            subject,
+            collection,
+            then_contains: false,
+            ..
+        } if url_operand_reads_component(subject, parsed, &guard.component, calls) => collection
+            .value_flow
+            .place
+            .as_deref()
+            .and_then(clean_overwrite_target_key),
+        ConditionExpressionFact::Not { operand, .. } => match operand.as_ref() {
+            ConditionExpressionFact::Membership {
+                subject,
+                collection,
+                then_contains: true,
+                ..
+            } if url_operand_reads_component(subject, parsed, &guard.component, calls) => collection
+                .value_flow
+                .place
+                .as_deref()
+                .and_then(clean_overwrite_target_key),
+            ConditionExpressionFact::Atom { span } => {
+                guard.membership_predicate.as_ref().and_then(|predicate| {
+                    calls.iter().find_map(|call| {
+                        (span_contains(*span, call.span)
+                            && rule_target_matches_call(call.name, call.receiver_types, predicate)
+                            && call.args.iter().any(|argument| {
+                                url_span_reads_component(argument.span, parsed, &guard.component, calls)
+                            }))
+                        .then(|| call.receiver.and_then(clean_overwrite_target_key))
+                        .flatten()
+                    })
+                })
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+fn url_collection_is_static(
+    collection: &str,
+    before: Span,
+    file_index: &bonsai_lang_api::DeclIndex,
+    calls: &[StructuredCall<'_>],
+    factories: &[RuleTarget],
+) -> bool {
+    let Some(assignment) = file_index
+        .assignment_values
+        .iter()
+        .filter(|fact| {
+            fact.assignment_span.start < before.start
+                && fact
+                    .target
+                    .as_deref()
+                    .and_then(clean_overwrite_target_key)
+                    .as_deref()
+                    == Some(collection)
+        })
+        .max_by_key(|fact| (fact.assignment_span.start, fact.assignment_span.end))
+    else {
+        return false;
+    };
+    if assignment.direct_call_name.is_none() && expression_flow_is_literal(&assignment.value_flow) {
+        return true;
+    }
+    if assignment.direct_call_name.as_deref().is_some_and(|callee| {
+        factories
+            .iter()
+            .any(|target| rule_target_matches_call(callee, &[], target))
+    }) && assignment
+        .exact_static_call_args
+        .as_ref()
+        .is_some_and(|arguments| !arguments.is_empty())
+    {
+        return true;
+    }
+    let Some(factory) = calls.iter().find(|call| {
+        span_contains(assignment.assignment_span, call.span)
+            && factories
+                .iter()
+                .any(|target| rule_target_matches_call(call.name, call.receiver_types, target))
+    }) else {
+        return false;
+    };
+    !factory.args.is_empty()
+        && factory.args.iter().enumerate().all(|(index, _)| {
+            bonsai_lang_api::call_argument_value_fact(&file_index.call_argument_values, factory.span, index)
+                .is_some_and(|fact| fact.static_value.is_some())
+        })
+}
+
+fn url_condition_is_disjunction(expression: &ConditionExpressionFact) -> bool {
+    match expression {
+        ConditionExpressionFact::Atom { .. } => true,
+        ConditionExpressionFact::Any { operands, .. } => operands
+            .iter()
+            .all(|operand| matches!(operand, ConditionExpressionFact::Atom { .. })),
+        _ => false,
+    }
+}
+
+fn url_place_derives_from_any(
+    place: &str,
+    roots: &[String],
+    assignments: &[StructuredAssignment<'_>],
+    before: Span,
+    visited: &mut AHashSet<String>,
+) -> bool {
+    if roots.iter().any(|root| root == place) {
+        return true;
+    }
+    if !visited.insert(place.to_string()) {
+        return false;
+    }
+    let derived = assignments
+        .iter()
+        .rev()
+        .find(|assignment| {
+            assignment.span.start < before.start
+                && clean_overwrite_target_key(assignment.target).as_deref() == Some(place)
+        })
+        .is_some_and(|assignment| {
+            assignment
+                .source_name
+                .into_iter()
+                .chain(assignment.source_names.iter().map(String::as_str))
+                .filter_map(clean_overwrite_target_key)
+                .any(|source| {
+                    url_place_derives_from_any(&source, roots, assignments, assignment.span, visited)
                 })
         });
-        if hardened {
-            return Some(assignment.span);
+    visited.remove(place);
+    derived
+}
+
+fn url_redirect_guard_is_exact(
+    events: &[FlowEvent],
+    decl_span: Span,
+    sink_call: &StructuredCall<'_>,
+    sink_span: Span,
+    _parsed: &str,
+    redirect: Option<&crate::rule::UrlRedirectGuardSemantics>,
+    file_index: &bonsai_lang_api::DeclIndex,
+) -> bool {
+    let Some(redirect) = redirect else {
+        return true;
+    };
+    match redirect {
+        crate::rule::UrlRedirectGuardSemantics::ReceiverFieldExactCallback {
+            field,
+            required_return_place,
+        } => {
+            let Some(receiver) = sink_call.receiver.and_then(clean_overwrite_target_key) else {
+                return false;
+            };
+            let target = format!("{receiver}.{field}");
+            file_index.assignment_values.iter().rev().any(|fact| {
+                span_contains(decl_span, fact.assignment_span)
+                    && fact.assignment_span.start < sink_span.start
+                    && fact.target.as_deref() == Some(target.as_str())
+                    && fact
+                        .exact_callable_return
+                        .as_ref()
+                        .and_then(|flow| flow.place.as_deref())
+                        == Some(required_return_place.as_str())
+            })
+        }
+        crate::rule::UrlRedirectGuardSemantics::PostSinkCall {
+            call,
+            argument_index,
+            required_value,
+        } => {
+            let Some(result) = assignment_target_containing_span(events, sink_span) else {
+                return false;
+            };
+            following_direct_call(events, sink_span, |candidate| {
+                rule_target_matches_call(candidate.name, candidate.receiver_types, call)
+                    && candidate.receiver.and_then(clean_overwrite_target_key).as_deref()
+                        == Some(result.as_str())
+                    && bonsai_lang_api::call_argument_value_fact(
+                        &file_index.call_argument_values,
+                        candidate.span,
+                        *argument_index,
+                    )
+                    .and_then(|fact| fact.static_value.as_ref())
+                        == Some(required_value)
+            })
+            .is_some()
+        }
+    }
+}
+
+fn assignment_target_containing_span(events: &[FlowEvent], target: Span) -> Option<String> {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span, target: place, ..
+            } if span_contains(*span, target) => {
+                return clean_overwrite_target_key(place);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(place) = assignment_target_containing_span(then_events, target)
+                    .or_else(|| assignment_target_containing_span(else_events, target))
+                {
+                    return Some(place);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(place) = assignment_target_containing_span(body, target) {
+                    return Some(place);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(place) = assignment_target_containing_span(body, target)
+                    .or_else(|| assignment_target_containing_span(catch_events, target))
+                    .or_else(|| assignment_target_containing_span(finally_events, target))
+                {
+                    return Some(place);
+                }
+            }
+            _ => {}
         }
     }
     None
 }
 
-pub(super) fn java_url_ssrf_guard_sanitizer(
-    ws: &Workspace,
-    sink_func: FuncId,
-    snk: &RuleMatch,
-    sink_rule: &Rule,
-) -> Option<FindingMatch> {
-    if sink_rule
-        .analysis_semantics
-        .as_ref()
-        .and_then(|semantics| semantics.guard_profile)
-        != Some(GuardProfile::JavaUrlSsrfGuard)
-    {
+fn following_direct_call<'a>(
+    events: &'a [FlowEvent],
+    target: Span,
+    predicate: impl Fn(StructuredCall<'a>) -> bool + Copy,
+) -> Option<StructuredCall<'a>> {
+    let sink_index = events.iter().position(|event| {
+        matches!(event, FlowEvent::Call { span, .. } if *span == target || spans_overlap(*span, target))
+    });
+    if let Some(index) = sink_index {
+        for event in &events[index + 1..] {
+            match event {
+                FlowEvent::Call {
+                    span,
+                    name,
+                    receiver,
+                    receiver_types,
+                    args,
+                    ..
+                } => {
+                    let call = StructuredCall {
+                        span: *span,
+                        name,
+                        receiver: receiver.as_deref(),
+                        receiver_types,
+                        args,
+                    };
+                    if predicate(call) {
+                        return Some(call);
+                    }
+                }
+                FlowEvent::Branch { .. }
+                | FlowEvent::Loop { .. }
+                | FlowEvent::Try { .. }
+                | FlowEvent::Defer { .. }
+                | FlowEvent::Using { .. } => break,
+                _ => {}
+            }
+        }
         return None;
     }
-    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
-    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let parsed_var = constructor_assignment_target_at(&decl.flow_events, snk.span)?;
-    let mut branches = Vec::new();
-    collect_following_branches_on_path(&decl.flow_events, snk.span, &mut branches);
-    let scheme_guard = branches.iter().find(|branch| {
-        java_url_scheme_guard_condition(branch.condition, &parsed_var)
-            && branch_arm_abruptly_exits(branch.then_events)
-    });
-    let has_host_allowlist = branches.iter().any(|branch| {
-        java_url_host_allowlist_condition(branch.condition, &parsed_var)
-            && branch_arm_abruptly_exits(branch.then_events)
-    });
-    let private_ip_reject = branches.iter().any(|branch| {
-        java_private_ip_reject_condition(branch.condition) && branch_arm_abruptly_exits(branch.then_events)
-    });
-    let mut assignments = Vec::new();
-    collect_structured_assignments_before(
-        &decl.flow_events,
-        Span::empty(snk.span.file, decl.span.end),
-        &mut assignments,
-    );
-    let has_dns_lookup = assignments.iter().any(|assignment| {
-        assignment.span.start > snk.span.start
-            && assignment
-                .source_call
-                .is_some_and(|call| clean_overwrite_callee_tail(call) == "getbyname")
-            && assignment
-                .source_call_args
-                .iter()
-                .any(|arg| compact_guard_text(arg) == format!("{parsed_var}.getHost()"))
-    });
-    if !(scheme_guard.is_some() && has_host_allowlist && has_dns_lookup && private_ip_reject) {
-        return None;
+    for event in events {
+        let found = match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => following_direct_call(then_events, target, predicate)
+                .or_else(|| following_direct_call(else_events, target, predicate)),
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                following_direct_call(body, target, predicate)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => following_direct_call(body, target, predicate)
+                .or_else(|| following_direct_call(catch_events, target, predicate))
+                .or_else(|| following_direct_call(finally_events, target, predicate)),
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
     }
-    finding_for_guard_span(
-        snk,
-        snapshot.text.as_ref(),
-        scheme_guard?.span,
-        "engine.sanitizer.java_url_ssrf_guard",
-        "ssrf-sanitize",
-        "url-scheme-host-private-ip-guard",
-    )
-}
-
-fn java_url_scheme_guard_condition(condition: &str, parsed_var: &str) -> bool {
-    let compact = compact_guard_text(condition);
-    compact.contains(&format!(
-        "!\"https\".equalsIgnoreCase({parsed_var}.getProtocol())"
-    )) || compact.contains(&format!(
-        "!{parsed_var}.getProtocol().equalsIgnoreCase(\"https\")"
-    )) || compact.contains(&format!("!\"https\".equals({parsed_var}.getProtocol())"))
-}
-
-fn java_url_host_allowlist_condition(condition: &str, parsed_var: &str) -> bool {
-    let compact = compact_guard_text(condition);
-    compact.contains(&format!(".contains({parsed_var}.getHost())"))
-        && (compact.starts_with('!')
-            || compact.starts_with("(!")
-            || compact.starts_with("false==")
-            || compact.starts_with("(false=="))
-}
-
-fn java_private_ip_reject_condition(condition: &str) -> bool {
-    let compact = compact_guard_text(condition);
-    [
-        "isLoopbackAddress()",
-        "isSiteLocalAddress()",
-        "isLinkLocalAddress()",
-        "isAnyLocalAddress()",
-        "isMulticastAddress()",
-    ]
-    .iter()
-    .filter(|needle| compact.contains(**needle))
-    .count()
-        >= 3
+    None
 }
 
 pub(super) fn go_jwt_inline_keyfunc_algorithm_guard_sanitizer(
@@ -899,7 +2272,7 @@ pub(super) fn js_ts_local_html_escape_helper_sanitizer(
     {
         return None;
     }
-    let file_index = ws.exact_decl_index(snk.span.file)?;
+    let file_index = ws.exact_decl_index_shared(snk.span.file)?;
     let sink_decl = file_index
         .defs
         .iter()
@@ -1061,7 +2434,7 @@ pub(super) fn java_local_html_escape_helper_return_sanitizer(
         return None;
     }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let file_index = ws.exact_decl_index(snk.span.file)?;
+    let file_index = ws.exact_decl_index_shared(snk.span.file)?;
     let decl = file_index
         .defs
         .iter()
@@ -1181,15 +2554,26 @@ fn java_html_sanitizer_return_span(decl: &bonsai_lang_api::Decl) -> Option<Span>
 struct StructuredCall<'a> {
     span: Span,
     name: &'a str,
+    receiver: Option<&'a str>,
+    receiver_types: &'a [String],
     args: &'a [bonsai_lang_api::CallArg],
 }
 
 fn collect_structured_calls<'a>(events: &'a [FlowEvent], out: &mut Vec<StructuredCall<'a>>) {
     for event in events {
         match event {
-            FlowEvent::Call { span, name, args, .. } => out.push(StructuredCall {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                receiver_types,
+                args,
+                ..
+            } => out.push(StructuredCall {
                 span: *span,
                 name,
+                receiver: receiver.as_deref(),
+                receiver_types,
                 args,
             }),
             FlowEvent::Branch {
@@ -1290,7 +2674,7 @@ pub(super) fn go_xml_decoder_hardening_sanitizer(
     {
         return None;
     }
-    let file_index = ws.exact_decl_index(snk.span.file)?;
+    let file_index = ws.exact_decl_index_shared(snk.span.file)?;
     let decl = file_index
         .defs
         .iter()
@@ -1360,30 +2744,43 @@ fn go_charset_reader_callback_is_hardened(callback: &bonsai_lang_api::Decl) -> b
 }
 
 pub(super) fn nosql_eq_filter_wrapper_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
     snk: &RuleMatch,
     sink_rule: &Rule,
     sink_tainted_args: &[TaintedArgInfo],
 ) -> Option<FindingMatch> {
-    if sink_rule.tag.as_deref() != Some("nosql-injection")
-        || !matches!(snk.language.as_str(), "javascript" | "typescript" | "go")
-        || sink_tainted_args.is_empty()
+    if sink_rule.tag.as_deref() != Some("nosql-injection") || sink_tainted_args.is_empty() {
+        return None;
+    }
+    let semantics = sink_rule.analysis_semantics.as_ref()?.nosql_filter.as_ref()?;
+    if !sink_tainted_args
+        .iter()
+        .any(|arg| arg.index == semantics.filter_arg_index)
     {
         return None;
     }
-    let filter_args: Vec<&TaintedArgInfo> = sink_tainted_args
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    let sink_call = calls
         .iter()
-        .filter(|arg| arg.index != usize::MAX)
-        .collect();
-    if filter_args.is_empty()
-        || !filter_args
-            .iter()
-            .all(|arg| nosql_filter_arg_uses_only_eq_wrappers(&arg.value_text))
-    {
+        .find(|call| call.span == snk.span || spans_overlap(call.span, snk.span))?;
+    let file_index = ws.exact_decl_index_shared(snk.span.file)?;
+    let argument = bonsai_lang_api::call_argument_value_fact(
+        &file_index.call_argument_values,
+        sink_call.span,
+        semantics.filter_arg_index,
+    )?;
+    if !nosql_filter_uses_only_literal_value_operators(
+        &argument.value_flow,
+        &semantics.literal_value_operators,
+    ) {
         return None;
     }
     Some(FindingMatch {
         origin: MatchOrigin::EngineSanitizer,
-        rule_id: "engine.sanitizer.nosql_eq_filter_wrapper".to_string(),
+        rule_id: "engine.sanitizer.nosql_literal_operator_filter".to_string(),
         file: snk.file.clone(),
         line: snk.line,
         column: snk.column,
@@ -1395,212 +2792,37 @@ pub(super) fn nosql_eq_filter_wrapper_sanitizer(
         trust: None,
         payload_types: Vec::new(),
         tainted_args: Vec::new(),
-        sanitised_arg_indices: sink_tainted_args
-            .iter()
-            .filter_map(|arg| u32::try_from(arg.index).ok())
-            .collect(),
+        sanitised_arg_indices: vec![u32::try_from(semantics.filter_arg_index).ok()?],
     })
 }
 
-fn nosql_filter_arg_uses_only_eq_wrappers(raw: &str) -> bool {
-    let compact = compact_guard_text(raw);
-    if compact.is_empty()
-        || !compact.contains("$eq")
-        || compact.contains("...")
-        || nosql_filter_contains_banned_operator(&compact)
-    {
+fn nosql_filter_uses_only_literal_value_operators(
+    filter: &bonsai_lang_api::ExpressionFlow,
+    literal_value_operators: &[String],
+) -> bool {
+    if filter.aggregate_fields.is_empty() || !filter.spreads.is_empty() || !filter.tuple_items.is_empty() {
         return false;
     }
-    let Some(inner) = braced_object_inner(raw) else {
-        return false;
-    };
-    let fields = split_top_level_items(inner);
-    if fields.is_empty() {
-        return false;
-    }
-    fields.into_iter().all(|field| {
-        let Some((_, value)) = split_top_level_once(field, ':') else {
+    let mut saw_literal_operator = false;
+    for field in &filter.aggregate_fields {
+        if field.name.starts_with('$') {
             return false;
-        };
-        let value = value.trim().trim_end_matches(',');
-        nosql_literal_value(value) || nosql_value_is_eq_wrapper(value)
-    })
-}
-
-fn nosql_filter_contains_banned_operator(compact: &str) -> bool {
-    const BANNED: &[&str] = &[
-        "$ne",
-        "$gt",
-        "$gte",
-        "$lt",
-        "$lte",
-        "$in",
-        "$nin",
-        "$regex",
-        "$where",
-        "$expr",
-        "$or",
-        "$and",
-        "$nor",
-        "$not",
-        "$elemMatch",
-        "$function",
-        "$accumulator",
-    ];
-    BANNED.iter().any(|operator| compact.contains(operator))
-}
-
-fn nosql_literal_value(value: &str) -> bool {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    matches!(lower.as_str(), "true" | "false" | "null" | "nil" | "undefined")
-        || trimmed.starts_with('"')
-        || trimmed.starts_with('\'')
-        || trimmed
-            .chars()
-            .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-' | '+'))
-}
-
-fn nosql_value_is_eq_wrapper(value: &str) -> bool {
-    let Some(inner) = braced_object_inner(value) else {
-        return false;
-    };
-    let fields = split_top_level_items(inner);
-    if fields.len() != 1 {
-        return false;
-    }
-    let Some((key, wrapped)) = split_top_level_once(fields[0], ':') else {
-        return false;
-    };
-    let key = key.trim().trim_matches('"').trim_matches('\'').trim();
-    key == "$eq" && !wrapped.trim().is_empty()
-}
-
-fn braced_object_inner(text: &str) -> Option<&str> {
-    let trimmed = text.trim().trim_end_matches(';').trim_end_matches(',');
-    let open = trimmed.find('{')?;
-    let close = matching_closing_brace(trimmed, open)?;
-    if trimmed[close + 1..].trim().is_empty() {
-        Some(&trimmed[open + 1..close])
-    } else {
-        None
-    }
-}
-
-fn matching_closing_brace(text: &str, open: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    if bytes.get(open).copied() != Some(b'{') {
-        return None;
-    }
-    let mut depth = 0usize;
-    let mut quote: Option<u8> = None;
-    let mut escaped = false;
-    for (idx, byte) in bytes.iter().enumerate().skip(open) {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if *byte == b'\\' {
-                escaped = true;
-                continue;
-            }
-            if *byte == q {
-                quote = None;
-            }
+        }
+        if expression_flow_is_literal(&field.value) {
             continue;
         }
-        match *byte {
-            b'\'' | b'"' | b'`' => quote = Some(*byte),
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(idx);
-                }
-            }
-            _ => {}
+        if field.value.aggregate_fields.len() != 1
+            || !field.value.spreads.is_empty()
+            || !field.value.tuple_items.is_empty()
+            || !literal_value_operators
+                .iter()
+                .any(|operator| operator == &field.value.aggregate_fields[0].name)
+        {
+            return false;
         }
+        saw_literal_operator = true;
     }
-    None
-}
-
-fn split_top_level_items(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0isize;
-    let mut quote: Option<u8> = None;
-    let mut escaped = false;
-    let bytes = text.as_bytes();
-    for (idx, byte) in bytes.iter().enumerate() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if *byte == b'\\' {
-                escaped = true;
-                continue;
-            }
-            if *byte == q {
-                quote = None;
-            }
-            continue;
-        }
-        match *byte {
-            b'\'' | b'"' | b'`' => quote = Some(*byte),
-            b'{' | b'[' | b'(' => depth += 1,
-            b'}' | b']' | b')' => depth -= 1,
-            b',' if depth == 0 => {
-                let item = text[start..idx].trim();
-                if !item.is_empty() {
-                    out.push(item);
-                }
-                start = idx + 1;
-            }
-            _ => {}
-        }
-    }
-    let item = text[start..].trim();
-    if !item.is_empty() {
-        out.push(item);
-    }
-    out
-}
-
-fn split_top_level_once(text: &str, delimiter: char) -> Option<(&str, &str)> {
-    let mut depth = 0isize;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for (idx, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' | '`' => quote = Some(ch),
-            '{' | '[' | '(' => depth += 1,
-            '}' | ']' | ')' => depth -= 1,
-            _ if ch == delimiter && depth == 0 => {
-                return Some((&text[..idx], &text[idx + ch.len_utf8()..]));
-            }
-            _ => {}
-        }
-    }
-    None
+    saw_literal_operator
 }
 
 #[derive(Copy, Clone)]
@@ -1608,6 +2830,7 @@ struct StructuredAssignment<'a> {
     span: Span,
     target: &'a str,
     source_name: Option<&'a str>,
+    source_names: &'a [String],
     source_call: Option<&'a str>,
     source_call_args: &'a [String],
 }
@@ -1849,6 +3072,42 @@ fn finding_for_guard_span(
     })
 }
 
+fn finding_for_guard_span_in_workspace(
+    ws: &Workspace,
+    hit: &RuleMatch,
+    span: Span,
+    rule_id: &str,
+    tag: &str,
+    category: &str,
+) -> Option<FindingMatch> {
+    let snapshot = ws.vfs().snapshot(span.file).ok()?;
+    let (file, line, column) = resolve_span_location(ws, span);
+    let text = snapshot
+        .text
+        .get(span.start as usize..span.end as usize)?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    Some(FindingMatch {
+        origin: MatchOrigin::EngineSanitizer,
+        rule_id: rule_id.to_string(),
+        file,
+        line,
+        column,
+        text,
+        enclosing_fn: hit.enclosing_fn.clone(),
+        tag: Some(tag.to_string()),
+        severity: None,
+        category: Some(category.to_string()),
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: Vec::new(),
+    })
+}
+
 fn collect_structured_assignments_before<'a>(
     events: &'a [FlowEvent],
     before: Span,
@@ -1860,6 +3119,7 @@ fn collect_structured_assignments_before<'a>(
                 span,
                 target,
                 source_name,
+                source_names,
                 source_call,
                 source_call_args,
                 ..
@@ -1869,6 +3129,7 @@ fn collect_structured_assignments_before<'a>(
                         span: *span,
                         target,
                         source_name: source_name.as_deref(),
+                        source_names,
                         source_call: source_call.as_deref(),
                         source_call_args,
                     });
@@ -1916,7 +3177,7 @@ pub(super) fn local_ldap_escape_helper_sanitizer(
         return None;
     }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let file_index = ws.exact_decl_index(snk.span.file)?;
+    let file_index = ws.exact_decl_index_shared(snk.span.file)?;
     let decl = file_index
         .defs
         .iter()
@@ -2161,7 +3422,7 @@ pub(super) fn go_same_origin_redirect_helper_guard_sanitizer(
     if targets.is_empty() {
         return None;
     }
-    let file_index = ws.exact_decl_index(snk.span.file)?;
+    let file_index = ws.exact_decl_index_shared(snk.span.file)?;
     let decl = file_index
         .defs
         .iter()
@@ -2484,110 +3745,6 @@ fn assignment_target_for_source_call_at(
     None
 }
 
-fn constructor_assignment_target_at(
-    events: &[bonsai_lang_api::FlowEvent],
-    sink_span: Span,
-) -> Option<String> {
-    use bonsai_lang_api::FlowEvent;
-    for event in events {
-        match event {
-            FlowEvent::Assign {
-                span,
-                target,
-                source_call,
-                ..
-            } if span_contains(*span, sink_span)
-                && source_call.as_deref().is_some_and(|call| {
-                    matches!(clean_overwrite_callee_tail(call).as_str(), "url" | "uri")
-                }) =>
-            {
-                return clean_overwrite_target_key(target);
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                if let Some(target) = constructor_assignment_target_at(then_events, sink_span)
-                    .or_else(|| constructor_assignment_target_at(else_events, sink_span))
-                {
-                    return Some(target);
-                }
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if let Some(target) = constructor_assignment_target_at(body, sink_span) {
-                    return Some(target);
-                }
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                if let Some(target) = constructor_assignment_target_at(body, sink_span)
-                    .or_else(|| constructor_assignment_target_at(catch_events, sink_span))
-                    .or_else(|| constructor_assignment_target_at(finally_events, sink_span))
-                {
-                    return Some(target);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn find_call_arg_named_at<'a>(
-    events: &'a [bonsai_lang_api::FlowEvent],
-    call_span: Span,
-    arg_name: &str,
-) -> Option<&'a bonsai_lang_api::CallArg> {
-    use bonsai_lang_api::FlowEvent;
-    for event in events {
-        match event {
-            FlowEvent::Call { span, args, .. } => {
-                if *span == call_span || spans_overlap(*span, call_span) {
-                    if let Some(arg) = args.iter().find(|arg| arg.name.as_deref() == Some(arg_name)) {
-                        return Some(arg);
-                    }
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                if let Some(arg) = find_call_arg_named_at(then_events, call_span, arg_name)
-                    .or_else(|| find_call_arg_named_at(else_events, call_span, arg_name))
-                {
-                    return Some(arg);
-                }
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if let Some(arg) = find_call_arg_named_at(body, call_span, arg_name) {
-                    return Some(arg);
-                }
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                if let Some(arg) = find_call_arg_named_at(body, call_span, arg_name)
-                    .or_else(|| find_call_arg_named_at(catch_events, call_span, arg_name))
-                    .or_else(|| find_call_arg_named_at(finally_events, call_span, arg_name))
-                {
-                    return Some(arg);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 fn python_dev_only_env_guard_condition(condition: &str) -> bool {
     let lower = condition.trim().to_ascii_lowercase();
     let reads_env = lower.contains("os.environ.get")
@@ -2627,14 +3784,20 @@ pub(super) fn finite_literal_map_lookup_allowlist_sanitizer(
         return None;
     }
     let snapshot = ws.vfs().snapshot(sink.span.file).ok()?;
-    let file_index = ws.db().decl_index(sink.span.file)?;
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
     let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&file_index.assignment_values);
+    let headers = ws.compiler_linkage_index();
     let enclosing = ws
         .enclosing_index()
-        .enclosing_for(ws.db(), sink.span.file, sink.span.start)?;
+        .enclosing_for(headers.as_ref(), sink.span.file, sink.span.start)?;
     let decl = ws.exact_decl(enclosing.symbol)?;
     let mut file_assignments = Vec::new();
-    for candidate in &file_index.defs {
+    let exact_file_decls: Vec<_> = file_index
+        .defs
+        .iter()
+        .filter_map(|candidate| ws.exact_decl(candidate.symbol))
+        .collect();
+    for candidate in &exact_file_decls {
         collect_structured_assignments_before(&candidate.flow_events, sink.span, &mut file_assignments);
     }
     file_assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
@@ -2642,8 +3805,45 @@ pub(super) fn finite_literal_map_lookup_allowlist_sanitizer(
     let mut local_assignments = Vec::new();
     collect_structured_assignments_before(&decl.flow_events, sink.span, &mut local_assignments);
     local_assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    let mut local_calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut local_calls);
     let span_map = bonsai_common::cached_span_map_arc(sink.span.file, snapshot.version, &snapshot.text);
     for arg in tainted_args {
+        let target = clean_overwrite_target_key(&arg.value_text);
+        if let Some(assignment) = target.as_deref().and_then(|target| {
+            local_assignments.iter().rev().find(|assignment| {
+                clean_overwrite_target_key(assignment.target).as_deref() == Some(target)
+                    && python_constant_literal_map_get_assignment(
+                        assignment,
+                        &local_calls,
+                        &file_assignments,
+                        &file_index.assignment_values,
+                    )
+            })
+        }) {
+            let location = span_map.line_col(assignment.span.start);
+            let text = snapshot
+                .text
+                .get(assignment.span.start as usize..assignment.span.end as usize)?
+                .trim()
+                .to_string();
+            return Some(FindingMatch {
+                origin: MatchOrigin::EngineSanitizer,
+                rule_id: "engine.sanitizer.literal_map_value_allowlist".to_string(),
+                file: sink.file.clone(),
+                line: location.line,
+                column: location.column,
+                text,
+                enclosing_fn: sink.enclosing_fn.clone(),
+                tag: Some("allowlist-validate".to_string()),
+                severity: None,
+                category: Some("finite-map-value-allowlist".to_string()),
+                trust: None,
+                payload_types: Vec::new(),
+                tainted_args: Vec::new(),
+                sanitised_arg_indices: Vec::new(),
+            });
+        }
         let Some((map_name, key_name)) = python_index_lookup_parts(&arg.value_text) else {
             continue;
         };
@@ -2693,6 +3893,206 @@ pub(super) fn finite_literal_map_lookup_allowlist_sanitizer(
         }
     }
     None
+}
+
+pub(super) fn parameterized_query_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<FindingMatch> {
+    let semantics = sink_rule
+        .analysis_semantics
+        .as_ref()?
+        .parameterized_query
+        .as_ref()?;
+    if !sanitizer_credits_sink_tag(Some("sql-parameterize"), sink_rule.tag.as_deref()) {
+        return None;
+    }
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    let sink_call = calls
+        .iter()
+        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let query_arg = sink_call.args.get(semantics.query_arg_index)?;
+    let bindings_arg = sink_call.args.get(semantics.bindings_arg_index)?;
+    let query_target = query_arg.place.as_deref().and_then(clean_overwrite_target_key)?;
+    let bindings_target = bindings_arg.place.as_deref().and_then(clean_overwrite_target_key);
+    if bindings_target.as_deref() == Some(query_target.as_str()) {
+        return None;
+    }
+
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(&decl.flow_events, sink.span, &mut assignments);
+    let mut file_assignments = Vec::new();
+    let exact_file_decls: Vec<_> = file_index
+        .defs
+        .iter()
+        .filter_map(|candidate| ws.exact_decl(candidate.symbol))
+        .collect();
+    for candidate in &exact_file_decls {
+        collect_structured_assignments_before(&candidate.flow_events, sink.span, &mut file_assignments);
+    }
+    file_assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    file_assignments.dedup_by_key(|assignment| assignment.span);
+
+    let mut branches = Vec::new();
+    collect_completed_branches_on_path(&decl.flow_events, sink.span, &mut branches);
+    let guarded_fragments: AHashMap<String, Span> = branches
+        .into_iter()
+        .filter(|branch| branch_arm_abruptly_exits(branch.then_events))
+        .filter_map(|branch| {
+            let membership = branch_condition_fact_for_span(&file_index.branch_conditions, branch.span)?
+                .membership
+                .as_ref()?;
+            if membership.then_contains {
+                return None;
+            }
+            let subject = clean_overwrite_target_key(&membership.subject)?;
+            let collection = clean_overwrite_target_key(&membership.collection)?;
+            literal_collection_declared_before(&file_assignments, &collection, &file_index.assignment_values)
+                .then_some((subject, branch.span))
+        })
+        .collect();
+    if guarded_fragments.is_empty() {
+        return None;
+    }
+
+    let query_assignments: Vec<_> = assignments
+        .iter()
+        .filter(|assignment| {
+            clean_overwrite_target_key(assignment.target).as_deref() == Some(query_target.as_str())
+        })
+        .collect();
+    if query_assignments.is_empty()
+        || !query_assignments.iter().all(|assignment| {
+            assignment.source_call.is_none()
+                && assignment.source_names.iter().all(|source| {
+                    clean_overwrite_target_key(source)
+                        .is_some_and(|source| guarded_fragments.contains_key(&source))
+                })
+        })
+        || !query_assignments
+            .iter()
+            .any(|assignment| !assignment.source_names.is_empty())
+    {
+        return None;
+    }
+
+    let guard_span = guarded_fragments
+        .values()
+        .copied()
+        .min_by_key(|span| (span.start, span.end))?;
+    let snapshot = ws.vfs().snapshot(sink.span.file).ok()?;
+    let mut finding = finding_for_guard_span(
+        sink,
+        snapshot.text.as_ref(),
+        guard_span,
+        "engine.sanitizer.parameterized_query_allowlisted_fragments",
+        "sql-parameterize",
+        "parameterized-query-allowlisted-fragments",
+    )?;
+    finding.sanitised_arg_indices = vec![u32::try_from(semantics.query_arg_index).ok()?];
+    Some(finding)
+}
+
+fn literal_collection_declared_before(
+    assignments: &[StructuredAssignment<'_>],
+    collection: &str,
+    assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+) -> bool {
+    assignments.iter().any(|assignment| {
+        if clean_overwrite_target_key(assignment.target).as_deref() != Some(collection) {
+            return false;
+        }
+        assignment_values
+            .iter()
+            .find(|fact| fact.assignment_span == assignment.span)
+            .is_some_and(|fact| {
+                let flow = &fact.value_flow;
+                (!flow.tuple_items.is_empty() && flow.tuple_items.iter().all(expression_flow_is_literal))
+                    || (!flow.aggregate_fields.is_empty()
+                        && flow
+                            .aggregate_fields
+                            .iter()
+                            .all(|field| expression_flow_is_literal(&field.value)))
+            })
+    })
+}
+
+fn expression_flow_is_literal(flow: &bonsai_lang_api::ExpressionFlow) -> bool {
+    flow.place.is_none()
+        && flow.projection.is_none()
+        && flow.source_names.is_empty()
+        && flow.call_sites.is_empty()
+        && flow.spreads.is_empty()
+        && flow.tuple_items.iter().all(expression_flow_is_literal)
+        && flow
+            .aggregate_fields
+            .iter()
+            .all(|field| expression_flow_is_literal(&field.value))
+}
+
+fn python_constant_literal_map_get_assignment(
+    assignment: &StructuredAssignment<'_>,
+    calls: &[StructuredCall<'_>],
+    file_assignments: &[StructuredAssignment<'_>],
+    assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+) -> bool {
+    let Some(source_call) = assignment.source_call else {
+        return false;
+    };
+    let Some(map_name) = source_call.strip_suffix(".get") else {
+        return false;
+    };
+    if !python_identifier_path_like(map_name) {
+        return false;
+    }
+    let Some(call) = calls.iter().find(|call| {
+        span_contains(assignment.span, call.span) && call.name == source_call && call.args.len() >= 2
+    }) else {
+        return false;
+    };
+    let Some(default_place) = call.args.get(1).and_then(|arg| arg.place.as_deref()) else {
+        return false;
+    };
+    let default_is_same_map_value = default_place
+        .strip_prefix(map_name)
+        .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1);
+    default_is_same_map_value
+        && python_constant_literal_mapping_declared_before(file_assignments, map_name, assignment_values)
+}
+
+fn python_constant_literal_mapping_declared_before(
+    assignments: &[StructuredAssignment<'_>],
+    map_name: &str,
+    assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+) -> bool {
+    assignments.iter().any(|assignment| {
+        if clean_overwrite_target_key(assignment.target).as_deref() != Some(map_name) {
+            return false;
+        }
+        let Some(value) = assignment_values
+            .iter()
+            .find(|fact| fact.assignment_span == assignment.span)
+            .map(|fact| &fact.value_flow)
+        else {
+            return false;
+        };
+        !value.aggregate_fields.is_empty()
+            && value.spreads.is_empty()
+            && value.aggregate_fields.iter().all(|field| {
+                field.value.place.is_none()
+                    && field.value.projection.is_none()
+                    && field.value.source_names.is_empty()
+                    && field.value.call_sites.is_empty()
+                    && field.value.aggregate_fields.is_empty()
+                    && field.value.tuple_items.is_empty()
+                    && field.value.spreads.is_empty()
+            })
+    })
 }
 
 pub(super) fn guarded_char_append_allowlist_sanitizer(

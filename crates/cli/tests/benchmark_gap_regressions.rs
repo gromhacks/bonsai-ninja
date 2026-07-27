@@ -2862,8 +2862,6 @@ func decoder(input string) {
             "d.Strict",
             "go.xxe.xml_decoder_entity_map",
             "d.Entity",
-            "go.xxe.xml_decoder_charsetreader",
-            "d.CharsetReader",
         ],
     );
     assert_rows_do_not_contain(
@@ -2872,6 +2870,8 @@ func decoder(input string) {
             "\"text\": \"Strict\"",
             "\"text\": \"Entity\"",
             "\"text\": \"CharsetReader\"",
+            "\"text\": \"d.CharsetReader\"",
+            "go.xxe.xml_decoder_charsetreader",
         ],
     );
 }

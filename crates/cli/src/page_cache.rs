@@ -8,18 +8,27 @@
 //! source/rulepack/dependency freshness fingerprints.
 
 use crate::{out_count, output, paging, progress};
+use anyhow::Context;
 use bonsai_common::{dependency_metadata::collect_dependency_metadata_fingerprints, write_atomic_bytes};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::UNIX_EPOCH;
 
 static REMEMBERED_WORKSPACE_FINGERPRINT: OnceLock<
     Mutex<Option<(PathBuf, bonsai_sdk::WorkspaceContentFingerprint)>>,
 > = OnceLock::new();
+
+fn lock_remembered_workspace_fingerprint(
+) -> MutexGuard<'static, Option<(PathBuf, bonsai_sdk::WorkspaceContentFingerprint)>> {
+    REMEMBERED_WORKSPACE_FINGERPRINT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 thread_local! {
     static CAPTURE: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -140,18 +149,12 @@ pub(crate) fn remember_workspace_fingerprint(
     fingerprint: bonsai_sdk::WorkspaceContentFingerprint,
 ) {
     let stable_workspace = stable_root_path(workspace);
-    *REMEMBERED_WORKSPACE_FINGERPRINT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .expect("page-cache fingerprint lock") = Some((stable_workspace, fingerprint));
+    *lock_remembered_workspace_fingerprint() = Some((stable_workspace, fingerprint));
 }
 
 fn remembered_workspace_fingerprint(workspace: &Path) -> Option<bonsai_sdk::WorkspaceContentFingerprint> {
     let stable_workspace = stable_root_path(workspace);
-    REMEMBERED_WORKSPACE_FINGERPRINT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .expect("page-cache fingerprint lock")
+    lock_remembered_workspace_fingerprint()
         .as_ref()
         .and_then(|(remembered_root, fingerprint)| {
             (remembered_root == &stable_workspace).then_some(*fingerprint)
@@ -242,7 +245,7 @@ pub(crate) fn save_keyed_payload<T: Serialize>(
         );
         return Ok(());
     };
-    let value = String::from_utf8(value).expect("serde_json always emits UTF-8");
+    let value = String::from_utf8(value).context("serialized page-cache JSON was not UTF-8")?;
     let dir = cache_dir(workspace);
     std::fs::create_dir_all(&dir)?;
     let file = KeyedPayloadFile {

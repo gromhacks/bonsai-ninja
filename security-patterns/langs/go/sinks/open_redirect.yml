@@ -2,7 +2,7 @@
   enabled: true
   language: go
   tag: open-redirect
-  severity: medium
+  severity: high
   packages:
   - github.com/gin-gonic/gin
   - github.com/labstack/echo

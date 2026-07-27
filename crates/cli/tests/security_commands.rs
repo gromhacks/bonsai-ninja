@@ -3099,6 +3099,7 @@ def handle():
 "#;
     for relative in [
         "app.py",
+        "src/main/java/com/example/app.py",
         "tests/test_app.py",
         "testdata/go_fixture.py",
         "src/test/java/AppTest.py",
@@ -3132,11 +3133,21 @@ def handle():
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&out).expect("production profile JSON");
     let rows = json_rows(&parsed);
-    assert_eq!(rows.len(), 1, "only first-party app.py should remain:\n{out}");
-    let row = &rows[0];
+    assert_eq!(
+        rows.len(),
+        2,
+        "first-party files, including Java package namespaces named `example`, should remain:\n{out}"
+    );
     assert!(
-        row.to_string().contains("app.py"),
-        "remaining production finding should come from app.py:\n{out}"
+        rows.iter().any(|row| {
+            let rendered = row.to_string();
+            rendered.contains("app.py") && !rendered.contains("src/main/java/")
+        }),
+        "the top-level app.py production finding should remain:\n{out}"
+    );
+    assert!(
+        out.contains("src/main/java/com/example/app.py"),
+        "the Java package namespace component `example` must not be treated as an example-project directory:\n{out}"
     );
     for excluded in [
         "tests/",

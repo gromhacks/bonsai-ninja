@@ -394,7 +394,7 @@ impl CallGraph {
     /// source `FileId`, and therefore cannot collide across file partitions.
     /// Reusing the flattened edge vector avoids both a second edge allocation
     /// and a second, potentially quadratic, per-caller duplicate scan.
-    fn from_unique_edges(edges: Vec<CallEdge>) -> Self {
+    pub fn from_unique_edges(edges: Vec<CallEdge>) -> Self {
         assert!(
             u32::try_from(edges.len()).is_ok(),
             "callgraph overflow: > 2^32 edges"
@@ -1015,13 +1015,23 @@ pub struct ResolvedCallGraph {
     /// Deterministic metadata for graph endpoints. Persisting the node name
     /// beside resolved edges lets later compiler phases consume a warm graph
     /// without retaining or rebuilding every file's lowered declaration body.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    // These vectors are encoded by the positional binary wire format used by
+    // workspace sidecars. Do not skip empty middle fields: doing so shifts a
+    // later field into the previous field's type during deserialization.
+    #[serde(default)]
     nodes: Vec<CallGraphNode>,
     /// Compiler-resolved file-local callable aliases (`let f = target;`).
     /// IDG construction consumes this compact linkage result instead of
     /// retaining every assignment event in every function body.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     local_bindings: Vec<CallGraphLocalBinding>,
+    /// Call expressions or callable arguments for which the compiler found
+    /// workspace candidates but could not select a semantically justified
+    /// edge. Unknown external calls are intentionally absent: a coincidental
+    /// short-name match elsewhere in the workspace is not resolution
+    /// evidence.
+    #[serde(default)]
+    unresolved_workspace_sites: Vec<UnresolvedWorkspaceCallSite>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1035,6 +1045,12 @@ struct CallGraphLocalBinding {
     caller: FuncId,
     name: Box<str>,
     target: FuncId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct UnresolvedWorkspaceCallSite {
+    caller: FuncId,
+    span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -1122,6 +1138,7 @@ impl ResolvedCallGraph {
             cg,
             nodes: Vec::new(),
             local_bindings: Vec::new(),
+            unresolved_workspace_sites: Vec::new(),
         }
     }
 
@@ -1367,6 +1384,7 @@ impl ResolvedCallGraph {
             cg,
             nodes,
             local_bindings: resolution.local_bindings,
+            unresolved_workspace_sites: resolution.unresolved_workspace_sites,
         }
     }
 
@@ -1374,9 +1392,76 @@ impl ResolvedCallGraph {
     /// while sharing one workspace-wide header resolution context.
     pub fn build_with_file_semantics_for_files_streaming_with_context<F, T, D>(
         global: &GlobalIndex,
+        aliases_for_file: F,
+        alias_targets_for_file: T,
+        included_files: &[FileId],
+        context: &ResolvedCallGraphBuildContext,
+        body_for_file: D,
+    ) -> Self
+    where
+        F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
+        D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+    {
+        Self::build_with_file_semantics_streaming_with_context_scoped(
+            global,
+            aliases_for_file,
+            alias_targets_for_file,
+            included_files,
+            None,
+            context,
+            body_for_file,
+        )
+    }
+
+    /// Resolve only the selected callable compiler bodies.
+    ///
+    /// Workspace headers remain complete, so every call receives the same
+    /// import, type, visibility, and overload resolution as a file-wide
+    /// build. Only outgoing bodies are demand-selected. A monotone caller can
+    /// therefore request newly discovered functions until its fixed point
+    /// converges without retaining unrelated functions that happen to share a
+    /// source file.
+    pub fn build_with_file_semantics_for_funcs_streaming_with_context<F, T, D>(
+        global: &GlobalIndex,
+        aliases_for_file: F,
+        alias_targets_for_file: T,
+        included_funcs: &[FuncId],
+        context: &ResolvedCallGraphBuildContext,
+        body_for_file: D,
+    ) -> Self
+    where
+        F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
+        D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+    {
+        let included_symbols: AHashSet<SymbolId> = included_funcs
+            .iter()
+            .map(|func| SymbolId::new(func.raw()))
+            .collect();
+        let mut included_files: Vec<FileId> = included_symbols
+            .iter()
+            .filter_map(|symbol| global.declaring_file(*symbol))
+            .collect();
+        included_files.sort_unstable_by_key(|file| file.raw());
+        included_files.dedup();
+        Self::build_with_file_semantics_streaming_with_context_scoped(
+            global,
+            aliases_for_file,
+            alias_targets_for_file,
+            &included_files,
+            Some(&included_symbols),
+            context,
+            body_for_file,
+        )
+    }
+
+    fn build_with_file_semantics_streaming_with_context_scoped<F, T, D>(
+        global: &GlobalIndex,
         mut aliases_for_file: F,
         mut alias_targets_for_file: T,
         included_files: &[FileId],
+        included_symbols: Option<&AHashSet<SymbolId>>,
         context: &ResolvedCallGraphBuildContext,
         body_for_file: D,
     ) -> Self
@@ -1403,7 +1488,10 @@ impl ResolvedCallGraph {
             })
             .collect::<Vec<_>>();
         let resolve_file = |info: &FileCallgraphInfo| {
-            body_for_file(info.file).map_or_else(FileCallgraphResolution::default, |index| {
+            body_for_file(info.file).map_or_else(FileCallgraphResolution::default, |mut index| {
+                if let Some(included) = included_symbols {
+                    index.defs.retain(|decl| included.contains(&decl.symbol));
+                }
                 resolve_file_call_edges(global, context, info, &index.defs)
             })
         };
@@ -1414,6 +1502,7 @@ impl ResolvedCallGraph {
             cg,
             nodes,
             local_bindings: resolution.local_bindings,
+            unresolved_workspace_sites: resolution.unresolved_workspace_sites,
         }
     }
 
@@ -1486,6 +1575,18 @@ impl ResolvedCallGraph {
             .iter()
             .map(|binding| (binding.caller, binding.name.as_ref(), binding.target))
     }
+
+    /// Iterate exact resolver gaps in deterministic caller/span order.
+    ///
+    /// Each row had workspace candidates but no semantically justified call
+    /// edge. Calls with no workspace evidence are external/unknown and do not
+    /// make a workspace scan incomplete merely because their short name
+    /// collides with an unrelated declaration.
+    pub fn unresolved_workspace_call_sites(&self) -> impl Iterator<Item = (FuncId, Span)> + '_ {
+        self.unresolved_workspace_sites
+            .iter()
+            .map(|site| (site.caller, site.span))
+    }
 }
 
 fn resolve_file_call_edges(
@@ -1502,6 +1603,7 @@ fn resolve_file_call_edges(
     let mut callable_target_cache = CallableTargetCache::default();
     let mut local_cg = CallGraph::new();
     let mut resolved_bindings = Vec::new();
+    let mut unresolved_workspace_sites = Vec::new();
     for decl in decls {
         if !matches!(
             decl.kind,
@@ -1553,12 +1655,16 @@ fn resolve_file_call_edges(
                 workspace_module_cache: &mut workspace_module_cache,
                 callable_target_cache: &mut callable_target_cache,
                 graph: &mut local_cg,
+                unresolved_workspace_sites: &mut unresolved_workspace_sites,
             },
         );
     }
+    unresolved_workspace_sites.sort_unstable();
+    unresolved_workspace_sites.dedup();
     FileCallgraphResolution {
         edges: local_cg.edges,
         local_bindings: resolved_bindings,
+        unresolved_workspace_sites,
     }
 }
 
@@ -1566,6 +1672,7 @@ fn resolve_file_call_edges(
 struct FileCallgraphResolution {
     edges: Vec<CallEdge>,
     local_bindings: Vec<CallGraphLocalBinding>,
+    unresolved_workspace_sites: Vec<UnresolvedWorkspaceCallSite>,
 }
 
 fn collect_resolved_file_edges<R>(
@@ -1598,16 +1705,25 @@ where
         .iter()
         .map(|result| result.local_bindings.len())
         .sum();
+    let unresolved_count = file_results
+        .iter()
+        .map(|result| result.unresolved_workspace_sites.len())
+        .sum();
     let mut out = FileCallgraphResolution {
         edges: Vec::with_capacity(edge_count),
         local_bindings: Vec::with_capacity(binding_count),
+        unresolved_workspace_sites: Vec::with_capacity(unresolved_count),
     };
     for result in file_results {
         out.edges.extend(result.edges);
         out.local_bindings.extend(result.local_bindings);
+        out.unresolved_workspace_sites
+            .extend(result.unresolved_workspace_sites);
     }
     out.local_bindings.sort();
     out.local_bindings.dedup();
+    out.unresolved_workspace_sites.sort_unstable();
+    out.unresolved_workspace_sites.dedup();
     out
 }
 
@@ -1691,6 +1807,7 @@ struct CallGraphBuildState<'a> {
     workspace_module_cache: &'a mut WorkspaceModuleTargetCache,
     callable_target_cache: &'a mut CallableTargetCache,
     graph: &'a mut CallGraph,
+    unresolved_workspace_sites: &'a mut Vec<UnresolvedWorkspaceCallSite>,
 }
 
 /// Adapter-emitted syntax facts for one call site plus the receiver identity
@@ -1747,6 +1864,7 @@ fn add_call_event_edges(
         state.method_candidate_cache,
         state.callable_target_cache,
         state.graph,
+        state.unresolved_workspace_sites,
     );
     let short = short_callee(name);
     let alias_qualified = qualified_module_alias_call(name, context.aliases)
@@ -2086,6 +2204,7 @@ fn resolve_and_emit_call_site(
     let CallGraphBuildState {
         method_candidate_cache,
         graph: cg,
+        unresolved_workspace_sites,
         ..
     } = state;
     if !candidates.is_empty() {
@@ -2157,7 +2276,14 @@ fn resolve_and_emit_call_site(
     retain_call_kind_compatible_candidates(global, resolved_call_kind, &mut candidates);
     dedup_func_ids(&mut candidates);
     dedup_semantic_candidate_decls(global, &mut candidates);
-    emit_call_site_candidate_edges(candidates, candidates_from_callable_binding, facts, context, cg);
+    emit_call_site_candidate_edges(
+        candidates,
+        candidates_from_callable_binding,
+        facts,
+        context,
+        cg,
+        unresolved_workspace_sites,
+    );
 }
 
 fn emit_call_site_candidate_edges(
@@ -2166,6 +2292,7 @@ fn emit_call_site_candidate_edges(
     facts: &CallSiteFacts<'_>,
     context: &CallResolutionContext<'_>,
     graph: &mut CallGraph,
+    unresolved_workspace_sites: &mut Vec<UnresolvedWorkspaceCallSite>,
 ) {
     if candidates.is_empty() {
         return;
@@ -2184,6 +2311,10 @@ fn emit_call_site_candidate_edges(
     );
     let Some((kind, precision)) = semantic_edge_shape(candidates.len(), semantic_virtual || same_decl_family)
     else {
+        unresolved_workspace_sites.push(UnresolvedWorkspaceCallSite {
+            caller: context.from,
+            span: facts.span,
+        });
         return;
     };
     let provenance = edge_provenance_for_resolved_call(
@@ -2242,6 +2373,7 @@ fn add_assignment_call_edges(
         workspace_module_cache,
         callable_target_cache,
         graph: cg,
+        unresolved_workspace_sites,
     } = state;
     if assign_source_call_shadowed_by_explicit_call(events, name, *span) {
         return;
@@ -2331,6 +2463,10 @@ fn add_assignment_call_edges(
             caller_capabilities.callable_declaration_family,
         );
         let Some((kind, precision)) = semantic_edge_shape(candidates.len(), same_decl_family) else {
+            unresolved_workspace_sites.push(UnresolvedWorkspaceCallSite {
+                caller: from,
+                span: *span,
+            });
             return;
         };
         let provenance = edge_provenance_for_resolved_call(
@@ -2362,7 +2498,14 @@ fn add_assignment_call_edges(
             source_names: Vec::new(),
         })
         .collect::<Vec<_>>();
-    add_callback_arg_edges(&args, context, method_candidate_cache, callable_target_cache, cg);
+    add_callback_arg_edges(
+        &args,
+        context,
+        method_candidate_cache,
+        callable_target_cache,
+        cg,
+        unresolved_workspace_sites,
+    );
 }
 
 fn add_resolved_call_edges(
@@ -2411,6 +2554,7 @@ fn add_callback_arg_edges(
     method_candidate_cache: &mut MethodCandidateCache,
     callable_target_cache: &mut CallableTargetCache,
     cg: &mut CallGraph,
+    unresolved_workspace_sites: &mut Vec<UnresolvedWorkspaceCallSite>,
 ) {
     let CallResolutionContext {
         from,
@@ -2443,6 +2587,12 @@ fn add_callback_arg_edges(
     for arg in args {
         let targets = resolver.resolve(&arg.value_text, arg.span);
         let [to] = targets.as_slice() else {
+            if targets.len() > 1 {
+                unresolved_workspace_sites.push(UnresolvedWorkspaceCallSite {
+                    caller: from,
+                    span: arg.span,
+                });
+            }
             continue;
         };
         let to = *to;

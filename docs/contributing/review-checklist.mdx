@@ -165,7 +165,7 @@ class and verify each box.
       the uppercase section casing used by the binary (`USAGE`,
       `OPTIONS`, `ARGUMENTS`, `COMMANDS`, `EXAMPLES`, `SEE ALSO`).
 
-## Workspace-cache change (`crates/workspace/src/{dataflow,value_flow,flow_ids,taint_index,transitive_callers,class_index,enclosing_index,decl_name_index}.rs`)
+## Workspace-cache change (`crates/workspace/src/{dataflow,value_flow,flow_ids,taint_index,class_index,enclosing_index,decl_name_index}.rs`)
 
 - [ ] **Invalidation hook fires on edit.** New caches expose `clear()`
       (or `invalidate_file(file)` for per-file granularity) and

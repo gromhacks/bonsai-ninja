@@ -48,6 +48,174 @@ fn cached_graph_is_shared_arc_across_calls() {
 }
 
 #[test]
+fn source_reachable_summary_fixed_point_promotes_already_reached_callers() {
+    let ws = ws_with(
+        "app.py",
+        concat!(
+            "def source(value):\n",
+            "    return relay(value)\n\n",
+            "def relay(value):\n",
+            "    return source(value)\n\n",
+            "def outer(value):\n",
+            "    return relay(value)\n",
+        ),
+    );
+    let global = ws.compiler_linkage_index();
+    let func = |name: &str| {
+        let symbol = global
+            .find_by_name(name)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("missing {name}"));
+        bonsai_common::FuncId::new(symbol.raw())
+    };
+    let source = func("source");
+    let relay = func("relay");
+    let outer = func("outer");
+
+    let reachable =
+        ws.source_reachable_resolved_call_graph(&[source], &[], Some(bonsai_common::Precision::Narrowed));
+    assert!(
+        reachable.funcs.contains(&relay),
+        "ordinary forward edge reaches relay"
+    );
+    assert!(
+        reachable.funcs.contains(&outer),
+        "relay's summary-output capability must propagate to its caller even when relay was already forward-reachable"
+    );
+}
+
+#[test]
+fn source_reachable_target_return_corridor_reaches_order_independent_fixed_point() {
+    let ws = ws_with(
+        "app.py",
+        concat!(
+            "def target2():\n",
+            "    target1()\n\n",
+            "def target1():\n",
+            "    source()\n\n",
+            "def source():\n",
+            "    pass\n",
+        ),
+    );
+    let global = ws.compiler_linkage_index();
+    let func = |name: &str| {
+        let symbol = global
+            .find_by_name(name)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("missing {name}"));
+        bonsai_common::FuncId::new(symbol.raw())
+    };
+    let source = func("source");
+    let target1 = func("target1");
+    let target2 = func("target2");
+
+    // The declarations deliberately put target2 -> target1 before
+    // target1 -> source. A single insertion-order pass misses target2; the
+    // compiler relation must converge independently of AST declaration order.
+    let reachable = ws.source_reachable_resolved_call_graph(
+        &[source],
+        &[target1, target2],
+        Some(bonsai_common::Precision::Narrowed),
+    );
+    assert!(reachable.funcs.contains(&target1));
+    assert!(reachable.funcs.contains(&target2));
+    assert_eq!(reachable.reached_targets, 2);
+}
+
+#[test]
+fn source_reachable_target_return_corridor_compiles_cross_file_callers() {
+    let ws = Workspace::new(registry());
+    ws.vfs().write(
+        "producer.py".to_string(),
+        Arc::<str>::from("def produce(value):\n    return value\n"),
+    );
+    ws.vfs().write(
+        "consumer.py".to_string(),
+        Arc::<str>::from(
+            "from producer import produce\n\ndef target(value):\n    return sink(produce(value))\n",
+        ),
+    );
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+    }
+
+    let global = ws.compiler_linkage_index();
+    let func = |name: &str| {
+        let symbol = global
+            .find_by_name(name)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("missing {name}"));
+        bonsai_common::FuncId::new(symbol.raw())
+    };
+    let source = func("produce");
+    let target = func("target");
+    let reachable = ws.source_reachable_resolved_call_graph(
+        &[source],
+        &[target],
+        Some(bonsai_common::Precision::Narrowed),
+    );
+
+    assert!(
+        reachable.funcs.contains(&target),
+        "a target caller in another file must be compiled for return-flow reachability"
+    );
+    assert!(
+        reachable.graph.callees_of(target).any(|edge| edge.to == source),
+        "the cross-file target-to-source call edge must remain in the scoped compiler graph"
+    );
+}
+
+#[test]
+fn target_emission_corridor_compiles_only_targets_and_ast_output_providers() {
+    let ws = ws_with(
+        "app.py",
+        concat!(
+            "def target(value):\n",
+            "    leaf(value)\n",
+            "    return provider(value)\n\n",
+            "def leaf(value):\n",
+            "    sink(value)\n\n",
+            "def provider(value):\n",
+            "    return value\n",
+        ),
+    );
+    let global = ws.compiler_linkage_index();
+    let func = |name: &str| {
+        let symbol = global
+            .find_by_name(name)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("missing {name}"));
+        bonsai_common::FuncId::new(symbol.raw())
+    };
+    let target = func("target");
+    let leaf = func("leaf");
+    let provider = func("provider");
+
+    let corridor = ws.target_emission_resolved_call_graph(
+        &[target],
+        &[target],
+        Some(bonsai_common::Precision::Narrowed),
+    );
+    assert!(corridor.funcs.contains(&target));
+    assert!(
+        corridor.funcs.contains(&provider),
+        "adapter-emitted return capability must compile the provider body"
+    );
+    assert!(
+        !corridor.funcs.contains(&leaf),
+        "a non-target callee with no output capability cannot affect a row emitted in target"
+    );
+    assert!(
+        corridor.graph.callees_of(target).any(|edge| edge.to == leaf),
+        "resolver evidence for target-local terminal calls must survive without compiling the callee body"
+    );
+}
+
+#[test]
 fn callgraph_sidecar_rejects_changed_dependency_metadata() {
     let root = tempdir("dependency-metadata");
     std::fs::write(

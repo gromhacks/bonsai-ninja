@@ -18,7 +18,7 @@ bonsai_workspace = { workspace = true }
 ahash = { workspace = true }
 regex = { workspace = true }
 parking_lot = { workspace = true }
-rayon = "1"
+rayon = { workspace = true }
 
 [dev-dependencies]
 bonsai_lang_python = { workspace = true }

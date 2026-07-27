@@ -31,15 +31,73 @@ fn release_bin() -> Option<PathBuf> {
     // and materially more memory hungry. This gate intentionally validates
     // production behavior, so never silently substitute the debug artifact.
     let path = repo_root().join("target/release/bonsai-ninja");
-    if path.exists() {
-        Some(path)
-    } else {
+    if !path.exists() {
         eprintln!(
             "skipping elasticsearch large-repo test: release binary not built ({})",
             path.display()
         );
-        None
+        return None;
     }
+    match release_binary_is_fresh(&path, &repo_root()) {
+        Ok(true) => Some(path),
+        Ok(false) => {
+            eprintln!(
+                "skipping elasticsearch large-repo test: release binary is stale; \
+                 run `cargo build --release --locked -p bonsai_cli`"
+            );
+            None
+        }
+        Err(error) => {
+            eprintln!(
+                "skipping elasticsearch large-repo test: cannot verify release binary freshness: {error}"
+            );
+            None
+        }
+    }
+}
+
+fn release_binary_is_fresh(binary: &Path, root: &Path) -> std::io::Result<bool> {
+    let binary_modified = binary.metadata()?.modified()?;
+    let mut newest_input = UNIX_EPOCH;
+    for input in [
+        root.join("Cargo.toml"),
+        root.join("Cargo.lock"),
+        root.join("crates"),
+    ] {
+        record_newest_release_input(&input, &mut newest_input)?;
+    }
+    Ok(binary_modified >= newest_input)
+}
+
+fn record_newest_release_input(path: &Path, newest: &mut SystemTime) -> std::io::Result<()> {
+    let metadata = path.symlink_metadata()?;
+    if metadata.is_file() {
+        let is_release_input = matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("Cargo.toml" | "Cargo.lock" | "build.rs")
+        ) || path.extension().and_then(|extension| extension.to_str()) == Some("rs");
+        if is_release_input {
+            *newest = (*newest).max(metadata.modified()?);
+        }
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    if matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("tests" | "benches" | "examples")
+    ) {
+        // Integration/benchmark/example sources do not participate in the
+        // production CLI binary. Treating this test file as a release input
+        // would make editing the gate itself mark an otherwise current binary
+        // stale, and `cargo build --release` could never repair the timestamp.
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path)? {
+        record_newest_release_input(&entry?.path(), newest)?;
+    }
+    Ok(())
 }
 
 fn elasticsearch_root() -> Option<PathBuf> {
@@ -77,12 +135,24 @@ fn temp_output_path(name: &str) -> PathBuf {
 }
 
 fn run_bonsai(bin: &Path, args: &[String]) -> Output {
-    Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .args(args)
         .arg("--no-color")
         .arg("--no-progress")
         .env("COLUMNS", "200")
-        .env_remove("BONSAI_CONTEXT")
+        .env_remove("BONSAI_CONTEXT");
+    // Keep the scale gate reproducible on shared development/CI hosts. This
+    // budget controls compiler concurrency and cache retention only; it does
+    // not cap files, graph closure, iterations, or emitted facts. Callers may
+    // set a lower value to exercise a smaller machine.
+    if std::env::var_os("BONSAI_MEMORY_BUDGET_MB").is_none() {
+        command.env("BONSAI_MEMORY_BUDGET_MB", "3072");
+    }
+    if std::env::var_os("MIMALLOC_PURGE_DELAY").is_none() {
+        command.env("MIMALLOC_PURGE_DELAY", "0");
+    }
+    command
         .output()
         .unwrap_or_else(|err| panic!("run bonsai-ninja {args:?}: {err}"))
 }
@@ -248,7 +318,7 @@ fn elasticsearch_security_inventory_commands_do_not_regress() {
 }
 
 #[test]
-fn elasticsearch_full_taint_analysis_does_not_regress() {
+fn elasticsearch_production_taint_analysis_does_not_regress() {
     let _guard = elasticsearch_test_lock();
     let (Some(bin), Some(es)) = (release_bin(), elasticsearch_root()) else {
         return;
@@ -260,6 +330,8 @@ fn elasticsearch_full_taint_analysis_does_not_regress() {
             "security",
             "{es}",
             "taint-analysis",
+            "--profile",
+            "production",
             "--summary",
             "--format",
             "json",
@@ -284,5 +356,27 @@ fn elasticsearch_full_taint_analysis_does_not_regress() {
         parsed.get("total_findings").and_then(|v| v.as_u64()).is_some(),
         "taint summary missing total_findings: {parsed}"
     );
+    assert_eq!(
+        parsed.get("analysis_complete").and_then(|value| value.as_bool()),
+        Some(true),
+        "production taint summary must report exact completed analysis: {parsed}"
+    );
+    assert_eq!(
+        parsed
+            .get("analysis_incomplete_reasons")
+            .and_then(|value| value.as_array())
+            .map(Vec::len),
+        Some(0),
+        "production taint summary must not hide incomplete compiler work: {parsed}"
+    );
+    for field in ["source_rule_count", "sink_rule_count", "sanitizer_rule_count"] {
+        assert!(
+            parsed
+                .get(field)
+                .and_then(|value| value.as_u64())
+                .is_some_and(|count| count > 0),
+            "production taint summary lost `{field}` inventory: {parsed}"
+        );
+    }
     let _ = std::fs::remove_file(output);
 }

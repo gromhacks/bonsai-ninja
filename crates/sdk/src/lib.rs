@@ -105,7 +105,7 @@ pub use bonsai_workspace::{
     analyzer_build_fingerprint,
     flow_query::{
         EntryTaintGraph, SyntaxFlowBackend, SyntaxFlowCacheStatus, SyntaxFlowGraph, SyntaxFlowPlan,
-        SyntaxFlowQuery, TaintedCall, TaintedCallEdge, TaintedCallKind,
+        SyntaxFlowQuery, SyntaxFlowSession, TaintedCall, TaintedCallEdge, TaintedCallKind,
     },
     summarize_precision, CrossModuleOptions, Workspace, WorkspaceContextRoot, WorkspaceContextRootKind,
     WorkspaceError, WorkspaceOpenOptions as OpenOptions, WorkspaceSemanticContext,

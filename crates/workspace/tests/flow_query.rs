@@ -122,3 +122,45 @@ fn syntax_flow_query_uses_warmed_idg_target_cut() {
         "warmed IDG backend must preserve the target-cut sink flow"
     );
 }
+
+#[test]
+fn syntax_flow_query_uses_one_exact_scoped_session_when_idg_is_cold() {
+    let ws = python_ws(
+        "def entry(req):\n    helper(req)\n\n\
+         def helper(value):\n    sink(value)\n\n\
+         def unrelated(value):\n    other(value)\n\n\
+         def sink(arg):\n    return arg\n",
+    );
+    let entry = func_id(&ws, "entry");
+    let sink = func_id(&ws, "sink");
+    let mut targets = AHashSet::new();
+    targets.insert(sink);
+    let session = ws
+        .syntax_flow_session(&[entry], &targets)
+        .expect("source-to-target compiler corridor");
+    assert!(
+        ws.db().idg_service().is_none(),
+        "query-scoped IDG must not replace the full-workspace service"
+    );
+
+    let result = ws.syntax_flow_graph(
+        SyntaxFlowQuery::new(entry)
+            .target_funcs(Some(&targets))
+            .prefer_warmed_idg(true)
+            .session(Some(&session)),
+    );
+
+    assert_eq!(result.backend, SyntaxFlowBackend::ScopedIdgTargetCut);
+    assert_eq!(result.plan.backend, SyntaxFlowBackend::ScopedIdgTargetCut);
+    assert_eq!(result.plan.cache_status, SyntaxFlowCacheStatus::Hit);
+    assert!(!result.plan.idg_available);
+    assert_eq!(result.plan.target_cut_size, Some(1));
+    assert!(
+        graph_mentions_call(&ws, result.graph.as_ref(), "sink"),
+        "scoped IDG backend must preserve the exact target flow"
+    );
+    assert!(
+        ws.db().idg_service().is_none(),
+        "scoped session must remain query-local after execution"
+    );
+}

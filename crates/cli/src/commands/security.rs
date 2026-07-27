@@ -599,7 +599,11 @@ const PRODUCTION_EXCLUDES: &[&str] = &[
     "mocks/",
     "sample/",
     "samples/",
-    "example/",
+    // `example` is also the conventional Java package component in
+    // `src/main/java/com/example/...`. Keep the singular project layout
+    // root-anchored so production filtering never drops compiled
+    // application code merely because its namespace contains `example`.
+    "^example/",
     "examples/",
     "demo/",
     "demos/",
@@ -1450,7 +1454,9 @@ fn emit_taint_render_report_inner(
             save_taint_payload_if_requested(workspace, filters_hash, pages.clone(), cache_payload);
             emit_cached_page(&pages, current_page)?;
         }
-        BrowseFormat::Sarif => unreachable!("SARIF is rendered before the cached taint report path"),
+        BrowseFormat::Sarif => {
+            anyhow::bail!("internal format error: SARIF must be rendered before the cached taint report path")
+        }
     }
     Ok(())
 }
@@ -2901,9 +2907,9 @@ fn cmd_source_analysis(
             }
             Ok(())
         }
-        SourceAnalysisFormat::Sarif => {
-            unreachable!("SARIF source-analysis format is rejected before rendering")
-        }
+        SourceAnalysisFormat::Sarif => anyhow::bail!(
+            "source-analysis does not support SARIF; use JSON or text, or run taint-analysis for SARIF findings"
+        ),
     }
 }
 

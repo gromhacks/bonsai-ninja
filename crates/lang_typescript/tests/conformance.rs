@@ -42,6 +42,69 @@ fn arrow_expression_records_implicit_return() {
 }
 
 #[test]
+fn static_escape_maps_and_character_transforms_are_exact_compiler_facts() {
+    use bonsai_lang_api::{CharacterSubstitutionDomain, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "escape.ts",
+            r#"
+const LDAP: Record<string, string> = {
+  "\\": "\\5c", "*": "\\2a", "(": "\\28", ")": "\\29", "\u0000": "\\00",
+};
+function ldapEscape(v: string): string {
+  return [...v].map(c => LDAP[c] ?? c).join("");
+}
+const HTML: Record<string, string> = {
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+};
+function htmlEscape(v: string): string {
+  return v.replace(/[&<>"']/g, c => HTML[c]);
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("TypeScript declaration index");
+
+    let ldap_map = index
+        .static_string_maps
+        .iter()
+        .find(|fact| fact.target == "LDAP")
+        .expect("decoded LDAP map");
+    assert!(ldap_map
+        .entries
+        .iter()
+        .any(|entry| entry.key == "\0" && entry.value == "\\00"));
+    assert!(index.character_substitutions.iter().any(|fact| {
+        fact.table == "LDAP" && fact.domain == CharacterSubstitutionDomain::TableKeysWithIdentityFallback
+    }));
+
+    let html_map = index
+        .static_string_maps
+        .iter()
+        .find(|fact| fact.target == "HTML")
+        .expect("decoded HTML map");
+    assert_eq!(html_map.entries.len(), 5);
+    assert!(index.character_substitutions.iter().any(|fact| {
+        fact.table == "HTML"
+            && matches!(
+                &fact.domain,
+                CharacterSubstitutionDomain::ExactCharacters { characters }
+                    if characters == &vec![
+                        "\"".to_string(),
+                        "&".to_string(),
+                        "'".to_string(),
+                        "<".to_string(),
+                        ">".to_string(),
+                    ]
+            )
+    }));
+}
+
+#[test]
 fn inherited_getter_projection_adds_backing_field_source() {
     use bonsai_lang_api::{FlowEvent, LanguageAdapter};
 

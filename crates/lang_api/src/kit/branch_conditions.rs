@@ -21,6 +21,8 @@ pub fn extract_branch_condition_facts(
                     branch_span: span_of(file, &node),
                     condition_span: span_of(file, &condition),
                     polarity: condition_polarity(condition, src),
+                    membership: membership_condition(condition, src),
+                    expression: None,
                 });
             }
         }
@@ -39,7 +41,49 @@ pub fn extract_branch_condition_facts(
     facts
 }
 
-fn condition_polarity(mut condition: Node<'_>, src: &[u8]) -> crate::BranchConditionPolarity {
+fn condition_polarity(condition: Node<'_>, src: &[u8]) -> crate::BranchConditionPolarity {
+    let (_, negated) = strip_top_level_negations(condition, src);
+    if negated {
+        crate::BranchConditionPolarity::Negated
+    } else {
+        crate::BranchConditionPolarity::Positive
+    }
+}
+
+fn membership_condition(condition: Node<'_>, src: &[u8]) -> Option<crate::MembershipConditionFact> {
+    let (condition, outer_negated) = strip_top_level_negations(condition, src);
+    if condition.named_child_count() != 2 {
+        return None;
+    }
+    let subject = condition.named_child(0)?;
+    let collection = condition.named_child(1)?;
+    let operator = src
+        .get(subject.end_byte()..collection.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut then_contains = match operator.as_str() {
+        "in" => true,
+        "not in" => false,
+        _ => return None,
+    };
+    if outer_negated {
+        then_contains = !then_contains;
+    }
+    let subject = node_text(&subject, src).trim().to_string();
+    let collection = node_text(&collection, src).trim().to_string();
+    if subject.is_empty() || collection.is_empty() {
+        return None;
+    }
+    Some(crate::MembershipConditionFact {
+        subject,
+        collection,
+        then_contains,
+    })
+}
+
+fn strip_top_level_negations<'tree>(mut condition: Node<'tree>, src: &[u8]) -> (Node<'tree>, bool) {
     let mut negated = false;
     loop {
         while matches!(
@@ -51,7 +95,7 @@ fn condition_polarity(mut condition: Node<'_>, src: &[u8]) -> crate::BranchCondi
             };
             condition = inner;
         }
-        if condition.kind() != "not_operator" && !direct_negation_token(condition, src) {
+        if condition.kind() != "not_operator" && !leading_negation_token(condition, src) {
             break;
         }
         negated = !negated;
@@ -64,25 +108,14 @@ fn condition_polarity(mut condition: Node<'_>, src: &[u8]) -> crate::BranchCondi
         };
         condition = operand;
     }
-    if negated {
-        crate::BranchConditionPolarity::Negated
-    } else {
-        crate::BranchConditionPolarity::Positive
-    }
+    (condition, negated)
 }
 
-fn direct_negation_token(condition: Node<'_>, src: &[u8]) -> bool {
+fn leading_negation_token(condition: Node<'_>, src: &[u8]) -> bool {
     let mut cursor = condition.walk();
     if !cursor.goto_first_child() {
         return false;
     }
-    loop {
-        let child = cursor.node();
-        if !child.is_named() && matches!(node_text(&child, src).trim(), "!" | "not") {
-            return true;
-        }
-        if !cursor.goto_next_sibling() {
-            return false;
-        }
-    }
+    let child = cursor.node();
+    !child.is_named() && matches!(node_text(&child, src).trim(), "!" | "not")
 }

@@ -14,7 +14,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -112,20 +111,30 @@ TARGETS: tuple[RepoTarget, ...] = (
     RepoTarget("javascript", "node", "https://github.com/nodejs/node.git"),
     RepoTarget("kotlin", "kotlin", "https://github.com/JetBrains/kotlin.git"),
     RepoTarget("lua", "kong", "https://github.com/Kong/kong.git"),
-    RepoTarget("objc", "firebase-ios-sdk", "https://github.com/firebase/firebase-ios-sdk.git"),
+    RepoTarget(
+        "objc", "firebase-ios-sdk", "https://github.com/firebase/firebase-ios-sdk.git"
+    ),
     RepoTarget("perl", "perl5", "https://github.com/Perl/perl5.git"),
-    RepoTarget("php", "wordpress-develop", "https://github.com/WordPress/wordpress-develop.git"),
+    RepoTarget(
+        "php", "wordpress-develop", "https://github.com/WordPress/wordpress-develop.git"
+    ),
     RepoTarget("python", "ansible", "https://github.com/ansible/ansible.git"),
     RepoTarget("ruby", "rails", "https://github.com/rails/rails.git"),
     RepoTarget("rust", "rust", "https://github.com/rust-lang/rust.git"),
     RepoTarget("scala", "spark", "https://github.com/apache/spark.git"),
-    RepoTarget("solidity", "openzeppelin-contracts", "https://github.com/OpenZeppelin/openzeppelin-contracts.git"),
+    RepoTarget(
+        "solidity",
+        "openzeppelin-contracts",
+        "https://github.com/OpenZeppelin/openzeppelin-contracts.git",
+    ),
     RepoTarget("swift", "swift", "https://github.com/swiftlang/swift.git"),
     RepoTarget("typescript", "vscode", "https://github.com/microsoft/vscode.git"),
 )
 
 
-SECURITY_PHASE_RE = re.compile(r"^\[security-phase\]\s+([^:]+):\s+([0-9.]+)s(?:\s+(.*))?$")
+SECURITY_PHASE_RE = re.compile(
+    r"^\[security-phase\]\s+([^:]+):\s+([0-9.]+)s(?:\s+(.*))?$"
+)
 TIME_RE = re.compile(r"^(real|user|sys)\s+([0-9.]+)$", re.MULTILINE)
 
 
@@ -142,7 +151,9 @@ def find_binary(root: Path, explicit: str | None) -> Path:
     candidate = root / "target" / "release" / "bonsai-ninja"
     if candidate.exists():
         return candidate
-    raise SystemExit("missing release binary; run `cargo build --release -p bonsai_cli --bin bonsai-ninja`")
+    raise SystemExit(
+        "missing release binary; run `cargo build --release -p bonsai_cli --bin bonsai-ninja`"
+    )
 
 
 def parse_langs(raw: str | None) -> list[str]:
@@ -200,8 +211,16 @@ def run_command(
         if stderr_path:
             stderr_handle.close()
     elapsed = time.monotonic() - started
-    stdout_text = "" if stdout_path or proc is None else (proc.stdout or b"").decode("utf-8", errors="replace")
-    stderr_text = "" if stderr_path or proc is None else (proc.stderr or b"").decode("utf-8", errors="replace")
+    stdout_text = (
+        ""
+        if stdout_path or proc is None
+        else (proc.stdout or b"").decode("utf-8", errors="replace")
+    )
+    stderr_text = (
+        ""
+        if stderr_path or proc is None
+        else (proc.stderr or b"").decode("utf-8", errors="replace")
+    )
     if stderr_path and stderr_path.exists():
         stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
     if stdout_path and stdout_path.exists() and stdout_path.stat().st_size < 1_000_000:
@@ -212,8 +231,12 @@ def run_command(
         "elapsed_seconds": round(elapsed, 3),
         "returncode": returncode,
         "timed_out": timed_out,
-        "stdout_bytes": stdout_path.stat().st_size if stdout_path and stdout_path.exists() else len(stdout_text.encode()),
-        "stderr_bytes": stderr_path.stat().st_size if stderr_path and stderr_path.exists() else len(stderr_text.encode()),
+        "stdout_bytes": stdout_path.stat().st_size
+        if stdout_path and stdout_path.exists()
+        else len(stdout_text.encode()),
+        "stderr_bytes": stderr_path.stat().st_size
+        if stderr_path and stderr_path.exists()
+        else len(stderr_text.encode()),
         "stdout_preview": stdout_text[:2000],
         "stderr_preview": stderr_text[:4000],
         "time": times,
@@ -298,92 +321,177 @@ def is_under(path: Path, root: Path) -> bool:
         return False
 
 
-def validate_findings(json_path: Path, workspace: Path, primary_language: str) -> dict[str, Any]:
-    problems: list[str] = []
+def load_finding_rows(json_path: Path) -> tuple[list[Any] | None, list[str], bool]:
     try:
         data = json.loads(json_path.read_text(encoding="utf-8", errors="replace"))
     except json.JSONDecodeError as exc:
-        return {
-            "valid_json": False,
-            "finding_count": None,
-            "problems": [f"invalid json: {exc}"],
-        }
+        return None, [f"invalid json: {exc}"], False
+    problems = []
     if isinstance(data, dict) and isinstance(data.get("rows"), list):
         if data.get("analysis_complete") is not True:
             problems.append("top-level analysis_complete != true")
         data = data["rows"]
     if not isinstance(data, list):
+        problems.append(
+            f"expected list output or rows object, got {type(data).__name__}"
+        )
+        return None, problems, True
+    return data, problems, True
+
+
+def increment(counts: dict[str, int], value: object) -> None:
+    if isinstance(value, str) and value:
+        counts[value] = counts.get(value, 0) + 1
+
+
+def validate_file_path(
+    *,
+    file_value: object,
+    workspace: Path,
+    finding_index: int,
+    label: str,
+    problems: list[str],
+) -> int:
+    if not isinstance(file_value, str) or not file_value:
+        return 0
+    path = Path(file_value)
+    if not is_under(path, workspace):
+        problems.append(
+            f"finding {finding_index}: {label} file outside workspace: {file_value}"
+        )
+    elif not path.exists():
+        problems.append(f"finding {finding_index}: {label} file missing: {file_value}")
+    return 1
+
+
+def validate_endpoint(
+    *,
+    finding: dict[str, Any],
+    label: str,
+    finding_index: int,
+    workspace: Path,
+    rule_counts: dict[str, int],
+    severity_counts: dict[str, int],
+    problems: list[str],
+) -> int:
+    item = finding.get(label)
+    if not isinstance(item, dict):
+        problems.append(f"finding {finding_index}: missing {label}")
+        return 0
+    increment(rule_counts, item.get("rule_id"))
+    if label == "sink":
+        increment(severity_counts, item.get("severity"))
+    return validate_file_path(
+        file_value=item.get("file"),
+        workspace=workspace,
+        finding_index=finding_index,
+        label=label,
+        problems=problems,
+    )
+
+
+def validate_taint_paths(
+    finding: dict[str, Any],
+    finding_index: int,
+    workspace: Path,
+    problems: list[str],
+) -> int:
+    checked = 0
+    for step in finding.get("taint_path", []):
+        if isinstance(step, dict):
+            checked += validate_file_path(
+                file_value=step.get("file"),
+                workspace=workspace,
+                finding_index=finding_index,
+                label="taint path",
+                problems=problems,
+            )
+    return checked
+
+
+def validate_finding(
+    *,
+    finding: object,
+    index: int,
+    workspace: Path,
+    counts: dict[str, dict[str, int]],
+    problems: list[str],
+) -> tuple[int, int]:
+    if not isinstance(finding, dict):
+        problems.append(f"finding {index}: expected object")
+        return 0, 0
+    finding_id = finding.get("finding_id")
+    if not isinstance(finding_id, str) or not finding_id.startswith("S:"):
+        problems.append(f"finding {index}: missing stable finding_id")
+    increment(counts["language"], finding.get("language"))
+    increment(counts["precision"], finding.get("precision"))
+    checked = validate_endpoint(
+        finding=finding,
+        label="source",
+        finding_index=index,
+        workspace=workspace,
+        rule_counts=counts["source_rules"],
+        severity_counts=counts["severity"],
+        problems=problems,
+    )
+    checked += validate_endpoint(
+        finding=finding,
+        label="sink",
+        finding_index=index,
+        workspace=workspace,
+        rule_counts=counts["sink_rules"],
+        severity_counts=counts["severity"],
+        problems=problems,
+    )
+    checked += validate_taint_paths(finding, index, workspace, problems)
+    incomplete = int(finding.get("analysis_complete") is not True)
+    return checked, incomplete
+
+
+def top_counts(counts: dict[str, int]) -> dict[str, int]:
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:10])
+
+
+def validate_findings(
+    json_path: Path, workspace: Path, primary_language: str
+) -> dict[str, Any]:
+    data, problems, valid_json = load_finding_rows(json_path)
+    if data is None:
         return {
-            "valid_json": True,
+            "valid_json": valid_json,
             "finding_count": None,
-            "problems": problems + [f"expected list output or rows object, got {type(data).__name__}"],
+            "problems": problems,
         }
-    language_counts: dict[str, int] = {}
-    severity_counts: dict[str, int] = {}
-    precision_counts: dict[str, int] = {}
-    source_rules: dict[str, int] = {}
-    sink_rules: dict[str, int] = {}
-    incomplete = 0
+    counts: dict[str, dict[str, int]] = {
+        "language": {},
+        "severity": {},
+        "precision": {},
+        "source_rules": {},
+        "sink_rules": {},
+    }
     checked_paths = 0
+    incomplete = 0
     for index, finding in enumerate(data):
-        if not isinstance(finding, dict):
-            problems.append(f"finding {index}: expected object")
-            continue
-        finding_id = finding.get("finding_id")
-        if not isinstance(finding_id, str) or not finding_id.startswith("S:"):
-            problems.append(f"finding {index}: missing stable finding_id")
-        language = str(finding.get("language", ""))
-        if language:
-            language_counts[language] = language_counts.get(language, 0) + 1
-        if finding.get("analysis_complete") is not True:
-            incomplete += 1
-        for label in ("source", "sink"):
-            item = finding.get(label)
-            if not isinstance(item, dict):
-                problems.append(f"finding {index}: missing {label}")
-                continue
-            rule_id = item.get("rule_id")
-            if label == "source" and isinstance(rule_id, str):
-                source_rules[rule_id] = source_rules.get(rule_id, 0) + 1
-            if label == "sink" and isinstance(rule_id, str):
-                sink_rules[rule_id] = sink_rules.get(rule_id, 0) + 1
-            if label == "sink":
-                severity = item.get("severity")
-                if isinstance(severity, str):
-                    severity_counts[severity] = severity_counts.get(severity, 0) + 1
-            file_value = item.get("file")
-            if isinstance(file_value, str) and file_value:
-                checked_paths += 1
-                path = Path(file_value)
-                if not is_under(path, workspace):
-                    problems.append(f"finding {index}: {label} file outside workspace: {file_value}")
-                elif not path.exists():
-                    problems.append(f"finding {index}: {label} file missing: {file_value}")
-        for step in finding.get("taint_path", []):
-            if not isinstance(step, dict):
-                continue
-            file_value = step.get("file")
-            if isinstance(file_value, str) and file_value:
-                checked_paths += 1
-                path = Path(file_value)
-                if not is_under(path, workspace):
-                    problems.append(f"finding {index}: taint path outside workspace: {file_value}")
-                elif not path.exists():
-                    problems.append(f"finding {index}: taint path file missing: {file_value}")
-        precision = finding.get("precision")
-        if isinstance(precision, str):
-            precision_counts[precision] = precision_counts.get(precision, 0) + 1
+        checked, finding_incomplete = validate_finding(
+            finding=finding,
+            index=index,
+            workspace=workspace,
+            counts=counts,
+            problems=problems,
+        )
+        checked_paths += checked
+        incomplete += finding_incomplete
     if incomplete:
         problems.append(f"{incomplete} finding(s) had analysis_complete != true")
     return {
         "valid_json": True,
         "finding_count": len(data),
-        "primary_language_findings": language_counts.get(primary_language, 0),
-        "language_counts": dict(sorted(language_counts.items())),
-        "severity_counts": dict(sorted(severity_counts.items())),
-        "precision_counts": dict(sorted(precision_counts.items())),
-        "top_source_rules": dict(sorted(source_rules.items(), key=lambda item: (-item[1], item[0]))[:10]),
-        "top_sink_rules": dict(sorted(sink_rules.items(), key=lambda item: (-item[1], item[0]))[:10]),
+        "primary_language_findings": counts["language"].get(primary_language, 0),
+        "language_counts": dict(sorted(counts["language"].items())),
+        "severity_counts": dict(sorted(counts["severity"].items())),
+        "precision_counts": dict(sorted(counts["precision"].items())),
+        "top_source_rules": top_counts(counts["source_rules"]),
+        "top_sink_rules": top_counts(counts["sink_rules"]),
         "checked_paths": checked_paths,
         "problems": problems[:200],
     }
@@ -401,7 +509,11 @@ def run_target(
     paged_output: bool,
     keep_workspaces: bool,
 ) -> dict[str, Any]:
-    temp_path = Path(tempfile.mkdtemp(prefix=f"bonsai-realworld-{target.language}-", dir=str(tmp_root)))
+    temp_path = Path(
+        tempfile.mkdtemp(
+            prefix=f"bonsai-realworld-{target.language}-", dir=str(tmp_root)
+        )
+    )
     workspace = temp_path / target.name
     result: dict[str, Any] = {
         "language": target.language,
@@ -458,11 +570,19 @@ def run_target(
             stdout_path=taint_json,
             stderr_path=taint_stderr,
         )
-        stderr_text = taint_stderr.read_text(encoding="utf-8", errors="replace") if taint_stderr.exists() else ""
+        stderr_text = (
+            taint_stderr.read_text(encoding="utf-8", errors="replace")
+            if taint_stderr.exists()
+            else ""
+        )
         taint["phases"] = parse_phase_log(stderr_text)
         taint["warnings"] = [
             text
-            for text in ("payload exceeds 4GiB", "save_to_disk failed", "workspace IDG save_to_disk failed")
+            for text in (
+                "payload exceeds 4GiB",
+                "save_to_disk failed",
+                "workspace IDG save_to_disk failed",
+            )
             if text in stderr_text
         ]
         result["taint"] = taint
@@ -488,14 +608,28 @@ def run_target(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin", dest="binary", help="bonsai-ninja binary path")
-    parser.add_argument("--langs", default="all", help="comma-separated language list, or all")
+    parser.add_argument(
+        "--langs", default="all", help="comma-separated language list, or all"
+    )
     parser.add_argument("--tmp-root", default="/tmp", help="temporary clone parent")
-    parser.add_argument("--out-dir", default=None, help="artifact directory, default target/realworld-lang-benchmark")
+    parser.add_argument(
+        "--out-dir",
+        default=None,
+        help="artifact directory, default target/realworld-lang-benchmark",
+    )
     parser.add_argument("--json-out", default=None, help="summary JSON path")
     parser.add_argument("--clone-timeout", type=int, default=900)
     parser.add_argument("--command-timeout", type=int, default=900)
-    parser.add_argument("--profile", default="production", help="security profile for taint-analysis; empty disables")
-    parser.add_argument("--paged-output", action="store_true", help="keep paged JSON instead of passing --all")
+    parser.add_argument(
+        "--profile",
+        default="production",
+        help="security profile for taint-analysis; empty disables",
+    )
+    parser.add_argument(
+        "--paged-output",
+        action="store_true",
+        help="keep paged JSON instead of passing --all",
+    )
     parser.add_argument("--keep-workspaces", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true")
     args = parser.parse_args(argv)
@@ -505,18 +639,26 @@ def main(argv: list[str] | None = None) -> int:
     langs = parse_langs(args.langs)
     tmp_root = Path(args.tmp_root).expanduser().resolve()
     tmp_root.mkdir(parents=True, exist_ok=True)
-    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else root / "target" / "realworld-lang-benchmark"
+    out_dir = (
+        Path(args.out_dir).expanduser().resolve()
+        if args.out_dir
+        else root / "target" / "realworld-lang-benchmark"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     json_out = (
         Path(args.json_out).expanduser().resolve()
         if args.json_out
-        else out_dir / f"summary-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+        else out_dir
+        / f"summary-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
     )
 
     results: list[dict[str, Any]] = []
     for language in langs:
         target = target_for_language(language)
-        print(f"[realworld-bench] {language}: cloning and benchmarking {target.name}", flush=True)
+        print(
+            f"[realworld-bench] {language}: cloning and benchmarking {target.name}",
+            flush=True,
+        )
         result = run_target(
             target,
             binary=binary,
@@ -529,9 +671,16 @@ def main(argv: list[str] | None = None) -> int:
             keep_workspaces=args.keep_workspaces,
         )
         results.append(result)
-        interim_failures = [item["language"] for item in results if item.get("status") != "ok"]
+        interim_failures = [
+            item["language"] for item in results if item.get("status") != "ok"
+        ]
         json_out.write_text(
-            json.dumps({"results": results, "failures": interim_failures}, indent=2, sort_keys=True) + "\n"
+            json.dumps(
+                {"results": results, "failures": interim_failures},
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
         )
         status = result.get("status")
         findings = result.get("validation", {}).get("finding_count")

@@ -94,6 +94,7 @@ pub use resources::compiler_weighted_batches;
 pub use resources::compiler_worker_count;
 pub use resources::effective_memory_limit_bytes;
 pub use resources::memory_bounded_worker_count;
+pub use resources::syntax_weighted_batches;
 pub use resources::syntax_worker_count;
 pub use span::{LineCol, Span, SpanMap};
 pub use span_cache::{cached_span_map, cached_span_map_arc};
@@ -171,6 +172,7 @@ pub struct CallLinkageFact {
 pub struct CallResultLinkageFact {
 pub struct FunctionLinkageFacts {
 pub struct GlobalIndex {
+pub struct GlobalIndexIdentity(Arc<()>);
 pub struct ReturnedConstructorLinkageFact {
 
 === inspect ===
@@ -247,6 +249,7 @@ pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tre
 pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<ImportSpec> {
 pub fn js_ts_module_segments(path: &std::path::Path) -> Vec<String> {
 pub fn js_ts_require_calls(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<ImportSpec> {
+pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
 pub struct JavaScriptAdapter;
 
 === lang_kotlin ===
@@ -509,7 +512,6 @@ pub mod linkage_sidecar;
 pub mod semantic_context;
 pub mod taint_index;
 pub mod taint_index_disk;
-pub mod transitive_callers;
 pub mod value_flow;
 pub mod value_flow_disk;
 pub struct ExactDecl {

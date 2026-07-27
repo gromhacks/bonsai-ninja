@@ -34,6 +34,7 @@ pub use resources::compiler_weighted_batches;
 pub use resources::compiler_worker_count;
 pub use resources::effective_memory_limit_bytes;
 pub use resources::memory_bounded_worker_count;
+pub use resources::syntax_weighted_batches;
 pub use resources::syntax_worker_count;
 pub use span::{LineCol, Span, SpanMap};
 pub use span_cache::{cached_span_map, cached_span_map_arc};

@@ -1,12 +1,10 @@
-//! Concurrency regression test for the workspace caches. Each
-//! cache had a read-then-write hazard pattern (B1) that
-//! design-patterns.mdx §13a now explicitly forbids: an `if let
-//! Some(_) = lock.read().get(...).cloned()` scrutinee whose
-//! temporary extends past the if-let body and into a subsequent
-//! `lock.write()` upgrade — same-thread deadlock under
-//! `parking_lot::RwLock`. Audit pass 3 fixed every site (commit
-//! `214a4b5`); this test pins the property: pounding each cache
-//! from rayon worker threads must complete within a small budget.
+//! Concurrency regression tests for the workspace caches. Cold paths must
+//! drop read guards before taking write guards: an `if let
+//! Some(_) = lock.read().get(...).cloned()` scrutinee can retain its
+//! temporary into a later `lock.write()` and deadlock the same thread under
+//! `parking_lot::RwLock`. Cold construction is also single-flight or
+//! snapshot-keyed so an old source snapshot cannot repopulate a cache
+//! after edit invalidation.
 //!
 //! A regression that re-introduces the if-let-scrutinee form
 //! would deadlock the workers and trip the timeout below.
@@ -61,7 +59,7 @@ fn fresh_workspace() -> (Workspace, FuncId) {
     write_python_workspace(&root);
     let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::query_only())
         .expect("open succeeds");
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let caller_sym = global
         .find_by_name("caller")
         .iter()
@@ -132,7 +130,7 @@ fn cached_resolved_call_graph_no_deadlock_under_parallel_cold_hits() {
 #[test]
 fn class_member_index_no_deadlock_under_parallel_cold_hits() {
     let (ws, _func) = fresh_workspace();
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let class_sym = global
         .find_by_name("Box")
         .iter()
@@ -141,7 +139,7 @@ fn class_member_index_no_deadlock_under_parallel_cold_hits() {
         .expect("class Box present");
     assert_finishes_within("ClassMemberIndex::methods_of", || {
         (0..PARALLEL_HITS).into_par_iter().for_each(|_| {
-            let _ = ws.class_members().methods_of(ws.db(), class_sym, "value");
+            let _ = ws.class_members().methods_of(&global, class_sym, "value");
         });
     });
 }
@@ -150,9 +148,10 @@ fn class_member_index_no_deadlock_under_parallel_cold_hits() {
 fn enclosing_index_no_deadlock_under_parallel_cold_hits() {
     let (ws, _func) = fresh_workspace();
     let file = ws.vfs().all_files()[0];
+    let headers = ws.compiler_linkage_index();
     assert_finishes_within("EnclosingIndex::entries_for", || {
         (0..PARALLEL_HITS).into_par_iter().for_each(|_| {
-            let _ = ws.enclosing_index().entries_for(ws.db(), file);
+            let _ = ws.enclosing_index().entries_for(headers.as_ref(), file);
         });
     });
 }
@@ -160,20 +159,10 @@ fn enclosing_index_no_deadlock_under_parallel_cold_hits() {
 #[test]
 fn decl_name_index_no_deadlock_under_parallel_cold_hits() {
     let (ws, _func) = fresh_workspace();
+    let headers = ws.compiler_linkage_index();
     assert_finishes_within("DeclNameIndex::entries", || {
         (0..PARALLEL_HITS).into_par_iter().for_each(|_| {
-            let _ = ws.decl_name_index().entries(ws.db());
-        });
-    });
-}
-
-#[test]
-fn transitive_callers_no_deadlock_under_parallel_cold_hits() {
-    let (ws, caller_func) = fresh_workspace();
-    let cg = ws.cached_resolved_call_graph();
-    assert_finishes_within("TransitiveCallersIndex::callers_of", || {
-        (0..PARALLEL_HITS).into_par_iter().for_each(|_| {
-            let _ = ws.transitive_callers().callers_of(&cg, caller_func, 4);
+            let _ = ws.decl_name_index().entries(headers.as_ref());
         });
     });
 }

@@ -62,7 +62,7 @@ source-to-sink evidence, so run the deep gate before merge:
   --format json --no-color --no-progress
 ```
 
-The 2026-07-20 deep gate covers 7,148 rules and 10,489 examples with zero
+The 2026-07-25 deep gate covers 7,152 rules and 10,499 examples with zero
 errors, warnings, or taint-replay misses. Current counts belong in
 [Release Readiness](RELEASE_READINESS.md); the command remains authoritative.
 
@@ -156,10 +156,12 @@ Path-preview and diagnostic controls are allowed only when they report
 truncation and do not feed semantic reachability. The streamed IDG sidecar has
 no workspace file-count ceiling.
 
-The current Elasticsearch reference is the dated 30,055-file run in
-[Release Readiness](RELEASE_READINESS.md): `analysis_complete: true`, no
-incomplete reasons, 57.98 seconds wall time, and about 2.33 GiB maximum RSS.
-Older synthetic and real-world benchmark measurements remain in
+The current Elasticsearch references are the dated 30,055-file runs in
+[Release Readiness](RELEASE_READINESS.md). Production security completed with
+`analysis_complete: true`, no incomplete reasons, 169.10 seconds wall time,
+and about 1.56 GiB maximum RSS. A targeted exact inspect/taint query completed
+in 278.25 seconds at about 2.89 GiB under a 3 GiB compiler budget. Older
+synthetic and real-world benchmark measurements remain in
 [the archived goal benchmark](goal-benchmark-2026-05-15.md).
 
 Use `BONSAI_DEBUG=security-phase` for phase timing and add `idg-build` when

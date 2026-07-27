@@ -159,6 +159,18 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer:
+        attribute: [os, path, realpath]
+      path_constructor:
+        attribute: [os, path, join]
+      containment_check:
+        name: startswith
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: [os.sep]
   match_examples:
   - name: path open
     code: "import builtins\ndef example(user_input):\n    return open(user_input)\n"
@@ -276,6 +288,8 @@
   - pathlib
   cwe:
   - CWE-22
+  analysis_semantics:
+    sink_terminal_priority: 100
   match:
     kind: call
     callee:

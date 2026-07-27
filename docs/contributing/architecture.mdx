@@ -59,7 +59,8 @@ are half-open byte ranges, line/column lookups go through a thread-local
 LRU cache.
 
 `crates/common::resources` also owns resource scheduling. Memory limits are
-detected from the host and Linux cgroups, optionally lowered by
+detected from the host and the process's active nested Linux cgroup v1/v2
+memory controller, optionally lowered by
 `BONSAI_MEMORY_BUDGET_MB`. Weighted compiler batches use each source unit's
 actual byte size after subtracting the process's measured resident set and a
 safety margin; the conservative worker profile serializes exact units at a
@@ -67,7 +68,10 @@ safety margin; the conservative worker profile serializes exact units at a
 remaining parallelism. IDG transfer obtains the same exact VFS byte length
 through the compiler semantics provider after linkage/resolver state is
 resident. Unsupported RSS probes fall back to a conservative reserve. This is
-never an analysis budget.
+never an analysis budget. The workspace's exact-body cache also derives its
+byte budget from this effective memory limit. That cache changes how much
+adapter-lowered IR is retained between exact lookups, not which IR is produced
+or which files are analyzed.
 
 **`crates/hash`** provides FNV-1a digests for every persisted ID. Sole API:
 `fnv1a_str_slice64`, `fnv1a_names64`, `fnv1a_bytes64`, `fnv1a_low32`. RFC
@@ -128,6 +132,14 @@ validates every sidecar against the same current workspace snapshot; if a file
 changed between workers, it reruns the exact phases until one coherent atomic
 generation is current. That retry reaches quiescence without an iteration cap.
 
+The global index is a linker header, not a second copy of every body. It keeps
+declarations, aggregate layouts, types, modules, imports, inheritance, and
+stable symbol identities. Exact consumers stream one compiler-object body at a
+time, remap its file-local symbols to the header, and release it after the
+memory-aware batch unless the byte-weighted hot cache retains it. This is the
+large-workspace invariant: body and graph lifetimes do not multiply peak
+memory, while every requested body is still analyzed exactly.
+
 ## Adapter framework
 
 **`crates/lang_api`** holds the trait every language adapter implements
@@ -182,6 +194,17 @@ record and local-to-segment node map. Stitching hydrates one segment and moves
 that record into the linker; it does not reparse or re-lower the AST. Every
 scheduled function and fixed-point relation is still consumed.
 
+Workspace IDG generations are single-flight in process and own a
+target-specific advisory lock across processes. A waiter validates and reuses
+the immutable sidecar published by the current owner before doing compiler
+work. It removes only well-formed FactStore staging files in the same
+versioned IDG family after independently proving ownership of each target; a
+hard-killed process therefore cannot strand an unbounded cache artifact, and
+an active peer's staging files are never swept by filename guesswork.
+Saved-file edits acquire the semantic generation guards before changing VFS
+text, so one build cannot observe old indexes mixed with a new source
+snapshot.
+
 Interprocedural return summaries are compiled from structural call boundaries
 identified by caller, resolved callee, and exact call span. The compiler
 reconstructs one function-local CSR at a time from canonical segment edges,
@@ -204,6 +227,11 @@ summaries may first evaluate the union of all remaining formal seeds; a
 negative union is a proof that each member is negative, while positive unions
 are still checked per parameter. This removes redundant work without changing
 the least fixed point.
+
+Closure reached sets use sorted external runs, while pending LIFO frontiers
+store all spilled chunks in one append-only temporary file and truncate
+consumed tails. Memory scheduling therefore remains exact without making file
+descriptor use proportional to closure fan-out.
 
 Large compiler phases transfer only their canonical result across a scoped
 worker-heap boundary. Transient maps, sort buffers, and CSR construction state
@@ -384,13 +412,13 @@ The retrieval factstore is
 part of the structural semantic coverage set: it speeds candidate lookup for
 search/inspect/browse surfaces but cannot create calls, edges, flows,
 findings, or refs by itself. Large query commands may validate the retrieval
-factstore from source/dependency/build fingerprints before workspace open,
+factstore from source/dependency/schema fingerprints before workspace open,
 but they still hydrate through canonical APIs before rendering.
 `cache stats` and `WorkspaceCache::stats()` validate the manifest against the
 current workspace and decode reported sidecar payloads where possible, so
 diagnostics report reusable facts rather than raw file presence or stale
 same-size artifacts. Retrieval payload validation uses the same query-time
-source/dependency/build pipeline fingerprint, which rejects copied or moved
+source/dependency/schema pipeline fingerprint, which rejects copied or moved
 candidate indexes before they can narrow a query.
 
 - `DataFlowCache` (`dataflow.rs`) — per-`FuncId` `KindedTokens` +
@@ -429,10 +457,6 @@ candidate indexes before they can narrow a query.
   Security analysis reports the cache decision through
   `AnalysisProgress::Note`, including whether the run was a memory hit,
   disk hit, miss, or config invalidation.
-- `TransitiveCallersIndex` (`transitive_callers.rs`) — cached,
-  explicitly depth-scoped caller-frontier queries on the resolved callgraph.
-  This is a candidate/scheduling utility, not the production taint closure;
-  the semantic IDG fixed point is uncapped.
 - `ClassMemberIndex` (`class_index.rs`) —
   `(class_sym, method_name) → Vec<FuncId>` and `class_sym →
   constructor FuncIds`. Replaces per-resolution linear scans of
@@ -443,6 +467,14 @@ candidate indexes before they can narrow a query.
 - `DeclNameIndex` (`decl_name_index.rs`) — workspace-wide
   lowercased decl-name table for `inspect --query <pat>`
   `Contains` matching.
+- `ExactBodyCache` (`exact_body_cache.rs`) — single-flight, byte-weighted LRU
+  for exact per-file `DeclIndex` bodies. Entries are keyed by file and VFS
+  version, charged from source size, and retained within a fraction of the
+  effective process memory budget. Read-only consumers share the same
+  `Arc<DeclIndex>` through `exact_decl_index_shared`; the compatibility owned
+  API clones only when requested. An entry larger than the hot-cache budget is
+  returned normally and evicted immediately. Eviction therefore trades
+  repeated adapter lowering for memory and never truncates compiler work.
 - `cached_resolved_call_graph()` — singleton
   `Arc<ResolvedCallGraph>` shared with `inspect`, `security`,
   `dump callgraph`, the dataflow + flow-id caches.
@@ -454,7 +486,13 @@ candidate indexes before they can narrow a query.
 Every cache is interior-mutable (`parking_lot::RwLock` /
 `Mutex`) and safe to share across rayon worker threads.
 `Workspace::ingest_dir` clears or invalidates each cache when a
-file edit lands so subsequent queries observe current state.
+file edit lands so subsequent queries observe current state. Exact-body
+single-flight cells prevent concurrent consumers from lowering the same
+retained file snapshot more than once. A security analysis also owns one
+immutable dependency-manifest package snapshot because manifests such as
+`requirements.txt` are not necessarily VFS compiler inputs. Broad matching
+and later point constraint rechecks share that snapshot, so a concurrent save
+cannot mix old endpoint evidence with new package facts.
 
 ## Security
 
@@ -564,5 +602,7 @@ changes in place, tombstones deleted files, and rewrites the sidecars
 after affected entries are rebuilt. File edits are wired through
 `Workspace::ingest_dir`, which fans an invalidation event out to
 every cache (dataflow, value-flow, flow-ids, inter-taint singleton,
-resolved call graph, taint-graph index, transitive callers, class
-members, enclosing-decl index, decl-name index).
+resolved call graph, taint-graph index, class members, enclosing-decl
+index, decl-name index). Derived declaration indexes also verify the opaque
+identity of the exact `GlobalIndex` snapshot they were built from, so an old
+reader cannot repopulate a cleared cache after a concurrent edit.

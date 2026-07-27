@@ -438,6 +438,7 @@ fn rule_has_taint_dependent_constraint(rule: &Rule) -> bool {
             ConstraintKind::ArgTainted { .. }
                 | ConstraintKind::AnyArgTainted { .. }
                 | ConstraintKind::ReceiverTainted { .. }
+                | ConstraintKind::ReceiverOriginCallbackParamReachesCall { .. }
         )
     })
 }
@@ -739,9 +740,73 @@ fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
     validate_no_hardcoded_receiver_regex(rule, issues);
     validate_receiver_agnostic_regex_has_package_gate(rule, issues);
     validate_analysis_semantics(rule, issues);
+    validate_callback_origin_constraints(rule, issues);
     validate_taint_semantics(rule, issues);
     validate_packages_not_maven_artifacts(rule, issues);
     validate_yaml_language_field(rule, issues);
+}
+
+fn validate_callback_origin_constraints(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
+    let callable_target = |target: &RuleTarget| {
+        target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+            || target
+                .attribute
+                .as_ref()
+                .is_some_and(|parts| !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty()))
+            || target
+                .regex
+                .as_ref()
+                .is_some_and(|pattern| !pattern.trim().is_empty())
+    };
+    for constraint in &rule.constraints.0 {
+        let ConstraintKind::ReceiverOriginCallbackParamReachesCall {
+            receiver_origin_callback_param_reaches_call: spec,
+        } = constraint
+        else {
+            continue;
+        };
+        if rule.kind != RuleKind::Sink || !matches!(rule.match_spec.kind, MatchKind::Call | MatchKind::Write)
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-callback-origin-constraint",
+                Some(rule),
+                "receiver_origin_callback_param_reaches_call is valid only on sink rules with match.kind=call or match.kind=write",
+            );
+        }
+        if !callable_target(&spec.receiver_factory)
+            || !callable_target(&spec.receiver_member)
+            || !callable_target(&spec.callback_call)
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-callback-origin-constraint",
+                Some(rule),
+                "receiver_origin_callback_param_reaches_call requires callable receiver_factory, receiver_member, and callback_call targets",
+            );
+        }
+        for (role, target) in [
+            ("receiver_factory", &spec.receiver_factory),
+            ("receiver_member", &spec.receiver_member),
+            ("callback_call", &spec.callback_call),
+        ] {
+            if let Some(pattern) = target.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-callback-origin-constraint",
+                        Some(rule),
+                        &format!(
+                            "receiver_origin_callback_param_reaches_call.{role}.regex is invalid: {error}"
+                        ),
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
@@ -777,7 +842,17 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         );
     }
     if (semantics.guard_profile.is_some()
+        || semantics.sink_terminal_priority.is_some()
         || semantics.path_containment_guard.is_some()
+        || semantics.path_consumer_containment_guard.is_some()
+        || semantics.relative_path_containment_guard.is_some()
+        || semantics.parameterized_query.is_some()
+        || semantics.nosql_filter.is_some()
+        || semantics.dynamic_key_denylist_guard.is_some()
+        || semantics.receiver_factory_guard.is_some()
+        || semantics.configured_argument_factory_guard.is_some()
+        || semantics.character_escape.is_some()
+        || semantics.url_network_guard.is_some()
         || semantics.context_flow.is_some()
         || semantics.post_sink_policy.is_some())
         && rule.kind != RuleKind::Sink
@@ -787,7 +862,7 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "error",
             "invalid-analysis-semantics",
             Some(rule),
-            "guard_profile, path_containment_guard, context_flow, and post_sink_policy are only valid on sink rules",
+            "sink_terminal_priority, guard_profile, path_containment_guard, path_consumer_containment_guard, relative_path_containment_guard, parameterized_query, nosql_filter, dynamic_key_denylist_guard, receiver_factory_guard, configured_argument_factory_guard, character_escape, url_network_guard, context_flow, and post_sink_policy are only valid on sink rules",
         );
     }
     let path_profile = semantics.guard_profile == Some(GuardProfile::PythonPathContainment);
@@ -798,6 +873,26 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "invalid-analysis-semantics",
             Some(rule),
             "python-path-containment guard_profile and path_containment_guard must be declared together",
+        );
+    }
+    let path_consumer_profile = semantics.guard_profile == Some(GuardProfile::PathConsumerContainment);
+    if path_consumer_profile != semantics.path_consumer_containment_guard.is_some() {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "path-consumer-containment guard_profile and path_consumer_containment_guard must be declared together",
+        );
+    }
+    let relative_path_profile = semantics.guard_profile == Some(GuardProfile::RelativePathContainment);
+    if relative_path_profile != semantics.relative_path_containment_guard.is_some() {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "relative-path-containment guard_profile and relative_path_containment_guard must be declared together",
         );
     }
     if let Some(path_guard) = semantics.path_containment_guard.as_ref() {
@@ -839,6 +934,381 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                         "invalid-analysis-semantics",
                         Some(rule),
                         &format!("path_containment_guard.{role}.regex is invalid: {error}"),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(path_guard) = semantics.path_consumer_containment_guard.as_ref() {
+        let callable_target = |target: &RuleTarget| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.trim().is_empty())
+        };
+        if !callable_target(&path_guard.canonicalizer)
+            || path_guard
+                .base_canonicalizer
+                .as_ref()
+                .is_some_and(|target| !callable_target(target))
+            || !callable_target(&path_guard.path_constructor)
+            || !callable_target(&path_guard.containment_check)
+            || path_guard.boundary_places.is_empty()
+            || path_guard
+                .boundary_places
+                .iter()
+                .any(|place| place.trim().is_empty())
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "path_consumer_containment_guard requires callable canonicalizer/path_constructor/containment_check targets and non-empty boundary_places",
+            );
+        }
+        for (role, target) in [
+            ("canonicalizer", &path_guard.canonicalizer),
+            (
+                "base_canonicalizer",
+                path_guard
+                    .base_canonicalizer
+                    .as_ref()
+                    .unwrap_or(&path_guard.canonicalizer),
+            ),
+            ("path_constructor", &path_guard.path_constructor),
+            ("containment_check", &path_guard.containment_check),
+        ] {
+            if let Some(pattern) = target.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-analysis-semantics",
+                        Some(rule),
+                        &format!("path_consumer_containment_guard.{role}.regex is invalid: {error}"),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(path_guard) = semantics.relative_path_containment_guard.as_ref() {
+        let callable_target = |target: &RuleTarget| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.trim().is_empty())
+        };
+        if !callable_target(&path_guard.candidate_canonicalizer)
+            || !callable_target(&path_guard.base_canonicalizer)
+            || !callable_target(&path_guard.relative_path)
+            || !callable_target(&path_guard.rejection_check)
+            || path_guard.relative_base_arg_index == path_guard.relative_candidate_arg_index
+            || path_guard.rejected_exact_values.is_empty()
+            || path_guard
+                .rejected_exact_values
+                .iter()
+                .any(|value| value.is_empty())
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "relative_path_containment_guard requires callable targets, distinct relative-path base/candidate arguments, and non-empty rejected_exact_values",
+            );
+        }
+        for (role, target) in [
+            ("candidate_canonicalizer", &path_guard.candidate_canonicalizer),
+            ("base_canonicalizer", &path_guard.base_canonicalizer),
+            ("relative_path", &path_guard.relative_path),
+            ("rejection_check", &path_guard.rejection_check),
+        ] {
+            if let Some(pattern) = target.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-analysis-semantics",
+                        Some(rule),
+                        &format!("relative_path_containment_guard.{role}.regex is invalid: {error}"),
+                    );
+                }
+            }
+        }
+    }
+    if semantics
+        .parameterized_query
+        .as_ref()
+        .is_some_and(|query| query.query_arg_index == query.bindings_arg_index)
+    {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "parameterized_query requires distinct query_arg_index and bindings_arg_index values",
+        );
+    }
+    if semantics.nosql_filter.as_ref().is_some_and(|filter| {
+        filter.literal_value_operators.is_empty()
+            || filter
+                .literal_value_operators
+                .iter()
+                .any(|operator| operator.trim().is_empty())
+    }) {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "nosql_filter requires at least one non-empty literal_value_operator",
+        );
+    }
+    if let Some(guard) = semantics.dynamic_key_denylist_guard.as_ref() {
+        let callable_target = |target: &RuleTarget| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.trim().is_empty())
+        };
+        if !callable_target(&guard.collection_constructor)
+            || !callable_target(&guard.membership_check)
+            || guard.rejected_exact_values.is_empty()
+            || guard.rejected_exact_values.iter().any(String::is_empty)
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "dynamic_key_denylist_guard requires callable constructor/membership targets and non-empty rejected_exact_values",
+            );
+        }
+        for (role, target) in [
+            ("collection_constructor", &guard.collection_constructor),
+            ("membership_check", &guard.membership_check),
+        ] {
+            if let Some(pattern) = target.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-analysis-semantics",
+                        Some(rule),
+                        &format!("dynamic_key_denylist_guard.{role}.regex is invalid: {error}"),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(guard) = semantics.receiver_factory_guard.as_ref() {
+        let callable_target = |target: &RuleTarget| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.trim().is_empty())
+        };
+        if guard.factories.is_empty() || guard.factories.iter().any(|target| !callable_target(target)) {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "receiver_factory_guard requires at least one callable factory target",
+            );
+        }
+        for (index, target) in guard.factories.iter().enumerate() {
+            if let Some(pattern) = target.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-analysis-semantics",
+                        Some(rule),
+                        &format!("receiver_factory_guard.factories[{index}].regex is invalid: {error}"),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(guard) = semantics.configured_argument_factory_guard.as_ref() {
+        let callable_target = |target: &RuleTarget| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.trim().is_empty())
+        };
+        let mut names = BTreeSet::new();
+        if !callable_target(&guard.factory)
+            || guard.required_named_arguments.is_empty()
+            || guard
+                .required_named_arguments
+                .iter()
+                .any(|required| required.name.trim().is_empty() || !names.insert(required.name.as_str()))
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "configured_argument_factory_guard requires a callable factory and unique, non-empty required named arguments",
+            );
+        }
+        if let Some(pattern) = guard.factory.regex.as_deref() {
+            if let Err(error) = Regex::new(pattern) {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "invalid-analysis-semantics",
+                    Some(rule),
+                    &format!("configured_argument_factory_guard.factory.regex is invalid: {error}"),
+                );
+            }
+        }
+    }
+    if semantics.character_escape.as_ref().is_some_and(|escape| {
+        escape.required_mappings.is_empty()
+            || escape
+                .required_mappings
+                .iter()
+                .any(|mapping| mapping.input.is_empty() || mapping.output.is_empty())
+    }) {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "character_escape requires non-empty input/output mappings",
+        );
+    }
+    if let Some(guard) = semantics.url_network_guard.as_ref() {
+        let callable_target = |target: &RuleTarget| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.trim().is_empty())
+        };
+        let component_valid = |component: &crate::rule::UrlComponentSemantics| {
+            component
+                .field
+                .as_ref()
+                .is_some_and(|field| !field.trim().is_empty())
+                ^ component.accessor.as_ref().is_some_and(callable_target)
+        };
+        let root_valid = match &guard.root {
+            crate::rule::UrlGuardRootSemantics::SinkReceiver
+            | crate::rule::UrlGuardRootSemantics::SinkAssignmentTarget => true,
+            crate::rule::UrlGuardRootSemantics::SinkArgumentAccessor { accessor, .. } => {
+                callable_target(accessor)
+            }
+        };
+        let redirect_valid = guard.redirect.as_ref().is_none_or(|redirect| match redirect {
+            crate::rule::UrlRedirectGuardSemantics::ReceiverFieldExactCallback {
+                field,
+                required_return_place,
+            } => !field.trim().is_empty() && !required_return_place.trim().is_empty(),
+            crate::rule::UrlRedirectGuardSemantics::PostSinkCall { call, .. } => callable_target(call),
+        });
+        if !root_valid
+            || !callable_target(&guard.parser)
+            || !component_valid(&guard.scheme.component)
+            || guard
+                .scheme
+                .comparison_predicate
+                .as_ref()
+                .is_some_and(|target| !callable_target(target))
+            || guard.scheme.allowed_values.is_empty()
+            || guard.scheme.allowed_values.iter().any(|value| value.is_empty())
+            || !component_valid(&guard.host_allowlist.component)
+            || guard
+                .host_allowlist
+                .membership_predicate
+                .as_ref()
+                .is_some_and(|target| !callable_target(target))
+            || guard
+                .host_allowlist
+                .static_collection_factories
+                .iter()
+                .any(|target| !callable_target(target))
+            || !callable_target(&guard.dns.resolver)
+            || guard.dns.private_address_predicates.is_empty()
+            || guard
+                .dns
+                .private_address_predicates
+                .iter()
+                .any(|target| !callable_target(target))
+            || !redirect_valid
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "url_network_guard requires callable rule targets, exactly one field/accessor per component, non-empty allowed schemes/private-address predicates, and a valid redirect policy",
+            );
+        }
+        let mut regex_targets: Vec<(&str, &RuleTarget)> = vec![("parser", &guard.parser)];
+        if let crate::rule::UrlGuardRootSemantics::SinkArgumentAccessor { accessor, .. } = &guard.root {
+            regex_targets.push(("root.accessor", accessor));
+        }
+        if let Some(target) = guard.scheme.component.accessor.as_ref() {
+            regex_targets.push(("scheme.component.accessor", target));
+        }
+        if let Some(target) = guard.scheme.comparison_predicate.as_ref() {
+            regex_targets.push(("scheme.comparison_predicate", target));
+        }
+        if let Some(target) = guard.host_allowlist.component.accessor.as_ref() {
+            regex_targets.push(("host_allowlist.component.accessor", target));
+        }
+        if let Some(target) = guard.host_allowlist.membership_predicate.as_ref() {
+            regex_targets.push(("host_allowlist.membership_predicate", target));
+        }
+        for target in &guard.host_allowlist.static_collection_factories {
+            regex_targets.push(("host_allowlist.static_collection_factories", target));
+        }
+        regex_targets.push(("dns.resolver", &guard.dns.resolver));
+        for target in &guard.dns.private_address_predicates {
+            regex_targets.push(("dns.private_address_predicates", target));
+        }
+        if let Some(crate::rule::UrlRedirectGuardSemantics::PostSinkCall { call, .. }) =
+            guard.redirect.as_ref()
+        {
+            regex_targets.push(("redirect.call", call));
+        }
+        for (role, target) in regex_targets {
+            if let Some(pattern) = target.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-analysis-semantics",
+                        Some(rule),
+                        &format!("url_network_guard.{role}.regex is invalid: {error}"),
                     );
                 }
             }
@@ -1016,6 +1486,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             | crate::rule::ConstraintKind::ArgTainted { .. }
             | crate::rule::ConstraintKind::ReceiverTainted { .. }
             | crate::rule::ConstraintKind::AnyArgTainted { .. }
+            | crate::rule::ConstraintKind::ReceiverOriginCallbackParamReachesCall { .. }
             | crate::rule::ConstraintKind::FormatArgIndex { .. }
             | crate::rule::ConstraintKind::Namespace { .. }
             | crate::rule::ConstraintKind::TopLevel { .. }

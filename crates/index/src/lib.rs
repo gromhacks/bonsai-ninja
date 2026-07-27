@@ -10,6 +10,7 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::{short_qualified_tail, FileId, Span, SymbolId};
 use bonsai_lang_api::{CallKind, Decl, DeclIndex, DeclKind, FlowEvent, Ref, Visibility};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct DeclDedupKey {
@@ -33,6 +34,8 @@ struct DeclDedupKey {
 pub struct FunctionLinkageFacts {
     pub calls: Vec<CallLinkageFact>,
     pub call_result_assignments: Vec<CallResultLinkageFact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumed_call_results: Vec<Span>,
     pub returned_constructor_calls: Vec<ReturnedConstructorLinkageFact>,
     pub returned_projection_tails: Vec<Box<str>>,
     pub has_summary_output: bool,
@@ -43,6 +46,7 @@ impl FunctionLinkageFacts {
     pub fn is_empty(&self) -> bool {
         self.calls.is_empty()
             && self.call_result_assignments.is_empty()
+            && self.consumed_call_results.is_empty()
             && self.returned_constructor_calls.is_empty()
             && self.returned_projection_tails.is_empty()
             && !self.has_summary_output
@@ -57,6 +61,8 @@ pub struct CallLinkageFact {
     pub receiver: Option<Box<str>>,
     pub call_kind: CallKind,
     pub arg_spans: Box<[Span]>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_writeback_arg: bool,
 }
 
 /// Arity evidence for an assignment whose right-hand side is a direct call.
@@ -91,8 +97,25 @@ impl From<&Decl> for DeclDedupKey {
 }
 
 /// A merged view over all per-file decl indices.
+///
+/// Clones of one immutable compiler snapshot share this opaque identity.
+/// Semantic mutation advances it, allowing derived caches to reject results
+/// built from an older `GlobalIndex` even when an old `Arc` races edit
+/// invalidation.
+#[derive(Clone, Debug, Default)]
+pub struct GlobalIndexIdentity(Arc<()>);
+
+impl PartialEq for GlobalIndexIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for GlobalIndexIdentity {}
+
 #[derive(Clone, Debug, Default)]
 pub struct GlobalIndex {
+    identity: GlobalIndexIdentity,
     /// All per-file indices, indexed by the file they belong to.
     by_file: AHashMap<FileId, DeclIndex>,
     /// Global symbol table. Index = global raw id.
@@ -129,6 +152,20 @@ impl GlobalIndex {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Opaque identity of this exact compiler-header snapshot.
+    ///
+    /// The token is stable across immutable clones and changes whenever
+    /// declaration semantics mutate. Derived workspace caches use it as a
+    /// generation key; it has no source-language meaning.
+    #[must_use]
+    pub fn identity(&self) -> GlobalIndexIdentity {
+        self.identity.clone()
+    }
+
+    fn advance_identity(&mut self) {
+        self.identity = GlobalIndexIdentity::default();
     }
 
     /// Insert a per-file index. Local symbol ids in `index` are remapped to
@@ -170,6 +207,9 @@ impl GlobalIndex {
         index.refs.clear();
         index.assignment_values.clear();
         index.call_receivers.clear();
+        index.call_argument_values.clear();
+        index.static_string_maps.clear();
+        index.character_substitutions.clear();
         index.runtime_type_narrowings.clear();
         index.branch_conditions.clear();
         index.strings.clear();
@@ -190,20 +230,29 @@ impl GlobalIndex {
     /// this compiler phase boundary.
     pub fn insert_linkage_header_preprocessed(&mut self, mut index: DeclIndex) {
         dedup_decl_index_defs(&mut index);
-        let linkage = index
-            .defs
-            .iter()
-            .filter_map(|decl| {
-                let facts = function_linkage_facts(&decl.flow_events);
-                (!facts.is_empty()).then_some((decl.symbol, facts))
-            })
-            .collect();
+        let mut consumed_by_symbol = consumed_call_results_by_symbol(&index);
+        let mut linkage = Vec::new();
+        for decl in &index.defs {
+            let mut facts = function_linkage_facts(&decl.flow_events);
+            if let Some(consumed) = consumed_by_symbol.remove(&decl.symbol) {
+                facts.consumed_call_results.extend(consumed);
+                facts.consumed_call_results.sort_unstable();
+                facts.consumed_call_results.dedup();
+                facts.consumed_call_results.shrink_to_fit();
+            }
+            if !facts.is_empty() {
+                linkage.push((decl.symbol, facts));
+            }
+        }
         for decl in &mut index.defs {
             decl.flow_events.clear();
         }
         index.refs.clear();
         index.assignment_values.clear();
         index.call_receivers.clear();
+        index.call_argument_values.clear();
+        index.static_string_maps.clear();
+        index.character_substitutions.clear();
         index.runtime_type_narrowings.clear();
         index.branch_conditions.clear();
         index.strings.clear();
@@ -257,6 +306,7 @@ impl GlobalIndex {
     }
 
     fn insert_deduped(&mut self, mut index: DeclIndex, linkage: Vec<(SymbolId, FunctionLinkageFacts)>) {
+        self.advance_identity();
         let file = index.file;
         if self.by_file.contains_key(&file) {
             self.remove_file(file);
@@ -320,6 +370,7 @@ impl GlobalIndex {
     /// downstream consumers can match `[Base, sink]` on a `Child`
     /// receiver without falling back to receiver-name heuristics.
     pub fn finalize_semantic_facts(&mut self) {
+        self.advance_identity();
         let bases_by_type = self.bases_by_type_name();
         self.finalized_bases_by_type.clone_from(&bases_by_type);
         for index in self.by_file.values_mut() {
@@ -391,6 +442,10 @@ impl GlobalIndex {
     /// name-table entries, ref backlinks, and tombstone the global
     /// id slots so old SymbolIds resolve to `None`.
     pub fn remove_file(&mut self, file: FileId) {
+        if !self.by_file.contains_key(&file) {
+            return;
+        }
+        self.advance_identity();
         if let Some(prev) = self.by_file.remove(&file) {
             for decl in &prev.defs {
                 self.linkage_by_symbol.remove(&decl.symbol);
@@ -486,6 +541,66 @@ impl GlobalIndex {
     #[must_use]
     pub fn linkage_facts(&self, symbol: SymbolId) -> Option<&FunctionLinkageFacts> {
         self.linkage_by_symbol.get(&symbol)
+    }
+
+    /// Project compact linkage from one exact file body whose symbols have
+    /// already been rebound to this header index.
+    ///
+    /// This is the demand-driven counterpart of
+    /// [`Self::insert_linkage_header_preprocessed`]. It lets a scoped compiler
+    /// pass retain complete workspace declaration/type headers while
+    /// materializing call/return linkage only for callable bodies the fixed
+    /// point actually requests.
+    #[must_use]
+    pub fn project_linkage_from_remapped_file(
+        &self,
+        index: &DeclIndex,
+    ) -> Vec<(SymbolId, FunctionLinkageFacts)> {
+        let mut consumed_by_symbol = consumed_call_results_by_symbol(index);
+        let mut linkage = Vec::new();
+        for decl in &index.defs {
+            let header = self
+                .decl_of(decl.symbol)
+                .expect("remapped linkage body is absent from compiler headers");
+            assert_eq!(
+                header.span.file, index.file,
+                "remapped linkage body belongs to a different compiler file"
+            );
+            let mut facts = function_linkage_facts(&decl.flow_events);
+            if let Some(consumed) = consumed_by_symbol.remove(&decl.symbol) {
+                facts.consumed_call_results.extend(consumed);
+                facts.consumed_call_results.sort_unstable();
+                facts.consumed_call_results.dedup();
+                facts.consumed_call_results.shrink_to_fit();
+            }
+            if !facts.is_empty() {
+                linkage.push((decl.symbol, facts));
+            }
+        }
+        linkage
+    }
+
+    /// Install linkage projected from bodies already rebound to this index.
+    ///
+    /// Replacing a row is deterministic and supports a callable-scoped pass
+    /// that revisits one file for a newly demanded function. Unknown symbols
+    /// are compiler invariant violations rather than silently ignored facts.
+    pub fn install_projected_linkage<I>(&mut self, linkage: I)
+    where
+        I: IntoIterator<Item = (SymbolId, FunctionLinkageFacts)>,
+    {
+        self.advance_identity();
+        for (symbol, facts) in linkage {
+            assert!(
+                self.decl_of(symbol).is_some(),
+                "projected linkage symbol is absent from compiler headers"
+            );
+            if facts.is_empty() {
+                self.linkage_by_symbol.remove(&symbol);
+            } else {
+                self.linkage_by_symbol.insert(symbol, facts);
+            }
+        }
     }
 
     /// Every reference site that resolves to `symbol`, paired with
@@ -615,6 +730,7 @@ impl<'de> Deserialize<'de> for GlobalIndex {
     {
         let wire = GlobalIndexWireOwned::deserialize(deserializer)?;
         let mut index = Self {
+            identity: GlobalIndexIdentity::default(),
             by_file: wire.by_file.into_iter().collect(),
             entries: wire
                 .entries
@@ -685,11 +801,64 @@ fn function_linkage_facts(events: &[FlowEvent]) -> FunctionLinkageFacts {
     collect_function_linkage_facts(events, &returned_call_sites, &mut facts);
     facts.calls.shrink_to_fit();
     facts.call_result_assignments.shrink_to_fit();
+    facts.consumed_call_results.sort_unstable();
+    facts.consumed_call_results.dedup();
+    facts.consumed_call_results.shrink_to_fit();
     facts.returned_constructor_calls.sort_unstable();
     facts.returned_constructor_calls.dedup();
     facts.returned_constructor_calls.shrink_to_fit();
     facts.returned_projection_tails.shrink_to_fit();
     facts
+}
+
+fn consumed_call_results_by_symbol(index: &DeclIndex) -> AHashMap<SymbolId, Vec<Span>> {
+    let mut call_sites = Vec::new();
+    for fact in &index.assignment_values {
+        call_sites.extend(fact.call_sites.iter().copied());
+        call_sites.extend(fact.value_flow.call_sites.iter().copied());
+    }
+    for fact in &index.call_receivers {
+        call_sites.extend(fact.value_flow.call_sites.iter().copied());
+    }
+    for fact in &index.call_argument_values {
+        call_sites.extend(fact.value_flow.call_sites.iter().copied());
+    }
+    call_sites.sort_unstable();
+    call_sites.dedup();
+
+    let mut owners: Vec<(u64, SymbolId, Span)> = index
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            )
+        })
+        .filter_map(|decl| {
+            decl.body_span
+                .map(|body| (body.end.saturating_sub(body.start), decl.symbol, body))
+        })
+        .collect();
+    owners.sort_unstable_by_key(|(width, symbol, body)| {
+        (*width, body.file.raw(), body.start, body.end, symbol.raw())
+    });
+
+    let mut by_symbol: AHashMap<SymbolId, Vec<Span>> = AHashMap::new();
+    for call_site in call_sites {
+        let Some((_, symbol, _)) = owners
+            .iter()
+            .find(|(_, _, body)| linkage_span_contains(*body, call_site))
+        else {
+            continue;
+        };
+        by_symbol.entry(*symbol).or_default().push(call_site);
+    }
+    by_symbol
+}
+
+fn linkage_span_contains(outer: Span, inner: Span) -> bool {
+    outer.file == inner.file && outer.start <= inner.start && outer.end >= inner.end
 }
 
 struct ReturnedCallSiteRow {
@@ -788,6 +957,9 @@ fn collect_function_linkage_facts(
                         .map(|arg| arg.span)
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
+                    has_writeback_arg: args
+                        .iter()
+                        .any(|arg| arg.passing_mode == bonsai_lang_api::ArgumentPassingMode::WriteBack),
                 });
                 if matches!(call_kind, CallKind::Constructor) && returned_call_sites.contains(*span) {
                     facts
@@ -818,6 +990,9 @@ fn collect_function_linkage_facts(
                 value_flow,
                 ..
             } => {
+                facts
+                    .consumed_call_results
+                    .extend(value_flow.call_sites.iter().copied());
                 facts.has_summary_output |= value_text
                     .as_deref()
                     .is_some_and(|value| !value.trim().is_empty())
@@ -834,10 +1009,22 @@ fn collect_function_linkage_facts(
                         .push(tail.clone().into_boxed_str());
                 }
             }
-            FlowEvent::Yield { value_text, .. } => {
+            FlowEvent::Yield {
+                value_text,
+                value_flow,
+                ..
+            } => {
+                facts
+                    .consumed_call_results
+                    .extend(value_flow.call_sites.iter().copied());
                 facts.has_summary_output |= value_text
                     .as_deref()
                     .is_some_and(|value| !value.trim().is_empty());
+            }
+            FlowEvent::AggregateAssign { value_flow, .. } => {
+                facts
+                    .consumed_call_results
+                    .extend(value_flow.call_sites.iter().copied());
             }
             FlowEvent::Branch {
                 then_events,

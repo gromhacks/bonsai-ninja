@@ -68,6 +68,19 @@ fn javascript_ws(source: &str) -> Workspace {
     ws
 }
 
+fn javascript_ws_files(files: &[(&str, &str)]) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    for (path, source) in files {
+        ws.vfs().write((*path).to_string(), Arc::<str>::from(*source));
+    }
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
 fn csharp_ws(source: &str) -> Workspace {
     let registry = bonsai_adapters::all_languages_registry();
     let ws = Workspace::new(registry);
@@ -205,7 +218,7 @@ def handler(user_input):
         },
     }]);
 
-    let rules = [fmt, top_level_open, pipe_open];
+    let rules = vec![fmt, top_level_open, pipe_open];
     let refs: Vec<&Rule> = rules.iter().collect();
     let hits = match_rules_against_facts(&ws, &refs);
 
@@ -862,7 +875,7 @@ def handler(request, user_input):
         },
     }]);
 
-    let rules = [
+    let rules = vec![
         call_attr_rule("python.test.alias_system", &["os", "system"]),
         keyword,
         target_attr_rule("python.test.request_args", MatchKind::Read, &["request", "args"]),
@@ -894,6 +907,55 @@ def handler(request, user_input):
             "expected batched match for {id}; got {batched:?}"
         );
     }
+}
+
+#[test]
+fn framework_source_package_evidence_follows_only_connected_local_modules() {
+    let ws = javascript_ws_files(&[
+        (
+            "src/index.js",
+            r#"
+const Fastify = require("fastify");
+const register = require("./routes/config");
+const app = Fastify();
+register(app);
+"#,
+        ),
+        (
+            "src/routes/config.js",
+            r#"
+module.exports = app => {
+  app.patch("/config", async (req, reply) => {
+    consume(req.body);
+  });
+};
+"#,
+        ),
+        (
+            "isolated/other.js",
+            r#"
+function unrelated(req) {
+  consume(req.body);
+}
+"#,
+        ),
+    ]);
+    let mut rule = target_attr_rule("javascript.test.fastify_body", MatchKind::Read, &["req", "body"]);
+    rule.language = "javascript".to_string();
+    rule.frameworks = vec!["fastify".to_string()];
+    rule.packages = vec!["fastify".to_string()];
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert_eq!(
+        matches.len(),
+        1,
+        "framework package evidence must reach split route modules without bleeding into disconnected code: {matches:#?}"
+    );
+    assert!(
+        matches[0].file.ends_with("src/routes/config.js"),
+        "connected route module should own the exact read: {matches:#?}"
+    );
+    assert_eq!(matches[0].match_text, "req.body");
 }
 
 #[test]
@@ -1066,7 +1128,7 @@ def handler(user_input):
             value: "\"clean\"".to_string(),
         },
     }]);
-    let rules = [tainted_second, clean_second];
+    let rules = vec![tainted_second, clean_second];
     let rule_refs: Vec<&Rule> = rules.iter().collect();
 
     let batched = match_rules_against_facts(&ws, &rule_refs);

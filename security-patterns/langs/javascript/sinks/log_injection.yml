@@ -2,7 +2,7 @@
   enabled: true
   language: javascript
   tag: log-injection
-  severity: medium
+  severity: high
   cwe:
   - CWE-117
   match:

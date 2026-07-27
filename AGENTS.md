@@ -51,6 +51,12 @@ work. After the isolated workers finish, the parent validates that every
 sidecar describes one current workspace snapshot and reruns the exact sequence
 if a file changed between phases.
 
+For broad analysis, retain only workspace linkage headers (declarations,
+types, modules, imports, inheritance, and stable symbol identities) and stream
+exact adapter-lowered bodies on demand. Never make all project bodies resident
+beside the IDG. Body-cache eviction may cause exact recomputation; it must not
+change analyzed files, edges, or closure.
+
 Always treat pagination as correctness. If output says more pages exist,
 continue with `--page 2`, `--page next`, or the printed `P:...` cursor
 before claiming coverage. Use `--all` only for tight filters or explicit

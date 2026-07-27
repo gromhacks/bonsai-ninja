@@ -10,6 +10,27 @@ use bonsai_common::FileId;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// Whether a grammar node is comment-only syntax rather than a value-bearing
+/// expression. Adapters and shared lowering use this at syntax boundaries so
+/// a named comment node can never shift positional argument indices.
+pub(super) fn is_comment_node_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "comment"
+            | "line_comment"
+            | "block_comment"
+            | "shebang"
+            | "hash_bang_line"
+            | "doc_comment"
+            | "inner_doc_comment_marker"
+            | "outer_doc_comment_marker"
+            | "documentation_comment"
+            | "multiline_comment"
+            | "dartdoc_comment"
+            | "jsdoc_comment"
+    ) || kind.ends_with("_comment")
+}
+
 /// Collect every comment node in the tree, classifying each by its
 /// stripped body. Tree-sitter grammars surface comments as one of a
 /// small set of node kinds (`comment`, `line_comment`, `block_comment`,
@@ -24,32 +45,12 @@ pub fn extract_comments(tree: &tree_sitter::Tree, file: FileId, src: &[u8]) -> V
     // Every tree-sitter grammar in the pack emits comments as one of
     // these node kinds. Union is language-agnostic; the adapter
     // doesn't need to opt in.
-    const COMMENT_KINDS: &[&str] = &[
-        "comment",
-        "line_comment",
-        "block_comment",
-        "shebang",
-        "hash_bang_line",
-        // Rust grammar distinguishes these.
-        "doc_comment",
-        "inner_doc_comment_marker",
-        "outer_doc_comment_marker",
-        // Kotlin / Swift doc comment variants.
-        "documentation_comment",
-        "multiline_comment",
-        // Dart / JS dedicated doc variants.
-        "dartdoc_comment",
-        "jsdoc_comment",
-        // Python docstring — tree-sitter-python surfaces it as a
-        // string inside an expression_statement, handled separately
-        // below so we don't double-count regular strings.
-    ];
     let mut out = Vec::new();
     let mut cursor = tree.walk();
     let root = tree.root_node();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if COMMENT_KINDS.contains(&node.kind()) {
+        if is_comment_node_kind(node.kind()) {
             let text = node_text(&node, src).trim().to_string();
             if !text.is_empty() {
                 let body = strip_comment_markers(&text);

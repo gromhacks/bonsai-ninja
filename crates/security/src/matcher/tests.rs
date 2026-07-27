@@ -20,6 +20,479 @@ fn rule_from_yaml(yaml: &str, kind: crate::rule::RuleKind) -> Rule {
 }
 
 #[test]
+fn weighted_matcher_cache_eviction_only_recomputes() {
+    let cache = MatcherFactCache::<u8, usize>::new(1);
+    let builds = std::sync::atomic::AtomicUsize::new(0);
+    let first = cache.get_or_insert_with(
+        0,
+        || {
+            builds.fetch_add(1, Ordering::Relaxed);
+            Arc::new(7)
+        },
+        |_| 1,
+    );
+    let reused = cache.get_or_insert_with(
+        0,
+        || {
+            builds.fetch_add(1, Ordering::Relaxed);
+            Arc::new(7)
+        },
+        |_| 1,
+    );
+    assert!(Arc::ptr_eq(&first, &reused));
+    let _ = cache.get_or_insert_with(1, || Arc::new(9), |_| 1);
+    let rebuilt = cache.get_or_insert_with(
+        0,
+        || {
+            builds.fetch_add(1, Ordering::Relaxed);
+            Arc::new(7)
+        },
+        |_| 1,
+    );
+    assert!(!Arc::ptr_eq(&first, &rebuilt));
+    assert_eq!(builds.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn matcher_cache_phase_release_only_forces_exact_recomputation() {
+    let cache = MatcherFactCache::<u8, usize>::new(1);
+    let builds = std::sync::atomic::AtomicUsize::new(0);
+    let build = || {
+        builds.fetch_add(1, Ordering::Relaxed);
+        Arc::new(7)
+    };
+    let first = cache.get_or_insert_with(0, build, |_| 1);
+    cache.clear_retained();
+    let rebuilt = cache.get_or_insert_with(0, build, |_| 1);
+
+    assert!(!Arc::ptr_eq(&first, &rebuilt));
+    assert_eq!(builds.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn matcher_cache_phase_budget_can_shrink_and_restore_without_changing_values() {
+    let cache = MatcherFactCache::<u8, usize>::new(4);
+    let builds = std::sync::atomic::AtomicUsize::new(0);
+    let build = || {
+        builds.fetch_add(1, Ordering::Relaxed);
+        Arc::new(7)
+    };
+    let first = cache.get_or_insert_with(0, build, |_| 2);
+    cache.set_retained_budget(1);
+    let rebuilt = cache.get_or_insert_with(0, build, |_| 2);
+    assert!(!Arc::ptr_eq(&first, &rebuilt));
+
+    cache.set_retained_budget(4);
+    let retained = cache.get_or_insert_with(0, build, |_| 2);
+    let reused = cache.get_or_insert_with(0, build, |_| 2);
+    assert!(Arc::ptr_eq(&retained, &reused));
+    assert_eq!(*reused, 7);
+    assert_eq!(builds.load(Ordering::Relaxed), 3);
+}
+
+#[test]
+fn matcher_cache_can_retain_one_required_oversize_compiler_projection() {
+    let cache = MatcherFactCache::<u8, usize>::new_with_oversized_singleton(1, true);
+    let builds = std::sync::atomic::AtomicUsize::new(0);
+    let build = || {
+        builds.fetch_add(1, Ordering::Relaxed);
+        Arc::new(7)
+    };
+    let first = cache.get_or_insert_with(0, build, |_| 8);
+    cache.set_retained_budget(1);
+    let reused = cache.get_or_insert_with(0, build, |_| 8);
+
+    assert!(Arc::ptr_eq(&first, &reused));
+    assert_eq!(builds.load(Ordering::Relaxed), 1);
+
+    let second = cache.get_or_insert_with(1, || Arc::new(9), |_| 8);
+    let second_reused = cache.get_or_insert_with(1, || Arc::new(11), |_| 8);
+    assert!(Arc::ptr_eq(&second, &second_reused));
+    assert_eq!(*second_reused, 9);
+    assert!(
+        cache.state.lock().entries.len() <= 1,
+        "oversize retention must stay bounded to one LRU value"
+    );
+}
+
+#[test]
+fn demanded_import_projection_matches_exhaustive_prefix_intersection() {
+    let modules = [
+        "org.apache.velocity.app.VelocityEngine",
+        "poco/URI.h",
+        "DBI::db",
+        "unrelated.deep.module",
+    ];
+    let demanded = [
+        "org.apache.velocity".to_string(),
+        "poco".to_string(),
+        "DBI".to_string(),
+        "absent".to_string(),
+    ];
+    let demanded_set = demanded.iter().cloned().collect::<AHashSet<_>>();
+    let mut exhaustive = AHashSet::new();
+    let mut projected = AHashSet::new();
+    for module in modules {
+        insert_import_target_prefixes(&mut exhaustive, module);
+        insert_demanded_import_target_prefixes(&mut projected, module, &demanded_set);
+    }
+    exhaustive.retain(|package| demanded_set.contains(package));
+
+    assert_eq!(projected, exhaustive);
+}
+
+#[test]
+fn broad_matcher_cache_reserves_low_memory_semantic_headroom() {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+
+    assert_eq!(
+        broad_matcher_fact_cache_total_budget_bytes_for_limit(Some(3 * GIB)),
+        128 * MIB
+    );
+    assert_eq!(
+        broad_matcher_fact_cache_total_budget_bytes_for_limit(None),
+        256 * MIB
+    );
+}
+
+#[test]
+fn workspace_package_cache_fingerprint_preserves_component_identity() {
+    assert_eq!(
+        combined_workspace_package_fingerprint(7, 11),
+        combined_workspace_package_fingerprint(7, 11)
+    );
+    assert_ne!(
+        combined_workspace_package_fingerprint(7, 11),
+        combined_workspace_package_fingerprint(11, 7),
+        "manifest and compiler-import fingerprints are distinct cache-key components"
+    );
+}
+
+#[test]
+fn endpoint_taint_constraints_reuse_the_initial_static_syntax_proof() {
+    let rule = rule_from_yaml(
+        r#"
+id: java.test.execute
+enabled: true
+language: java
+tag: sql-injection
+severity: high
+match:
+  kind: call
+  callee:
+    name: execute
+constraints:
+  - arg_count: 2
+  - arg_tainted:
+      index: 1
+description: Endpoint proof fixture.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let call_span = Span::new(FileId::new(3), 10, 20);
+    let expected = RuleMatch {
+        origin: MatchOrigin::Rulepack,
+        rule_id: rule.id.clone(),
+        language: rule.language.clone(),
+        file: "Example.java".to_string(),
+        line: 1,
+        column: 1,
+        span: call_span,
+        match_text: "execute".to_string(),
+        enclosing_fn: Some("run".to_string()),
+    };
+    let call = TaintedCall {
+        parent_trace_id: None,
+        caller: bonsai_common::FuncId::new(7),
+        name: "execute".to_string(),
+        call_span,
+        tainted_args: vec![bonsai_taint::TaintedArgAtCall {
+            index: 1,
+            value_text: "query".to_string(),
+        }],
+        tainted_receiver: None,
+        kind: TaintedCallKind::Call,
+    };
+    let calls = [call];
+    let view = InterTaintView::new(&calls);
+
+    assert_eq!(
+        endpoint_taint_constraints_pass_without_syntax(&rule, &expected, &view, true),
+        Some(true),
+        "the endpoint scan already proved static arg/package constraints"
+    );
+    assert_eq!(
+        endpoint_taint_constraints_pass_without_syntax(&rule, &expected, &view, false),
+        None,
+        "ambiguous overlapping call identities must retain exact AST verification"
+    );
+
+    let wrong_slot_call = TaintedCall {
+        tainted_args: vec![bonsai_taint::TaintedArgAtCall {
+            index: 0,
+            value_text: "safe".to_string(),
+        }],
+        ..calls[0].clone()
+    };
+    let wrong_slot_calls = [wrong_slot_call];
+    assert_eq!(
+        endpoint_taint_constraints_pass_without_syntax(
+            &rule,
+            &expected,
+            &InterTaintView::new(&wrong_slot_calls),
+            true,
+        ),
+        Some(false),
+        "positional taint predicates must remain argument-sensitive"
+    );
+}
+
+#[test]
+fn endpoint_taint_constraint_fast_path_falls_back_when_ast_identity_is_required() {
+    let rule = rule_from_yaml(
+        r#"
+id: python.test.run
+enabled: true
+language: python
+tag: command-injection
+severity: high
+match:
+  kind: call
+  callee:
+    name: run
+constraints:
+  - arg_tainted:
+      kw: command
+description: Keyword endpoint fixture.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let call_span = Span::new(FileId::new(4), 30, 40);
+    let expected = RuleMatch {
+        origin: MatchOrigin::Rulepack,
+        rule_id: rule.id.clone(),
+        language: rule.language.clone(),
+        file: "app.py".to_string(),
+        line: 1,
+        column: 1,
+        span: call_span,
+        match_text: "run".to_string(),
+        enclosing_fn: Some("handler".to_string()),
+    };
+    let call = TaintedCall {
+        parent_trace_id: None,
+        caller: bonsai_common::FuncId::new(8),
+        name: "run".to_string(),
+        call_span,
+        tainted_args: vec![bonsai_taint::TaintedArgAtCall {
+            index: 0,
+            value_text: "payload".to_string(),
+        }],
+        tainted_receiver: None,
+        kind: TaintedCallKind::Call,
+    };
+    let calls = [call];
+    let view = InterTaintView::new(&calls);
+
+    assert_eq!(
+        endpoint_taint_constraints_pass_without_syntax(&rule, &expected, &view, true),
+        None,
+        "keyword-to-position resolution remains adapter-owned AST work"
+    );
+}
+
+#[test]
+fn weighted_matcher_cache_single_flights_oversize_values() {
+    const THREADS: usize = 8;
+    let cache = Arc::new(MatcherFactCache::<u8, usize>::new(1));
+    let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let start = Arc::new(std::sync::Barrier::new(THREADS));
+    let handles = (0..THREADS)
+        .map(|_| {
+            let cache = Arc::clone(&cache);
+            let builds = Arc::clone(&builds);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                cache.get_or_insert_with(
+                    0,
+                    || {
+                        builds.fetch_add(1, Ordering::Relaxed);
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        Arc::new(7)
+                    },
+                    |_| 2,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let values = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("matcher cache request"))
+        .collect::<Vec<_>>();
+    assert!(values.iter().skip(1).all(|value| Arc::ptr_eq(&values[0], value)));
+    assert_eq!(builds.load(Ordering::Relaxed), 1);
+
+    let rebuilt = cache.get_or_insert_with(
+        0,
+        || {
+            builds.fetch_add(1, Ordering::Relaxed);
+            Arc::new(7)
+        },
+        |_| 2,
+    );
+    assert!(!Arc::ptr_eq(&values[0], &rebuilt));
+    assert_eq!(builds.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn matcher_cache_release_does_not_retain_an_active_single_flight() {
+    let cache = Arc::new(MatcherFactCache::<u8, usize>::new(1));
+    let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    let builder_cache = Arc::clone(&cache);
+    let builder_builds = Arc::clone(&builds);
+    let builder = std::thread::spawn(move || {
+        builder_cache.get_or_insert_with(
+            0,
+            || {
+                builder_builds.fetch_add(1, Ordering::Relaxed);
+                started_tx.send(()).expect("announce matcher build");
+                release_rx.recv().expect("release matcher build");
+                Arc::new(7)
+            },
+            |_| 1,
+        )
+    });
+
+    started_rx.recv().expect("matcher build started");
+    cache.clear_retained();
+    let active_cell = {
+        let state = cache.state.lock();
+        Arc::clone(&state.in_flight.get(&0).expect("active matcher fact flight").cell)
+    };
+
+    let waiter_cache = Arc::clone(&cache);
+    let waiter_builds = Arc::clone(&builds);
+    let waiter = std::thread::spawn(move || {
+        waiter_cache.get_or_insert_with(
+            0,
+            || {
+                waiter_builds.fetch_add(1, Ordering::Relaxed);
+                Arc::new(7)
+            },
+            |_| 1,
+        )
+    });
+
+    let wait_started = std::time::Instant::now();
+    while Arc::strong_count(&active_cell) < 4 {
+        assert!(
+            wait_started.elapsed() < std::time::Duration::from_secs(5),
+            "waiter did not join the active matcher fact flight"
+        );
+        std::thread::yield_now();
+    }
+    release_tx.send(()).expect("finish matcher build");
+    let built = builder.join().expect("builder thread");
+    let shared = waiter.join().expect("waiter thread");
+    assert!(Arc::ptr_eq(&built, &shared));
+    assert_eq!(builds.load(Ordering::Relaxed), 1);
+
+    let rebuilt = cache.get_or_insert_with(
+        0,
+        || {
+            builds.fetch_add(1, Ordering::Relaxed);
+            Arc::new(7)
+        },
+        |_| 1,
+    );
+    assert!(
+        !Arc::ptr_eq(&built, &rebuilt),
+        "a matcher value completed after release must not repopulate the hot set"
+    );
+    assert_eq!(builds.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn transient_package_facts_survive_syntax_release() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    let file = ws.vfs().write(
+        "controllers/handler.js",
+        "function handle(req, res) { return res.send(req.body); }\n",
+    );
+
+    let first =
+        file_package_set_with_workspace_context_and_retention(&ws, file, false, FactRetention::Transient);
+    ws.db().release_syntax(file);
+    let second =
+        file_package_set_with_workspace_context_and_retention(&ws, file, false, FactRetention::Transient);
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "exact lowered package facts should be reused after the transient syntax tree is evicted"
+    );
+}
+
+#[test]
+fn transient_decl_match_facts_survive_syntax_release() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    let file = ws.vfs().write(
+        "controllers/handler.js",
+        "function handle(req, res) { return res.send(req.body); }\n",
+    );
+    let factory = empty_factory_returns();
+
+    let first =
+        decl_match_facts_for_retention(&ws, file, None, factory.as_ref(), FactRetention::Transient, None);
+    assert!(
+        !first.by_decl_span.is_empty(),
+        "adapter lowering should produce matcher facts"
+    );
+    ws.db().release_syntax(file);
+    let second =
+        decl_match_facts_for_retention(&ws, file, None, factory.as_ref(), FactRetention::Transient, None);
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "exact lowered declaration facts should be reused after the transient syntax tree is evicted"
+    );
+}
+
+#[test]
+fn package_facts_require_compiler_or_dependency_evidence() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    let inferred_only = ws.vfs().write(
+        "controllers/handler.js",
+        "function handle(req, res) { return res.send(req.body); }\n",
+    );
+    let imported = ws.vfs().write(
+        "routes/imported.js",
+        "const express = require(\"express\");\nfunction handle(req, res) { return res.send(req.body); }\n",
+    );
+
+    let inferred_packages = file_package_set_with_workspace_context_and_retention(
+        &ws,
+        inferred_only,
+        false,
+        FactRetention::Transient,
+    );
+    assert!(
+        !inferred_packages.contains("express"),
+        "paths and conventional parameter names are not compiler evidence for a framework"
+    );
+    let imported_packages =
+        file_package_set_with_workspace_context_and_retention(&ws, imported, false, FactRetention::Transient);
+    assert!(
+        imported_packages.contains("express"),
+        "the adapter import index should provide exact package evidence"
+    );
+}
+
+#[test]
 fn flow_read_attribute_match_requires_actual_qualified_token() {
     let split_callback_tokens = vec!["req".to_string(), "err.path".to_string()];
     assert!(
@@ -43,10 +516,13 @@ fn canonical_flow_read_uses_ast_rhs_span_instead_of_assignment_punctuation() {
     let value_span = Span::new(file, value_start, source.len() as u64);
     let facts = [bonsai_lang_api::AssignmentValueFact {
         assignment_span,
+        target: Some("req.query".to_string()),
         target_span: Some(Span::new(file, 0, "req.query".len() as u64)),
         value_span,
         call_sites: Vec::new(),
         value_flow: Default::default(),
+        exact_callable_return: None,
+        exact_static_call_args: None,
         direct_call_name: None,
         direct_call_receiver: None,
     }];
@@ -113,6 +589,48 @@ fn assignment_source_call_facts_inherit_receiver_type_aliases() {
         calls[0].receiver_types,
         vec!["jakarta.servlet.http.Cookie".to_string()],
         "matcher-synthesized assignment source calls must retain semantic receiver type evidence"
+    );
+}
+
+#[test]
+fn syntax_bound_resource_assignment_uses_rulepack_factory_type() {
+    let mut factory = FactoryReturns::default();
+    factory.by_language.insert(
+        "python".to_string(),
+        vec![FactoryReturnSpec {
+            method: "AsyncClient".to_string(),
+            receiver_path: vec!["httpx".to_string()],
+            type_name: "AsyncClient".to_string(),
+        }],
+    );
+    let events = vec![FlowEvent::Using {
+        span: span(),
+        body: vec![FlowEvent::Assign {
+            span: span(),
+            target: "client".to_string(),
+            source_name: None,
+            source_call: Some("httpx.AsyncClient".to_string()),
+            source_call_args: Vec::new(),
+            source_names: vec!["httpx.AsyncClient".to_string()],
+            declares_new_binding: false,
+            value_kind: None,
+        }],
+    }];
+
+    let aliases = synth_factory_type_aliases(
+        &events,
+        &[],
+        &factory,
+        "python",
+        &std::collections::HashMap::new(),
+    );
+
+    assert_eq!(
+        aliases,
+        vec![TypeAliasBinding {
+            name: "client".to_string(),
+            type_name: "AsyncClient".to_string(),
+        }]
     );
 }
 
@@ -348,6 +866,38 @@ description: Flask request args source.
             &source_file_packages,
         ),
         "source rules may use file-level package evidence for dynamic request receiver extraction"
+    );
+    let receiver_taint_rule = rule_from_yaml(
+        r#"
+id: javascript.test.uploaded_file_mv
+enabled: true
+language: javascript
+tag: file-upload
+severity: high
+packages: [express-fileupload]
+match:
+  kind: call
+  callee:
+    regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.mv$"
+constraints:
+  - arg_tainted:
+      index: 0
+  - receiver_tainted: true
+description: Uploaded file move.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let receiver_taint_prepared =
+        PreparedRule::new(&receiver_taint_rule).expect("receiver-taint package rule prepares");
+    let upload_packages = AHashSet::from_iter(["express-fileupload".to_string()]);
+    assert!(
+        receiver_taint_prepared.call_context_allows(
+            "uploaded.mv",
+            &[],
+            &std::collections::HashMap::new(),
+            &upload_packages,
+        ),
+        "a receiver-taint constraint supplies endpoint dataflow identity for a package-gated receiver-agnostic call"
     );
     let lifecycle_rule = rule_from_yaml(
         r#"
@@ -762,6 +1312,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         alias_chains: None,
         runtime_types: None,
         lifecycle_transitions: None,
+        structural_context: None,
     }));
     assert!(!constraints_pass(ConstraintEval {
         rule_id: "test.same_receiver",
@@ -782,6 +1333,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         alias_chains: None,
         runtime_types: None,
         lifecycle_transitions: None,
+        structural_context: None,
     }));
     assert!(!constraints_pass(ConstraintEval {
         rule_id: "test.same_receiver",
@@ -802,6 +1354,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         alias_chains: None,
         runtime_types: None,
         lifecycle_transitions: None,
+        structural_context: None,
     }));
 }
 

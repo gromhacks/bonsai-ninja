@@ -54,7 +54,11 @@ def run_json(cmd: list[str]) -> tuple[int, dict[str, Any], str]:
     try:
         payload = json.loads(stdout or "{}")
     except json.JSONDecodeError as exc:
-        return code, {"error": f"invalid json: {exc}", "stdout": stdout, "stderr": stderr}, stderr
+        return (
+            code,
+            {"error": f"invalid json: {exc}", "stdout": stdout, "stderr": stderr},
+            stderr,
+        )
     return code, payload, stderr
 
 
@@ -100,7 +104,9 @@ def validate_pack_validate(rules_dir: str, binary: str) -> SectionResult:
     )
 
 
-def validate_duplicates(strict_family_file: bool = True, fail_on_collision: bool = True) -> SectionResult:
+def validate_duplicates(
+    strict_family_file: bool = True, fail_on_collision: bool = True
+) -> SectionResult:
     cmd = [
         "python3",
         str(SCRIPT_DIR / "pack_audit.py"),
@@ -126,7 +132,9 @@ def validate_duplicates(strict_family_file: bool = True, fail_on_collision: bool
         family_file_mismatches = []
 
     ok = code == 0 and not duplicate_ids and not family_file_mismatches
-    if fail_on_collision and (duplicate_enabled_match_shapes or cross_family_api_collisions):
+    if fail_on_collision and (
+        duplicate_enabled_match_shapes or cross_family_api_collisions
+    ):
         ok = False
     detail = {
         "command": " ".join(cmd),
@@ -156,7 +164,9 @@ def parse_example_coverage(out: str) -> int:
     return int(match.group(1))
 
 
-def validate_examples(rules_dir: str, fail_on_missing_examples: bool = True) -> SectionResult:
+def validate_examples(
+    rules_dir: str, fail_on_missing_examples: bool = True
+) -> SectionResult:
     cmd = ["python3", str(SCRIPT_DIR / "rule_example_coverage.py"), rules_dir]
     code, stdout, stderr = run(cmd)
     missing = parse_example_coverage(stdout)
@@ -290,7 +300,11 @@ def main() -> int:
         default="security-patterns",
         help="Rulepack root path (default: security-patterns)",
     )
-    parser.add_argument("--binary", default=str(REPO_ROOT / "target" / "release" / "bonsai-ninja"), help="Path to bonsai-ninja binary")
+    parser.add_argument(
+        "--binary",
+        default=str(REPO_ROOT / "target" / "release" / "bonsai-ninja"),
+        help="Path to bonsai-ninja binary",
+    )
     parser.add_argument(
         "--no-fail-on-missing-examples",
         dest="fail_on_missing_examples",
@@ -339,7 +353,9 @@ def main() -> int:
             not args.allow_family_file_mismatch,
             fail_on_collision=args.fail_on_collision,
         ),
-        validate_examples(args.rules_dir, fail_on_missing_examples=args.fail_on_missing_examples),
+        validate_examples(
+            args.rules_dir, fail_on_missing_examples=args.fail_on_missing_examples
+        ),
         validate_collision_examples(
             args.rules_dir,
             args.binary,
@@ -362,10 +378,19 @@ def main() -> int:
                 print(f"     issues: {len(section.details['issues'])}")
 
     if args.json_out:
-        collisions_section = next((section for section in sections if section.name == "match-example-collisions"), None)
+        collisions_section = next(
+            (
+                section
+                for section in sections
+                if section.name == "match-example-collisions"
+            ),
+            None,
+        )
         merge_candidates = []
         if collisions_section:
-            merge_candidates = collisions_section.details.get("merge_candidates", []) or []
+            merge_candidates = (
+                collisions_section.details.get("merge_candidates", []) or []
+            )
         payload = {
             "rules_dir": args.rules_dir,
             "binary": args.binary,

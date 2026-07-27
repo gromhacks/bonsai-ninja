@@ -12,7 +12,6 @@ bonsai_callgraph = { workspace = true }
 bonsai_common = { workspace = true }
 bonsai_factstore = { workspace = true }
 bonsai_hash = { workspace = true }
-bonsai_index = { workspace = true }
 bonsai_lang_api = { workspace = true }
 bonsai_workspace = { workspace = true }
 ahash = { workspace = true }

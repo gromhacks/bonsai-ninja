@@ -180,7 +180,7 @@ pub fn resolution_coverage(
             file: file_path,
             ..ResolutionCoverageFileRow::default()
         };
-        let Some(file_index) = ws.exact_decl_index(file) else {
+        let Some(file_index) = ws.exact_decl_index_shared(file) else {
             continue;
         };
         let file_alias_targets: AHashMap<String, AliasTarget> =
@@ -231,7 +231,7 @@ pub(crate) fn resolution_incomplete_reasons(ws: &Workspace) -> Vec<String> {
     let mut receiver_type_gaps = 0usize;
 
     for file in global.all_files() {
-        let Some(file_index) = ws.exact_decl_index(file) else {
+        let Some(file_index) = ws.exact_decl_index_shared(file) else {
             continue;
         };
         let file_alias_targets: AHashMap<String, AliasTarget> =

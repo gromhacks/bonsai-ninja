@@ -1294,6 +1294,91 @@ fn finding_with_flow_for_grouping(
     }
 }
 
+fn combined_terminal_finding(sink_rule_id: &str, chain_funcs: Vec<FuncId>) -> CombinedFindingWithChain {
+    let mut item = finding_with_flow_for_grouping("S:terminal", 11, "token", "F:terminal");
+    item.finding.sink.rule_id = sink_rule_id.to_string();
+    item.finding.chain_display = chain_funcs
+        .iter()
+        .enumerate()
+        .map(|(idx, _)| format!("fn_{idx}"))
+        .collect();
+    item.chain_funcs = chain_funcs;
+    CombinedFindingWithChain {
+        finding: item.finding,
+        chain_funcs: item.chain_funcs,
+        additional_sources: Vec::new(),
+        additional_sinks: Vec::new(),
+        member_finding_ids: Vec::new(),
+    }
+}
+
+#[test]
+fn rulepack_terminal_priority_drops_only_strictly_downstream_duplicate() {
+    let preferred_rule = validation_rule_from_yaml(
+        r"
+id: python.cmdi.project_boundary
+enabled: true
+language: python
+tag: command-injection
+severity: critical
+cwe: [CWE-78]
+analysis_semantics:
+  sink_terminal_priority: 100
+match:
+  kind: call
+  callee:
+    name: project_boundary
+description: Canonical project boundary.
+",
+    );
+    let downstream_rule = validation_rule_from_yaml(
+        r"
+id: python.cmdi.transport
+enabled: true
+language: python
+tag: command-injection
+severity: critical
+cwe: [CWE-78]
+match:
+  kind: call
+  callee:
+    name: transport
+description: Downstream transport.
+",
+    );
+    let mut pack = Rulepack::default();
+    pack.packs.insert(
+        "python".to_string(),
+        LanguagePack {
+            language: "python".to_string(),
+            sinks: vec![preferred_rule, downstream_rule],
+            ..LanguagePack::default()
+        },
+    );
+
+    let preferred = combined_terminal_finding(
+        "python.cmdi.project_boundary",
+        vec![FuncId::new(1), FuncId::new(2)],
+    );
+    let downstream = combined_terminal_finding(
+        "python.cmdi.transport",
+        vec![FuncId::new(1), FuncId::new(2), FuncId::new(3)],
+    );
+    let sibling = combined_terminal_finding("python.cmdi.transport", vec![FuncId::new(1), FuncId::new(4)]);
+    let mut findings = vec![preferred, downstream, sibling];
+
+    drop_rulepack_terminal_dominated_findings(&mut findings, &pack);
+
+    assert_eq!(findings.len(), 2);
+    assert!(findings
+        .iter()
+        .any(|item| item.finding.sink.rule_id == "python.cmdi.project_boundary"));
+    assert!(findings.iter().any(|item| {
+        item.finding.sink.rule_id == "python.cmdi.transport"
+            && item.chain_funcs == vec![FuncId::new(1), FuncId::new(4)]
+    }));
+}
+
 #[test]
 fn combined_findings_do_not_merge_distinct_representative_flows() {
     let pack = Rulepack::default();

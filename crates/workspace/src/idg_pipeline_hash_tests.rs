@@ -79,6 +79,59 @@ fn workspace_generation_reuses_pipeline_identity_until_an_edit() {
 }
 
 #[test]
+fn edit_waits_for_active_idg_generation_before_mutating_source() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let workspace = Workspace::new(Arc::new(LanguageRegistry::new()));
+    let path = std::path::PathBuf::from("/virtual/app.py");
+    let file = workspace.apply_edit(&path, "old source".to_string());
+    let generation = workspace.inner.idg_build_serial.lock();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let editor = workspace.clone();
+    let edit_path = path.clone();
+    let thread = std::thread::spawn(move || {
+        started_tx.send(()).expect("announce edit");
+        editor.apply_edit(&edit_path, "new source".to_string());
+        finished_tx.send(()).expect("announce completion");
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("edit thread started");
+    assert!(
+        finished_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "edit must wait for the active compiler generation"
+    );
+    assert_eq!(
+        workspace
+            .vfs()
+            .snapshot(file)
+            .expect("old snapshot remains readable")
+            .text
+            .as_ref(),
+        "old source",
+        "VFS text must not change before cache-generation ownership transfers"
+    );
+
+    drop(generation);
+    finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("edit completes after generation release");
+    thread.join().expect("join editor");
+    assert_eq!(
+        workspace
+            .vfs()
+            .snapshot(file)
+            .expect("new snapshot")
+            .text
+            .as_ref(),
+        "new source"
+    );
+}
+
+#[test]
 fn idg_transfer_fingerprint_is_order_stable() {
     let left = bonsai_idg::TransferOptions {
         clean_output_overwrites: vec![
@@ -194,5 +247,74 @@ fn idg_transfer_fingerprint_tracks_receiver_result_policy() {
         idg_transfer_options_fingerprint(&plain),
         idg_transfer_options_fingerprint(&with_receiver_flow),
         "receiver-result semantics change graph edges and must invalidate the transfer sidecar"
+    );
+}
+
+#[test]
+fn idg_scoped_fingerprints_are_order_independent_and_scope_sensitive() {
+    let files_left = [FileId::new(9), FileId::new(2), FileId::new(9)];
+    let files_right = [FileId::new(2), FileId::new(9)];
+    let funcs_left = [FuncId::new(17), FuncId::new(3), FuncId::new(17)];
+    let funcs_right = [FuncId::new(3), FuncId::new(17)];
+
+    assert_eq!(
+        idg_file_scope_fingerprint(&files_left),
+        idg_file_scope_fingerprint(&files_right)
+    );
+    assert_eq!(
+        idg_func_scope_fingerprint(&funcs_left),
+        idg_func_scope_fingerprint(&funcs_right)
+    );
+    assert_ne!(
+        idg_func_scope_fingerprint(&funcs_right),
+        idg_func_scope_fingerprint(&[FuncId::new(3)])
+    );
+}
+
+fn resolved_graph_with_edges(edges: &[(u32, u32, u64)]) -> bonsai_callgraph::ResolvedCallGraph {
+    let mut graph = bonsai_callgraph::CallGraph::new();
+    for &(from, to, start) in edges {
+        graph.add_edge(bonsai_callgraph::CallEdge {
+            from: FuncId::new(from),
+            to: FuncId::new(to),
+            span: bonsai_common::Span::new(FileId::new(1), start, start + 1),
+            kind: bonsai_callgraph::EdgeKind::Direct,
+            precision: Precision::Exact,
+            provenance: bonsai_callgraph::EdgeProvenance::direct_symbol(),
+        });
+    }
+    bonsai_callgraph::ResolvedCallGraph::from_call_graph(graph)
+}
+
+#[test]
+fn idg_call_graph_fingerprint_is_order_independent_and_edge_sensitive() {
+    let left = resolved_graph_with_edges(&[(1, 2, 10), (2, 3, 20)]);
+    let reordered = resolved_graph_with_edges(&[(2, 3, 20), (1, 2, 10)]);
+    let changed = resolved_graph_with_edges(&[(1, 2, 10), (2, 4, 20)]);
+
+    assert_eq!(
+        idg_call_graph_fingerprint(&left),
+        idg_call_graph_fingerprint(&reordered),
+        "equivalent resolved relations must reuse one scoped IDG"
+    );
+    assert_ne!(
+        idg_call_graph_fingerprint(&left),
+        idg_call_graph_fingerprint(&changed),
+        "a changed resolved call edge must invalidate the scoped IDG"
+    );
+}
+
+#[test]
+fn idg_scoped_semantics_fingerprint_tracks_optional_graph_inputs() {
+    let base = idg_scoped_semantics_fingerprint(1, 2, None, None);
+    assert_ne!(
+        base,
+        idg_scoped_semantics_fingerprint(1, 2, Some(0), None),
+        "a function-scoped graph is distinct even when its component hash is zero"
+    );
+    assert_ne!(
+        base,
+        idg_scoped_semantics_fingerprint(1, 2, None, Some(0)),
+        "a caller-supplied call graph is distinct even when its component hash is zero"
     );
 }

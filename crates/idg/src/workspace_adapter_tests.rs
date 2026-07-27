@@ -70,14 +70,7 @@ fn build_index(decls: Vec<Decl>) -> GlobalIndex {
         idx.insert(bonsai_lang_api::DeclIndex {
             file,
             defs,
-            refs: Vec::new(),
-            assignment_values: Vec::new(),
-            call_receivers: Vec::new(),
-            runtime_type_narrowings: Vec::new(),
-            branch_conditions: Vec::new(),
-            aggregate_layouts: Vec::new(),
-            strings: Vec::new(),
-            comments: Vec::new(),
+            ..bonsai_lang_api::DeclIndex::default()
         });
     }
     idx

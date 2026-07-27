@@ -41,7 +41,7 @@ pub use query::{matching_decls, matching_func_ids, Matcher};
 /// `"<unknown>"` for a missing entry.
 #[must_use]
 pub fn func_display_name(workspace: &bonsai_workspace::Workspace, func_id: bonsai_common::FuncId) -> String {
-    let global = workspace.db().global_index();
+    let global = workspace.compiler_header_index();
     let symbol = bonsai_common::SymbolId::new(func_id.raw());
     global
         .decl_of(symbol)

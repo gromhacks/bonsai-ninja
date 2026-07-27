@@ -18,6 +18,7 @@ use crate::cache_fingerprint::{
     dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,
     workspace_content_fingerprint,
 };
+use crate::factstore_cleanup::{cleanup_valid_sidecar_temp_files, factstore_writer_suffix_is_valid};
 use crate::taint_index_disk::{
     decode_verified, encode as encode_taint_graph_entry, factstore_key,
     TaintGraphEntry as DiskTaintGraphEntry,
@@ -29,7 +30,7 @@ use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_taint::EntryTaintGraph;
 use fs2::FileExt;
 use parking_lot::{Mutex, RwLock};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,25 +38,27 @@ use std::sync::Arc;
 /// On-disk snapshot version for the workspace-wide taint graph.
 /// Disk format is the streaming factstore; bumping this invalidates
 /// every cached sidecar so consumers get a fresh build on next open.
+// v12 (2026-07-25): Security source graphs now execute against the exact
+// source-to-sink corridor's backward target-demand relation. Older graphs
+// were built with workspace-global sink demand and are not semantically
+// interchangeable even though their wire shape is unchanged.
 // v11 (2026-07-16): MessagePack replaces the retired binary codec.
 // v10 (2026-07-01): taint graph/dataflow cache semantics changed to avoid
 // seeding callee/module target components as value carriers and to keep exact
 // RHS call spans for assignment-derived terminal calls.
 // v9 (2026-05-27): taint graph derives from the IDG, whose construction
 // and seeding changed enough that old graphs are no longer equivalent.
-pub const TAINT_GRAPH_CACHE_VERSION: u32 = 11;
+pub const TAINT_GRAPH_CACHE_VERSION: u32 = 12;
 
 /// Caller-defined table id stamped into the factstore header. 4 is
 /// the next slot after dataflow (2), value-flow (1), flow-ids (3).
 const TAINT_GRAPH_TABLE_ID: u32 = 4;
 
-/// Default number of source-seeded graphs retained in memory.
+/// Secondary safety bound on source-seeded graphs retained in memory.
 ///
-/// This is a cache cap, not an analysis cap: evicted graphs are
-/// recomputed or rehydrated from the factstore. The value is large
-/// enough to cover normal SDK command reuse while preventing the
-/// historical Redis-scale failure mode where every source graph
-/// stayed resident for the whole scan.
+/// Production retention is governed primarily by bytes because graph sizes
+/// differ by orders of magnitude. The entry limit remains as a guard against
+/// excessive metadata and for compatibility with existing SDK configuration.
 pub const TAINT_GRAPH_RESIDENT_ENTRY_CAP: usize = 512;
 
 fn configured_resident_entry_cap() -> usize {
@@ -63,6 +66,22 @@ fn configured_resident_entry_cap() -> usize {
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .unwrap_or(TAINT_GRAPH_RESIDENT_ENTRY_CAP)
+}
+
+fn configured_resident_budget_bytes() -> u64 {
+    const BYTES_PER_MIB: u64 = 1024 * 1024;
+    const DEFAULT_BUDGET_BYTES: u64 = 64 * BYTES_PER_MIB;
+    const MIN_BUDGET_BYTES: u64 = 64 * 1024;
+    const MAX_BUDGET_BYTES: u64 = 256 * BYTES_PER_MIB;
+    std::env::var("BONSAI_TAINT_GRAPH_CACHE_MB")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .and_then(|mib| mib.checked_mul(BYTES_PER_MIB))
+        .or_else(|| {
+            bonsai_common::effective_memory_limit_bytes()
+                .map(|limit| (limit / 64).clamp(MIN_BUDGET_BYTES, MAX_BUDGET_BYTES))
+        })
+        .unwrap_or(DEFAULT_BUDGET_BYTES)
 }
 
 /// Pipeline-hash field in the factstore header. Folds the matcher
@@ -101,6 +120,12 @@ pub type SeedShapeKey = Vec<String>;
 /// One entry in the per-`(source_func, seed_shape)` taint-graph map.
 pub type TaintGraphEntry = Arc<EntryTaintGraph>;
 
+#[derive(Debug)]
+struct ResidentGraphEntry {
+    graph: TaintGraphEntry,
+    estimated_bytes: u64,
+}
+
 /// Workspace-wide taint graph cache. Cleared on file edits.
 #[derive(Debug)]
 pub struct TaintGraphIndex {
@@ -110,11 +135,15 @@ pub struct TaintGraphIndex {
 #[derive(Debug)]
 struct Inner {
     /// `(source_func, sorted_seed_key)` → cached `EntryTaintGraph`.
-    by_source_seed: AHashMap<(FuncId, SeedShapeKey), TaintGraphEntry>,
+    by_source_seed: AHashMap<(FuncId, SeedShapeKey), ResidentGraphEntry>,
     /// FIFO insertion order for bounded resident entries.
     resident_order: VecDeque<(FuncId, SeedShapeKey)>,
     /// Maximum number of decoded graphs resident in memory.
     resident_cap: usize,
+    /// Maximum estimated bytes of decoded graph allocations retained in RAM.
+    resident_budget_bytes: u64,
+    /// Estimated bytes currently retained by `by_source_seed`.
+    resident_bytes: u64,
     /// Optional fingerprint of the `InterTaintConfig` that produced
     /// the cached entries. Bump-on-mismatch lets the consumer tell
     /// whether a different rulepack would invalidate the cache.
@@ -141,6 +170,15 @@ struct PersistSession {
     writer: Mutex<Option<FactStoreWriter>>,
     written_keys: Mutex<AHashSet<u64>>,
     existing: Option<Arc<FactStoreReader>>,
+}
+
+/// Result of starting one exact write-through cache session.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PersistStartReport {
+    /// Whether this call created a new writer.
+    pub started: bool,
+    /// Abandoned temp files removed while holding their target locks.
+    pub temp_files_removed: usize,
 }
 
 fn persistence_lock_path(path: &Path) -> PathBuf {
@@ -177,11 +215,13 @@ fn acquire_persistence_lock(path: &Path) -> std::io::Result<File> {
 }
 
 impl Inner {
-    fn with_capacity(resident_cap: usize) -> Self {
+    fn with_limits(resident_cap: usize, resident_budget_bytes: u64) -> Self {
         Self {
             by_source_seed: AHashMap::with_capacity(resident_cap.min(1024)),
             resident_order: VecDeque::with_capacity(resident_cap.min(1024)),
             resident_cap,
+            resident_budget_bytes,
+            resident_bytes: 0,
             config_fingerprint: 0,
             disk: None,
             persist: None,
@@ -191,7 +231,12 @@ impl Inner {
 
 impl Default for TaintGraphIndex {
     fn default() -> Self {
-        Self::with_capacity(configured_resident_entry_cap())
+        Self {
+            inner: RwLock::new(Inner::with_limits(
+                configured_resident_entry_cap(),
+                configured_resident_budget_bytes(),
+            )),
+        }
     }
 }
 
@@ -207,7 +252,22 @@ impl TaintGraphIndex {
     #[must_use]
     pub fn with_capacity(resident_cap: usize) -> Self {
         Self {
-            inner: RwLock::new(Inner::with_capacity(resident_cap)),
+            inner: RwLock::new(Inner::with_limits(resident_cap, u64::MAX)),
+        }
+    }
+
+    /// Build an index with byte-governed decoded-graph retention.
+    ///
+    /// Exact graphs larger than the budget are returned and may be persisted,
+    /// but are not held resident. This is a cache limit, never an analysis
+    /// limit.
+    #[must_use]
+    pub fn with_resident_budget_bytes(resident_budget_bytes: u64) -> Self {
+        Self {
+            inner: RwLock::new(Inner::with_limits(
+                TAINT_GRAPH_RESIDENT_ENTRY_CAP,
+                resident_budget_bytes,
+            )),
         }
     }
 
@@ -221,7 +281,7 @@ impl TaintGraphIndex {
             .read()
             .by_source_seed
             .get(&(source_func, seed_key.to_vec()))
-            .cloned();
+            .map(|entry| Arc::clone(&entry.graph));
         if cached.is_some() {
             return cached;
         }
@@ -233,13 +293,23 @@ impl TaintGraphIndex {
     /// (guarding against the astronomical hash collision), and
     /// hydrate the in-memory map. Returns the cached graph on hit.
     fn try_hydrate_from_disk(&self, source_func: FuncId, seed_key: &[String]) -> Option<TaintGraphEntry> {
-        let reader = self.inner.read().disk.clone()?;
+        let (reader, config_fingerprint) = {
+            let inner = self.inner.read();
+            (inner.disk.clone()?, inner.config_fingerprint)
+        };
         let key = factstore_key(source_func, seed_key);
         let hit = reader.get(key).ok().flatten()?;
         let entry = decode_verified(&hit.payload, source_func, seed_key).ok()?;
         let arc = Arc::new(entry.graph);
         let map_key = (source_func, seed_key.to_vec());
         let mut inner = self.inner.write();
+        // A file edit or rulepack/config swap can invalidate the index while
+        // the payload is being read and decoded. Never repopulate the new
+        // generation from that stale reader. Pointer identity also catches a
+        // same-config sidecar reload after corruption/rebuild.
+        if !disk_snapshot_is_current(&inner, &reader, config_fingerprint) {
+            return None;
+        }
         Some(insert_resident(&mut inner, map_key, arc).0)
     }
 
@@ -298,6 +368,7 @@ impl TaintGraphIndex {
         let mut inner = self.inner.write();
         inner.by_source_seed.clear();
         inner.resident_order.clear();
+        inner.resident_bytes = 0;
         inner.config_fingerprint = 0;
         inner.disk = None;
         inner.persist = None;
@@ -314,6 +385,7 @@ impl TaintGraphIndex {
         }
         inner.by_source_seed.clear();
         inner.resident_order.clear();
+        inner.resident_bytes = 0;
         inner.config_fingerprint = config_fingerprint;
         inner.disk = None;
         inner.persist = None;
@@ -354,6 +426,18 @@ impl TaintGraphIndex {
         self.inner.read().resident_cap
     }
 
+    /// Estimated decoded graph bytes currently retained in RAM.
+    #[must_use]
+    pub fn resident_bytes(&self) -> u64 {
+        self.inner.read().resident_bytes
+    }
+
+    /// Byte budget for decoded graph retention.
+    #[must_use]
+    pub fn resident_budget_bytes(&self) -> u64 {
+        self.inner.read().resident_budget_bytes
+    }
+
     /// Change the resident decoded-graph cap and evict immediately if
     /// the current cache is larger than the new bound. This is useful
     /// for one-shot broad CLI scans, where retaining decoded graphs
@@ -364,13 +448,26 @@ impl TaintGraphIndex {
         if resident_cap == 0 {
             inner.by_source_seed.clear();
             inner.resident_order.clear();
+            inner.resident_bytes = 0;
             return;
         }
         while inner.by_source_seed.len() > resident_cap {
-            let Some(oldest) = inner.resident_order.pop_front() else {
+            if !evict_oldest_resident(&mut inner) {
                 break;
-            };
-            inner.by_source_seed.remove(&oldest);
+            }
+        }
+    }
+
+    /// Change the decoded-graph byte budget and evict immediately when the
+    /// retained hot set is larger. Graph computation and factstore
+    /// persistence remain exact; only reuse changes.
+    pub fn set_resident_budget_bytes(&self, resident_budget_bytes: u64) {
+        let mut inner = self.inner.write();
+        inner.resident_budget_bytes = resident_budget_bytes;
+        while inner.resident_bytes > resident_budget_bytes {
+            if !evict_oldest_resident(&mut inner) {
+                break;
+            }
         }
     }
 
@@ -467,7 +564,7 @@ impl TaintGraphIndex {
         let mem_entries: Vec<((FuncId, SeedShapeKey), TaintGraphEntry)> = inner
             .by_source_seed
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(key, entry)| (key.clone(), Arc::clone(&entry.graph)))
             .collect();
         let config_fingerprint = inner.config_fingerprint;
         let disk_reader = inner.disk.clone();
@@ -530,10 +627,26 @@ impl TaintGraphIndex {
         db: &AnalyzerDb,
         config_fingerprint: u64,
     ) -> std::io::Result<bool> {
+        self.begin_persist_to_disk_report(path, db, config_fingerprint)
+            .map(|report| report.started)
+    }
+
+    /// Start write-through persistence and report safe crash-artifact cleanup.
+    ///
+    /// FactStore temp names contain the writer pid, but a pid alone is not a
+    /// portable liveness proof. Instead this acquires each taint-sidecar's
+    /// advisory target lock before unlinking its abandoned temps. Active
+    /// writers retain their lock and are never touched.
+    pub fn begin_persist_to_disk_report(
+        &self,
+        path: &Path,
+        db: &AnalyzerDb,
+        config_fingerprint: u64,
+    ) -> std::io::Result<PersistStartReport> {
         let mut inner = self.inner.write();
         if let Some(active) = inner.persist.as_ref() {
             if active.path == path && active.config_fingerprint == config_fingerprint {
-                return Ok(false);
+                return Ok(PersistStartReport::default());
             }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
@@ -543,15 +656,15 @@ impl TaintGraphIndex {
         if inner.config_fingerprint != config_fingerprint {
             inner.by_source_seed.clear();
             inner.resident_order.clear();
+            inner.resident_bytes = 0;
             inner.disk = None;
             inner.config_fingerprint = config_fingerprint;
         }
         let existing = inner.disk.clone();
         let lock_file = acquire_persistence_lock(path)?;
-        // Check session ownership before creating a temp writer. Constructing
-        // first let a losing concurrent caller unlink/replace the live temp.
-        // Automatic temp sweeping is intentionally absent because another
-        // process may own a unique active temp for the same target.
+        // Ownership is established before cleanup: another process's active
+        // target remains locked and its unique temp is never unlinked.
+        let temp_files_removed = cleanup_abandoned_taint_graph_temp_files(path)?;
         let writer = FactStoreWriter::create(
             path,
             TAINT_GRAPH_TABLE_ID,
@@ -566,7 +679,10 @@ impl TaintGraphIndex {
             written_keys: Mutex::new(AHashSet::default()),
             existing,
         }));
-        Ok(true)
+        Ok(PersistStartReport {
+            started: true,
+            temp_files_removed,
+        })
     }
 
     /// Finish the active write-through session. Existing disk entries
@@ -663,6 +779,7 @@ impl TaintGraphIndex {
         let entries = reader.len();
         inner.by_source_seed.clear();
         inner.resident_order.clear();
+        inner.resident_bytes = 0;
         inner.config_fingerprint = config_fingerprint;
         inner.disk = Some(Arc::new(reader));
         inner.persist = None;
@@ -695,36 +812,85 @@ impl TaintGraphIndex {
 /// directory. Normal analysis never calls this function: blindly sweeping by
 /// filename can unlink another process's active unique temp file.
 pub fn cleanup_sidecar_temp_files(path: &Path) -> std::io::Result<usize> {
-    let Some(parent) = path.parent() else {
+    cleanup_valid_sidecar_temp_files(path)
+}
+
+fn cleanup_abandoned_taint_graph_temp_files(owned_path: &Path) -> std::io::Result<usize> {
+    let Some(parent) = owned_path.parent() else {
         return Ok(0);
     };
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return Ok(0);
-    };
-    let prefix = format!("{file_name}.tmp.");
-    let mut removed = 0usize;
+    let current_prefix = format!("taint_graph.v{TAINT_GRAPH_CACHE_VERSION}.");
+    let mut targets = BTreeSet::new();
     let entries = match std::fs::read_dir(parent) {
         Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(err) => return Err(err),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
     };
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         };
         let name = entry.file_name();
-        if !name.to_string_lossy().starts_with(&prefix) {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some((target_name, writer_suffix)) = name.rsplit_once(".tmp.") else {
+            continue;
+        };
+        if factstore_writer_suffix_is_valid(writer_suffix)
+            && target_name.starts_with(&current_prefix)
+            && target_name.ends_with(".factstore")
+        {
+            targets.insert(parent.join(target_name));
+        }
+    }
+
+    let mut removed = cleanup_valid_sidecar_temp_files(owned_path)?;
+    for target in targets {
+        if target == owned_path {
             continue;
         }
-        match std::fs::remove_file(entry.path()) {
-            Ok(()) => removed += 1,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
+        let lock_file = match acquire_persistence_lock(&target) {
+            Ok(lock_file) => lock_file,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => {
+                tracing::warn!(
+                    path = %target.display(),
+                    error = %error,
+                    "skipping abandoned taint temp cleanup"
+                );
+                continue;
+            }
+        };
+        match cleanup_valid_sidecar_temp_files(&target) {
+            Ok(count) => removed = removed.saturating_add(count),
+            Err(error) => {
+                tracing::warn!(
+                    path = %target.display(),
+                    error = %error,
+                    "abandoned taint temp cleanup failed"
+                );
+            }
+        }
+        if let Err(error) = FileExt::unlock(&lock_file) {
+            tracing::warn!(
+                path = %target.display(),
+                error = %error,
+                "abandoned taint temp cleanup lock release failed"
+            );
         }
     }
     Ok(removed)
+}
+
+fn disk_snapshot_is_current(inner: &Inner, reader: &Arc<FactStoreReader>, config_fingerprint: u64) -> bool {
+    inner.config_fingerprint == config_fingerprint
+        && inner
+            .disk
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, reader))
 }
 
 fn insert_resident(
@@ -733,21 +899,43 @@ fn insert_resident(
     graph: TaintGraphEntry,
 ) -> (TaintGraphEntry, Option<Arc<PersistSession>>) {
     if let Some(existing) = inner.by_source_seed.get(&key) {
-        return (existing.clone(), None);
+        return (Arc::clone(&existing.graph), None);
     }
     let persist = inner.persist.clone();
-    if inner.resident_cap == 0 {
+    let estimated_bytes = graph.estimated_resident_bytes();
+    if inner.resident_cap == 0
+        || inner.resident_budget_bytes == 0
+        || estimated_bytes > inner.resident_budget_bytes
+    {
         return (graph, persist);
     }
-    while inner.by_source_seed.len() >= inner.resident_cap {
-        let Some(oldest) = inner.resident_order.pop_front() else {
+    while inner.by_source_seed.len() >= inner.resident_cap
+        || inner.resident_bytes.saturating_add(estimated_bytes) > inner.resident_budget_bytes
+    {
+        if !evict_oldest_resident(inner) {
             break;
-        };
-        inner.by_source_seed.remove(&oldest);
+        }
     }
     inner.resident_order.push_back(key.clone());
-    inner.by_source_seed.insert(key, graph.clone());
+    inner.resident_bytes = inner.resident_bytes.saturating_add(estimated_bytes);
+    inner.by_source_seed.insert(
+        key,
+        ResidentGraphEntry {
+            graph: Arc::clone(&graph),
+            estimated_bytes,
+        },
+    );
     (graph, persist)
+}
+
+fn evict_oldest_resident(inner: &mut Inner) -> bool {
+    let Some(oldest) = inner.resident_order.pop_front() else {
+        return false;
+    };
+    if let Some(evicted) = inner.by_source_seed.remove(&oldest) {
+        inner.resident_bytes = inner.resident_bytes.saturating_sub(evicted.estimated_bytes);
+    }
+    true
 }
 
 fn sanitize_sidecar_namespace(namespace: &str) -> String {
@@ -794,5 +982,33 @@ fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
     match err {
         bonsai_factstore::FactStoreError::Io(e) => e,
         other => std::io::Error::other(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_disk_snapshot_is_rejected_after_config_or_reader_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("taint.factstore");
+        FactStoreWriter::create(&path, TAINT_GRAPH_TABLE_ID, 7)
+            .expect("create factstore")
+            .finish()
+            .expect("finish factstore");
+        let first = Arc::new(FactStoreReader::open(&path, TAINT_GRAPH_TABLE_ID, 7).expect("first reader"));
+        let replacement =
+            Arc::new(FactStoreReader::open(&path, TAINT_GRAPH_TABLE_ID, 7).expect("replacement reader"));
+
+        let mut inner = Inner::with_limits(1, 1);
+        inner.config_fingerprint = 42;
+        inner.disk = Some(Arc::clone(&first));
+        assert!(disk_snapshot_is_current(&inner, &first, 42));
+        assert!(!disk_snapshot_is_current(&inner, &replacement, 42));
+
+        inner.disk = Some(replacement);
+        assert!(!disk_snapshot_is_current(&inner, &first, 42));
+        assert!(!disk_snapshot_is_current(&inner, &first, 7));
     }
 }

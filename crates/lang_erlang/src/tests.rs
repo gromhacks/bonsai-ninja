@@ -50,10 +50,13 @@ fn fun_ref_assignment_emits_clean_callable_alias() {
     let value_start = u64::try_from(src.find("fun").expect("RHS start")).unwrap();
     let facts = [bonsai_lang_api::AssignmentValueFact {
         assignment_span: span,
+        target: Some("Cb".to_string()),
         target_span: Some(bonsai_common::Span::new(FileId::new(0), 0, 2)),
         value_span: bonsai_common::Span::new(FileId::new(0), value_start, span.end),
         call_sites: Vec::new(),
         value_flow: Default::default(),
+        exact_callable_return: None,
+        exact_static_call_args: None,
         direct_call_name: None,
         direct_call_receiver: None,
     }];
@@ -235,6 +238,7 @@ fn list_comprehension_assignment_exposes_generator_sources() {
     let value_start = u64::try_from(src.find('[').expect("RHS start")).unwrap();
     let facts = [bonsai_lang_api::AssignmentValueFact {
         assignment_span: span,
+        target: Some("RawTokens".to_string()),
         target_span: Some(bonsai_common::Span::new(
             FileId::new(0),
             0,
@@ -243,6 +247,8 @@ fn list_comprehension_assignment_exposes_generator_sources() {
         value_span: bonsai_common::Span::new(FileId::new(0), value_start, span.end),
         call_sites: Vec::new(),
         value_flow: Default::default(),
+        exact_callable_return: None,
+        exact_static_call_args: None,
         direct_call_name: None,
         direct_call_receiver: None,
     }];

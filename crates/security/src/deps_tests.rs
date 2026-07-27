@@ -62,6 +62,40 @@ fn python_package_rule(package: &str) -> Rule {
 }
 
 #[test]
+fn manifest_recognition_reuses_the_language_mapping() {
+    for basename in [
+        "Pipfile",
+        "mix.exs",
+        "go.work",
+        "packages.config",
+        "project.csproj",
+        "plugin.gemspec",
+        "Package.resolved",
+    ] {
+        assert!(
+            is_dependency_manifest_basename(basename),
+            "{basename} has a language mapping and must be scanned"
+        );
+    }
+    assert!(!is_dependency_manifest_basename("notes.yaml"));
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_scan_does_not_follow_directory_symlinks_outside_the_workspace() {
+    let root = temp_root("bonsai-deps-symlink-root");
+    let outside = temp_root("bonsai-deps-symlink-outside");
+    std::fs::write(outside.join("Pipfile"), "requests = \"*\"").expect("outside manifest");
+    std::os::unix::fs::symlink(&outside, root.join("linked")).expect("directory symlink");
+
+    let paths = scan_manifest_files(&root, &Rulepack::default());
+    assert!(
+        paths.is_empty(),
+        "dependency inventory must not follow workspace symlinks: {paths:?}"
+    );
+}
+
+#[test]
 fn dependency_inventory_treats_manifest_package_name_as_evidence() {
     let root = temp_root("bonsai-deps-package");
     std::fs::write(
@@ -177,6 +211,53 @@ percent-encoding = "2"
         "expected percent_encoding alias from percent-encoding, got {:?}",
         packages
     );
+}
+
+#[test]
+fn broad_manifest_refresh_replaces_stale_package_context() {
+    let root = temp_root("bonsai-deps-manifest-refresh");
+    let manifest = root.join("requirements.txt");
+    std::fs::write(&manifest, "psycopg2-binary==2.9.9\n").expect("initial requirements");
+
+    let initial = workspace_dependency_packages_for_language(&root, "python");
+    assert!(initial.packages.contains("psycopg2"));
+    assert!(!initial.packages.contains("requests"));
+
+    std::fs::write(&manifest, "requests==2.32.3\n").expect("updated requirements");
+    let _snapshot = super::refresh_workspace_dependency_package_context(&root);
+
+    let refreshed = workspace_dependency_packages_for_language(&root, "python");
+    assert_ne!(initial.fingerprint, refreshed.fingerprint);
+    assert!(!refreshed.packages.contains("psycopg2"));
+    assert!(refreshed.packages.contains("requests"));
+}
+
+#[test]
+fn analysis_manifest_snapshot_remains_immutable_until_the_run_finishes() {
+    let root = temp_root("bonsai-deps-analysis-snapshot");
+    let manifest = root.join("requirements.txt");
+    std::fs::write(&manifest, "psycopg2-binary==2.9.9\n").expect("initial requirements");
+    let workspace_id = 9_001;
+    let snapshot = super::begin_workspace_dependency_package_snapshot(&root, workspace_id);
+
+    let initial =
+        super::workspace_dependency_packages_for_language_in_workspace(&root, "python", workspace_id);
+    assert!(initial.packages.contains("psycopg2"));
+    std::fs::write(&manifest, "requests==2.32.3\n").expect("updated requirements");
+
+    let during_run =
+        super::workspace_dependency_packages_for_language_in_workspace(&root, "python", workspace_id);
+    assert_eq!(initial.fingerprint, during_run.fingerprint);
+    assert!(during_run.packages.contains("psycopg2"));
+    assert!(!during_run.packages.contains("requests"));
+
+    drop(snapshot);
+    let refreshed_snapshot = super::refresh_workspace_dependency_package_context(&root);
+    let after_run =
+        super::workspace_dependency_packages_for_language_in_workspace(&root, "python", workspace_id);
+    assert_eq!(after_run.fingerprint, refreshed_snapshot.fingerprint);
+    assert!(!after_run.packages.contains("psycopg2"));
+    assert!(after_run.packages.contains("requests"));
 }
 
 #[test]

@@ -276,7 +276,9 @@
   disabled_reason:
     code: over-broad
 - id: go.sanitizer.filepath_rel_containment
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: go
   tag: path-sanitize
   packages: ["path/filepath"]
@@ -295,8 +297,9 @@
         return filepath.Rel(root, candidate)
       }
     expect_match_text: [filepath.Rel]
-  description: "filepath.Rel(root, candidate) - containment primitive when followed by a `!strings.HasPrefix(rel, \"..\")`
-    / `rel != \"..\"` guard."
+  description: "Disabled as a standalone sanitizer: filepath.Rel only computes a relative path. Sink rules that support
+    containment opt into relative-path-containment semantics, which require the canonical candidate, relative result,
+    exact parent and parent-prefix rejection branch, abrupt failure arm, trusted base provenance, and guarded consumer."
 - id: go.sanitizer.strconv_atoi
   enabled: true
   language: go

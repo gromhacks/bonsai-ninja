@@ -18,6 +18,10 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    nosql_filter:
+      filter_arg_index: 0
+      literal_value_operators: ["$eq"]
   match_examples:
   - name: mongo find
     code: |

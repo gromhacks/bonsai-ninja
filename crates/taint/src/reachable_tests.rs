@@ -30,19 +30,21 @@ fn call_summary_cache_for(
 ) -> CallEventSummaryCache<'static> {
     let mut spans = by_span.keys().copied().collect::<Vec<_>>();
     spans.sort_by_key(|span| (span.file.raw(), span.start, std::cmp::Reverse(span.end)));
-    CallEventSummaryCache {
-        by_func: AHashMap::from_iter([(
-            func,
-            Arc::new(FunctionCallEventSummaries {
-                by_span,
-                spans,
-                return_spans: Vec::new(),
-                writes: Vec::new(),
-            }),
-        )]),
-        shared: None,
-        db: None,
-    }
+    let by_span = by_span
+        .into_iter()
+        .map(|(span, summary)| (span, Arc::new(summary)))
+        .collect();
+    let mut cache = CallEventSummaryCache::default();
+    cache.insert_local(
+        func,
+        Arc::new(FunctionCallEventSummaries {
+            by_span,
+            spans,
+            return_spans: Vec::new(),
+            writes: Vec::new(),
+        }),
+    );
+    cache
 }
 
 #[test]
@@ -105,21 +107,64 @@ fn call_event_summaries_are_shared_across_source_queries() {
     let shared = IdgAttributionCaches::default();
     let first_arc = {
         let mut first = CallEventSummaryCache::shared(&shared);
-        assert!(cached_call_event_summaries_for_func(func, &global, &mut first)
-            .expect("cached empty summary")
-            .is_empty());
-        Arc::clone(first.by_func.get(&func).expect("first summary"))
+        let summary =
+            cached_call_event_summaries_for_func(func, &global, &mut first).expect("cached empty summary");
+        assert!(summary.by_span.is_empty());
+        summary
     };
     let second_arc = {
         let mut second = CallEventSummaryCache::shared(&shared);
-        assert!(cached_call_event_summaries_for_func(func, &global, &mut second)
-            .expect("shared empty summary")
-            .is_empty());
-        Arc::clone(second.by_func.get(&func).expect("second summary"))
+        let summary =
+            cached_call_event_summaries_for_func(func, &global, &mut second).expect("shared empty summary");
+        assert!(summary.by_span.is_empty());
+        summary
     };
 
     assert!(Arc::ptr_eq(&first_arc, &second_arc));
-    assert_eq!(shared.call_events.read().len(), 1);
+    assert_eq!(shared.stats().0, 1);
+}
+
+#[test]
+fn attribution_cache_evicts_by_bytes_without_changing_results() {
+    let func = FuncId::new(7);
+    let shared = IdgAttributionCaches::with_budget_bytes(1);
+    let summary = Arc::new(FunctionCallEventSummaries {
+        by_span: ahash::AHashMap::default(),
+        spans: Vec::new(),
+        return_spans: Vec::new(),
+        writes: Vec::new(),
+    });
+
+    let returned = shared.insert_attribution(func, Arc::clone(&summary), shared.generation());
+    assert!(Arc::ptr_eq(&returned, &summary));
+    assert_eq!(
+        shared.stats().0,
+        0,
+        "oversize exact summaries must not remain resident"
+    );
+}
+
+#[test]
+fn stale_attribution_build_cannot_repopulate_a_cleared_generation() {
+    let func = FuncId::new(7);
+    let shared = IdgAttributionCaches::default();
+    let old_generation = shared.generation();
+    shared.clear();
+    let summary = Arc::new(FunctionCallEventSummaries {
+        by_span: ahash::AHashMap::default(),
+        spans: Vec::new(),
+        return_spans: Vec::new(),
+        writes: Vec::new(),
+    });
+
+    let returned = shared.insert_attribution(func, Arc::clone(&summary), old_generation);
+    assert!(Arc::ptr_eq(&returned, &summary));
+    assert_eq!(
+        shared.stats().0,
+        0,
+        "work from an invalidated source generation may be returned to its \
+         active caller but must not become a cache hit for later queries"
+    );
 }
 
 #[test]
@@ -639,8 +684,54 @@ fn anchored_call_return_seed_does_not_include_same_name_reads_or_writes() {
 }
 
 #[test]
-fn anchored_projected_source_does_not_seed_container_siblings() {
+fn anchored_aggregate_call_return_seeds_ast_materialized_result_descendants() {
     let func = FuncId::new(10);
+    let anchor = Span {
+        file: FileId::new(0),
+        start: 10,
+        end: 20,
+    };
+    let mut segment = IdgSegment::new();
+    let result = segment.strings.intern("result");
+    let value = segment.strings.intern("value");
+    let call_ret = segment.intern_place(Place::CallRet {
+        site: CallSiteId(anchor),
+    });
+    let projected_read = segment.intern_place(Place::Read {
+        name: result,
+        path: vec![value].into(),
+    });
+    segment.intern_node(func, call_ret);
+    segment.intern_node(func, projected_read);
+    segment.record_func(func);
+    let service = service_from_segment(segment);
+    let db = empty_db();
+    let seeds = TokenSet::from_iter(["result".to_string(), "source_call".to_string()]);
+
+    let nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(func, &seeds, Some(anchor), &[]),
+        db.global_index().as_ref(),
+        &service,
+    );
+    let points = nodes
+        .iter()
+        .filter_map(|node| service.resolve_point(*node))
+        .collect::<Vec<_>>();
+
+    assert!(points
+        .iter()
+        .any(|point| point.kind == bonsai_idg::PointKind::CallRet));
+    assert!(
+        points
+            .iter()
+            .any(|point| point.kind == bonsai_idg::PointKind::Read && point.name == "result.value"),
+        "a whole aggregate returned by the source call must taint its parsed descendant reads"
+    );
+}
+
+#[test]
+fn anchored_projected_source_does_not_seed_container_siblings() {
+    let func = FuncId::new(11);
     let container_span = Span {
         file: FileId::new(0),
         start: 10,
@@ -703,7 +794,7 @@ fn anchored_projected_source_does_not_seed_container_siblings() {
 
 #[test]
 fn anchored_container_assignment_seeds_materialized_descendant_reads() {
-    let func = FuncId::new(11);
+    let func = FuncId::new(12);
     let anchor = Span {
         file: FileId::new(0),
         start: 10,
@@ -773,6 +864,9 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
         file,
         refs: Vec::new(),
         assignment_values: Vec::new(),
+        call_argument_values: Vec::new(),
+        static_string_maps: Vec::new(),
+        character_substitutions: Vec::new(),
         aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
@@ -892,6 +986,9 @@ fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input()
         file,
         refs: Vec::new(),
         assignment_values: Vec::new(),
+        call_argument_values: Vec::new(),
+        static_string_maps: Vec::new(),
+        character_substitutions: Vec::new(),
         aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),

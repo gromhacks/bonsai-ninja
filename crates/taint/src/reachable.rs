@@ -151,6 +151,63 @@ impl Default for EntryTaintGraph {
     }
 }
 
+impl EntryTaintGraph {
+    /// Conservative resident allocation estimate for cache scheduling.
+    ///
+    /// This measures owned vector buffers and string capacities rather than
+    /// serialized length. It is deliberately independent of analysis
+    /// semantics: a graph larger than a cache's byte budget is still returned
+    /// exactly, but the caller may choose not to retain it.
+    #[must_use]
+    pub fn estimated_resident_bytes(&self) -> u64 {
+        let mut bytes = estimated_type_bytes::<Self>();
+        bytes = bytes.saturating_add(estimated_vec_buffer_bytes::<TaintedCallEdge>(
+            self.call_records.capacity(),
+        ));
+        for edge in &self.call_records {
+            bytes = bytes.saturating_add(estimated_vec_buffer_bytes::<crate::idg_api::TaintedArg>(
+                edge.tainted_args.capacity(),
+            ));
+            for arg in &edge.tainted_args {
+                bytes = bytes
+                    .saturating_add(estimated_string_capacity_bytes(&arg.value_text))
+                    .saturating_add(estimated_string_capacity_bytes(&arg.param_name));
+            }
+        }
+        bytes = bytes.saturating_add(estimated_vec_buffer_bytes::<crate::idg_api::TaintedCall>(
+            self.tainted_calls.capacity(),
+        ));
+        for call in &self.tainted_calls {
+            bytes = bytes
+                .saturating_add(estimated_string_capacity_bytes(&call.name))
+                .saturating_add(estimated_vec_buffer_bytes::<crate::idg_api::TaintedArgAtCall>(
+                    call.tainted_args.capacity(),
+                ));
+            for arg in &call.tainted_args {
+                bytes = bytes.saturating_add(estimated_string_capacity_bytes(&arg.value_text));
+            }
+            if let Some(receiver) = &call.tainted_receiver {
+                bytes = bytes.saturating_add(estimated_string_capacity_bytes(receiver));
+            }
+        }
+        bytes.max(1)
+    }
+}
+
+fn estimated_type_bytes<T>() -> u64 {
+    u64::try_from(std::mem::size_of::<T>()).unwrap_or(u64::MAX)
+}
+
+fn estimated_vec_buffer_bytes<T>(capacity: usize) -> u64 {
+    u64::try_from(capacity)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(estimated_type_bytes::<T>())
+}
+
+fn estimated_string_capacity_bytes(value: &String) -> u64 {
+    u64::try_from(value.capacity()).unwrap_or(u64::MAX)
+}
+
 /// Serde default for [`EntryTaintGraph::precision`] / [`TaintedCallEdge::precision`]
 /// when older payloads (without the field) are deserialised — we
 /// stay maximally precise rather than guess `Approximate`.
@@ -666,6 +723,7 @@ pub fn inspect_entry_taint_graph_from_idg_with_target_funcs(
             nodes: None,
             funcs: target_funcs,
             lineage_funcs: None,
+            relevance: None,
         }),
     )
 }
@@ -1092,6 +1150,19 @@ fn rule_match_seed_nodes(
             }
         } else {
             seed_nodes.extend(anchor_nodes);
+            if anchor_has_call_return && !seed_names.is_empty() {
+                // A source call may return an aggregate through a positional
+                // binding (`hdr, err := tr.Next()`, `actor, _ :=
+                // c.Cookie(...)`). The transfer graph keeps the synthetic
+                // tuple position internal so it can stitch resolved return
+                // fields precisely; the rule match's AST-derived bare result
+                // name is the proof that the selected value itself is the
+                // source. Seed only materialized descendant READS of that
+                // result. This preserves field sensitivity (projected source
+                // names never widen to siblings) and avoids seeding later
+                // writes, which may be clean overwrites.
+                seed_nodes.extend(token_descendant_read_seed_nodes(source_func, &seed_names, idg));
+            }
         }
     }
     if !output_arg_names.is_empty() && source_anchor.is_none() {
@@ -1586,6 +1657,11 @@ struct ComposedIdgTaintSeeds<'a> {
     output_arg_names: &'a [String],
 }
 
+/// Diagnostic rendering batch only. Every node is emitted when the explicit
+/// detail channel is enabled; batching prevents the logger from building one
+/// workspace-sized string and does not bound semantic analysis or output.
+const DEBUG_NODE_BATCH_ENTRIES: usize = 256;
+
 fn compose_idg_taint_query_seeds<'a>(
     source_func: FuncId,
     seeds: &'a TokenSet,
@@ -1621,9 +1697,10 @@ fn log_idg_taint_seed(
     source_func: FuncId,
     seeds: &TokenSet,
     composed: &ComposedIdgTaintSeeds<'_>,
+    closure: &[bonsai_idg::WsNodeId],
+    symbolic_cross_call_count: usize,
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
-    max_precision: Option<Precision>,
 ) {
     if !bonsai_diagnostics::debug::is_enabled("idg-closure") {
         return;
@@ -1632,8 +1709,6 @@ fn log_idg_taint_seed(
         .decl_of(bonsai_common::SymbolId::new(source_func.raw()))
         .map(|decl| decl.name.clone())
         .unwrap_or_default();
-    let cross_calls = idg.cross_call_edges_in_closure_with_max_precision(&composed.nodes, max_precision);
-    let closure = idg.forward_closure_with_max_precision(&composed.nodes, max_precision);
     let seed_nodes = composed
         .nodes
         .iter()
@@ -1651,7 +1726,7 @@ fn log_idg_taint_seed(
     let seed_names = seeds.iter().map(String::as_str).collect::<Vec<_>>();
     bonsai_diagnostics::debug_log!(
         "idg-closure",
-        "src={}({}) seed_names={:?} anchor={:?} output_args={:?} seed_count={} seed_nodes={:?} closure_size={} xcalls={}",
+        "src={}({}) seed_names={:?} anchor={:?} output_args={:?} seed_count={} seed_nodes={:?} closure_size={} symbolic_xcalls={}",
         source_name,
         source_func.raw(),
         seed_names,
@@ -1660,21 +1735,29 @@ fn log_idg_taint_seed(
         composed.nodes.len(),
         seed_nodes,
         closure.len(),
-        cross_calls.len()
+        symbolic_cross_call_count
     );
     if bonsai_diagnostics::debug::is_enabled("idg-closure-detail") {
-        let detail = closure
-            .iter()
-            .filter_map(|node| {
-                idg.resolve_point(*node).map(|point| {
-                    format!(
-                        "ws#{}={:?}:{}@{}..{}",
-                        node.0, point.kind, point.name, point.span.start, point.span.end
-                    )
+        for (chunk_index, chunk) in closure.chunks(DEBUG_NODE_BATCH_ENTRIES).enumerate() {
+            let detail = chunk
+                .iter()
+                .filter_map(|node| {
+                    idg.resolve_point(*node).map(|point| {
+                        format!(
+                            "ws#{}={:?}:{}@{}..{}",
+                            node.0, point.kind, point.name, point.span.start, point.span.end
+                        )
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        bonsai_diagnostics::debug_log!("idg-closure-detail", "  closure_nodes: {:?}", detail);
+                .collect::<Vec<_>>();
+            bonsai_diagnostics::debug_log!(
+                "idg-closure-detail",
+                "closure_nodes chunk={} total={} nodes={:?}",
+                chunk_index,
+                closure.len(),
+                detail
+            );
+        }
     }
 }
 
@@ -1739,13 +1822,45 @@ fn compile_idg_taint_closure(request: TaintClosureCompilationRequest<'_>) -> Tai
     // immutable IDG. If a transfer fired, retain the full source prefix so
     // terminal evidence receives an evidenced parent trace.
     let evidence = if transfers_added_seeds {
-        closure_evidence_with_targets(&seed_nodes, idg, max_precision, None, targets.lineage_funcs)
+        closure_evidence_with_targets(
+            &seed_nodes,
+            idg,
+            max_precision,
+            None,
+            targets.lineage_funcs,
+            targets.lineage_funcs,
+            targets.relevance,
+        )
     } else if let Some(target_nodes) = target_nodes {
-        closure_evidence_with_targets(&seed_nodes, idg, max_precision, Some(target_nodes), targets.funcs)
+        closure_evidence_with_targets(
+            &seed_nodes,
+            idg,
+            max_precision,
+            Some(target_nodes),
+            targets.funcs,
+            targets.lineage_funcs,
+            targets.relevance,
+        )
     } else if let Some(target_funcs) = targets.funcs {
-        closure_evidence_with_targets(&seed_nodes, idg, max_precision, None, Some(target_funcs))
+        closure_evidence_with_targets(
+            &seed_nodes,
+            idg,
+            max_precision,
+            None,
+            Some(target_funcs),
+            targets.lineage_funcs,
+            targets.relevance,
+        )
     } else {
-        closure_evidence_with_targets(&seed_nodes, idg, max_precision, None, None)
+        closure_evidence_with_targets(
+            &seed_nodes,
+            idg,
+            max_precision,
+            None,
+            None,
+            targets.lineage_funcs,
+            targets.relevance,
+        )
     };
     TaintClosureCompilation {
         nodes: evidence.nodes,
@@ -1786,22 +1901,32 @@ fn renderable_cross_calls_from_closure(
             all_edges.len(),
             lineage_funcs.map_or(0, |funcs| funcs.len())
         );
-        let node_detail = closure_nodes
-            .iter()
-            .filter_map(|node| {
-                let point = idg.resolve_point(*node)?;
-                Some(format!(
-                    "ws#{}=func{}:{:?}:{}@{}..{}",
-                    node.0,
-                    point.func.raw(),
-                    point.kind,
-                    point.name,
-                    point.span.start,
-                    point.span.end
-                ))
-            })
-            .collect::<Vec<_>>();
-        bonsai_diagnostics::debug_log!("idg-closure", "target cut exact detail={:?}", node_detail);
+    }
+    if bonsai_diagnostics::debug::is_enabled("idg-closure-detail") {
+        for (chunk_index, chunk) in closure_nodes.chunks(DEBUG_NODE_BATCH_ENTRIES).enumerate() {
+            let node_detail = chunk
+                .iter()
+                .filter_map(|node| {
+                    let point = idg.resolve_point(*node)?;
+                    Some(format!(
+                        "ws#{}=func{}:{:?}:{}@{}..{}",
+                        node.0,
+                        point.func.raw(),
+                        point.kind,
+                        point.name,
+                        point.span.start,
+                        point.span.end
+                    ))
+                })
+                .collect::<Vec<_>>();
+            bonsai_diagnostics::debug_log!(
+                "idg-closure-detail",
+                "target_cut_nodes chunk={} total={} nodes={:?}",
+                chunk_index,
+                closure_nodes.len(),
+                node_detail
+            );
+        }
     }
     // Compiler callgraph pre-order keeps a caller's first evidenced inflow
     // ahead of its descendants without another semantic graph traversal.
@@ -1864,7 +1989,7 @@ fn materialize_call_records<'a>(
             caller: edge.caller,
             callee: edge.callee,
             call_span: edge.call_span,
-            tainted_args: tainted_args_for_cross_call_edge(edge, callee_decl, call_summary),
+            tainted_args: tainted_args_for_cross_call_edge(edge, callee_decl, call_summary.as_deref()),
             precision: edge.precision,
             edge_kind: edge.call_kind,
         });
@@ -1923,7 +2048,7 @@ fn materialize_direct_tainted_calls(
     let mut tainted_calls = Vec::new();
     for ((caller, call_span), arg_indices) in sorted_sites {
         let Some(call_summary) =
-            cached_call_event_summary(caller, call_span, context.global, call_summary_cache).cloned()
+            cached_call_event_summary(caller, call_span, context.global, call_summary_cache)
         else {
             continue;
         };
@@ -2002,9 +2127,8 @@ fn materialize_synthetic_tainted_calls(
         let Some(summaries) = cached_function_attribution(func, context.global, call_summary_cache) else {
             continue;
         };
-        let return_spans = summaries.return_spans.clone();
         let parent_trace_id = context.first_inflow.get(&func).copied();
-        for call_span in return_spans {
+        for &call_span in &summaries.return_spans {
             tainted_calls.push(crate::idg_api::TaintedCall {
                 parent_trace_id,
                 caller: func,
@@ -2035,7 +2159,6 @@ fn materialize_synthetic_tainted_calls(
         let Some(summaries) = cached_function_attribution(func, context.global, call_summary_cache) else {
             continue;
         };
-        let writes = summaries.writes.clone();
         let names = tainted_names_by_caller
             .entry(func)
             .or_insert_with(|| tainted_local_names_in_caller(func, context.idg, context.closure_set))
@@ -2044,7 +2167,7 @@ fn materialize_synthetic_tainted_calls(
             continue;
         }
         collect_tainted_writes(
-            &writes,
+            &summaries.writes,
             func,
             &names,
             context.first_inflow.get(&func).copied(),
@@ -2169,6 +2292,7 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
         nodes: _,
         funcs: target_funcs,
         lineage_funcs,
+        relevance,
     } = targets;
     let owned_global = global.is_none().then(|| db.global_index());
     let global = global
@@ -2180,8 +2304,7 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
     if composed.nodes.is_empty() {
         return graph;
     }
-    log_idg_taint_seed(source_func, seeds, &composed, global, idg, max_precision);
-    let seed_nodes = composed.nodes;
+    let seed_nodes = composed.nodes.clone();
     let TaintClosureCompilation {
         nodes: closure_nodes,
         symbolic_cross_calls,
@@ -2196,6 +2319,7 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
             nodes: None,
             funcs: target_funcs,
             lineage_funcs,
+            relevance,
         },
         honor_node_targets: false,
         global,
@@ -2270,6 +2394,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         nodes: target_nodes,
         funcs: target_funcs,
         lineage_funcs,
+        relevance,
     } = targets;
     let owned_global = global.is_none().then(|| db.global_index());
     let global = global
@@ -2301,8 +2426,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         })
         .collect();
 
-    log_idg_taint_seed(source_func, seeds, &composed, global, idg, max_precision);
-    let seed_nodes = composed.nodes;
+    let seed_nodes = composed.nodes.clone();
     let TaintClosureCompilation {
         nodes: closure_nodes,
         symbolic_cross_calls,
@@ -2317,12 +2441,22 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
             nodes: target_nodes,
             funcs: target_funcs,
             lineage_funcs,
+            relevance,
         },
         honor_node_targets: true,
         global,
         idg,
         max_precision,
     });
+    log_idg_taint_seed(
+        source_func,
+        seeds,
+        &composed,
+        &closure_nodes,
+        symbolic_cross_calls.len(),
+        global,
+        idg,
+    );
     if closure_nodes.is_empty() {
         return graph;
     }
@@ -2376,6 +2510,16 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
     graph.precision = worst;
     graph.pairs_analyzed = u32::try_from(cross_calls.len()).unwrap_or(u32::MAX);
     log_entry_taint_graph(source_func, &graph, global);
+    if let Some(caches) = caches {
+        let (entries, resident_bytes, budget_bytes) = caches.attribution_caches().stats();
+        bonsai_diagnostics::debug_log!(
+            "idg-closure",
+            "attribution cache entries={} resident_bytes={} budget_bytes={}",
+            entries,
+            resident_bytes,
+            budget_bytes
+        );
+    }
     graph
 }
 
@@ -2593,7 +2737,7 @@ fn closure_with_func_filter(
     func_filter: Option<&AHashSet<FuncId>>,
 ) -> Vec<bonsai_idg::WsNodeId> {
     if let Some(funcs) = func_filter.filter(|funcs| !funcs.is_empty()) {
-        idg.forward_target_func_cut_with_max_precision(seed_nodes, funcs, max_precision)
+        idg.forward_closure_within_funcs_with_max_precision(seed_nodes, funcs, max_precision)
     } else {
         idg.forward_closure_with_max_precision(seed_nodes, max_precision)
     }
@@ -2609,8 +2753,23 @@ fn closure_evidence_with_targets(
     max_precision: Option<Precision>,
     target_nodes: Option<&[bonsai_idg::WsNodeId]>,
     target_funcs: Option<&AHashSet<FuncId>>,
+    func_filter: Option<&AHashSet<FuncId>>,
+    target_relevance: Option<&bonsai_idg::IdgTargetRelevance>,
 ) -> bonsai_idg::IdgClosureEvidence {
-    let mut evidence = idg.forward_closure_evidence_with_max_precision(seed_nodes, max_precision);
+    let mut evidence = if let (Some(funcs), Some(relevance)) =
+        (func_filter.filter(|funcs| !funcs.is_empty()), target_relevance)
+    {
+        idg.forward_closure_evidence_within_funcs_and_relevance_with_max_precision(
+            seed_nodes,
+            funcs,
+            relevance,
+            max_precision,
+        )
+    } else if let Some(funcs) = func_filter.filter(|funcs| !funcs.is_empty()) {
+        idg.forward_closure_evidence_within_funcs_with_max_precision(seed_nodes, funcs, max_precision)
+    } else {
+        idg.forward_closure_evidence_with_max_precision(seed_nodes, max_precision)
+    };
     let target_nodes = target_nodes.filter(|nodes| !nodes.is_empty());
     let target_funcs = target_funcs.filter(|funcs| !funcs.is_empty());
     if target_nodes.is_none() && target_funcs.is_none() {
@@ -2803,7 +2962,7 @@ fn apply_call_result_passthrough_fixpoint(
             else {
                 continue;
             };
-            for (call_span, summary) in summaries {
+            for (call_span, summary) in &summaries.by_span {
                 for configured in &passthroughs {
                     let passthrough = configured.passthrough;
                     if !configured.callee.matches(&summary.name, &mut callee_name_cache) {
@@ -3620,7 +3779,7 @@ struct WriteEventSummary {
 
 #[derive(Debug)]
 struct FunctionCallEventSummaries {
-    by_span: ahash::AHashMap<bonsai_common::Span, CallEventSummary>,
+    by_span: ahash::AHashMap<bonsai_common::Span, std::sync::Arc<CallEventSummary>>,
     /// Call spans sorted by `(file, start, reverse(end))`. This turns nested
     /// syntax lookup into a binary-search range query instead of a full scan
     /// of every call in a generated function for every tainted argument.
@@ -3629,32 +3788,148 @@ struct FunctionCallEventSummaries {
     writes: Vec<WriteEventSummary>,
 }
 
-/// Immutable AST call summaries shared by every source query in one analysis
-/// lifecycle. Security can issue thousands of distinct source closures over
-/// the same functions; rebuilding and then dropping identical string-rich
-/// summaries per source is pure repeated front-end work.
-#[derive(Debug, Default)]
+#[derive(Debug)]
+struct AttributionCacheEntry {
+    summaries: std::sync::Arc<FunctionCallEventSummaries>,
+    estimated_bytes: u64,
+}
+
+#[derive(Debug)]
+struct AttributionCacheState {
+    entries: lru::LruCache<FuncId, AttributionCacheEntry>,
+    estimated_bytes: u64,
+    generation: u64,
+}
+
+impl Default for AttributionCacheState {
+    fn default() -> Self {
+        Self {
+            entries: lru::LruCache::unbounded(),
+            estimated_bytes: 0,
+            generation: 0,
+        }
+    }
+}
+
+/// Immutable AST call summaries shared by source queries in one analysis
+/// lifecycle.
+///
+/// The cache is bounded by estimated resident bytes, not function count:
+/// compiler functions vary by orders of magnitude in syntax size. Eviction
+/// changes only recomputation; each miss re-lowers the exact Tree-sitter file
+/// and returns the same typed attribution facts.
+#[derive(Debug)]
 pub(crate) struct IdgAttributionCaches {
-    call_events: parking_lot::RwLock<ahash::AHashMap<FuncId, std::sync::Arc<FunctionCallEventSummaries>>>,
+    budget_bytes: u64,
+    state: parking_lot::Mutex<AttributionCacheState>,
+}
+
+impl Default for IdgAttributionCaches {
+    fn default() -> Self {
+        const DEFAULT_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+        const MIN_BUDGET_BYTES: u64 = 64 * 1024;
+        const MAX_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+        let budget_bytes = bonsai_common::effective_memory_limit_bytes()
+            .map(|limit| (limit / 64).clamp(MIN_BUDGET_BYTES, MAX_BUDGET_BYTES))
+            .unwrap_or(DEFAULT_BUDGET_BYTES);
+        Self::with_budget_bytes(budget_bytes)
+    }
 }
 
 impl IdgAttributionCaches {
+    fn with_budget_bytes(budget_bytes: u64) -> Self {
+        Self {
+            budget_bytes,
+            state: parking_lot::Mutex::new(AttributionCacheState::default()),
+        }
+    }
+
+    fn get(
+        &self,
+        func: FuncId,
+        expected_generation: u64,
+    ) -> Option<std::sync::Arc<FunctionCallEventSummaries>> {
+        let mut state = self.state.lock();
+        if state.generation != expected_generation {
+            return None;
+        }
+        state
+            .entries
+            .get(&func)
+            .map(|entry| std::sync::Arc::clone(&entry.summaries))
+    }
+
+    fn insert_attribution(
+        &self,
+        func: FuncId,
+        summaries: std::sync::Arc<FunctionCallEventSummaries>,
+        expected_generation: u64,
+    ) -> std::sync::Arc<FunctionCallEventSummaries> {
+        let estimated_bytes = estimated_function_call_event_summaries_bytes(&summaries);
+        let mut state = self.state.lock();
+        if state.generation != expected_generation {
+            return summaries;
+        }
+        if let Some(existing) = state.entries.get(&func) {
+            return std::sync::Arc::clone(&existing.summaries);
+        }
+        if self.budget_bytes == 0 || estimated_bytes > self.budget_bytes {
+            return summaries;
+        }
+        state.estimated_bytes = state.estimated_bytes.saturating_add(estimated_bytes);
+        if let Some((_replaced_func, replaced)) = state.entries.push(
+            func,
+            AttributionCacheEntry {
+                summaries: std::sync::Arc::clone(&summaries),
+                estimated_bytes,
+            },
+        ) {
+            state.estimated_bytes = state.estimated_bytes.saturating_sub(replaced.estimated_bytes);
+        }
+        while state.estimated_bytes > self.budget_bytes {
+            let Some((_evicted_func, evicted)) = state.entries.pop_lru() else {
+                break;
+            };
+            state.estimated_bytes = state.estimated_bytes.saturating_sub(evicted.estimated_bytes);
+        }
+        summaries
+    }
+
     pub(crate) fn clear(&self) {
-        self.call_events.write().clear();
+        let mut state = self.state.lock();
+        state.entries.clear();
+        state.estimated_bytes = 0;
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .expect("taint attribution cache generation exhausted");
+    }
+
+    fn generation(&self) -> u64 {
+        self.state.lock().generation
+    }
+
+    fn stats(&self) -> (usize, u64, u64) {
+        let state = self.state.lock();
+        (state.entries.len(), state.estimated_bytes, self.budget_bytes)
     }
 }
 
 struct CallEventSummaryCache<'a> {
-    by_func: ahash::AHashMap<FuncId, std::sync::Arc<FunctionCallEventSummaries>>,
+    local_budget_bytes: u64,
+    local: AttributionCacheState,
     shared: Option<&'a IdgAttributionCaches>,
+    shared_generation: Option<u64>,
     db: Option<&'a AnalyzerDb>,
 }
 
 impl Default for CallEventSummaryCache<'_> {
     fn default() -> Self {
         Self {
-            by_func: ahash::AHashMap::default(),
+            local_budget_bytes: default_query_attribution_budget_bytes(),
+            local: AttributionCacheState::default(),
             shared: None,
+            shared_generation: None,
             db: None,
         }
     }
@@ -3664,19 +3939,153 @@ impl<'a> CallEventSummaryCache<'a> {
     #[cfg(test)]
     fn shared(shared: &'a IdgAttributionCaches) -> Self {
         Self {
-            by_func: ahash::AHashMap::default(),
+            local_budget_bytes: shared.budget_bytes,
+            local: AttributionCacheState::default(),
             shared: Some(shared),
+            shared_generation: Some(shared.generation()),
             db: None,
         }
     }
 
     fn for_query(shared: Option<&'a IdgAttributionCaches>, db: &'a AnalyzerDb) -> Self {
+        let shared_generation = shared.map(IdgAttributionCaches::generation);
         Self {
-            by_func: ahash::AHashMap::default(),
+            local_budget_bytes: shared
+                .map_or_else(default_query_attribution_budget_bytes, |cache| cache.budget_bytes),
+            local: AttributionCacheState::default(),
             shared,
+            shared_generation,
             db: Some(db),
         }
     }
+
+    fn get(&mut self, func: FuncId) -> Option<std::sync::Arc<FunctionCallEventSummaries>> {
+        self.local
+            .entries
+            .get(&func)
+            .map(|entry| std::sync::Arc::clone(&entry.summaries))
+    }
+
+    fn insert_local(
+        &mut self,
+        func: FuncId,
+        summaries: std::sync::Arc<FunctionCallEventSummaries>,
+    ) -> std::sync::Arc<FunctionCallEventSummaries> {
+        if let Some(existing) = self.local.entries.get(&func) {
+            return std::sync::Arc::clone(&existing.summaries);
+        }
+        let estimated_bytes = estimated_function_call_event_summaries_bytes(&summaries);
+        if self.local_budget_bytes == 0 || estimated_bytes > self.local_budget_bytes {
+            return summaries;
+        }
+        self.local.estimated_bytes = self.local.estimated_bytes.saturating_add(estimated_bytes);
+        if let Some((_replaced_func, replaced)) = self.local.entries.push(
+            func,
+            AttributionCacheEntry {
+                summaries: std::sync::Arc::clone(&summaries),
+                estimated_bytes,
+            },
+        ) {
+            self.local.estimated_bytes = self
+                .local
+                .estimated_bytes
+                .saturating_sub(replaced.estimated_bytes);
+        }
+        while self.local.estimated_bytes > self.local_budget_bytes {
+            let Some((_evicted_func, evicted)) = self.local.entries.pop_lru() else {
+                break;
+            };
+            self.local.estimated_bytes = self.local.estimated_bytes.saturating_sub(evicted.estimated_bytes);
+        }
+        summaries
+    }
+}
+
+fn default_query_attribution_budget_bytes() -> u64 {
+    const DEFAULT_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
+    const MIN_BUDGET_BYTES: u64 = 64 * 1024;
+    const MAX_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
+    bonsai_common::effective_memory_limit_bytes()
+        .map(|limit| (limit / 128).clamp(MIN_BUDGET_BYTES, MAX_BUDGET_BYTES))
+        .unwrap_or(DEFAULT_BUDGET_BYTES)
+}
+
+fn estimated_function_call_event_summaries_bytes(summaries: &FunctionCallEventSummaries) -> u64 {
+    const HASH_BUCKET_OVERHEAD_BYTES: u64 = 16;
+    let mut bytes = estimated_type_bytes::<FunctionCallEventSummaries>();
+    bytes = bytes.saturating_add(
+        u64::try_from(summaries.by_span.capacity())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(
+                estimated_type_bytes::<(bonsai_common::Span, std::sync::Arc<CallEventSummary>)>()
+                    .saturating_add(HASH_BUCKET_OVERHEAD_BYTES),
+            ),
+    );
+    for summary in summaries.by_span.values() {
+        bytes = bytes
+            .saturating_add(estimated_type_bytes::<CallEventSummary>())
+            .saturating_add(estimated_string_capacity_bytes(&summary.name))
+            .saturating_add(estimated_vec_buffer_bytes::<String>(
+                summary.args_value_text.capacity(),
+            ))
+            .saturating_add(estimated_vec_buffer_bytes::<bonsai_common::Span>(
+                summary.args_span.capacity(),
+            ))
+            .saturating_add(estimated_vec_buffer_bytes::<Option<String>>(
+                summary.args_place.capacity(),
+            ))
+            .saturating_add(estimated_vec_buffer_bytes::<Vec<String>>(
+                summary.args_source_names.capacity(),
+            ))
+            .saturating_add(estimated_vec_buffer_bytes::<String>(
+                summary.receiver_source_names.capacity(),
+            ))
+            .saturating_add(estimated_vec_buffer_bytes::<String>(
+                summary.receiver_types.capacity(),
+            ));
+        for value in &summary.args_value_text {
+            bytes = bytes.saturating_add(estimated_string_capacity_bytes(value));
+        }
+        for place in summary.args_place.iter().flatten() {
+            bytes = bytes.saturating_add(estimated_string_capacity_bytes(place));
+        }
+        for sources in &summary.args_source_names {
+            bytes = bytes.saturating_add(estimated_vec_buffer_bytes::<String>(sources.capacity()));
+            for source in sources {
+                bytes = bytes.saturating_add(estimated_string_capacity_bytes(source));
+            }
+        }
+        if let Some(receiver) = &summary.receiver {
+            bytes = bytes.saturating_add(estimated_string_capacity_bytes(receiver));
+        }
+        for source in &summary.receiver_source_names {
+            bytes = bytes.saturating_add(estimated_string_capacity_bytes(source));
+        }
+        for receiver_type in &summary.receiver_types {
+            bytes = bytes.saturating_add(estimated_string_capacity_bytes(receiver_type));
+        }
+    }
+    bytes = bytes
+        .saturating_add(estimated_vec_buffer_bytes::<bonsai_common::Span>(
+            summaries.spans.capacity(),
+        ))
+        .saturating_add(estimated_vec_buffer_bytes::<bonsai_common::Span>(
+            summaries.return_spans.capacity(),
+        ))
+        .saturating_add(estimated_vec_buffer_bytes::<WriteEventSummary>(
+            summaries.writes.capacity(),
+        ));
+    for write in &summaries.writes {
+        bytes = bytes
+            .saturating_add(estimated_string_capacity_bytes(&write.target))
+            .saturating_add(estimated_vec_buffer_bytes::<String>(
+                write.source_names.capacity(),
+            ));
+        for source in &write.source_names {
+            bytes = bytes.saturating_add(estimated_string_capacity_bytes(source));
+        }
+    }
+    bytes.max(1)
 }
 
 impl CallEventSummary {
@@ -3847,8 +4256,7 @@ fn promote_nested_tainted_call_args(
         .map(|((caller, span), args)| (*caller, *span, args.clone()))
         .collect::<Vec<_>>();
     for (caller, nested_span, nested_arg_indices) in seeds {
-        let Some(nested_summary) =
-            cached_call_event_summary(caller, nested_span, global, call_summary_cache).cloned()
+        let Some(nested_summary) = cached_call_event_summary(caller, nested_span, global, call_summary_cache)
         else {
             continue;
         };
@@ -3862,7 +4270,7 @@ fn promote_nested_tainted_call_args(
         let Some(summaries) = cached_call_event_summaries_for_func(caller, global, call_summary_cache) else {
             continue;
         };
-        for (outer_span, outer_summary) in summaries {
+        for (outer_span, outer_summary) in &summaries.by_span {
             if *outer_span == nested_span {
                 continue;
             }
@@ -4212,111 +4620,93 @@ fn span_contains_or_equals(outer: bonsai_common::Span, inner: bonsai_common::Spa
     outer.file == inner.file && inner.start >= outer.start && inner.end <= outer.end
 }
 
-fn cached_call_event_summary<'a>(
+fn cached_call_event_summary(
     func: FuncId,
     target_span: bonsai_common::Span,
     global: &GlobalIndex,
-    cache: &'a mut CallEventSummaryCache<'_>,
-) -> Option<&'a CallEventSummary> {
+    cache: &mut CallEventSummaryCache<'_>,
+) -> Option<std::sync::Arc<CallEventSummary>> {
     cached_call_event_summaries_for_func(func, global, cache)
-        .and_then(|summaries| summaries.get(&target_span))
+        .and_then(|summaries| summaries.by_span.get(&target_span).cloned())
 }
 
-fn cached_call_event_summaries_for_func<'a>(
+fn cached_call_event_summaries_for_func(
     func: FuncId,
     global: &GlobalIndex,
-    cache: &'a mut CallEventSummaryCache<'_>,
-) -> Option<&'a ahash::AHashMap<bonsai_common::Span, CallEventSummary>> {
-    cached_function_attribution(func, global, cache).map(|summaries| &summaries.by_span)
+    cache: &mut CallEventSummaryCache<'_>,
+) -> Option<std::sync::Arc<FunctionCallEventSummaries>> {
+    cached_function_attribution(func, global, cache)
 }
 
-fn cached_function_attribution<'a>(
+fn cached_function_attribution(
     func: FuncId,
     global: &GlobalIndex,
-    cache: &'a mut CallEventSummaryCache<'_>,
-) -> Option<&'a FunctionCallEventSummaries> {
-    if !cache.by_func.contains_key(&func) {
-        let shared_hit = cache
-            .shared
-            .and_then(|shared| shared.call_events.read().get(&func).cloned());
-        if let Some(summaries) = shared_hit {
-            cache.by_func.insert(func, summaries);
-        } else {
-            // Compiler linkage is a compact scheduling/index surface; even a
-            // non-empty header body is not a completeness promise. Re-lower
-            // one exact Tree-sitter file when attribution first needs it,
-            // distill every function in that file into call summaries, then
-            // release the body. This keeps source rendering exact without
-            // materialising a second workspace-wide body index.
-            let symbol = bonsai_common::SymbolId::new(func.raw());
-            let exact_file = cache.db.and_then(|db| {
-                let file = global.declaring_file(symbol)?;
-                db.decl_index_remapped_to_headers(global, file)
-            });
-            if let Some(file_index) = exact_file {
-                let built = file_index
-                    .defs
-                    .iter()
-                    .map(|decl| {
-                        (
-                            FuncId::new(decl.symbol.raw()),
-                            build_function_call_event_summaries(decl, &file_index.call_receivers),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                if let Some(shared) = cache.shared {
-                    let mut write = shared.call_events.write();
-                    for (built_func, summaries) in built {
-                        write.entry(built_func).or_insert(summaries);
-                    }
-                    if let Some(summaries) = write.get(&func).cloned() {
-                        cache.by_func.insert(func, summaries);
-                    }
-                } else {
-                    cache.by_func.extend(built);
-                }
-            }
-
-            // Full-index compatibility callers already carry exact bodies.
-            // Empty functions also land here as an explicit negative cache.
-            if !cache.by_func.contains_key(&func) {
-                let built = global
-                    .decl_of(bonsai_common::SymbolId::new(func.raw()))
-                    .map(|decl| {
-                        let receiver_facts = global
-                            .file_index(decl.span.file)
-                            .map(|index| index.call_receivers.as_slice())
-                            .unwrap_or_default();
-                        build_function_call_event_summaries(decl, receiver_facts)
-                    })
-                    .unwrap_or_else(|| {
-                        std::sync::Arc::new(FunctionCallEventSummaries {
-                            by_span: ahash::AHashMap::default(),
-                            spans: Vec::new(),
-                            return_spans: Vec::new(),
-                            writes: Vec::new(),
-                        })
-                    });
-                if let Some(shared) = cache.shared {
-                    let mut write = shared.call_events.write();
-                    let summaries = std::sync::Arc::clone(
-                        write.entry(func).or_insert_with(|| std::sync::Arc::clone(&built)),
-                    );
-                    cache.by_func.insert(func, summaries);
-                } else {
-                    cache.by_func.insert(func, built);
-                }
-            }
-        }
+    cache: &mut CallEventSummaryCache<'_>,
+) -> Option<std::sync::Arc<FunctionCallEventSummaries>> {
+    if let Some(summaries) = cache.get(func) {
+        return Some(summaries);
     }
-    cache.by_func.get(&func).map(std::sync::Arc::as_ref)
+    if let Some(summaries) = cache
+        .shared
+        .zip(cache.shared_generation)
+        .and_then(|(shared, generation)| shared.get(func, generation))
+    {
+        return Some(cache.insert_local(func, summaries));
+    }
+
+    // Compiler linkage is a compact scheduling/index surface; even a
+    // non-empty header body is not a completeness promise. Re-lower one exact
+    // Tree-sitter file when attribution first needs it, distill only the
+    // requested function, then release the body. Building every sibling
+    // function eagerly made one request retain a second whole-file semantic
+    // representation and scaled with generated-file size.
+    let symbol = bonsai_common::SymbolId::new(func.raw());
+    let exact_file = cache.db.and_then(|db| {
+        let file = global.declaring_file(symbol)?;
+        db.decl_index_remapped_to_headers(global, file)
+    });
+    let built = exact_file
+        .as_ref()
+        .and_then(|file_index| {
+            file_index
+                .defs
+                .iter()
+                .find(|decl| decl.symbol.raw() == func.raw())
+                .map(|decl| build_function_call_event_summaries(decl, &file_index.call_receivers))
+        })
+        // Full-index compatibility callers already carry exact bodies.
+        .or_else(|| {
+            global.decl_of(symbol).map(|decl| {
+                let receiver_facts = global
+                    .file_index(decl.span.file)
+                    .map(|index| index.call_receivers.as_slice())
+                    .unwrap_or_default();
+                build_function_call_event_summaries(decl, receiver_facts)
+            })
+        })
+        // Missing functions are an explicit negative cache entry.
+        .unwrap_or_else(|| {
+            std::sync::Arc::new(FunctionCallEventSummaries {
+                by_span: ahash::AHashMap::default(),
+                spans: Vec::new(),
+                return_spans: Vec::new(),
+                writes: Vec::new(),
+            })
+        });
+    let built = if let Some((shared, generation)) = cache.shared.zip(cache.shared_generation) {
+        shared.insert_attribution(func, built, generation)
+    } else {
+        built
+    };
+    Some(cache.insert_local(func, built))
 }
 
 fn build_function_call_event_summaries(
     decl: &bonsai_lang_api::Decl,
     receiver_facts: &[bonsai_lang_api::CallReceiverFact],
 ) -> std::sync::Arc<FunctionCallEventSummaries> {
-    let mut by_span: ahash::AHashMap<bonsai_common::Span, CallEventSummary> = ahash::AHashMap::default();
+    let mut by_span: ahash::AHashMap<bonsai_common::Span, std::sync::Arc<CallEventSummary>> =
+        ahash::AHashMap::default();
     collect_call_event_summaries(&decl.flow_events, receiver_facts, &mut by_span);
     let mut spans = by_span.keys().copied().collect::<Vec<_>>();
     spans.sort_by_key(|span| (span.file.raw(), span.start, std::cmp::Reverse(span.end)));
@@ -4341,8 +4731,8 @@ fn cached_nested_call_event_summary(
     global: &GlobalIndex,
     cache: &mut CallEventSummaryCache<'_>,
 ) -> Option<(bonsai_common::Span, CallEventSummary)> {
-    let _ = cached_call_event_summaries_for_func(func, global, cache)?;
-    let spans = &cache.by_func.get(&func)?.spans;
+    let summaries = cached_call_event_summaries_for_func(func, global, cache)?;
+    let spans = &summaries.spans;
     let first = spans.partition_point(|span| {
         (span.file.raw(), span.start) < (argument_span.file.raw(), argument_span.start)
     });
@@ -4356,14 +4746,14 @@ fn cached_nested_call_event_summary(
         // is the whole call expression. Exclude the current call identity.
         .filter(|span| *span != current_call_span && span_contains_or_equals(argument_span, *span))
         .min_by_key(|span| (span.start, std::cmp::Reverse(span.end)))?;
-    let summary = cache.by_func.get(&func)?.by_span.get(&nested_span)?.clone();
-    Some((nested_span, summary))
+    let summary = summaries.by_span.get(&nested_span)?;
+    Some((nested_span, summary.as_ref().clone()))
 }
 
 fn collect_call_event_summaries(
     events: &[bonsai_lang_api::FlowEvent],
     receiver_facts: &[bonsai_lang_api::CallReceiverFact],
-    out: &mut ahash::AHashMap<bonsai_common::Span, CallEventSummary>,
+    out: &mut ahash::AHashMap<bonsai_common::Span, std::sync::Arc<CallEventSummary>>,
 ) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
@@ -4384,7 +4774,7 @@ fn collect_call_event_summaries(
                 receiver_source_names.sort();
                 out.insert(
                     *span,
-                    CallEventSummary {
+                    std::sync::Arc::new(CallEventSummary {
                         name: name.clone(),
                         call_kind: *call_kind,
                         args_value_text: args.iter().map(|arg| arg.value_text.clone()).collect(),
@@ -4394,7 +4784,7 @@ fn collect_call_event_summaries(
                         receiver: receiver.clone(),
                         receiver_source_names,
                         receiver_types: receiver_types.clone(),
-                    },
+                    }),
                 );
             }
             FlowEvent::Assign {
@@ -4403,28 +4793,30 @@ fn collect_call_event_summaries(
                 source_call_args,
                 ..
             } => {
-                out.entry(*span).or_insert_with(|| CallEventSummary {
-                    name: name.clone(),
-                    call_kind: bonsai_lang_api::CallKind::Function,
-                    args_value_text: source_call_args.clone(),
-                    args_span: source_call_args.iter().map(|_| *span).collect(),
-                    args_place: source_call_args
-                        .iter()
-                        .map(|arg| is_bare_identifier(arg.trim()).then(|| arg.trim().to_string()))
-                        .collect(),
-                    args_source_names: source_call_args
-                        .iter()
-                        .map(|arg| {
-                            if is_bare_identifier(arg.trim()) {
-                                vec![arg.trim().to_string()]
-                            } else {
-                                Vec::new()
-                            }
-                        })
-                        .collect(),
-                    receiver: None,
-                    receiver_source_names: Vec::new(),
-                    receiver_types: Vec::new(),
+                out.entry(*span).or_insert_with(|| {
+                    std::sync::Arc::new(CallEventSummary {
+                        name: name.clone(),
+                        call_kind: bonsai_lang_api::CallKind::Function,
+                        args_value_text: source_call_args.clone(),
+                        args_span: source_call_args.iter().map(|_| *span).collect(),
+                        args_place: source_call_args
+                            .iter()
+                            .map(|arg| is_bare_identifier(arg.trim()).then(|| arg.trim().to_string()))
+                            .collect(),
+                        args_source_names: source_call_args
+                            .iter()
+                            .map(|arg| {
+                                if is_bare_identifier(arg.trim()) {
+                                    vec![arg.trim().to_string()]
+                                } else {
+                                    Vec::new()
+                                }
+                            })
+                            .collect(),
+                        receiver: None,
+                        receiver_source_names: Vec::new(),
+                        receiver_types: Vec::new(),
+                    })
                 });
             }
             FlowEvent::Branch {

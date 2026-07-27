@@ -159,8 +159,25 @@ CATEGORY_ID_FAMILIES: dict[str, set[str]] = {
 
 # Common boilerplate words that don't help variant matching.
 STOP_TOKENS = {
-    "the", "a", "an", "of", "for", "with", "and", "or", "to", "in",
-    "on", "at", "as", "by", "is", "be", "from", "into", "via",
+    "the",
+    "a",
+    "an",
+    "of",
+    "for",
+    "with",
+    "and",
+    "or",
+    "to",
+    "in",
+    "on",
+    "at",
+    "as",
+    "by",
+    "is",
+    "be",
+    "from",
+    "into",
+    "via",
 }
 
 HEADING_CATEGORY_ALIASES = {
@@ -190,11 +207,13 @@ def slugify(value: str) -> str:
 def variant_from_heading(category: str, name: str, desc: str = "") -> dict:
     cat_tokens = {t for t in re.split(r"[-_/]", category) if t}
     name_tokens = {
-        t for t in re.split(r"[-_/]", name)
+        t
+        for t in re.split(r"[-_/]", name)
         if t and t not in STOP_TOKENS and t not in cat_tokens
     }
     desc_tokens = {
-        w for w in re.findall(r"[a-z][a-z0-9_]+", desc.lower())
+        w
+        for w in re.findall(r"[a-z][a-z0-9_]+", desc.lower())
         if len(w) > 3 and w not in STOP_TOKENS and w not in cat_tokens
     }
     return {
@@ -205,63 +224,56 @@ def variant_from_heading(category: str, name: str, desc: str = "") -> dict:
     }
 
 
-def load_taxonomy() -> dict[str, list[dict]]:
-    """Return {category-name: [{name, tokens, raw_line}]} from pattern-variants.mdx."""
-    if not TAXONOMY.exists():
-        sys.exit(f"missing taxonomy: {TAXONOMY}")
-    text = TAXONOMY.read_text()
+def expanded_description_tokens(desc: str, category_tokens: set[str]) -> set[str]:
+    tokens: set[str] = set()
+    for word in re.findall(r"[a-z][a-z0-9_]+", desc.lower()):
+        if len(word) <= 3 or word in STOP_TOKENS or word in category_tokens:
+            continue
+        tokens.add(word)
+        tokens.update(
+            part
+            for part in word.split("_")
+            if len(part) > 3 and part not in STOP_TOKENS and part not in category_tokens
+        )
+    return tokens
+
+
+def taxonomy_from_bullets(text: str) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
-    cur: str | None = None
+    category: str | None = None
     h3_re = re.compile(r"^### (.+?)\s*$")
     bullet_re = re.compile(r"^- \*\*([a-z0-9][a-z0-9-]*)\*\* — (.*)$")
     for raw in text.splitlines():
-        m = h3_re.match(raw)
-        if m:
-            # Normalize "ssti / template-injection" -> "ssti", "code-injection / eval" -> "code-injection".
-            cur = m.group(1).split(" / ")[0].strip()
-            out.setdefault(cur, [])
+        heading = h3_re.match(raw)
+        if heading:
+            category = heading.group(1).split(" / ")[0].strip()
+            out.setdefault(category, [])
             continue
-        if cur is None:
+        if category is None:
             continue
-        m = bullet_re.match(raw)
-        if not m:
+        bullet = bullet_re.match(raw)
+        if not bullet:
             continue
-        name = m.group(1)
-        desc = m.group(2)
-        # Tokens are tracked in two buckets: name-tokens (the variant's
-        # short name) carry more semantic weight than desc-tokens
-        # (synonyms scraped from the prose). When two variants tie on
-        # total overlap, the one with higher name-overlap wins — that
-        # avoids `alg-confusion` losing to `alg-none` just because
-        # both share the `alg` token.
-        # Strip category-name tokens — every rule in the category will
-        # have these (e.g. every `*.xxe.*` rule has "xxe"), so they
-        # carry zero discriminating power and just bias the matcher.
-        cat_tokens = {t for t in re.split(r"[-_/]", cur) if t}
+        name, desc = bullet.groups()
+        category_tokens = {t for t in re.split(r"[-_/]", category) if t}
         name_tokens = {
-            t for t in re.split(r"[-_/]", name)
-            if t and t not in STOP_TOKENS and t not in cat_tokens
+            t
+            for t in re.split(r"[-_/]", name)
+            if t and t not in STOP_TOKENS and t not in category_tokens
         }
-        desc_tokens: set[str] = set()
-        for w in re.findall(r"[a-z][a-z0-9_]+", desc.lower()):
-            if len(w) > 3 and w not in STOP_TOKENS and w not in cat_tokens:
-                desc_tokens.add(w)
-                for sub in w.split("_"):
-                    if len(sub) > 3 and sub not in STOP_TOKENS and sub not in cat_tokens:
-                        desc_tokens.add(sub)
-        tokens = name_tokens | desc_tokens
-        out[cur].append({
-            "name": name,
-            "tokens": tokens,
-            "name_tokens": name_tokens,
-            "shape": desc,
-        })
-    if any(out.values()):
-        return out
+        out[category].append(
+            {
+                "name": name,
+                "tokens": name_tokens
+                | expanded_description_tokens(desc, category_tokens),
+                "name_tokens": name_tokens,
+                "shape": desc,
+            }
+        )
+    return out
 
-    # Current MDX docs present rule shapes as `### Category — variant`
-    # examples rather than the older bullet taxonomy. Keep this audit
-    # useful by deriving a compact taxonomy from those headings.
+
+def taxonomy_from_headings(text: str) -> dict[str, list[dict]]:
     section: str | None = None
     h2_re = re.compile(r"^## (.+?)\s*$")
     shape_re = re.compile(r"^### (.+?)\s*$")
@@ -289,9 +301,21 @@ def load_taxonomy() -> dict[str, list[dict]]:
             fallback["deserialization"].append(
                 variant_from_heading("deserialization", "deserialization", heading)
             )
-    if not fallback:
-        sys.exit(f"no taxonomy variants found in {TAXONOMY}")
     return dict(fallback)
+
+
+def load_taxonomy() -> dict[str, list[dict]]:
+    """Return {category-name: [{name, tokens, raw_line}]} from pattern-variants.mdx."""
+    if not TAXONOMY.exists():
+        sys.exit(f"missing taxonomy: {TAXONOMY}")
+    text = TAXONOMY.read_text()
+    taxonomy = taxonomy_from_bullets(text)
+    if any(taxonomy.values()):
+        return taxonomy
+    taxonomy = taxonomy_from_headings(text)
+    if not taxonomy:
+        sys.exit(f"no taxonomy variants found in {TAXONOMY}")
+    return taxonomy
 
 
 def load_na_overrides() -> dict[tuple[str, str], list[str]]:
@@ -317,12 +341,14 @@ def load_rules(lang: str) -> list[dict]:
             try:
                 data = yaml.safe_load(f.read_text())
             except yaml.YAMLError as exc:
-                rules.append({
-                    "id": f"<parse-error>:{f.name}",
-                    "_parse_error": str(exc),
-                    "_kind": sub,
-                    "_file": f.name,
-                })
+                rules.append(
+                    {
+                        "id": f"<parse-error>:{f.name}",
+                        "_parse_error": str(exc),
+                        "_kind": sub,
+                        "_file": f.name,
+                    }
+                )
                 continue
             if not isinstance(data, list):
                 continue
@@ -363,9 +389,14 @@ def variant_for_rule(rule: dict, variants: list[dict]) -> str | None:
     tag = rule.get("tag")
     tag_str = (tag if isinstance(tag, str) else " ".join(tag)) if tag else ""
     desc = (rule.get("description") or "").lower()
-    haystack = " ".join([rid.replace(".", " ").replace("_", " "),
-                         file.replace(".yml", "").replace("_", " "),
-                         tag_str.lower(), desc])
+    haystack = " ".join(
+        [
+            rid.replace(".", " ").replace("_", " "),
+            file.replace(".yml", "").replace("_", " "),
+            tag_str.lower(),
+            desc,
+        ]
+    )
     haystack_tokens = set(re.findall(r"[a-z][a-z0-9]+", haystack))
     # Score = (name-overlap, total-overlap). Higher is better; name
     # overlap dominates so an alg-confusion rule isn't pulled toward
@@ -382,123 +413,170 @@ def variant_for_rule(rule: dict, variants: list[dict]) -> str | None:
     return best[2]
 
 
+def classify_category_rules(
+    rules: list[dict], category: str, variants: list[dict]
+) -> tuple[dict[str, list[dict]], dict[str, list[dict]], list[dict]]:
+    enabled: dict[str, list[dict]] = defaultdict(list)
+    disabled: dict[str, list[dict]] = defaultdict(list)
+    unmatched = []
+    for rule in rules:
+        if category not in rule_categories(rule):
+            continue
+        variant = variant_for_rule(rule, variants)
+        if variant is None:
+            unmatched.append(rule)
+        elif rule.get("enabled") is False:
+            disabled[variant].append(rule)
+        else:
+            enabled[variant].append(rule)
+    return enabled, disabled, unmatched
+
+
+def coverage_status(
+    variant: str,
+    not_applicable: set[str],
+    enabled: dict[str, list[dict]],
+    disabled: dict[str, list[dict]],
+) -> str:
+    if variant in not_applicable:
+        return "n/a"
+    if variant in enabled:
+        return "x"
+    if variant in disabled:
+        return "partial"
+    return "-"
+
+
+def add_category_cells(
+    matrix: dict,
+    *,
+    lang: str,
+    category: str,
+    variants: list[dict],
+    rules: list[dict],
+    not_applicable: set[str],
+) -> None:
+    enabled, disabled, unmatched = classify_category_rules(rules, category, variants)
+    for variant in variants:
+        name = variant["name"]
+        matrix["cells"][f"{lang}|{category}|{name}"] = {
+            "lang": lang,
+            "category": category,
+            "variant": name,
+            "status": coverage_status(name, not_applicable, enabled, disabled),
+            "rule_count": len(enabled.get(name, [])),
+            "disabled_count": len(disabled.get(name, [])),
+        }
+    if unmatched:
+        matrix["cells"][f"{lang}|{category}|<unmatched>"] = {
+            "lang": lang,
+            "category": category,
+            "variant": "<unmatched>",
+            "status": "info",
+            "rule_count": len(unmatched),
+            "ids": [rule.get("id") for rule in unmatched[:10]],
+        }
+
+
 def build_matrix() -> dict:
     taxonomy = load_taxonomy()
     na_overrides = load_na_overrides()
-    langs = sorted([p.name for p in PACK.iterdir() if p.is_dir()])
+    langs = sorted(path.name for path in PACK.iterdir() if path.is_dir())
     matrix: dict = {
         "langs": langs,
-        "categories": list(taxonomy.keys()),
+        "categories": list(taxonomy),
         "cells": {},
     }
     for lang in langs:
         rules = load_rules(lang)
-        for cat, variants in taxonomy.items():
-            classified = defaultdict(list)
-            classified_disabled = defaultdict(list)
-            uncat: list[dict] = []
-            for r in rules:
-                if cat not in rule_categories(r):
-                    continue
-                v = variant_for_rule(r, variants)
-                if v is None:
-                    uncat.append(r)
-                    continue
-                if r.get("enabled") is False:
-                    classified_disabled[v].append(r)
-                else:
-                    classified[v].append(r)
-            na_list = set(na_overrides.get((lang, cat), []))
-            for v in variants:
-                vname = v["name"]
-                cell_id = f"{lang}|{cat}|{vname}"
-                if vname in na_list:
-                    status = "n/a"
-                elif vname in classified:
-                    status = "x"
-                elif vname in classified_disabled:
-                    status = "partial"
-                else:
-                    status = "-"
-                matrix["cells"][cell_id] = {
-                    "lang": lang,
-                    "category": cat,
-                    "variant": vname,
-                    "status": status,
-                    "rule_count": len(classified.get(vname, [])),
-                    "disabled_count": len(classified_disabled.get(vname, [])),
-                }
-            # Stash uncategorized rules for visibility (per-cat).
-            unmatched_id = f"{lang}|{cat}|<unmatched>"
-            if uncat:
-                matrix["cells"][unmatched_id] = {
-                    "lang": lang,
-                    "category": cat,
-                    "variant": "<unmatched>",
-                    "status": "info",
-                    "rule_count": len(uncat),
-                    "ids": [r.get("id") for r in uncat[:10]],
-                }
+        for category, variants in taxonomy.items():
+            add_category_cells(
+                matrix,
+                lang=lang,
+                category=category,
+                variants=variants,
+                rules=rules,
+                not_applicable=set(na_overrides.get((lang, category), [])),
+            )
     return matrix
 
 
-def render_markdown(matrix: dict) -> str:
-    lines: list[str] = []
-    lines.append("# Category coverage matrix")
-    lines.append("")
-    lines.append("Generated by `scripts/category_audit.py`. Cells:")
-    lines.append("")
-    lines.append("- `x` rule(s) present and enabled")
-    lines.append("- `partial` rule(s) present but disabled")
-    lines.append("- `-` no rule found")
-    lines.append("- `n/a` language lacks the primitive")
-    lines.append("")
-    by_cat: dict[str, dict[str, dict[str, str]]] = defaultdict(lambda: defaultdict(dict))
+def category_tables(matrix: dict) -> list[str]:
+    by_cat: dict[str, dict[str, dict[str, str]]] = defaultdict(
+        lambda: defaultdict(dict)
+    )
     for cell in matrix["cells"].values():
         if cell["variant"] == "<unmatched>":
             continue
         by_cat[cell["category"]][cell["variant"]][cell["lang"]] = cell["status"]
-    for cat in matrix["categories"]:
-        lines.append(f"## {cat}")
+    lines = []
+    for category in matrix["categories"]:
+        lines.append(f"## {category}")
         lines.append("")
         header = ["variant"] + matrix["langs"]
         lines.append("| " + " | ".join(header) + " |")
         lines.append("| " + " | ".join("---" for _ in header) + " |")
-        variants = sorted(by_cat[cat].keys())
-        for v in variants:
-            row = [v] + [by_cat[cat][v].get(lang, "-") for lang in matrix["langs"]]
+        for variant in sorted(by_cat[category]):
+            row = [variant] + [
+                by_cat[category][variant].get(lang, "-") for lang in matrix["langs"]
+            ]
             lines.append("| " + " | ".join(row) + " |")
         lines.append("")
+    return lines
 
-    lines.append("## Aggregate")
-    lines.append("")
+
+def aggregate_lines(matrix: dict) -> list[str]:
     counts = defaultdict(int)
     for cell in matrix["cells"].values():
-        if cell["variant"] == "<unmatched>":
-            continue
-        counts[cell["status"]] += 1
-    total = sum(counts.values())
-    for status in ("x", "partial", "-", "n/a"):
-        n = counts.get(status, 0)
-        pct = (100.0 * n / total) if total else 0
-        lines.append(f"- `{status}`: {n} ({pct:.1f}%)")
-    lines.append("")
-
-    lines.append("## Unmatched rules (review hints)")
-    lines.append("")
-    lines.append("Rules whose tag/id placed them in a category but whose "
-                 "name/file did not overlap any variant token. Either the "
-                 "variant name is too narrow (update pattern-variants.mdx) or "
-                 "the rule id is wrong (rename in the rulepack).")
-    lines.append("")
-    for cell in matrix["cells"].values():
         if cell["variant"] != "<unmatched>":
-            continue
-        if cell["rule_count"] == 0:
+            counts[cell["status"]] += 1
+    total = sum(counts.values())
+    lines = ["## Aggregate", ""]
+    for status in ("x", "partial", "-", "n/a"):
+        count = counts.get(status, 0)
+        percent = (100.0 * count / total) if total else 0
+        lines.append(f"- `{status}`: {count} ({percent:.1f}%)")
+    lines.append("")
+    return lines
+
+
+def unmatched_rule_lines(matrix: dict) -> list[str]:
+    lines = [
+        "## Unmatched rules (review hints)",
+        "",
+        "Rules whose tag/id placed them in a category but whose "
+        "name/file did not overlap any variant token. Either the "
+        "variant name is too narrow (update pattern-variants.mdx) or "
+        "the rule id is wrong (rename in the rulepack).",
+        "",
+    ]
+    for cell in matrix["cells"].values():
+        if cell["variant"] != "<unmatched>" or cell["rule_count"] == 0:
             continue
         ids = cell.get("ids", [])
-        lines.append(f"- {cell['lang']} / {cell['category']}: {cell['rule_count']} rules; sample: {', '.join(ids)}")
+        lines.append(
+            f"- {cell['lang']} / {cell['category']}: "
+            f"{cell['rule_count']} rules; sample: {', '.join(ids)}"
+        )
     lines.append("")
+    return lines
+
+
+def render_markdown(matrix: dict) -> str:
+    lines = [
+        "# Category coverage matrix",
+        "",
+        "Generated by `scripts/category_audit.py`. Cells:",
+        "",
+        "- `x` rule(s) present and enabled",
+        "- `partial` rule(s) present but disabled",
+        "- `-` no rule found",
+        "- `n/a` language lacks the primitive",
+        "",
+    ]
+    lines.extend(category_tables(matrix))
+    lines.extend(aggregate_lines(matrix))
+    lines.extend(unmatched_rule_lines(matrix))
     return "\n".join(lines)
 
 
@@ -517,79 +595,126 @@ def emit_default() -> int:
             continue
         counts[cell["status"]] += 1
     total = sum(counts.values())
-    print(f"cells: {total} | x={counts['x']} partial={counts['partial']} -={counts['-']} n/a={counts['n/a']}")
+    print(
+        f"cells: {total} | x={counts['x']} partial={counts['partial']} -={counts['-']} n/a={counts['n/a']}"
+    )
     return 0
 
 
-def diff_against(base: str) -> int:
-    """Compare the current matrix to the matrix produced from `base`'s tree.
+def matrix_status(matrix: dict) -> dict[str, str]:
+    return {
+        key: cell["status"]
+        for key, cell in matrix["cells"].items()
+        if cell["variant"] != "<unmatched>"
+    }
 
-    We only need to compare cell statuses. We rebuild the matrix in
-    a worktree-free fashion by `git show`-ing the relevant files.
-    """
-    cur = build_matrix()
-    cur_status = {k: v["status"] for k, v in cur["cells"].items() if v["variant"] != "<unmatched>"}
 
-    # Build prior matrix by checking out the base tree to a temp dir.
+def baseline_status(base: str) -> dict[str, str] | None:
     tmp = REPO / "build" / f".diff-base.{base.replace('/', '_')}"
     tmp.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
-            ["git", "--git-dir", str(REPO / ".git"), "worktree", "add",
-             "--detach", str(tmp), base],
-            check=True, capture_output=True, text=True,
+            [
+                "git",
+                "--git-dir",
+                str(REPO / ".git"),
+                "worktree",
+                "add",
+                "--detach",
+                str(tmp),
+                base,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
         )
     except subprocess.CalledProcessError as exc:
         print(f"git worktree add failed: {exc.stderr}", file=sys.stderr)
-        return 2
+        return None
 
     try:
         prev_proc = subprocess.run(
             [sys.executable, str(tmp / "scripts" / "category_audit.py")],
-            cwd=str(tmp), capture_output=True, text=True,
+            cwd=str(tmp),
+            capture_output=True,
+            text=True,
         )
         if prev_proc.returncode != 0:
-            print("baseline run failed; treating all current cells as new",
-                  file=sys.stderr)
-            prev = {}
-        else:
-            prev_path = tmp / "build" / "category_coverage.json"
-            prev_data = json.loads(prev_path.read_text())
-            prev = {k: v["status"] for k, v in prev_data["cells"].items()
-                    if v["variant"] != "<unmatched>"}
+            print(
+                "baseline run failed; treating all current cells as new",
+                file=sys.stderr,
+            )
+            return {}
+        prev_path = tmp / "build" / "category_coverage.json"
+        return matrix_status(json.loads(prev_path.read_text()))
     finally:
         subprocess.run(
-            ["git", "--git-dir", str(REPO / ".git"), "worktree", "remove",
-             "--force", str(tmp)],
-            capture_output=True, text=True,
+            [
+                "git",
+                "--git-dir",
+                str(REPO / ".git"),
+                "worktree",
+                "remove",
+                "--force",
+                str(tmp),
+            ],
+            capture_output=True,
+            text=True,
         )
 
+
+def compare_statuses(
+    current: dict[str, str], previous: dict[str, str]
+) -> tuple[list[tuple], list[tuple], list[tuple]]:
     rank = {"x": 3, "partial": 2, "n/a": 1, "-": 0}
     regressions = []
     improvements = []
     new_cells = []
-    for k, status in cur_status.items():
-        if k not in prev:
+    for key, status in current.items():
+        if key not in previous:
             if status != "-":
-                new_cells.append((k, status))
+                new_cells.append((key, status))
             continue
-        if rank.get(status, 0) < rank.get(prev[k], 0):
-            regressions.append((k, prev[k], status))
-        elif rank.get(status, 0) > rank.get(prev[k], 0):
-            improvements.append((k, prev[k], status))
+        before = previous[key]
+        if rank.get(status, 0) < rank.get(before, 0):
+            regressions.append((key, before, status))
+        elif rank.get(status, 0) > rank.get(before, 0):
+            improvements.append((key, before, status))
+    return regressions, improvements, new_cells
 
-    if regressions:
-        print("REGRESSIONS:")
-        for k, before, after in regressions:
-            print(f"  {k}: {before} -> {after}")
-    if improvements:
-        print("IMPROVEMENTS:")
-        for k, before, after in improvements:
-            print(f"  {k}: {before} -> {after}")
-    if new_cells:
-        print("NEW CELLS:")
-        for k, status in new_cells:
-            print(f"  {k}: {status}")
+
+def print_status_changes(
+    regressions: list[tuple],
+    improvements: list[tuple],
+    new_cells: list[tuple],
+) -> None:
+    sections = (
+        ("REGRESSIONS:", regressions),
+        ("IMPROVEMENTS:", improvements),
+        ("NEW CELLS:", new_cells),
+    )
+    for title, rows in sections:
+        if not rows:
+            continue
+        print(title)
+        for row in rows:
+            if len(row) == 3:
+                key, before, after = row
+                print(f"  {key}: {before} -> {after}")
+            else:
+                key, status = row
+                print(f"  {key}: {status}")
+
+
+def diff_against(base: str) -> int:
+    """Compare the current matrix to the matrix produced from `base`'s tree."""
+    previous = baseline_status(base)
+    if previous is None:
+        return 2
+    regressions, improvements, new_cells = compare_statuses(
+        matrix_status(build_matrix()), previous
+    )
+    print_status_changes(regressions, improvements, new_cells)
     return 1 if regressions else 0
 
 
@@ -600,41 +725,56 @@ def suggest_yaml(lang: str, category: str) -> int:
         print(f"known: {', '.join(sorted(taxonomy))}", file=sys.stderr)
         return 2
     matrix = build_matrix()
-    cells = [c for c in matrix["cells"].values()
-             if c["lang"] == lang
-             and c["category"] == category
-             and c["status"] in {"-", "partial"}
-             and c["variant"] != "<unmatched>"]
+    cells = [
+        c
+        for c in matrix["cells"].values()
+        if c["lang"] == lang
+        and c["category"] == category
+        and c["status"] in {"-", "partial"}
+        and c["variant"] != "<unmatched>"
+    ]
     if not cells:
         print(f"# {lang} / {category}: no missing variants")
         return 0
     stubs: list[dict] = []
     for cell in cells:
         variant = cell["variant"]
-        rule_id = f"{lang}.{category.replace('-', '_')}.TODO_{variant.replace('-', '_')}"
+        rule_id = (
+            f"{lang}.{category.replace('-', '_')}.TODO_{variant.replace('-', '_')}"
+        )
         tag = next(iter(CATEGORY_TAGS.get(category, [category])))
-        stubs.append({
-            "id": rule_id,
-            "enabled": False,  # default off until reviewer enables
-            "tag": tag,
-            "severity": "high",
-            "match": {
-                "kind": "call",
-                "callee": {"name": "TODO_callee_here"},
-            },
-            "description": f"TODO: {category} / {variant} sink for {lang}. See docs/pattern-variants.mdx.",
-        })
+        stubs.append(
+            {
+                "id": rule_id,
+                "enabled": False,  # default off until reviewer enables
+                "tag": tag,
+                "severity": "high",
+                "match": {
+                    "kind": "call",
+                    "callee": {"name": "TODO_callee_here"},
+                },
+                "description": f"TODO: {category} / {variant} sink for {lang}. See docs/pattern-variants.mdx.",
+            }
+        )
     print(yaml.safe_dump(stubs, sort_keys=False, default_flow_style=False))
     return 0
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--diff", metavar="GIT_BASE",
-                    help="compare matrix to <GIT_BASE>; nonzero exit on regression")
-    ap.add_argument("--suggest", nargs=2, metavar=("LANG", "CATEGORY"),
-                    help="print YAML stubs for missing variants in (lang, category)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--diff",
+        metavar="GIT_BASE",
+        help="compare matrix to <GIT_BASE>; nonzero exit on regression",
+    )
+    ap.add_argument(
+        "--suggest",
+        nargs=2,
+        metavar=("LANG", "CATEGORY"),
+        help="print YAML stubs for missing variants in (lang, category)",
+    )
     args = ap.parse_args()
     if args.diff:
         return diff_against(args.diff)

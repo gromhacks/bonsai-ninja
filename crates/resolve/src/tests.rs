@@ -60,14 +60,7 @@ fn insert_one(global: &mut GlobalIndex, file: FileId, decl: Decl) {
     global.insert(DeclIndex {
         file,
         defs: vec![decl],
-        refs: Vec::new(),
-        assignment_values: Vec::new(),
-        aggregate_layouts: Vec::new(),
-        strings: Vec::new(),
-        comments: Vec::new(),
-        call_receivers: Vec::new(),
-        runtime_type_narrowings: Vec::new(),
-        branch_conditions: Vec::new(),
+        ..DeclIndex::default()
     });
 }
 
@@ -315,14 +308,7 @@ fn static_member_resolution_accepts_enum_receivers_in_same_module() {
     global.insert(DeclIndex {
         file: local_file,
         defs: vec![local_enum, local_execute],
-        refs: Vec::new(),
-        assignment_values: Vec::new(),
-        aggregate_layouts: Vec::new(),
-        strings: Vec::new(),
-        comments: Vec::new(),
-        call_receivers: Vec::new(),
-        runtime_type_narrowings: Vec::new(),
-        branch_conditions: Vec::new(),
+        ..DeclIndex::default()
     });
 
     let mut sibling_enum = decl(sibling_file, DeclKind::Enum, "Executor", &["copy_1"], 10);
@@ -335,14 +321,7 @@ fn static_member_resolution_accepts_enum_receivers_in_same_module() {
     global.insert(DeclIndex {
         file: sibling_file,
         defs: vec![sibling_enum, sibling_execute],
-        refs: Vec::new(),
-        assignment_values: Vec::new(),
-        aggregate_layouts: Vec::new(),
-        strings: Vec::new(),
-        comments: Vec::new(),
-        call_receivers: Vec::new(),
-        runtime_type_narrowings: Vec::new(),
-        branch_conditions: Vec::new(),
+        ..DeclIndex::default()
     });
 
     let caller_module = ModulePath::from_segments(["copy_0"]);
@@ -710,14 +689,7 @@ fn class_resolution_rewrites_alias_map() {
     global.insert(DeclIndex {
         file,
         defs: vec![class],
-        refs: Vec::new(),
-        assignment_values: Vec::new(),
-        aggregate_layouts: Vec::new(),
-        strings: Vec::new(),
-        comments: Vec::new(),
-        call_receivers: Vec::new(),
-        runtime_type_narrowings: Vec::new(),
-        branch_conditions: Vec::new(),
+        ..DeclIndex::default()
     });
 
     let caller_module = ModulePath::from_segments(["pkg"]);
@@ -751,14 +723,7 @@ fn type_alias_member_call_does_not_fall_back_to_bare_method() {
     global.insert(DeclIndex {
         file: helper_file,
         defs: vec![cert, equals],
-        refs: Vec::new(),
-        assignment_values: Vec::new(),
-        aggregate_layouts: Vec::new(),
-        strings: Vec::new(),
-        comments: Vec::new(),
-        call_receivers: Vec::new(),
-        runtime_type_narrowings: Vec::new(),
-        branch_conditions: Vec::new(),
+        ..DeclIndex::default()
     });
 
     let caller_module = ModulePath::from_segments(["app"]);

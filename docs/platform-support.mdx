@@ -52,7 +52,11 @@ For an extra source-build architecture smoke check:
 scripts/check-targets.sh --extra
 ```
 
-If `rustup` is not installed, use a Rust distribution that already includes the target std libraries. A failure like `can't find crate for core` or `can't find crate for std` is a local toolchain setup failure, not a bonsai-ninja compile failure.
+If `rustup` is not installed, use a Rust distribution that already includes
+the target std libraries. Before starting Cargo, `check-targets.sh` verifies
+that every requested target has a usable `libstd`. Missing targets are reported
+together and the script exits without launching partial checks. This keeps a
+toolchain setup failure distinct from a bonsai-ninja compile failure.
 
 ## Local Verification Note
 
@@ -62,4 +66,8 @@ On the 2026-06-03 macOS/Homebrew Rust environment, the explicit host target chec
 scripts/check-targets.sh --no-install aarch64-apple-darwin
 ```
 
-Non-host target checks could not reach bonsai-ninja code on that machine because Homebrew Rust only had `aarch64-apple-darwin` std installed and `rustup` was not present to add more targets.
+Non-host target checks could not reach bonsai-ninja code on that machine
+because Homebrew Rust only had `aarch64-apple-darwin` std installed and
+`rustup` was not present to add more targets. The target preflight reports that
+condition before Cargo runs; install the listed target libraries before
+interpreting the command as a source-compatibility check.

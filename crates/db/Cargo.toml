@@ -25,10 +25,10 @@ rayon = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
 zstd = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 bonsai_lang_python = { workspace = true }
-tempfile = { workspace = true }
 tree-sitter = { workspace = true }
 
 [lints]

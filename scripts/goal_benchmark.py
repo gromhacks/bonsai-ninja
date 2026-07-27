@@ -2,8 +2,8 @@
 """Cold/warm benchmark harness for docs/goal.md.
 
 The goal explicitly asks us to track parse/index time, callgraph time,
-summary/taint time, peak RSS where feasible, cache behavior, and finding
-counts on `examples/` and on large local targets when they are available.
+summary/taint time, peak RSS, macOS physical footprint where available,
+cache behavior, and finding counts on `examples/` and on large local targets.
 
 This script runs the release CLI as a black-box benchmark and writes one JSON
 report that is suitable for check-in, CI artifacts, or local regression notes.
@@ -31,7 +31,10 @@ from typing import Any
 
 
 TIME_RE_MAC = re.compile(r"^\s*(\d+)\s+maximum resident set size$", re.MULTILINE)
-TIME_RE_GNU = re.compile(r"^\s*Maximum resident set size \(kbytes\):\s*(\d+)\s*$", re.MULTILINE)
+TIME_FOOTPRINT_RE_MAC = re.compile(r"^\s*(\d+)\s+peak memory footprint$", re.MULTILINE)
+TIME_RE_GNU = re.compile(
+    r"^\s*Maximum resident set size \(kbytes\):\s*(\d+)\s*$", re.MULTILINE
+)
 EXPORT_PHASE_RE = re.compile(r"^\[export-phase\]\s+([^:]+):\s+([0-9.]+)s(?:\s+(.*))?$")
 
 
@@ -39,6 +42,15 @@ EXPORT_PHASE_RE = re.compile(r"^\[export-phase\]\s+([^:]+):\s+([0-9.]+)s(?:\s+(.
 class Target:
     name: str
     path: Path
+
+
+@dataclass(frozen=True)
+class CommandOutcome:
+    returncode: int | None
+    status: str
+    sampled_peak_rss: int | None
+    wall_ms: float
+    error: str | None = None
 
 
 def repo_root() -> Path:
@@ -57,7 +69,9 @@ def find_binary(root: Path, explicit: str | None) -> Path:
     ):
         if candidate.exists():
             return candidate
-    raise SystemExit("missing bonsai-ninja binary; run `cargo build --release -p bonsai_cli`")
+    raise SystemExit(
+        "missing bonsai-ninja binary; run `cargo build --release -p bonsai_cli`"
+    )
 
 
 def parse_target(value: str) -> Target:
@@ -103,7 +117,9 @@ def discover_large_targets(root: Path) -> list[Target]:
     return candidates
 
 
-def copy_workspace(src: Path, label: str) -> tuple[Path, tempfile.TemporaryDirectory[str]]:
+def copy_workspace(
+    src: Path, label: str
+) -> tuple[Path, tempfile.TemporaryDirectory[str]]:
     temp = tempfile.TemporaryDirectory(prefix=f"bonsai-bench-{label}-")
     dst = Path(temp.name) / src.name
     ignore = shutil.ignore_patterns(
@@ -141,6 +157,12 @@ def parse_rss_bytes(stderr: str) -> int | None:
         return int(match.group(1))
     if match := TIME_RE_GNU.search(stderr):
         return int(match.group(1)) * 1024
+    return None
+
+
+def parse_physical_footprint_bytes(stderr: str) -> int | None:
+    if match := TIME_FOOTPRINT_RE_MAC.search(stderr):
+        return int(match.group(1))
     return None
 
 
@@ -191,59 +213,83 @@ def count_object_field(rows: list[Any], field: str) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def summarize_row_values(summary: dict[str, Any], value: Any) -> None:
+    row_count = count_json_rows(value)
+    if row_count is not None:
+        summary["row_count"] = row_count
+    row_values = rows_for_summary(value)
+    for field in ("precision", "severity", "kind"):
+        counts = count_object_field(row_values, field)
+        if counts:
+            summary[f"{field}_counts"] = counts
+
+
+def summarize_object_lists(summary: dict[str, Any], value: dict[str, Any]) -> None:
+    summary["keys"] = sorted(value)
+    for key in (
+        "files",
+        "classes",
+        "callgraph",
+        "flow_chains",
+        "flow_graph",
+        "findings",
+        "candidates",
+        "rows",
+    ):
+        nested = value.get(key)
+        if isinstance(nested, list):
+            summary[f"{key}_count"] = len(nested)
+
+
+def summarize_taint_graph(
+    summary: dict[str, Any], value: dict[str, Any]
+) -> dict[str, Any] | None:
+    taint_graph = value.get("taint_graph")
+    if not isinstance(taint_graph, dict):
+        return None
+    analysis_scope = value.get("analysis_scope")
+    if isinstance(analysis_scope, dict):
+        summary["analysis_scope"] = analysis_scope
+    summary["taint_graph"] = {
+        f"{key}_count": len(nested)
+        for key, nested in taint_graph.items()
+        if isinstance(nested, list)
+    }
+    return taint_graph
+
+
+def copy_completion_fields(
+    summary: dict[str, Any],
+    value: dict[str, Any],
+    taint_graph: dict[str, Any] | None,
+) -> None:
+    keys = (
+        "analysis_complete",
+        "flow_chains_complete",
+        "flow_chains_mode",
+        "flow_chains_truncated_targets",
+        "propagations_complete",
+        "chains_complete",
+        "chains_mode",
+        "flow_id_labels_complete",
+        "flow_id_labels_mode",
+        "chains_truncated_targets",
+        "flow_id_labels_truncated_functions",
+    )
+    for key in keys:
+        if key in value:
+            summary[key] = value[key]
+        elif taint_graph is not None and key in taint_graph:
+            summary["taint_graph"][key] = taint_graph[key]
+
+
 def summarize_json(value: Any) -> dict[str, Any]:
     summary: dict[str, Any] = {"type": type(value).__name__}
-    rows = count_json_rows(value)
-    if rows is not None:
-        summary["row_count"] = rows
-    row_values = rows_for_summary(value)
-    if row_values:
-        for field in ("precision", "severity", "kind"):
-            counts = count_object_field(row_values, field)
-            if counts:
-                summary[f"{field}_counts"] = counts
+    summarize_row_values(summary, value)
     if isinstance(value, dict):
-        summary["keys"] = sorted(value.keys())
-        for key in (
-            "files",
-            "classes",
-            "callgraph",
-            "flow_chains",
-            "flow_graph",
-            "findings",
-            "candidates",
-            "rows",
-        ):
-            nested = value.get(key)
-            if isinstance(nested, list):
-                summary[f"{key}_count"] = len(nested)
-        taint_graph = value.get("taint_graph")
-        if isinstance(taint_graph, dict):
-            analysis_scope = value.get("analysis_scope")
-            if isinstance(analysis_scope, dict):
-                summary["analysis_scope"] = analysis_scope
-            summary["taint_graph"] = {
-                f"{key}_count": len(nested)
-                for key, nested in taint_graph.items()
-                if isinstance(nested, list)
-            }
-        for key in (
-            "analysis_complete",
-            "flow_chains_complete",
-            "flow_chains_mode",
-            "flow_chains_truncated_targets",
-            "propagations_complete",
-            "chains_complete",
-            "chains_mode",
-            "flow_id_labels_complete",
-            "flow_id_labels_mode",
-            "chains_truncated_targets",
-            "flow_id_labels_truncated_functions",
-        ):
-            if key in value:
-                summary[key] = value[key]
-            elif isinstance(taint_graph, dict) and key in taint_graph:
-                summary["taint_graph"][key] = taint_graph[key]
+        summarize_object_lists(summary, value)
+        taint_graph = summarize_taint_graph(summary, value)
+        copy_completion_fields(summary, value, taint_graph)
     return summary
 
 
@@ -273,7 +319,11 @@ def int_value(value: Any, default: int = 0) -> int:
 
 CACHE_ARTIFACTS: tuple[tuple[str, str, str], ...] = (
     ("dataflow_legacy", "dataflow_sidecar_exists", "dataflow_sidecar_bytes"),
-    ("dataflow_factstore", "dataflow_factstore_sidecar_exists", "dataflow_factstore_sidecar_bytes"),
+    (
+        "dataflow_factstore",
+        "dataflow_factstore_sidecar_exists",
+        "dataflow_factstore_sidecar_bytes",
+    ),
     ("value_flow", "value_flow_sidecar_exists", "value_flow_sidecar_bytes"),
     ("flow_ids", "flow_ids_sidecar_exists", "flow_ids_sidecar_bytes"),
     ("callgraph", "callgraph_sidecar_exists", "callgraph_sidecar_bytes"),
@@ -285,7 +335,10 @@ CACHE_ARTIFACTS: tuple[tuple[str, str, str], ...] = (
 
 def summarize_cache_stats(stats: Any) -> dict[str, Any]:
     if not isinstance(stats, dict):
-        return {"available": False, "error": f"unexpected cache stats type: {type(stats).__name__}"}
+        return {
+            "available": False,
+            "error": f"unexpected cache stats type: {type(stats).__name__}",
+        }
     if "error" in stats:
         error = stats["error"]
         if isinstance(error, dict):
@@ -318,7 +371,9 @@ def summarize_cache_stats(stats: Any) -> dict[str, Any]:
     }
 
 
-def measured_step_by_label(steps: list[dict[str, Any]], prefix: str) -> dict[str, dict[str, Any]]:
+def measured_step_by_label(
+    steps: list[dict[str, Any]], prefix: str
+) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for step in steps:
         label = step.get("label")
@@ -351,7 +406,9 @@ def summarize_warm_speedups(
             continue
         cold_ms = cold_step.get("wall_ms")
         warm_ms = warm_step.get("wall_ms")
-        if not isinstance(cold_ms, (int, float)) or not isinstance(warm_ms, (int, float)):
+        if not isinstance(cold_ms, (int, float)) or not isinstance(
+            warm_ms, (int, float)
+        ):
             continue
         ratio = round(cold_ms / warm_ms, 3) if warm_ms > 0 else None
         out[cold_key] = {
@@ -361,13 +418,27 @@ def summarize_warm_speedups(
             "warm_delta_ms": round(warm_ms - cold_ms, 2),
             "cold_max_rss_bytes": cold_step.get("max_rss_bytes"),
             "warm_max_rss_bytes": warm_step.get("max_rss_bytes"),
+            "cold_peak_physical_footprint_bytes": cold_step.get(
+                "peak_physical_footprint_bytes"
+            ),
+            "warm_peak_physical_footprint_bytes": warm_step.get(
+                "peak_physical_footprint_bytes"
+            ),
         }
     return out
 
 
 def summarize_export_phases(phases: dict[str, Any]) -> dict[str, Any]:
-    flow = phases.get("flow sections") if isinstance(phases.get("flow sections"), dict) else {}
-    chains = phases.get("taint.chains") if isinstance(phases.get("taint.chains"), dict) else {}
+    flow = (
+        phases.get("flow sections")
+        if isinstance(phases.get("flow sections"), dict)
+        else {}
+    )
+    chains = (
+        phases.get("taint.chains")
+        if isinstance(phases.get("taint.chains"), dict)
+        else {}
+    )
     labels = (
         phases.get("taint.flow_id_labels")
         if isinstance(phases.get("taint.flow_id_labels"), dict)
@@ -381,8 +452,13 @@ def summarize_export_phases(phases: dict[str, Any]) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "flow_chains_truncated_targets": int_value(flow.get("truncated_targets")),
         "taint_chains_truncated_targets": int_value(chains.get("truncated_targets")),
-        "flow_id_labels_truncated_functions": int_value(labels.get("truncated_functions")),
-        "phase_coverage_complete": bool(flow) and bool(chains) and bool(labels) and "complete" in propagations,
+        "flow_id_labels_truncated_functions": int_value(
+            labels.get("truncated_functions")
+        ),
+        "phase_coverage_complete": bool(flow)
+        and bool(chains)
+        and bool(labels)
+        and "complete" in propagations,
     }
     if "mode" in flow:
         summary["flow_chains_mode"] = flow["mode"]
@@ -399,7 +475,9 @@ def summarize_export_phases(phases: dict[str, Any]) -> dict[str, Any]:
     ]
     if "propagations_complete" in summary:
         completeness_inputs.append(summary["propagations_complete"] is True)
-    summary["analysis_complete_from_phases"] = summary["phase_coverage_complete"] and all(completeness_inputs)
+    summary["analysis_complete_from_phases"] = summary[
+        "phase_coverage_complete"
+    ] and all(completeness_inputs)
     return summary
 
 
@@ -442,88 +520,113 @@ def tail_text(path: Path, max_bytes: int) -> str:
         return ""
 
 
-def run_measured(
+def wait_for_command(
+    proc: subprocess.Popen[bytes],
     *,
-    binary: Path,
-    root: Path,
-    args: list[str],
-    label: str,
-    timer: list[str] | None,
+    started: float,
     timeout_sec: float | None,
     rss_limit_bytes: int | None,
-    parse_json: bool = False,
-    store_json: bool = False,
+) -> tuple[str, int | None]:
+    status = "ok"
+    sampled_peak_rss: int | None = None
+    while proc.poll() is None:
+        elapsed = time.perf_counter() - started
+        current_rss = process_tree_rss_bytes(proc.pid)
+        if current_rss is not None:
+            sampled_peak_rss = max(sampled_peak_rss or 0, current_rss)
+        if timeout_sec is not None and elapsed > timeout_sec:
+            status = "timeout"
+            terminate_process_group(proc)
+            break
+        if (
+            rss_limit_bytes is not None
+            and current_rss is not None
+            and current_rss > rss_limit_bytes
+        ):
+            status = "rss_limit"
+            terminate_process_group(proc)
+            break
+        time.sleep(0.25)
+    if status == "ok":
+        proc.wait()
+    else:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            kill_process_group(proc)
+            proc.wait()
+    return status, sampled_peak_rss
+
+
+def monitor_command(
+    *,
+    command: list[str],
+    root: Path,
+    env: dict[str, str],
+    stdout_path: Path | None,
+    stderr_path: Path,
+    timeout_sec: float | None,
+    rss_limit_bytes: int | None,
     discard_stdout: bool = False,
-) -> dict[str, Any]:
-    stdout_path: Path | None = None
-    if not discard_stdout:
-        with tempfile.NamedTemporaryFile("w+b", delete=False) as stdout_file:
-            stdout_path = Path(stdout_file.name)
-    with tempfile.NamedTemporaryFile("w+b", delete=False) as stderr_file:
-        stderr_path = Path(stderr_file.name)
-    command = [str(binary), *args, "--no-color", "--no-progress"]
-    full_command = [*timer, *command] if timer else command
-    env = os.environ.copy()
-    if args and args[0] == "export":
-        env = with_debug_category(env, "export-phase")
+) -> CommandOutcome:
     started = time.perf_counter()
     status = "ok"
     sampled_peak_rss: int | None = None
     proc: subprocess.Popen[bytes] | None = None
+    error: str | None = None
     try:
-        stdout_handle = open(os.devnull, "wb") if discard_stdout else stdout_path.open("wb")  # type: ignore[union-attr]
+        if discard_stdout:
+            stdout_handle = open(os.devnull, "wb")
+        elif stdout_path is not None:
+            stdout_handle = stdout_path.open("wb")
+        else:
+            raise ValueError("stdout_path is required unless stdout is discarded")
         with stdout_handle as out, stderr_path.open("wb") as err:
             proc = subprocess.Popen(
-                full_command,
+                command,
                 cwd=root,
                 stdout=out,
                 stderr=err,
                 start_new_session=True,
                 env=env,
             )
-            while proc.poll() is None:
-                elapsed = time.perf_counter() - started
-                current_rss = process_tree_rss_bytes(proc.pid)
-                if current_rss is not None:
-                    sampled_peak_rss = max(sampled_peak_rss or 0, current_rss)
-                if timeout_sec is not None and elapsed > timeout_sec:
-                    status = "timeout"
-                    terminate_process_group(proc)
-                    break
-                if (
-                    rss_limit_bytes is not None
-                    and current_rss is not None
-                    and current_rss > rss_limit_bytes
-                ):
-                    status = "rss_limit"
-                    terminate_process_group(proc)
-                    break
-                time.sleep(0.25)
-            if status == "ok":
+            status, sampled_peak_rss = wait_for_command(
+                proc,
+                started=started,
+                timeout_sec=timeout_sec,
+                rss_limit_bytes=rss_limit_bytes,
+            )
+    except OSError as exc:
+        status = "launch_error" if proc is None else "monitor_error"
+        error = f"{type(exc).__name__}: {exc}"
+        if proc is not None and proc.poll() is None:
+            terminate_process_group(proc)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                kill_process_group(proc)
                 proc.wait()
-            else:
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    kill_process_group(proc)
-                    proc.wait()
     finally:
         wall_ms = round((time.perf_counter() - started) * 1000, 2)
-    stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
-    parsed = json_from_file(stdout_path) if parse_json and stdout_path is not None else None
-    measured_rss = parse_rss_bytes(stderr_text)
-    result: dict[str, Any] = {
-        "label": label,
-        "command": command,
-        "exit_code": proc.returncode if proc is not None else None,
-        "status": status,
-        "wall_ms": wall_ms,
-        "max_rss_bytes": max(
-            value for value in (measured_rss, sampled_peak_rss) if value is not None
-        )
-        if measured_rss is not None or sampled_peak_rss is not None
-        else None,
-    }
+    return CommandOutcome(
+        returncode=proc.returncode if proc is not None else None,
+        status=status,
+        sampled_peak_rss=sampled_peak_rss,
+        wall_ms=wall_ms,
+        error=error,
+    )
+
+
+def add_measurement_details(
+    result: dict[str, Any],
+    *,
+    stderr_text: str,
+    parsed: Any | None,
+    store_json: bool,
+    stdout_path: Path | None,
+    timeout_sec: float | None,
+    rss_limit_bytes: int | None,
+) -> None:
     if stdout_path is not None:
         try:
             result["stdout_bytes"] = stdout_path.stat().st_size
@@ -543,14 +646,94 @@ def run_measured(
             result["json"] = parsed
         if (rows := count_json_rows(parsed)) is not None:
             result["row_count"] = rows
-    if result["exit_code"] != 0 or status != "ok":
-        if stdout_path is not None:
-            result["stdout_tail"] = tail_text(stdout_path, 2000)
-        result["stderr_tail"] = stderr_text[-2000:]
+
+
+def add_failure_details(
+    result: dict[str, Any],
+    status: str,
+    stdout_path: Path | None,
+    stderr_text: str,
+) -> None:
+    if result["exit_code"] == 0 and status == "ok":
+        return
     if stdout_path is not None:
-        stdout_path.unlink(missing_ok=True)
-    stderr_path.unlink(missing_ok=True)
-    return result
+        result["stdout_tail"] = tail_text(stdout_path, 2000)
+    result["stderr_tail"] = stderr_text[-2000:]
+
+
+def run_measured(
+    *,
+    binary: Path,
+    root: Path,
+    args: list[str],
+    label: str,
+    timer: list[str] | None,
+    timeout_sec: float | None,
+    rss_limit_bytes: int | None,
+    parse_json: bool = False,
+    store_json: bool = False,
+    discard_stdout: bool = False,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="bonsai-measure-") as temp_dir:
+        temp_root = Path(temp_dir)
+        stdout_path = None if discard_stdout else temp_root / "stdout"
+        stderr_path = temp_root / "stderr"
+        command = [str(binary), *args, "--no-color", "--no-progress"]
+        full_command = [*timer, *command] if timer else command
+        env = os.environ.copy()
+        if args and args[0] == "export":
+            env = with_debug_category(env, "export-phase")
+        outcome = monitor_command(
+            command=full_command,
+            root=root,
+            env=env,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            timeout_sec=timeout_sec,
+            rss_limit_bytes=rss_limit_bytes,
+            discard_stdout=discard_stdout,
+        )
+        stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+        parsed = (
+            json_from_file(stdout_path)
+            if parse_json and stdout_path is not None
+            else None
+        )
+        measured_rss = parse_rss_bytes(stderr_text)
+        measured_footprint = parse_physical_footprint_bytes(stderr_text)
+        result: dict[str, Any] = {
+            "label": label,
+            "command": command,
+            "exit_code": outcome.returncode,
+            "status": outcome.status,
+            "wall_ms": outcome.wall_ms,
+            "max_rss_bytes": max(
+                value
+                for value in (measured_rss, outcome.sampled_peak_rss)
+                if value is not None
+            )
+            if measured_rss is not None or outcome.sampled_peak_rss is not None
+            else None,
+        }
+        if outcome.error is not None:
+            result["error"] = outcome.error
+        if measured_footprint is not None:
+            # macOS RSS includes clean file-backed pages that the kernel can
+            # evict under pressure. `/usr/bin/time -l` exposes the physical
+            # footprint separately; keep both so machine-fit decisions do not
+            # mistake reclaimable compiler sidecars for committed memory.
+            result["peak_physical_footprint_bytes"] = measured_footprint
+        add_measurement_details(
+            result,
+            stderr_text=stderr_text,
+            parsed=parsed,
+            store_json=store_json,
+            stdout_path=stdout_path,
+            timeout_sec=timeout_sec,
+            rss_limit_bytes=rss_limit_bytes,
+        )
+        add_failure_details(result, outcome.status, stdout_path, stderr_text)
+        return result
 
 
 def child_pids(pid: int) -> list[int]:
@@ -610,7 +793,9 @@ def kill_process_group(proc: subprocess.Popen[bytes]) -> None:
         return
 
 
-def cache_stats(binary: Path, root: Path, workspace: Path, timer: list[str] | None) -> dict[str, Any]:
+def cache_stats(
+    binary: Path, root: Path, workspace: Path, timer: list[str] | None
+) -> dict[str, Any]:
     result = run_measured(
         binary=binary,
         root=root,
@@ -646,7 +831,9 @@ def run_checked(
     )
 
 
-def clear_all(binary: Path, root: Path, workspace: Path, timer: list[str] | None) -> dict[str, Any]:
+def clear_all(
+    binary: Path, root: Path, workspace: Path, timer: list[str] | None
+) -> dict[str, Any]:
     return run_measured(
         binary=binary,
         root=root,
@@ -700,8 +887,16 @@ def bench_target(
             cold: list[dict[str, Any]] = []
             for label, args, parse_json in (
                 ("cold_index", ["index", str(workspace)], True),
-                ("cold_callgraph", ["dump-callgraph", str(workspace), "--format", "json", "--all"], True),
-                ("cold_export_all", ["export", str(workspace), "--format", "json", "--all"], False),
+                (
+                    "cold_callgraph",
+                    ["dump-callgraph", str(workspace), "--format", "json", "--all"],
+                    True,
+                ),
+                (
+                    "cold_export_all",
+                    ["export", str(workspace), "--format", "json", "--all"],
+                    False,
+                ),
                 (
                     "cold_source_analysis",
                     [
@@ -792,7 +987,13 @@ def bench_target(
                 run_measured(
                     binary=binary,
                     root=root,
-                    args=["dump-callgraph", str(workspace), "--format", "json", "--all"],
+                    args=[
+                        "dump-callgraph",
+                        str(workspace),
+                        "--format",
+                        "json",
+                        "--all",
+                    ],
                     label="warm_callgraph",
                     timer=timer,
                     timeout_sec=timeout_sec,
@@ -854,10 +1055,16 @@ def validate_targets(targets: list[Target]) -> list[Target]:
     valid: list[Target] = []
     for target in targets:
         if not target.path.exists():
-            print(f"warning: skipping missing target {target.name}={target.path}", file=sys.stderr)
+            print(
+                f"warning: skipping missing target {target.name}={target.path}",
+                file=sys.stderr,
+            )
             continue
         if not target.path.is_dir():
-            print(f"warning: skipping non-directory target {target.name}={target.path}", file=sys.stderr)
+            print(
+                f"warning: skipping non-directory target {target.name}={target.path}",
+                file=sys.stderr,
+            )
             continue
         valid.append(target)
     return valid
@@ -883,9 +1090,18 @@ def failed_measured_steps(value: Any) -> list[dict[str, Any]]:
 def main() -> int:
     root = repo_root()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", help="bonsai-ninja binary path; defaults to release then debug")
-    parser.add_argument("--target", action="append", type=parse_target, help="Benchmark target as name=path")
-    parser.add_argument("--runs", type=int, default=1, help="Number of cold/warm repetitions per target")
+    parser.add_argument(
+        "--binary", help="bonsai-ninja binary path; defaults to release then debug"
+    )
+    parser.add_argument(
+        "--target",
+        action="append",
+        type=parse_target,
+        help="Benchmark target as name=path",
+    )
+    parser.add_argument(
+        "--runs", type=int, default=1, help="Number of cold/warm repetitions per target"
+    )
     parser.add_argument(
         "--in-place",
         action="store_true",
@@ -900,19 +1116,23 @@ def main() -> int:
     parser.add_argument(
         "--timeout-sec",
         type=float,
-        default=300.0,
-        help="Per-command wall-time guard. Use 0 to disable.",
+        default=0.0,
+        help="Optional per-command wall-time guard in seconds. Disabled by default.",
     )
     parser.add_argument(
         "--rss-limit-mb",
         type=int,
-        default=2048,
-        help="Per-command process-tree RSS guard. Use 0 to disable.",
+        default=0,
+        help="Optional per-command process-tree RSS guard in MiB. Disabled by default.",
     )
     args = parser.parse_args()
 
     if args.runs < 1:
         raise SystemExit("--runs must be >= 1")
+    if args.timeout_sec < 0:
+        raise SystemExit("--timeout-sec must be >= 0")
+    if args.rss_limit_mb < 0:
+        raise SystemExit("--rss-limit-mb must be >= 0")
 
     binary = find_binary(root, args.binary)
     targets = args.target or default_targets(root)
@@ -928,7 +1148,9 @@ def main() -> int:
 
     timer = time_style()
     timeout_sec = None if args.timeout_sec == 0 else args.timeout_sec
-    rss_limit_bytes = None if args.rss_limit_mb == 0 else args.rss_limit_mb * 1024 * 1024
+    rss_limit_bytes = (
+        None if args.rss_limit_mb == 0 else args.rss_limit_mb * 1024 * 1024
+    )
     report: dict[str, Any] = {
         "schema": "bonsai.goal-benchmark.v1",
         "repo": str(root),

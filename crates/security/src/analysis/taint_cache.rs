@@ -206,11 +206,9 @@ pub(super) fn prepare_workspace_cache(
         namespace,
         config_fingerprint,
     );
-    // FactStore temp names are unique per process/session. Do not sweep them
-    // automatically here: another bonsai process may be actively writing the
-    // same configured sidecar. Explicit cache maintenance may remove known
-    // stale temps out of band.
-    let temp_files_removed = 0usize;
+    // Safe cleanup occurs only after the workspace layer owns each sidecar's
+    // advisory lock; active writers are skipped.
+    let mut temp_files_removed = 0usize;
     let mut disk_entries_loaded = 0usize;
     let mut load_error = None;
     let mut persist_started = false;
@@ -228,8 +226,11 @@ pub(super) fn prepare_workspace_cache(
     }
     let persistence_enabled = persistence_enabled();
     if persistence_enabled {
-        match index.begin_persist_to_disk(&sidecar, ws.db(), config_fingerprint) {
-            Ok(started) => persist_started = started,
+        match index.begin_persist_to_disk_report(&sidecar, ws.db(), config_fingerprint) {
+            Ok(report) => {
+                persist_started = report.started;
+                temp_files_removed = report.temp_files_removed;
+            }
             Err(err) => {
                 tracing::warn!(
                     path = %sidecar.display(),

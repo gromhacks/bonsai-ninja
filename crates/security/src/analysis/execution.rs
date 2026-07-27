@@ -1,7 +1,6 @@
 //! Exact source-to-sink semantic graph planning and execution.
 
 use super::{
-    apply_configured_transfer_fixpoint, build_idg_service_for_rulepack_for_files,
     call_result_passthroughs_from_rulepack_for_languages,
     clean_output_overwrites_from_rulepack_for_languages, compose_idg_seed_nodes, find_call_event_at,
     finish_taint_cache_write_through, func_id_for_match, idg_call_result_passthrough_specs,
@@ -10,11 +9,10 @@ use super::{
     rule_match_kind_is_param, seed_idg_service_for_rulepack_for_files, source_anchor_for_rule_match,
     source_callback_args_from_rulepack_for_languages, source_output_args_from_rulepack_for_languages,
     source_seed_set, span_contains, spans_overlap, spans_share_enclosing_loop, symbolic_field_languages,
-    symbolic_field_source_funcs, taint_cache, AHashMap, AHashSet, AnalysisProgress, Arc, BTreeMap,
-    CleanOverwritePolicy, DeclKind, Duration, FileId, FindingWithChain, FlowEvent, FuncId, GlobalIndex,
-    IdgSeedRequest, InterTaintCaches, InterTaintConfig, MatchKind, MatchOrigin, OnceLock, Precision,
-    ResolutionCoverage, RuleMatch, Rulepack, SourceMatchDedupeKey, SourceMatchDedupeValue, Span, SymbolId,
-    TokenSet, Workspace, WorkspaceCallableCache,
+    taint_cache, AHashMap, AHashSet, AnalysisProgress, Arc, CleanOverwritePolicy, DeclKind, Duration, FileId,
+    FindingWithChain, FlowEvent, FuncId, GlobalIndex, IdgSeedRequest, InterTaintCaches, InterTaintConfig,
+    MatchKind, MatchOrigin, OnceLock, Precision, ResolutionCoverage, RuleMatch, Rulepack,
+    SourceMatchDedupeKey, SourceMatchDedupeValue, Span, SymbolId, TokenSet, Workspace,
 };
 
 /// Build chain-aware findings: source rule matches → propagated taint
@@ -108,6 +106,8 @@ pub(super) struct SourceWorkItem<'a> {
     pub(super) source: &'a RuleMatch,
     pub(super) source_func: FuncId,
     pub(super) seeds: TokenSet,
+    pub(super) anchor: Option<Span>,
+    pub(super) output_arg_names: Vec<String>,
 }
 
 struct SourceWorkPlan<'a> {
@@ -190,7 +190,7 @@ fn plan_source_work<'a>(
             continue;
         };
         if active_file != Some(file) {
-            active_index = ws.exact_decl_index(file);
+            active_index = ws.exact_decl_index_shared(file);
             active_file = Some(file);
         }
         let Some(source_decl) = active_index.as_ref().and_then(|index| {
@@ -204,6 +204,7 @@ fn plan_source_work<'a>(
         for source in sources {
             let seeds = source_seed_set(pack, source.source, source_decl);
             let anchor = source_anchor_for_rule_match(pack, source.source);
+            let output_arg_names = output_arg_names_for_match(pack, source.source, source_decl);
             if seeds.is_empty() && anchor.is_none() {
                 continue;
             }
@@ -213,6 +214,8 @@ fn plan_source_work<'a>(
                     source: source.source,
                     source_func,
                     seeds,
+                    anchor,
+                    output_arg_names,
                 },
             ));
         }
@@ -235,7 +238,6 @@ struct TransferPlan {
 }
 
 struct SemanticScopeRequest<'a> {
-    ws: &'a Workspace,
     global: &'a GlobalIndex,
     source_funcs: &'a [FuncId],
     sink_funcs: &'a AHashSet<FuncId>,
@@ -249,27 +251,9 @@ struct SemanticScopeRequest<'a> {
 
 struct SemanticScopePlan {
     callback_corridors: AHashMap<FuncId, Arc<SourceSinkCorridor>>,
-    shared_corridors: SharedSourceSinkCorridors,
+    shared_union_corridor: Option<SourceSinkCorridor>,
     files: Vec<FileId>,
     funcs: Vec<FuncId>,
-}
-
-enum SemanticGraphExecution {
-    Partitioned,
-    Shared(Arc<bonsai_idg::IdgQueryService>),
-}
-
-impl SemanticGraphExecution {
-    fn is_partitioned(&self) -> bool {
-        matches!(self, Self::Partitioned)
-    }
-
-    fn shared(&self) -> Option<&Arc<bonsai_idg::IdgQueryService>> {
-        match self {
-            Self::Partitioned => None,
-            Self::Shared(service) => Some(service),
-        }
-    }
 }
 
 struct SemanticGraphCompilationRequest<'a> {
@@ -281,13 +265,10 @@ struct SemanticGraphCompilationRequest<'a> {
     funcs: &'a [FuncId],
     call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
     max_precision: Option<Precision>,
-    partitioned: bool,
-    source_group_count: usize,
-    source_unit_count: usize,
 }
 
 struct CompiledSemanticGraph {
-    execution: SemanticGraphExecution,
+    service: Arc<bonsai_idg::IdgQueryService>,
     cache_persist_started: bool,
 }
 
@@ -324,39 +305,21 @@ where
         detail: cache_report.detail(),
     });
 
-    let execution = if request.partitioned {
-        on_progress(AnalysisProgress::PhaseStarted {
-            label: "planning scoped semantic graph batches",
-            total: 0,
-        });
-        bonsai_diagnostics::debug_log!(
-            "security-phase",
-            "semantic graph source-unit streaming enabled funcs={} files={} source_groups={} units={}",
-            request.funcs.len(),
-            request.files.len(),
-            request.source_group_count,
-            request.source_unit_count
-        );
-        on_progress(AnalysisProgress::PhaseFinished);
-        SemanticGraphExecution::Partitioned
-    } else {
-        on_progress(AnalysisProgress::PhaseStarted {
-            label: "building scoped semantic graph",
-            total: 0,
-        });
-        let service = seed_idg_service_for_rulepack_for_files(
-            request.ws,
-            request.pack,
-            request.transfer_languages,
-            request.files,
-            request.funcs,
-            request.call_graph,
-        );
-        on_progress(AnalysisProgress::PhaseFinished);
-        SemanticGraphExecution::Shared(service)
-    };
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "building persisted scoped semantic graph",
+        total: 0,
+    });
+    let service = seed_idg_service_for_rulepack_for_files(
+        request.ws,
+        request.pack,
+        request.transfer_languages,
+        request.files,
+        request.funcs,
+        request.call_graph,
+    );
+    on_progress(AnalysisProgress::PhaseFinished);
     CompiledSemanticGraph {
-        execution,
+        service,
         cache_persist_started: cache_report.persist_started,
     }
 }
@@ -390,21 +353,6 @@ where
 {
     let mut source_funcs: Vec<FuncId> = request.source_groups.keys().copied().collect();
     source_funcs.sort_by_key(|func| func.raw());
-    let resolved_call_graph = request.ws.cached_resolved_call_graph();
-    let callback_targets = configured_source_callback_targets_by_source(
-        request.ws,
-        request.source_work,
-        request.pack,
-        resolved_call_graph.as_ref(),
-    );
-    let mut graph_source_funcs = source_funcs.clone();
-    graph_source_funcs.extend(
-        callback_targets
-            .values()
-            .flat_map(|targets| targets.iter().copied()),
-    );
-    graph_source_funcs.sort_by_key(|func| func.raw());
-    graph_source_funcs.dedup();
     let mut sink_func_list: Vec<FuncId> = request.sink_by_func.keys().copied().collect();
     sink_func_list.sort_by_key(|func| func.raw());
 
@@ -413,9 +361,20 @@ where
         total: 0,
     });
     let call_graph = request.ws.source_reachable_resolved_call_graph(
-        &graph_source_funcs,
+        &source_funcs,
         &sink_func_list,
         request.max_precision,
+    );
+    // The source-reachable compiler graph starts with every source function,
+    // so its exact indirect edges already include every configured callback
+    // that can participate in a source-to-sink corridor. Derive callback
+    // identity from that scoped graph instead of materializing the complete
+    // workspace callgraph beside the linkage table.
+    let callback_targets = configured_source_callback_targets_by_source(
+        request.ws,
+        request.source_work,
+        request.pack,
+        call_graph.graph.as_ref(),
     );
     bonsai_diagnostics::debug_log!(
         "security-phase",
@@ -468,24 +427,20 @@ where
 struct SourceScheduleRequest<'a> {
     source_groups: Vec<(FuncId, Vec<usize>)>,
     callback_corridors: &'a AHashMap<FuncId, Arc<SourceSinkCorridor>>,
-    shared_corridors: &'a SharedSourceSinkCorridors,
-    use_coarse_schedule: bool,
+    shared_union_corridor: Option<SourceSinkCorridor>,
+    node_prefilter_enabled: bool,
     prefilter_enabled: bool,
-    partitioned_idg: bool,
-    idg: Option<&'a Arc<bonsai_idg::IdgQueryService>>,
-    target_nodes_for_schedule: Option<&'a [bonsai_idg::WsNodeId]>,
+    idg: &'a Arc<bonsai_idg::IdgQueryService>,
     source_work: &'a [SourceWorkItem<'a>],
-    pack: &'a Rulepack,
-    config: &'a InterTaintConfig,
     global: &'a Arc<GlobalIndex>,
-    sink_target_nodes: Option<&'a SinkTargetNodes>,
-    call_graph: &'a Arc<bonsai_callgraph::ResolvedCallGraph>,
+    target_relevance: Option<&'a bonsai_idg::IdgTargetRelevance>,
+    call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+    max_precision: Option<Precision>,
     debug_taint_phase: bool,
 }
 
 struct SourceSchedulePlan {
     groups: Vec<ScheduledSourceGroup>,
-    partitioned_source_indices: AHashMap<FuncId, Arc<Vec<usize>>>,
 }
 
 struct SinkScheduleRequest<'a, 'matches> {
@@ -493,14 +448,13 @@ struct SinkScheduleRequest<'a, 'matches> {
     sinks_by_func: &'a AHashMap<FuncId, Vec<&'matches RuleMatch>>,
     sink_funcs: &'a AHashSet<FuncId>,
     semantic_funcs: &'a [FuncId],
-    semantic_graph: &'a SemanticGraphExecution,
+    semantic_graph: &'a bonsai_idg::IdgQueryService,
     prefilter_enabled: bool,
-    source_work_count: usize,
 }
 
 struct SinkSchedulePlan {
     targets: Option<SinkTargetNodes>,
-    use_coarse_schedule: bool,
+    node_prefilter_enabled: bool,
 }
 
 fn plan_sink_schedule(request: SinkScheduleRequest<'_, '_>) -> SinkSchedulePlan {
@@ -511,14 +465,12 @@ fn plan_sink_schedule(request: SinkScheduleRequest<'_, '_>) -> SinkSchedulePlan 
         .copied()
         .collect();
     let targets = if request.prefilter_enabled {
-        request.semantic_graph.shared().map(|service| {
-            sink_target_nodes_for_funcs(
-                service.as_ref(),
-                request.pack,
-                request.sinks_by_func,
-                &semantic_sink_func_set,
-            )
-        })
+        Some(sink_target_nodes_for_funcs(
+            request.semantic_graph,
+            request.pack,
+            request.sinks_by_func,
+            &semantic_sink_func_set,
+        ))
     } else {
         None
     };
@@ -533,25 +485,8 @@ fn plan_sink_schedule(request: SinkScheduleRequest<'_, '_>) -> SinkSchedulePlan 
     };
     let schedule_node_cut_enabled = targets
         .as_ref()
-        .is_some_and(|targets| targets.complete && !targets.nodes.is_empty());
+        .is_some_and(|targets| !targets.nodes.is_empty() || !targets.unresolved_funcs.is_empty());
     let graph_node_cut_enabled = targets.as_ref().is_some_and(|targets| !targets.nodes.is_empty());
-
-    // Choose from semantic work shape rather than a project-size or language
-    // constant. The coarse corridor is a conservative superset, so this only
-    // changes scheduling cost; the final IDG closure remains identical.
-    let scheduler_parallelism = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
-    let exact_schedule_pair_work = request
-        .source_work_count
-        .saturating_mul(targets.as_ref().map_or(0, |targets| targets.nodes.len()));
-    let graph_parallel_work = request
-        .semantic_funcs
-        .len()
-        .max(1)
-        .saturating_mul(scheduler_parallelism);
-    let use_coarse_schedule =
-        request.semantic_graph.is_partitioned() || exact_schedule_pair_work > graph_parallel_work;
     if let Some(targets) = targets.as_ref() {
         bonsai_diagnostics::debug_log!(
             "security-phase",
@@ -566,7 +501,7 @@ fn plan_sink_schedule(request: SinkScheduleRequest<'_, '_>) -> SinkSchedulePlan 
     }
     SinkSchedulePlan {
         targets,
-        use_coarse_schedule,
+        node_prefilter_enabled: schedule_node_cut_enabled,
     }
 }
 
@@ -574,58 +509,26 @@ fn schedule_source_groups<F>(request: SourceScheduleRequest<'_>, on_progress: &m
 where
     F: FnMut(AnalysisProgress),
 {
-    let mut groups = Vec::new();
-    let mut partitioned_source_indices = AHashMap::new();
+    // Target admission depends only on exact compiler seed nodes and the
+    // reusable backward relevance proof. Filter source matches before
+    // materializing per-source callgraph slices so rejected sources never
+    // allocate duplicate corridor hash tables.
+    let mut admitted_source_groups = Vec::new();
     for (source_func, indices) in request.source_groups {
-        let coarse_corridors =
-            coarse_corridor_for_source(request.callback_corridors, request.shared_corridors, source_func);
-        if request.use_coarse_schedule {
-            if request.prefilter_enabled {
-                for _ in &indices {
-                    on_progress(AnalysisProgress::PhaseTicked);
-                }
-            }
-            if request.partitioned_idg && !request.callback_corridors.contains_key(&source_func) {
-                if !coarse_corridors.is_empty() {
-                    partitioned_source_indices.insert(source_func, Arc::new(indices));
-                }
-                continue;
-            }
-            let indices = Arc::new(indices);
-            for corridor in coarse_corridors {
-                groups.push(ScheduledSourceGroup {
-                    src_func_id: source_func,
-                    indices: Arc::clone(&indices),
-                    corridor: Arc::clone(corridor),
-                });
-            }
-            continue;
-        }
-
-        let coarse_corridor = coarse_corridors.first().copied();
         let mut filtered_indices = Vec::with_capacity(indices.len());
-        let mut group_corridor = SourceSinkCorridor::default();
         for index in indices.iter().copied() {
-            let corridor = if let (Some(service), Some(target_nodes)) =
-                (request.idg, request.target_nodes_for_schedule)
-            {
-                source_index_sink_corridor(
-                    index,
-                    request.source_work,
-                    request.pack,
-                    request.config,
-                    request.global.as_ref(),
-                    service.as_ref(),
-                    target_nodes,
-                    request.sink_target_nodes.is_none_or(|targets| targets.complete),
-                    coarse_corridor.map(Arc::as_ref),
-                )
-            } else {
-                coarse_corridor.map(|corridor| corridor.as_ref().clone())
-            };
-            if let Some(corridor) = corridor {
+            let admitted = !request.node_prefilter_enabled
+                || request.target_relevance.is_none_or(|target_relevance| {
+                    source_index_is_target_relevant(
+                        index,
+                        request.source_work,
+                        request.global.as_ref(),
+                        request.idg.as_ref(),
+                        target_relevance,
+                    )
+                });
+            if admitted {
                 filtered_indices.push(index);
-                group_corridor.extend(corridor);
             }
             if request.prefilter_enabled {
                 on_progress(AnalysisProgress::PhaseTicked);
@@ -648,37 +551,52 @@ where
             }
             continue;
         }
-        if let Some(coarse_corridor) = coarse_corridor {
-            group_corridor.extend(coarse_corridor.as_ref().clone());
+        admitted_source_groups.push((source_func, filtered_indices));
+    }
+
+    let shared_source_funcs: Vec<FuncId> = admitted_source_groups
+        .iter()
+        .map(|(source_func, _)| *source_func)
+        .filter(|source_func| !request.callback_corridors.contains_key(source_func))
+        .collect();
+    let shared_corridors =
+        request
+            .shared_union_corridor
+            .map_or_else(SharedSourceSinkCorridors::default, |corridor| {
+                shared_source_sink_corridor(
+                    &corridor,
+                    &shared_source_funcs,
+                    request.global.as_ref(),
+                    request.call_graph,
+                    request.max_precision,
+                )
+            });
+
+    let mut groups = Vec::with_capacity(admitted_source_groups.len());
+    for (source_func, indices) in admitted_source_groups {
+        let coarse_corridors =
+            coarse_corridor_for_source(request.callback_corridors, &shared_corridors, source_func);
+        let indices = Arc::new(indices);
+        for corridor in coarse_corridors {
+            debug_assert!(corridor.lineage_funcs.contains(&source_func));
+            groups.push(ScheduledSourceGroup {
+                src_func_id: source_func,
+                indices: Arc::clone(&indices),
+                corridor: Arc::clone(corridor),
+            });
         }
-        group_corridor.lineage_funcs.insert(source_func);
-        extend_corridor_with_summary_dependency_support(
-            &mut group_corridor,
-            request.global.as_ref(),
-            request.call_graph.as_ref(),
-            request.config.max_edge_precision,
-        );
-        groups.push(ScheduledSourceGroup {
-            src_func_id: source_func,
-            indices: Arc::new(filtered_indices),
-            corridor: Arc::new(group_corridor),
-        });
     }
     if request.prefilter_enabled {
         on_progress(AnalysisProgress::PhaseFinished);
     }
-    SourceSchedulePlan {
-        groups,
-        partitioned_source_indices,
-    }
+    SourceSchedulePlan { groups }
 }
 
 fn plan_semantic_scope(request: SemanticScopeRequest<'_>) -> SemanticScopePlan {
     let mut scope_funcs = AHashSet::new();
     let mut callback_corridors = AHashMap::new();
-    let mut shared_corridors = SharedSourceSinkCorridors::default();
+    let mut shared_union_corridor = None;
     if request.prefilter_enabled {
-        let symbolic_sources = symbolic_field_source_funcs(request.ws, request.global, request.source_funcs);
         if let Some(corridor) = callgraph_sources_sink_corridor(
             request.source_funcs,
             request.sink_funcs,
@@ -686,20 +604,21 @@ fn plan_semantic_scope(request: SemanticScopeRequest<'_>) -> SemanticScopePlan {
             request.call_graph,
             request.max_precision,
         ) {
-            shared_corridors = partition_source_sink_corridor(
-                corridor,
+            // Compute the exact union of per-source slices without retaining
+            // hundreds of hash tables through IDG compilation and backward
+            // target relevance. Admitted slices are reconstructed after the
+            // target proof filters source matches.
+            visit_source_sink_corridors(
+                &corridor,
                 request.source_funcs,
-                &symbolic_sources,
                 request.global,
                 request.call_graph,
                 request.max_precision,
+                |_, source_corridor| {
+                    scope_funcs.extend(source_corridor.lineage_funcs);
+                },
             );
-            scope_funcs.extend(
-                shared_corridors
-                    .corridors
-                    .iter()
-                    .flat_map(|corridor| corridor.lineage_funcs.iter().copied()),
-            );
+            shared_union_corridor = Some(corridor);
         }
         scope_funcs.extend(merge_configured_source_callback_corridors(
             &mut callback_corridors,
@@ -730,7 +649,7 @@ fn plan_semantic_scope(request: SemanticScopeRequest<'_>) -> SemanticScopePlan {
     };
     SemanticScopePlan {
         callback_corridors,
-        shared_corridors,
+        shared_union_corridor,
         files,
         funcs,
     }
@@ -770,7 +689,6 @@ pub(super) struct SourceGroupExecutor<'a> {
     pub(super) pack: &'a Rulepack,
     pub(super) config: &'a InterTaintConfig,
     pub(super) chain_call_graph: &'a Arc<bonsai_callgraph::ResolvedCallGraph>,
-    pub(super) use_partitioned_scoped_idg: bool,
     pub(super) workspace_taint_index: &'a bonsai_workspace::taint_index::TaintGraphIndex,
     pub(super) taint_caches: &'a InterTaintCaches,
     pub(super) sink_by_func: &'a AHashMap<FuncId, Vec<&'a RuleMatch>>,
@@ -780,7 +698,6 @@ pub(super) struct SourceGroupExecutor<'a> {
     pub(super) receiver_base_map_cell: &'a OnceLock<AHashMap<String, Vec<String>>>,
     pub(super) sink_target_nodes: Option<&'a SinkTargetNodes>,
     pub(super) sink_target_nodes_for_graph: Option<&'a [bonsai_idg::WsNodeId]>,
-    pub(super) workspace_callable_cache: &'a WorkspaceCallableCache,
     pub(super) debug_taint_phase: bool,
 }
 
@@ -848,175 +765,10 @@ where
     groups
 }
 
-#[derive(Clone, Copy)]
-struct PartitionedExecutionContext<'a> {
-    executor: &'a SourceGroupExecutor<'a>,
-    pool: Option<&'a rayon::ThreadPool>,
-    global: &'a GlobalIndex,
-    ws: &'a Workspace,
-    pack: &'a Rulepack,
-    transfer_languages: &'a AHashSet<String>,
-    call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
-}
-
-struct PartitionedExecutionRequest<'a> {
-    context: PartitionedExecutionContext<'a>,
-    source_groups: Vec<ScheduledSourceGroup>,
-    shared_corridors: &'a SharedSourceSinkCorridors,
-    partitioned_source_indices: &'a AHashMap<FuncId, Arc<Vec<usize>>>,
-}
-
-fn execute_partitioned_source_groups<F>(
-    request: PartitionedExecutionRequest<'_>,
-    on_progress: &mut F,
-) -> Vec<FindingWithChain>
-where
-    F: FnMut(AnalysisProgress),
-{
-    let mut out = Vec::new();
-    let mut callback_batches: AHashMap<usize, (Arc<SourceSinkCorridor>, Vec<ScheduledSourceGroup>)> =
-        AHashMap::default();
-    for group in request.source_groups {
-        let key = Arc::as_ptr(&group.corridor) as usize;
-        callback_batches
-            .entry(key)
-            .or_insert_with(|| (Arc::clone(&group.corridor), Vec::new()))
-            .1
-            .push(group);
-    }
-    let shared_batch_count = request
-        .shared_corridors
-        .source_units
-        .iter()
-        .filter(|unit| {
-            unit.sources
-                .iter()
-                .any(|source| request.partitioned_source_indices.contains_key(source))
-        })
-        .count();
-    let total_batches = shared_batch_count.saturating_add(callback_batches.len());
-    bonsai_diagnostics::debug_log!(
-        "security-phase",
-        "semantic graph source units planned batches={}",
-        total_batches
-    );
-    let mut batch_number = 0usize;
-    for unit in &request.shared_corridors.source_units {
-        let active_sources: Vec<FuncId> = unit
-            .sources
-            .iter()
-            .copied()
-            .filter(|source| request.partitioned_source_indices.contains_key(source))
-            .collect();
-        if active_sources.is_empty() {
-            continue;
-        }
-        let corridor = Arc::clone(&unit.corridor);
-        let batch_groups: Vec<ScheduledSourceGroup> = active_sources
-            .iter()
-            .filter_map(|source| {
-                request
-                    .partitioned_source_indices
-                    .get(source)
-                    .map(|indices| ScheduledSourceGroup {
-                        src_func_id: *source,
-                        indices: Arc::clone(indices),
-                        corridor: Arc::clone(&corridor),
-                    })
-            })
-            .collect();
-        batch_number += 1;
-        out.extend(execute_partitioned_corridor_batch(
-            &request.context,
-            &corridor,
-            &batch_groups,
-            batch_number,
-            total_batches,
-            "scoped",
-            on_progress,
-        ));
-    }
-
-    let mut callback_batches: Vec<_> = callback_batches.into_values().collect();
-    callback_batches.sort_by_key(|(corridor, _)| {
-        corridor
-            .lineage_funcs
-            .iter()
-            .map(|func| func.raw())
-            .min()
-            .unwrap_or_default()
-    });
-    for (corridor, batch_groups) in callback_batches {
-        batch_number += 1;
-        out.extend(execute_partitioned_corridor_batch(
-            &request.context,
-            &corridor,
-            &batch_groups,
-            batch_number,
-            total_batches,
-            "callback",
-            on_progress,
-        ));
-    }
-    out
-}
-
-fn execute_partitioned_corridor_batch<F>(
-    context: &PartitionedExecutionContext<'_>,
-    corridor: &SourceSinkCorridor,
-    groups: &[ScheduledSourceGroup],
-    batch_number: usize,
-    total_batches: usize,
-    batch_kind: &str,
-    on_progress: &mut F,
-) -> Vec<FindingWithChain>
-where
-    F: FnMut(AnalysisProgress),
-{
-    let mut funcs: Vec<FuncId> = corridor.lineage_funcs.iter().copied().collect();
-    funcs.sort_by_key(|func| func.raw());
-    funcs.dedup();
-    let mut files: Vec<FileId> = funcs
-        .iter()
-        .filter_map(|func| context.global.declaring_file(SymbolId::new(func.raw())))
-        .collect();
-    files.sort_by_key(|file| file.raw());
-    files.dedup();
-    bonsai_diagnostics::debug_log!(
-        "security-phase",
-        "building {} semantic graph batch {}/{} groups={} funcs={} files={}",
-        batch_kind,
-        batch_number,
-        total_batches,
-        groups.len(),
-        funcs.len(),
-        files.len()
-    );
-    let idg = build_idg_service_for_rulepack_for_files(
-        context.ws,
-        context.pack,
-        context.transfer_languages,
-        &files,
-        &funcs,
-        context.call_graph,
-    );
-    execute_source_groups(context.executor, context.pool, groups, idg.as_ref(), on_progress)
-        .into_iter()
-        .flatten()
-        .collect()
-}
-
 struct ScheduledTaintExecutionRequest<'a, 'analysis> {
     executor: &'a SourceGroupExecutor<'analysis>,
-    global: &'a GlobalIndex,
-    ws: &'a Workspace,
-    pack: &'a Rulepack,
-    transfer_languages: &'a AHashSet<String>,
-    call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
-    semantic_graph: &'a SemanticGraphExecution,
+    semantic_graph: &'a bonsai_idg::IdgQueryService,
     source_groups: Vec<ScheduledSourceGroup>,
-    shared_corridors: &'a SharedSourceSinkCorridors,
-    partitioned_source_indices: &'a AHashMap<FuncId, Arc<Vec<usize>>>,
     source_group_count: usize,
     prefilter_enabled: bool,
 }
@@ -1030,48 +782,20 @@ where
 {
     let ScheduledTaintExecutionRequest {
         executor,
-        global,
-        ws,
-        pack,
-        transfer_languages,
-        call_graph,
         semantic_graph,
         source_groups,
-        shared_corridors,
-        partitioned_source_indices,
         source_group_count,
         prefilter_enabled,
     } = request;
     let mut scheduled_corridors = AHashSet::default();
     let mut scheduled_reachable_funcs = AHashSet::default();
-    if semantic_graph.is_partitioned() {
-        for (corridor, sources) in shared_corridors
-            .corridors
-            .iter()
-            .zip(&shared_corridors.sources_by_corridor)
-        {
-            if sources
-                .iter()
-                .any(|source| partitioned_source_indices.contains_key(source))
-            {
-                scheduled_corridors.insert(Arc::as_ptr(corridor) as usize);
-                scheduled_reachable_funcs.extend(corridor.lineage_funcs.iter().copied());
-            }
-        }
-    }
     for group in &source_groups {
         let corridor_key = Arc::as_ptr(&group.corridor) as usize;
         if scheduled_corridors.insert(corridor_key) {
             scheduled_reachable_funcs.extend(group.corridor.lineage_funcs.iter().copied());
         }
     }
-    let streamed_group_count = shared_corridors
-        .sources_by_corridor
-        .iter()
-        .flat_map(|sources| sources.iter())
-        .filter(|source| partitioned_source_indices.contains_key(source))
-        .count();
-    let total_groups = source_groups.len().saturating_add(streamed_group_count);
+    let total_groups = source_groups.len();
     let reachable_funcs = scheduled_reachable_funcs.len();
     bonsai_diagnostics::debug_log!(
         "security-phase",
@@ -1103,40 +827,16 @@ where
     } else {
         None
     };
-    match semantic_graph {
-        SemanticGraphExecution::Partitioned => {
-            // Source groups are streamed directly from each parsed source
-            // file; each file gets its exact cross-file source→all-sinks
-            // corridor and is released before the next compilation unit.
-            execute_partitioned_source_groups(
-                PartitionedExecutionRequest {
-                    context: PartitionedExecutionContext {
-                        executor,
-                        pool: rayon_pool.as_ref(),
-                        global,
-                        ws,
-                        pack,
-                        transfer_languages,
-                        call_graph,
-                    },
-                    source_groups,
-                    shared_corridors,
-                    partitioned_source_indices,
-                },
-                on_progress,
-            )
-        }
-        SemanticGraphExecution::Shared(global_idg) => execute_source_groups(
-            executor,
-            rayon_pool.as_ref(),
-            &source_groups,
-            global_idg.as_ref(),
-            on_progress,
-        )
-        .into_iter()
-        .flatten()
-        .collect(),
-    }
+    execute_source_groups(
+        executor,
+        rayon_pool.as_ref(),
+        &source_groups,
+        semantic_graph,
+        on_progress,
+    )
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 pub(super) fn build_findings_chain_aware<F>(request: ChainAnalysisRequest<'_, F>) -> ChainBuildResult
@@ -1206,6 +906,7 @@ where
         items: source_work,
         groups: source_groups,
     } = plan_source_work(ws, global.as_ref(), pack, source_hits);
+    let source_group_count = source_groups.len();
     let TransferPlan {
         languages: transfer_languages,
         config,
@@ -1244,6 +945,7 @@ where
         },
         on_progress,
     );
+    drop(source_groups);
     let chain_call_graph = reachable_call_graph.graph.clone();
     // Preserve the exact graph scope already built for this scan so the
     // completeness pass can identify unresolved internal calls without
@@ -1253,11 +955,10 @@ where
 
     let SemanticScopePlan {
         callback_corridors: coarse_corridors_by_func,
-        shared_corridors: shared_coarse_corridors,
+        shared_union_corridor,
         files: semantic_files,
         funcs: semantic_funcs,
     } = plan_semantic_scope(SemanticScopeRequest {
-        ws,
         global: global.as_ref(),
         source_funcs: &source_func_ids,
         sink_funcs: &sink_func_set,
@@ -1270,22 +971,32 @@ where
     });
     bonsai_diagnostics::debug_log!(
         "security-phase",
-        "semantic graph idg scope funcs={} files={} full_funcs={} full_files={} source_units={} callback_corridors={}",
+        "semantic graph idg scope funcs={} files={} full_funcs={} full_files={} shared_union_funcs={} callback_corridors={}",
         semantic_funcs.len(),
         semantic_files.len(),
         reachable_call_graph.funcs.len(),
         reachable_call_graph.files.len(),
-        shared_coarse_corridors.source_units.len(),
+        shared_union_corridor
+            .as_ref()
+            .map_or(0, |corridor| corridor.lineage_funcs.len()),
         coarse_corridors_by_func.len()
     );
+    drop(source_func_ids);
+    drop(source_callback_targets);
+    drop(reachable_call_graph);
 
-    // Disconnected callgraph components have no possible interprocedural IDG
-    // edge between them. Build and release them independently instead of
-    // choosing a whole-workspace strategy from a project-size threshold.
-    let partition_semantic_graph = source_sink_prefilter_enabled
-        && (shared_coarse_corridors.source_units.len() > 1 || !coarse_corridors_by_func.is_empty());
+    // The canonical workspace IDG supplied the immutable linkage and scope,
+    // but the closure below uses a much smaller transfer-configured graph.
+    // Retain the shared compiler symbols and unmap all previously cached graph
+    // readers before opening that scoped sidecar so large workspaces never
+    // keep both graph generations resident at once.
+    crate::matcher::release_matcher_fact_caches();
+    ws.release_idg_service_cache();
+    ws.release_resolved_call_graph_cache();
+    ws.release_exact_body_cache();
+    ws.db().release_global_index();
     let CompiledSemanticGraph {
-        execution: semantic_graph,
+        service: semantic_graph,
         cache_persist_started,
     } = compile_taint_semantic_graph(
         SemanticGraphCompilationRequest {
@@ -1297,29 +1008,46 @@ where
             funcs: &semantic_funcs,
             call_graph: chain_call_graph.as_ref(),
             max_precision,
-            partitioned: partition_semantic_graph,
-            source_group_count: source_groups.len(),
-            source_unit_count: shared_coarse_corridors.source_units.len(),
         },
         on_progress,
     );
-    let use_partitioned_scoped_idg = semantic_graph.is_partitioned();
+    drop(semantic_files);
+    drop(transfer_languages);
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "compiling function summaries",
+        total: semantic_funcs.len() as u64,
+    });
+    semantic_graph.prewarm_return_taint_param_indices_for_funcs_with_max_precision(
+        &semantic_funcs,
+        config.max_edge_precision,
+    );
+    for _ in &semantic_funcs {
+        on_progress(AnalysisProgress::PhaseTicked);
+    }
+    on_progress(AnalysisProgress::PhaseFinished);
     let SinkSchedulePlan {
         targets: sink_target_nodes,
-        use_coarse_schedule: use_coarse_source_sink_schedule,
+        node_prefilter_enabled,
     } = plan_sink_schedule(SinkScheduleRequest {
         pack,
         sinks_by_func: &sink_by_func,
         sink_funcs: &sink_func_set,
         semantic_funcs: &semantic_funcs,
-        semantic_graph: &semantic_graph,
+        semantic_graph: semantic_graph.as_ref(),
         prefilter_enabled: source_sink_prefilter_enabled,
-        source_work_count: source_work.len(),
     });
-    let sink_target_nodes_for_schedule = sink_target_nodes
+    drop(sink_func_set);
+    drop(semantic_funcs);
+    let target_relevance = sink_target_nodes
         .as_ref()
-        .filter(|targets| targets.complete && !targets.nodes.is_empty())
-        .map(|targets| targets.nodes.as_slice());
+        .filter(|targets| !targets.nodes.is_empty() || !targets.unresolved_funcs.is_empty())
+        .map(|targets| {
+            semantic_graph.target_relevance_with_max_precision(
+                &targets.nodes,
+                Some(&targets.unresolved_funcs),
+                config.max_edge_precision,
+            )
+        });
     let sink_target_nodes_for_graph = sink_target_nodes
         .as_ref()
         .filter(|targets| !targets.nodes.is_empty())
@@ -1338,23 +1066,19 @@ where
     let debug_taint_phase = bonsai_diagnostics::debug::is_enabled("security-taint");
     let SourceSchedulePlan {
         groups: scheduled_source_groups,
-        partitioned_source_indices,
     } = schedule_source_groups(
         SourceScheduleRequest {
             source_groups: source_groups_sorted,
             callback_corridors: &coarse_corridors_by_func,
-            shared_corridors: &shared_coarse_corridors,
-            use_coarse_schedule: use_coarse_source_sink_schedule,
+            shared_union_corridor,
+            node_prefilter_enabled,
             prefilter_enabled: source_sink_prefilter_enabled,
-            partitioned_idg: use_partitioned_scoped_idg,
-            idg: semantic_graph.shared(),
-            target_nodes_for_schedule: sink_target_nodes_for_schedule,
+            idg: &semantic_graph,
             source_work: &source_work,
-            pack,
-            config: &config,
             global: &global,
-            sink_target_nodes: sink_target_nodes.as_ref(),
-            call_graph: &chain_call_graph,
+            target_relevance: target_relevance.as_ref(),
+            call_graph: chain_call_graph.as_ref(),
+            max_precision: config.max_edge_precision,
             debug_taint_phase,
         },
         on_progress,
@@ -1369,7 +1093,18 @@ where
     }
     on_progress(AnalysisProgress::PhaseFinished);
 
-    let workspace_callable_cache = WorkspaceCallableCache::default();
+    // Everything below is fixed-point execution. Release compiler planning
+    // products that have already been reduced into `scheduled_source_groups`,
+    // the scoped IDG, or the resolved callgraph. The groups retain their
+    // exact corridors through `Arc`; dropping the planning maps only removes
+    // duplicate ownership and never changes the admitted function relation.
+    drop(coarse_corridors_by_func);
+    // The workspace-wide backward relation is only a cheap source-admission
+    // proof. Execution compiles a narrower exact demand relation for each
+    // scheduled compiler corridor, so retaining this broad relation would
+    // waste memory and invite accidental cross-corridor demand.
+    drop(target_relevance);
+
     let source_group_executor = SourceGroupExecutor {
         ws,
         global: &global,
@@ -1377,7 +1112,6 @@ where
         pack,
         config: &config,
         chain_call_graph: &chain_call_graph,
-        use_partitioned_scoped_idg,
         workspace_taint_index,
         taint_caches,
         sink_by_func: &sink_by_func,
@@ -1387,22 +1121,14 @@ where
         receiver_base_map_cell: &receiver_base_map_cell,
         sink_target_nodes: sink_target_nodes.as_ref(),
         sink_target_nodes_for_graph,
-        workspace_callable_cache: &workspace_callable_cache,
         debug_taint_phase,
     };
     let findings = execute_scheduled_taint_groups(
         ScheduledTaintExecutionRequest {
             executor: &source_group_executor,
-            global: global.as_ref(),
-            ws,
-            pack,
-            transfer_languages: &transfer_languages,
-            call_graph: chain_call_graph.as_ref(),
-            semantic_graph: &semantic_graph,
+            semantic_graph: semantic_graph.as_ref(),
             source_groups: scheduled_source_groups,
-            shared_corridors: &shared_coarse_corridors,
-            partitioned_source_indices: &partitioned_source_indices,
-            source_group_count: source_groups.len(),
+            source_group_count,
             prefilter_enabled: source_sink_prefilter_enabled,
         },
         on_progress,
@@ -1422,20 +1148,12 @@ fn sorted_seed_key(seeds: &TokenSet) -> Vec<String> {
 pub(super) struct SourceSinkCorridor {
     pub(super) terminal_sinks: AHashSet<FuncId>,
     pub(super) lineage_funcs: AHashSet<FuncId>,
-    pub(super) target_nodes: Vec<bonsai_idg::WsNodeId>,
 }
 
 #[derive(Default)]
 struct SharedSourceSinkCorridors {
     corridors: Vec<Arc<SourceSinkCorridor>>,
     source_corridors: AHashMap<FuncId, Vec<usize>>,
-    sources_by_corridor: Vec<Vec<FuncId>>,
-    source_units: Vec<SourceUnitPlan>,
-}
-
-struct SourceUnitPlan {
-    sources: Vec<FuncId>,
-    corridor: Arc<SourceSinkCorridor>,
 }
 
 impl SharedSourceSinkCorridors {
@@ -1453,9 +1171,6 @@ impl SourceSinkCorridor {
     fn extend(&mut self, other: SourceSinkCorridor) {
         self.terminal_sinks.extend(other.terminal_sinks);
         self.lineage_funcs.extend(other.lineage_funcs);
-        self.target_nodes.extend(other.target_nodes);
-        self.target_nodes.sort();
-        self.target_nodes.dedup();
     }
 }
 
@@ -1745,37 +1460,26 @@ fn sink_target_nodes_for_funcs(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // Source scheduling needs rule, seed, transfer, and IDG context.
-fn source_index_sink_corridor(
+fn source_index_is_target_relevant(
     index: usize,
     source_work: &[SourceWorkItem<'_>],
-    pack: &Rulepack,
-    config: &InterTaintConfig,
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
-    sink_target_nodes: &[bonsai_idg::WsNodeId],
-    sink_target_nodes_complete: bool,
-    coarse_corridor: Option<&SourceSinkCorridor>,
-) -> Option<SourceSinkCorridor> {
-    let source_item = source_work.get(index)?;
+    target_relevance: &bonsai_idg::IdgTargetRelevance,
+) -> bool {
+    let Some(source_item) = source_work.get(index) else {
+        return false;
+    };
     let src = source_item.source;
     let source_func = source_item.source_func;
     let seeds = &source_item.seeds;
-    let coarse_corridor = coarse_corridor?;
-    if sink_target_nodes.is_empty() {
-        return Some(coarse_corridor.clone());
-    }
-    let output_arg_names = global
-        .decl_of(SymbolId::new(source_func.raw()))
-        .map(|decl| output_arg_names_for_match(pack, src, decl))
-        .unwrap_or_default();
-    let anchor = if rule_match_kind_is_param(pack, &src.rule_id) || src.origin != MatchOrigin::Rulepack {
-        None
-    } else {
-        Some(src.span)
-    };
-    let mut seed_nodes = compose_idg_seed_nodes(
-        IdgSeedRequest::rule_match(source_func, seeds, anchor, &output_arg_names),
+    let seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(
+            source_func,
+            seeds,
+            source_item.anchor,
+            &source_item.output_arg_names,
+        ),
         global,
         idg,
     );
@@ -1786,101 +1490,31 @@ fn source_index_sink_corridor(
             src.rule_id,
             source_func.raw(),
             seeds.iter().collect::<Vec<_>>(),
-            anchor.map(|span| (span.start, span.end)),
-            output_arg_names
+            source_item.anchor.map(|span| (span.start, span.end)),
+            source_item.output_arg_names
         );
-        return None;
+        return false;
     }
-    apply_configured_transfer_fixpoint(
-        &mut seed_nodes,
-        &config.receiver_state_propagations,
-        &[],
-        &config.output_arg_flows,
-        global,
-        idg,
-        config.max_edge_precision,
-        Some(&coarse_corridor.lineage_funcs),
-    );
-    let cut = idg.forward_target_nodes_cut_with_max_precision(
-        &seed_nodes,
-        sink_target_nodes,
-        config.max_edge_precision,
-    );
-    if cut.is_empty() {
-        if bonsai_diagnostics::debug::is_enabled("security-taint") {
-            let describe = |nodes: &[bonsai_idg::WsNodeId]| {
-                nodes
-                    .iter()
-                    .map(|n| {
-                        idg.resolve_point(*n)
-                            .map(|p| format!("{n:?}@func{}:{:?}", p.func.raw(), p.kind))
-                            .unwrap_or_else(|| format!("{n:?}:unresolved"))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let unscoped =
-                idg.forward_target_nodes_cut_with_max_precision(&seed_nodes, sink_target_nodes, None);
-            let closure = idg.forward_closure_with_max_precision(&seed_nodes, config.max_edge_precision);
-            let mut reached_by_func: AHashMap<FuncId, Vec<String>> = AHashMap::new();
-            for node in &closure {
-                if let Some(point) = idg.resolve_point(*node) {
-                    let label = format!("{:?}:{}", point.kind, point.name);
-                    let labels = reached_by_func.entry(point.func).or_default();
-                    if !labels.contains(&label) {
-                        labels.push(label);
-                    }
-                }
-            }
-            let mut reached: Vec<String> = reached_by_func
-                .into_iter()
-                .map(|(func, mut labels)| {
-                    labels.sort();
-                    let name = global
-                        .decl_of(SymbolId::new(func.raw()))
-                        .map(|decl| decl.name.as_str())
-                        .unwrap_or("?");
-                    format!("{name}({}):{}", func.raw(), labels.join("|"))
-                })
-                .collect();
-            reached.sort();
-            bonsai_diagnostics::debug_log!(
-                "security-taint",
-                "empty cut rule={} seed_names={:?} anchor={:?} seeds=[{}] targets=[{}] unscoped_cut={} closure=[{}]",
-                src.rule_id,
-                seeds.iter().collect::<Vec<_>>(),
-                anchor,
-                describe(&seed_nodes),
-                describe(sink_target_nodes),
-                unscoped.len(),
-                reached.join(", ")
-            );
-        }
-        return (!sink_target_nodes_complete).then(|| coarse_corridor.clone());
+    if !target_relevance.admits_any(&seed_nodes) {
+        let seed_points = seed_nodes
+            .iter()
+            .filter_map(|node| {
+                idg.resolve_point(*node)
+                    .map(|point| format!("{:?}:{}", point.kind, point.name))
+            })
+            .collect::<Vec<_>>();
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "source rule={} func={} skipped=no_target_relevant_seed names={:?} output_args={:?} seed_points={:?}",
+            src.rule_id,
+            source_func.raw(),
+            seeds,
+            source_item.output_arg_names,
+            seed_points
+        );
+        return false;
     }
-    let mut corridor = SourceSinkCorridor::default();
-    for node in &cut {
-        let Some(point) = idg.resolve_point(*node) else {
-            continue;
-        };
-        if sink_target_nodes.binary_search(node).is_ok() {
-            corridor.target_nodes.push(*node);
-        }
-        corridor.lineage_funcs.insert(point.func);
-        if coarse_corridor.terminal_sinks.contains(&point.func) {
-            corridor.terminal_sinks.insert(point.func);
-        }
-    }
-    if corridor.terminal_sinks.is_empty() {
-        return None;
-    }
-    corridor.lineage_funcs.insert(source_func);
-    corridor
-        .lineage_funcs
-        .extend(corridor.terminal_sinks.iter().copied());
-    corridor.target_nodes.sort();
-    corridor.target_nodes.dedup();
-    Some(corridor)
+    true
 }
 
 fn callgraph_source_sink_corridor(
@@ -1893,17 +1527,16 @@ fn callgraph_source_sink_corridor(
     callgraph_sources_sink_corridor(&[source_func], sink_func_set, global, call_graph, max_precision)
 }
 
-/// Plan exact source compilation units over one union corridor.
+/// Bind every reachable source to its exact callgraph corridor while sharing
+/// identical slices.
 ///
-/// Sources whose adapters expose complete AST field places share one semantic
-/// compilation group: the IDG can apply exact sparse demand to that group
-/// without a size threshold. Remaining sources are streamed per parsed file
-/// under complete forwarding. Each unit recomputes the complete
-/// source→all-sinks corridor, so paths remain cross-file and interprocedural.
-fn partition_source_sink_corridor(
-    mut corridor: SourceSinkCorridor,
+/// The union corridor still determines the one persisted compiler IDG. Query
+/// closures use the per-source slices below, so an unrelated source branch
+/// cannot multiply contextual field facts. This is semantic graph slicing,
+/// not a work cap: every admitted function still runs to fixed point.
+fn shared_source_sink_corridor(
+    corridor: &SourceSinkCorridor,
     source_funcs: &[FuncId],
-    symbolic_field_source_funcs: &AHashSet<FuncId>,
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
     max_precision: Option<Precision>,
@@ -1911,82 +1544,70 @@ fn partition_source_sink_corridor(
     if corridor.lineage_funcs.is_empty() {
         return SharedSourceSinkCorridors::default();
     }
-    extend_corridor_with_summary_dependency_support(&mut corridor, global, call_graph, max_precision);
-    let mut sparse_sources = Vec::new();
-    let mut sources_by_file: BTreeMap<FileId, Vec<FuncId>> = BTreeMap::new();
-    for source in source_funcs.iter().copied() {
-        if !corridor.lineage_funcs.contains(&source) {
-            continue;
-        }
-        if symbolic_field_source_funcs.contains(&source) {
-            sparse_sources.push(source);
-            continue;
-        }
-        let Some(file) = global.declaring_file(SymbolId::new(source.raw())) else {
-            continue;
-        };
-        sources_by_file.entry(file).or_default().push(source);
+    let mut corridors = Vec::new();
+    let mut source_corridors: AHashMap<FuncId, Vec<usize>> = AHashMap::default();
+    let mut interned: AHashMap<(Vec<FuncId>, Vec<FuncId>), usize> = AHashMap::default();
+    visit_source_sink_corridors(
+        corridor,
+        source_funcs,
+        global,
+        call_graph,
+        max_precision,
+        |source, source_corridor| {
+            let mut lineage_key: Vec<FuncId> = source_corridor.lineage_funcs.iter().copied().collect();
+            lineage_key.sort_by_key(|func| func.raw());
+            let mut sink_key: Vec<FuncId> = source_corridor.terminal_sinks.iter().copied().collect();
+            sink_key.sort_by_key(|func| func.raw());
+            let key = (lineage_key, sink_key);
+            let corridor_index = if let Some(index) = interned.get(&key).copied() {
+                index
+            } else {
+                let index = corridors.len();
+                corridors.push(Arc::new(source_corridor));
+                interned.insert(key, index);
+                index
+            };
+            source_corridors.insert(source, vec![corridor_index]);
+        },
+    );
+    SharedSourceSinkCorridors {
+        corridors,
+        source_corridors,
     }
-    let mut source_batches: Vec<Vec<FuncId>> = sources_by_file.into_values().collect();
-    if !sparse_sources.is_empty() {
-        source_batches.push(sparse_sources);
-    }
-    for sources in &mut source_batches {
-        sources.sort_by_key(|func| func.raw());
-        sources.dedup();
-    }
-    let sink_func_set = corridor.terminal_sinks.clone();
-    let mut units_by_shape: BTreeMap<(Vec<FuncId>, Vec<FuncId>), Vec<FuncId>> = BTreeMap::new();
-    for sources in source_batches {
-        let Some(unit_corridor) =
-            callgraph_sources_sink_corridor(&sources, &sink_func_set, global, call_graph, max_precision)
-        else {
+}
+
+fn visit_source_sink_corridors(
+    corridor: &SourceSinkCorridor,
+    source_funcs: &[FuncId],
+    global: &GlobalIndex,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    max_precision: Option<Precision>,
+    mut visit: impl FnMut(FuncId, SourceSinkCorridor),
+) {
+    let mut sources: Vec<FuncId> = source_funcs
+        .iter()
+        .copied()
+        .filter(|source| corridor.lineage_funcs.contains(source))
+        .collect();
+    sources.sort_by_key(|func| func.raw());
+    sources.dedup();
+    for source in sources {
+        let Some(mut source_corridor) = callgraph_source_sink_corridor(
+            source,
+            &corridor.terminal_sinks,
+            global,
+            call_graph,
+            max_precision,
+        ) else {
             continue;
-        };
-        let mut lineage: Vec<FuncId> = unit_corridor.lineage_funcs.iter().copied().collect();
-        lineage.sort_by_key(|func| func.raw());
-        let mut sinks: Vec<FuncId> = unit_corridor.terminal_sinks.iter().copied().collect();
-        sinks.sort_by_key(|func| func.raw());
-        units_by_shape
-            .entry((lineage, sinks))
-            .or_default()
-            .extend(sources);
-    }
-    let mut source_units = Vec::with_capacity(units_by_shape.len());
-    for ((lineage, sinks), mut sources) in units_by_shape {
-        sources.sort_by_key(|func| func.raw());
-        sources.dedup();
-        let mut unit_corridor = SourceSinkCorridor {
-            terminal_sinks: sinks.into_iter().collect(),
-            lineage_funcs: lineage.into_iter().collect(),
-            target_nodes: Vec::new(),
         };
         extend_corridor_with_summary_dependency_support(
-            &mut unit_corridor,
+            &mut source_corridor,
             global,
             call_graph,
             max_precision,
         );
-        source_units.push(SourceUnitPlan {
-            sources,
-            corridor: Arc::new(unit_corridor),
-        });
-    }
-    let mut all_sources: Vec<FuncId> = source_units
-        .iter()
-        .flat_map(|unit| unit.sources.iter().copied())
-        .collect();
-    all_sources.sort_by_key(|func| func.raw());
-    all_sources.dedup();
-    let mut source_corridors: AHashMap<FuncId, Vec<usize>> = AHashMap::default();
-    for source in &all_sources {
-        source_corridors.insert(*source, vec![0]);
-    }
-    SharedSourceSinkCorridors {
-        corridors: vec![Arc::new(corridor)],
-        source_corridors,
-        sources_by_corridor: vec![all_sources],
-        source_units,
+        visit(source, source_corridor);
     }
 }
 
@@ -2073,7 +1694,6 @@ fn callgraph_sources_sink_corridor(
         return Some(SourceSinkCorridor {
             terminal_sinks: return_sinks,
             lineage_funcs,
-            target_nodes: Vec::new(),
         });
     }
     terminal_sinks.extend(return_sinks);
@@ -2107,7 +1727,6 @@ fn callgraph_sources_sink_corridor(
     Some(SourceSinkCorridor {
         terminal_sinks,
         lineage_funcs,
-        target_nodes: Vec::new(),
     })
 }
 
@@ -2153,11 +1772,13 @@ pub(super) fn source_analysis_worker_count() -> usize {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
         .max(1);
-    std::env::var("BONSAI_SOURCE_ANALYSIS_JOBS")
+    let requested = std::env::var("BONSAI_SOURCE_ANALYSIS_JOBS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .map(|requested| requested.max(1))
         .unwrap_or(available)
+        .min(available);
+    bonsai_common::compiler_worker_count(requested)
 }
 
 fn security_taint_worker_count() -> usize {
@@ -2169,12 +1790,19 @@ fn security_taint_worker_count() -> usize {
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .map(|requested| requested.max(1))
-        .unwrap_or(available);
-    std::env::var("BONSAI_TAINT_ANALYSIS_JOBS")
+        .unwrap_or(available)
+        .min(available);
+    let requested = std::env::var("BONSAI_TAINT_ANALYSIS_JOBS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .map(|requested| requested.max(1))
         .unwrap_or(default)
+        .min(available);
+    // Each worker owns an exact sparse-IDG closure workset while sharing the
+    // resident compiler linkage and IDG. Reuse the common compiler scheduler
+    // so constrained machines run identical closures serially instead of
+    // multiplying their peak memory by CPU count.
+    bonsai_common::compiler_worker_count(requested)
 }
 
 /// Build the cache key for an exact source-seeded graph. When an
@@ -2369,4 +1997,113 @@ fn source_is_sink_call_argument_in_events(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod corridor_tests {
+    use super::*;
+    use bonsai_callgraph::{CallEdge, CallGraph, EdgeKind, EdgeProvenance, ResolvedCallGraph};
+
+    fn resolved_graph(edges: &[(u32, u32)]) -> ResolvedCallGraph {
+        let mut graph = CallGraph::new();
+        for (index, &(from, to)) in edges.iter().enumerate() {
+            graph.add_edge(CallEdge {
+                from: FuncId::new(from),
+                to: FuncId::new(to),
+                span: Span::new(FileId::new(0), index as u64, index as u64 + 1),
+                kind: EdgeKind::Direct,
+                precision: Precision::Exact,
+                provenance: EdgeProvenance::direct_symbol(),
+            });
+        }
+        ResolvedCallGraph::from_call_graph(graph)
+    }
+
+    #[test]
+    fn shared_graph_retains_exact_per_source_corridors() {
+        let first_source = FuncId::new(1);
+        let first_middle = FuncId::new(2);
+        let first_sink = FuncId::new(3);
+        let second_source = FuncId::new(4);
+        let second_middle = FuncId::new(5);
+        let second_sink = FuncId::new(6);
+        let graph = resolved_graph(&[(1, 2), (2, 3), (4, 5), (5, 6)]);
+        let global = GlobalIndex::new();
+        let sinks: AHashSet<FuncId> = [first_sink, second_sink].into_iter().collect();
+        let union = callgraph_sources_sink_corridor(
+            &[first_source, second_source],
+            &sinks,
+            &global,
+            &graph,
+            Some(Precision::Narrowed),
+        )
+        .expect("union corridor");
+        let shared = shared_source_sink_corridor(
+            &union,
+            &[first_source, second_source],
+            &global,
+            &graph,
+            Some(Precision::Narrowed),
+        );
+
+        let first = shared.corridors_for_source(first_source);
+        let second = shared.corridors_for_source(second_source);
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            first[0].lineage_funcs,
+            [first_source, first_middle, first_sink].into_iter().collect()
+        );
+        assert_eq!(
+            second[0].lineage_funcs,
+            [second_source, second_middle, second_sink].into_iter().collect()
+        );
+        assert!(
+            !first[0].lineage_funcs.contains(&second_middle)
+                && !second[0].lineage_funcs.contains(&first_middle),
+            "one persisted graph must not widen an individual source query"
+        );
+    }
+
+    #[test]
+    fn deferred_corridor_slicing_materializes_only_admitted_sources() {
+        let admitted_source = FuncId::new(1);
+        let admitted_middle = FuncId::new(2);
+        let admitted_sink = FuncId::new(3);
+        let rejected_source = FuncId::new(4);
+        let rejected_middle = FuncId::new(5);
+        let rejected_sink = FuncId::new(6);
+        let graph = resolved_graph(&[(1, 2), (2, 3), (4, 5), (5, 6)]);
+        let global = GlobalIndex::new();
+        let sinks: AHashSet<FuncId> = [admitted_sink, rejected_sink].into_iter().collect();
+        let union = callgraph_sources_sink_corridor(
+            &[admitted_source, rejected_source],
+            &sinks,
+            &global,
+            &graph,
+            Some(Precision::Narrowed),
+        )
+        .expect("union corridor");
+
+        let shared = shared_source_sink_corridor(
+            &union,
+            &[admitted_source],
+            &global,
+            &graph,
+            Some(Precision::Narrowed),
+        );
+
+        assert_eq!(shared.corridors.len(), 1);
+        assert!(shared.corridors_for_source(rejected_source).is_empty());
+        assert_eq!(
+            shared.corridors_for_source(admitted_source)[0].lineage_funcs,
+            [admitted_source, admitted_middle, admitted_sink]
+                .into_iter()
+                .collect()
+        );
+        assert!(
+            !shared.corridors[0].lineage_funcs.contains(&rejected_middle),
+            "a target-rejected source must not retain its callgraph slice"
+        );
+    }
 }

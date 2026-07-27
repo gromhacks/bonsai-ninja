@@ -30,6 +30,12 @@ interpretation while a changed file alone falls back to Tree-sitter lowering.
 The completed generation is replaced atomically; queries never observe half
 old and half new compiler state.
 
+Workspace-wide resolution retains compact declaration, type, module,
+inheritance, import, and stable-symbol headers. Security, inspect, export, and
+IDG construction stream exact bodies from the compiler-object generation and
+remap them to those symbols. This separates body lifetime from graph lifetime
+without introducing another parser or lowering path.
+
 ## Sources
 
 A source is a rule-matched fact that introduces untrusted data: request parameters, headers, CLI input, queue messages, environment values, calldata, database rows, or other boundary values. Source rules live under `security-patterns/langs/<lang>/sources/`.

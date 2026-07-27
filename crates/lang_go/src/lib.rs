@@ -6,8 +6,9 @@ use bonsai_lang_api::{
         call_arg_from_node, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
         parse_with, span_of,
     },
-    AdapterContext, AdapterError, DeclIndex, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, ConditionEquality, ConditionExpressionFact, ConditionOperandFact,
+    DeclIndex, ExpressionField, ExpressionFlow, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
 };
 use tree_sitter::Node;
 use tree_sitter::{Language, Tree};
@@ -151,6 +152,10 @@ impl LanguageAdapter for GoAdapter {
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parsed {
             let src = snapshot.text.as_bytes();
+            populate_go_condition_expressions(&mut idx.branch_conditions, &tree, file, src);
+            populate_go_call_argument_values(&mut idx, &tree, file, src);
+            populate_go_assignment_values(&mut idx, &tree, file, src);
+            populate_go_exact_callable_assignments(&mut idx, &tree, file, src);
             // Phase-6 return-type extraction: `func f() T {}` populates
             // `Decl.return_type` for `apply_assign_call_result_types`.
             // Go uses `result` field for return type in the grammar.
@@ -229,6 +234,356 @@ impl LanguageAdapter for GoAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+/// Lower Go composite literals into the shared aggregate-value IR.
+///
+/// Tree-sitter-go represents `bson.M{"field": bson.M{"$eq": value}}` as
+/// `composite_literal -> literal_value -> keyed_element`, including another
+/// `composite_literal` below the keyed value. The language-neutral extractor
+/// deliberately does not assign semantics to Go's `literal_value` wrapper, so
+/// this adapter pass replaces only those argument facts whose exact CST node
+/// is a Go composite literal.
+fn populate_go_call_argument_values(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    let mut composite_literals = std::collections::HashMap::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "composite_literal" {
+            let span = span_of(file, &node);
+            composite_literals.insert((span.start, span.end), node);
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    for fact in &mut index.call_argument_values {
+        let Some(node) = composite_literals.get(&(fact.argument_span.start, fact.argument_span.end)) else {
+            continue;
+        };
+        fact.value_flow = lower_go_value_expression(*node, file, src);
+    }
+}
+
+fn populate_go_assignment_values(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    let composite_literals: std::collections::HashMap<_, _> = collect_kinds(tree, &["composite_literal"])
+        .into_iter()
+        .map(|node| {
+            let span = span_of(file, &node);
+            ((span.start, span.end), node)
+        })
+        .collect();
+    for fact in &mut index.assignment_values {
+        let Some(node) = composite_literals.get(&(fact.value_span.start, fact.value_span.end)) else {
+            continue;
+        };
+        fact.value_flow = lower_go_value_expression(*node, file, src);
+    }
+}
+
+/// Lower a keyed Go composite-literal field whose value is an exact
+/// single-return function literal into an assignment fact for `base.field`.
+/// Multi-statement, branching, or fallthrough callbacks deliberately emit no
+/// exact return summary.
+fn populate_go_exact_callable_assignments(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    let mut additions = Vec::new();
+    for keyed in collect_kinds(tree, &["keyed_element"]) {
+        let Some(key) = keyed.child_by_field_name("key").or_else(|| keyed.named_child(0)) else {
+            continue;
+        };
+        let Some(field) = go_static_aggregate_key(key, src) else {
+            continue;
+        };
+        let Some(mut value) = keyed
+            .child_by_field_name("value")
+            .or_else(|| keyed.named_child(1))
+        else {
+            continue;
+        };
+        while value.kind() == "literal_element" && value.named_child_count() == 1 {
+            value = value.named_child(0).expect("single named child");
+        }
+        if value.kind() != "func_literal" {
+            continue;
+        }
+        let Some(return_value) = go_exact_single_return_value(value) else {
+            continue;
+        };
+        let callable_span = span_of(file, &value);
+        let Some(container_assignment) = index
+            .assignment_values
+            .iter()
+            .filter(|fact| {
+                fact.assignment_span.start <= callable_span.start
+                    && callable_span.end <= fact.assignment_span.end
+            })
+            .min_by_key(|fact| fact.assignment_span.len())
+        else {
+            continue;
+        };
+        let Some(base) = container_assignment.target.as_deref() else {
+            continue;
+        };
+        additions.push(bonsai_lang_api::AssignmentValueFact {
+            assignment_span: span_of(file, &keyed),
+            target: Some(format!("{base}.{field}")),
+            target_span: Some(span_of(file, &key)),
+            value_span: callable_span,
+            call_sites: Vec::new(),
+            value_flow: bonsai_lang_api::kit::expression_flow_from_node(value, file, src),
+            exact_callable_return: Some(bonsai_lang_api::kit::expression_flow_from_node(
+                return_value,
+                file,
+                src,
+            )),
+            exact_static_call_args: None,
+            direct_call_name: None,
+            direct_call_receiver: None,
+        });
+    }
+    index.assignment_values.extend(additions);
+    index
+        .assignment_values
+        .sort_by_key(|fact| (fact.assignment_span.start, fact.assignment_span.end));
+    index.assignment_values.dedup();
+}
+
+fn go_exact_single_return_value(callable: Node<'_>) -> Option<Node<'_>> {
+    let body = callable.child_by_field_name("body")?;
+    let statements = if body.named_child_count() == 1
+        && body
+            .named_child(0)
+            .is_some_and(|child| child.kind() == "statement_list")
+    {
+        body.named_child(0)?
+    } else {
+        body
+    };
+    if statements.named_child_count() != 1 {
+        return None;
+    }
+    let return_statement = statements.named_child(0)?;
+    if return_statement.kind() != "return_statement" {
+        return None;
+    }
+    let values = return_statement.named_child(0)?;
+    if values.kind() == "expression_list" {
+        (values.named_child_count() == 1)
+            .then(|| values.named_child(0))
+            .flatten()
+    } else {
+        Some(values)
+    }
+}
+
+fn lower_go_value_expression(mut node: Node<'_>, file: FileId, src: &[u8]) -> ExpressionFlow {
+    while matches!(node.kind(), "literal_element" | "expression") && node.named_child_count() == 1 {
+        node = node.named_child(0).expect("single named child");
+    }
+    if node.kind() == "composite_literal" {
+        let body = node
+            .child_by_field_name("body")
+            .or_else(|| first_named_child_of_kind(&node, "literal_value"));
+        return body.map_or_else(ExpressionFlow::default, |body| {
+            lower_go_literal_value(body, file, src)
+        });
+    }
+    bonsai_lang_api::kit::expression_flow_from_node(node, file, src)
+}
+
+fn lower_go_literal_value(node: Node<'_>, file: FileId, src: &[u8]) -> ExpressionFlow {
+    let mut fields = Vec::new();
+    let mut items = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "keyed_element" {
+            let key = child.child_by_field_name("key").or_else(|| child.named_child(0));
+            let value = child
+                .child_by_field_name("value")
+                .or_else(|| child.named_child(1));
+            let (Some(key), Some(value)) = (key, value) else {
+                continue;
+            };
+            let Some(name) = go_static_aggregate_key(key, src) else {
+                continue;
+            };
+            fields.push(ExpressionField {
+                name,
+                value: lower_go_value_expression(value, file, src),
+            });
+        } else {
+            items.push(lower_go_value_expression(child, file, src));
+        }
+    }
+    ExpressionFlow {
+        aggregate_fields: fields,
+        tuple_items: items,
+        ..ExpressionFlow::default()
+    }
+}
+
+fn go_static_aggregate_key(mut node: Node<'_>, src: &[u8]) -> Option<String> {
+    while node.kind() == "literal_element" && node.named_child_count() == 1 {
+        node = node.named_child(0)?;
+    }
+    go_static_string_literal(node, src).or_else(|| {
+        matches!(node.kind(), "identifier" | "field_identifier" | "type_identifier")
+            .then(|| node_text(&node, src).trim().to_string())
+            .filter(|name| !name.is_empty())
+    })
+}
+
+/// Attach Go's boolean-expression grammar to the language-neutral condition
+/// IR. Go owns these operator spellings; shared analysis sees only semantic
+/// `Any`/`All`/`Not`/`Equality` nodes and exact expression spans.
+fn populate_go_condition_expressions(
+    facts: &mut [bonsai_lang_api::BranchConditionFact],
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) {
+    for branch in collect_kinds(tree, &["if_statement"]) {
+        let branch_span = span_of(file, &branch);
+        let Some(condition) = branch.child_by_field_name("condition") else {
+            continue;
+        };
+        let Some(fact) = facts.iter_mut().find(|fact| fact.branch_span == branch_span) else {
+            continue;
+        };
+        fact.expression = Some(lower_go_condition_expression(condition, file, src));
+    }
+}
+
+fn lower_go_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionExpressionFact {
+    if node.kind() == "parenthesized_expression" {
+        if let Some(inner) = node.named_child(0) {
+            return lower_go_condition_expression(inner, file, src);
+        }
+    }
+
+    let span = span_of(file, &node);
+    if node.kind() == "unary_expression" {
+        if let Some(operand) = node
+            .child_by_field_name("operand")
+            .or_else(|| node.named_child(0))
+        {
+            let prefix = src
+                .get(node.start_byte()..operand.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            if prefix == Some("!") {
+                return ConditionExpressionFact::Not {
+                    span,
+                    operand: Box::new(lower_go_condition_expression(operand, file, src)),
+                };
+            }
+        }
+    }
+
+    if node.kind() == "binary_expression" {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            let operator = src
+                .get(left.end_byte()..right.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            match operator {
+                Some("||") => {
+                    return merge_go_condition_junction(
+                        span,
+                        lower_go_condition_expression(left, file, src),
+                        lower_go_condition_expression(right, file, src),
+                        false,
+                    );
+                }
+                Some("&&") => {
+                    return merge_go_condition_junction(
+                        span,
+                        lower_go_condition_expression(left, file, src),
+                        lower_go_condition_expression(right, file, src),
+                        true,
+                    );
+                }
+                Some("==" | "!=") => {
+                    let relation = if operator == Some("==") {
+                        ConditionEquality::Equal
+                    } else {
+                        ConditionEquality::NotEqual
+                    };
+                    return ConditionExpressionFact::Equality {
+                        span,
+                        relation,
+                        left: go_condition_operand(left, file, src),
+                        right: go_condition_operand(right, file, src),
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if node.kind() == "index_expression" {
+        if let (Some(collection), Some(subject)) = (
+            node.child_by_field_name("operand"),
+            node.child_by_field_name("index"),
+        ) {
+            return ConditionExpressionFact::Membership {
+                span,
+                subject: go_condition_operand(subject, file, src),
+                collection: go_condition_operand(collection, file, src),
+                then_contains: true,
+            };
+        }
+    }
+
+    ConditionExpressionFact::Atom { span }
+}
+
+fn merge_go_condition_junction(
+    span: Span,
+    left: ConditionExpressionFact,
+    right: ConditionExpressionFact,
+    all: bool,
+) -> ConditionExpressionFact {
+    let mut operands = Vec::new();
+    let mut push = |operand: ConditionExpressionFact| match (all, operand) {
+        (true, ConditionExpressionFact::All { operands: nested, .. })
+        | (false, ConditionExpressionFact::Any { operands: nested, .. }) => operands.extend(nested),
+        (_, operand) => operands.push(operand),
+    };
+    push(left);
+    push(right);
+    if all {
+        ConditionExpressionFact::All { span, operands }
+    } else {
+        ConditionExpressionFact::Any { span, operands }
+    }
+}
+
+fn go_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
+    ConditionOperandFact {
+        span: span_of(file, &node),
+        value_flow: bonsai_lang_api::kit::expression_flow_from_node(node, file, src),
+        static_string: go_static_string_literal(node, src),
+    }
+}
+
+fn go_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let text = node_text(&node, src);
+    match node.kind() {
+        "interpreted_string_literal" => {
+            let inner = text.strip_prefix('"')?.strip_suffix('"')?;
+            // Exact guard comparison is sound only when no escape decoding is
+            // required. The adapter can add a complete Go decoder later
+            // without changing the shared IR contract.
+            (!inner.contains('\\')).then(|| inner.to_string())
+        }
+        "raw_string_literal" => text
+            .strip_prefix('`')
+            .and_then(|inner| inner.strip_suffix('`'))
+            .map(str::to_string),
+        _ => None,
     }
 }
 

@@ -796,6 +796,24 @@ fn compiler_engines_do_not_branch_on_concrete_languages() {
             "IDG core must not carry the concrete module suffix {suffix}"
         );
     }
+    let idg_builder = read(&root.join("crates/idg/src/builder.rs"));
+    let call_stitch = live_code(function_body(&idg_builder, "stitch_call_site"));
+    assert!(
+        call_stitch.contains(".position(|param| param == recv)")
+            && call_stitch.contains(".position(|param| param == &site.callee_name)"),
+        "IDG callback stitching must compare adapter-emitted binding identities exactly"
+    );
+    for syntax_normalizer in [
+        "trim_start_matches",
+        "trim_end_matches",
+        "strip_prefix",
+        "strip_suffix",
+    ] {
+        assert!(
+            !call_stitch.contains(syntax_normalizer),
+            "IDG callback stitching must not reinterpret adapter syntax with `{syntax_normalizer}`"
+        );
+    }
 
     let workspace = read(&root.join("crates/workspace/src/lib.rs"));
     let taint_idg_build = read(&root.join("crates/taint/src/idg_build.rs"));
@@ -2860,12 +2878,15 @@ fn production_taint_command_paths_use_filtered_semantic_idg_apis() {
 fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
     let root = repo_root();
     let inspect = read(&root.join("crates/cli/src/commands/inspect.rs"));
+    let inspect_engine = read(&root.join("crates/inspect/src/lib.rs"));
+    let workspace = read(&root.join("crates/workspace/src/lib.rs"));
     let body = function_body(&inspect, "inspect_taint_flows");
     assert!(
         body.contains("SyntaxFlowQuery::new")
+            && body.contains("ws.syntax_flow_session")
             && body.contains("ws.syntax_flow_graph")
             && body.contains("semantic_flow_stats.record_plan(&graph.plan)"),
-        "inspect_taint_flows must ask the workspace syntax-flow facade for taint graphs and retain planner metadata"
+        "inspect_taint_flows must ask the workspace syntax-flow facade for short-lived exact semantic sessions and retain planner metadata"
     );
     assert!(
         inspect.contains("SyntaxFlowPlan")
@@ -2873,6 +2894,33 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
             && inspect.contains("semantic_flow_cache_hits")
             && inspect.contains("semantic_flow_fallback_reasons"),
         "inspect must surface syntax-flow planner backend/cache/fallback metadata"
+    );
+    let command = function_body(&inspect, "cmd_inspect");
+    let occurrence_scan = function_body(&inspect, "scan_occurrence_facts");
+    let decl_scan = function_body(&inspect, "collect_decl_hits");
+    assert!(
+        command.contains("drop(edge_resolver)")
+            && command.contains("drop(chain_cache)")
+            && command.contains("ws.db().release_global_index()")
+            && command.contains("ws.release_resolved_call_graph_cache()")
+            && command.contains("ws.release_compiler_linkage_cache()")
+            && command.contains("ws.release_exact_body_cache()")
+            && command.contains("ws.release_decl_name_index_cache()")
+            && function_body(&inspect_engine, "func_display_name")
+                .contains("compiler_header_index()"),
+        "inspect must end its whole-body navigation phase before opening a scoped IDG and render semantic names from shared compiler headers"
+    );
+    assert!(
+        command.contains("let global = ws.compiler_header_index()")
+            && decl_scan.contains("if options.graph_flows_enabled")
+            && decl_scan.contains("ws.compiler_header_index()")
+            && occurrence_scan.contains("let resident_global = (!syntax_fast_path)")
+            && occurrence_scan.contains("ws.exact_decl_index_shared(file)")
+            && function_body(&workspace, "exact_decl_index_shared")
+                .contains("compiler_header_index()")
+            && !function_body(&workspace, "exact_decl_index_shared")
+                .contains("compiler_linkage_index()"),
+        "large syntax inspect must retain compiler headers and stream only visited exact file bodies before its semantic phase"
     );
     for forbidden in [
         "dataflow().graph_for",
@@ -2886,6 +2934,54 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
         "inspect_taint_flows must not bypass the syntax-flow facade or pre-check planner internals with `{forbidden}`"
     );
     }
+
+    let flow_query = read(&root.join("crates/workspace/src/flow_query.rs"));
+    let inspect_query = read(&root.join("crates/inspect/src/query.rs"));
+    let session = function_body(&flow_query, "syntax_flow_session");
+    assert!(
+        session.contains("target_emission_resolved_call_graph")
+            && session.contains("source_reachable_resolved_call_graph")
+            && session.contains("source_funcs.iter().all(|func| target_funcs.contains(func))")
+            && session.contains("corridor.linkage_index.clone()")
+            && session.contains(
+                "build_for_persistence_streaming_with_file_semantics_and_options_for_files_and_funcs",
+            )
+            && session.contains("tempfile::Builder::new()")
+            && session.contains("IdgQueryService::load_from_disk")
+            && !session.contains(".take(")
+            && !session.contains(".truncate("),
+        "cold targeted inspect must stream one exact source-to-target IDG corridor through an unpublished paged session without semantic work caps"
+    );
+    assert!(
+        function_body(&inspect_query, "matching_decls").contains("compiler_header_index()")
+            && !function_body(&inspect_query, "matching_decls").contains("compiler_linkage_index()"),
+        "syntax-only inspect candidate lookup must retain declaration/type headers, not workspace-wide call linkage"
+    );
+    let target_emissions = function_body(&workspace, "target_emission_resolved_call_graph");
+    let scoped_reach = function_body(&workspace, "source_reachable_resolved_call_graph_with_scope");
+    assert!(
+        target_emissions.contains("source_reachable_resolved_call_graph_with_scope")
+            && scoped_reach.contains("target_set.contains(&edge.to)")
+            && scoped_reach
+                .contains("target_emission_requires_callee(global.as_ref(), &scoped_linkage, edge)")
+            && function_body(&workspace, "target_emission_requires_callee")
+                .contains("consumed_call_results")
+            && function_body(&workspace, "target_emission_requires_callee")
+                .contains("has_writeback_arg")
+            && function_body(&workspace, "target_emission_requires_callee")
+                .contains("receiver_field_writes")
+            && !scoped_reach.contains("contains(\"")
+            && !scoped_reach.contains("ends_with("),
+        "inspect target slicing must be driven by compiler symbols and adapter-emitted output capability, never API names or source spelling"
+    );
+    assert!(
+        body.contains("ws.syntax_flow_session(&entries, targets)")
+            && body
+                .find("ws.syntax_flow_session(&entries, targets)")
+                .zip(body.find("for entry in entries"))
+                .is_some_and(|(session, entries)| session < entries),
+        "cold inspect must build one paged exact corridor and share it across every requested entry closure"
+    );
 }
 
 #[test]
@@ -2995,22 +3091,26 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
     let csr = read(&root.join("crates/idg/src/csr.rs"));
 
     let load = function_body(&compiler_object, "compressed_payload");
+    let metadata_for = function_body(&compiler_object, "metadata_for");
     let prepare = function_body(&compiler_object, "prepare_compiler_object");
     let save = function_body(&compiler_object, "save_compiler_object_sidecar");
+    let write_generation = function_body(&compiler_object, "write_compiler_object_generation");
     assert!(
         compiler_object.contains("pub struct CompiledFileObject")
             && compiler_object.contains("Sha256")
             && function_body(&compiler_object, "source_descriptor").contains("strip_prefix")
-            && load.contains("metadata.path != descriptor.path")
-            && load.contains("metadata.language != descriptor.language")
-            && load.contains("metadata.source_digest != descriptor.source_digest")
+            && load.contains("self.metadata_for(descriptor)")
+            && metadata_for.contains("metadata.path == descriptor.path")
+            && metadata_for.contains("metadata.language == descriptor.language")
+            && metadata_for.contains("metadata.source_digest == descriptor.source_digest")
             && load.contains("digest_bytes(&hit.payload)")
             && prepare.matches("ensure_source_version").count() == 3
             && prepare.contains("Ok(Some(prepared)) => {")
-            && save.contains("PreparedFactStorePayload")
-            && save.contains("compiler_weighted_batches")
-            && !save.contains(".take(")
-            && !save.contains(".truncate("),
+            && save.contains("write_compiler_object_generation")
+            && write_generation.contains("PreparedFactStorePayload")
+            && write_generation.contains("compiler_weighted_batches")
+            && !write_generation.contains(".take(")
+            && !write_generation.contains(".truncate("),
         "compiler objects must be atomic, strongly content-identified, relocatable by relative path, and complete"
     );
     assert!(
@@ -3020,6 +3120,16 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
             && function_body(&sdk, "cache_manifest_coverage")
                 .contains("stats.compiler_object_sidecar_exists"),
         "broad syntax consumers and semantic readiness must share the canonical compiler-object generation"
+    );
+    let bulk_objects = function_body(&compiler_object, "visit_compiler_file_objects_uncached");
+    assert!(
+        bulk_objects.contains("compiler_weighted_batches")
+            && bulk_objects.contains("compiler_file_object_uncached")
+            && bulk_objects.contains("visit(file, object)")
+            && !bulk_objects.contains("ThreadPoolBuilder")
+            && !bulk_objects.contains(".take(")
+            && !bulk_objects.contains(".truncate("),
+        "bulk compiler-object visits must cover every requested file in order, release each batch, and reuse shared scheduling while memory changes only parallel width"
     );
 
     let build_reach = function_body(&service, "build_reach");
@@ -3048,6 +3158,8 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
     let factstore_writer = read(&root.join("crates/factstore/src/writer.rs"));
     let symbolic = read(&root.join("crates/idg/src/symbolic.rs"));
     let index = read(&root.join("crates/index/src/lib.rs"));
+    let security_matcher = read(&root.join("crates/security/src/matcher/mod.rs"));
+    let security_execution = read(&root.join("crates/security/src/analysis/execution.rs"));
     let taint_idg = read(&root.join("crates/taint/src/idg_build.rs"));
     let workspace = read(&root.join("crates/workspace/src/lib.rs"));
     for (phase, body, scheduler) in [
@@ -3063,7 +3175,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         ),
         (
             "compiler objects",
-            function_body(&compiler_object, "save_compiler_object_sidecar"),
+            function_body(&compiler_object, "write_compiler_object_generation"),
             "compiler_weighted_batches",
         ),
         (
@@ -3075,6 +3187,14 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             "IDG transfer",
             function_body(&idg, "idg_transfer_batches"),
             "compiler_weighted_batches",
+        ),
+        (
+            "security matcher",
+            function_body(
+                &security_matcher,
+                "match_rules_against_facts_with_progress_and_mode",
+            ),
+            "syntax_weighted_batches",
         ),
     ] {
         assert!(
@@ -3093,6 +3213,109 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && function_body(&idg, "idg_transfer_batches").contains("compiler_weighted_batches"),
         "IDG transfer concurrency must use exact compiler-unit size where the syntax provider exposes it"
     );
+    let reachable_taint_scope = function_body(&security_execution, "compile_reachable_taint_scope");
+    assert!(
+        reachable_taint_scope.contains("source_reachable_resolved_call_graph")
+            && reachable_taint_scope.contains("call_graph.graph.as_ref()")
+            && !reachable_taint_scope.contains("cached_resolved_call_graph"),
+        "taint scope compilation must derive callback edges from its exact scoped callgraph instead of retaining a duplicate whole-workspace graph"
+    );
+    assert!(
+        function_body(&resources, "syntax_weighted_batches").contains("current_process_resident_bytes")
+            && function_body(
+                &security_matcher,
+                "match_rules_against_facts_with_progress_and_mode"
+            )
+            .contains("snapshot.text.len()"),
+        "broad syntax matching must schedule actual source-unit sizes against the live resident working set"
+    );
+    let package_contexts = function_body(&security_matcher, "build_language_import_package_contexts");
+    let package_context_prewarm =
+        function_body(&security_matcher, "prewarm_language_import_package_contexts");
+    let compiler_session_prewarm = function_body(
+        &security_matcher,
+        "prepare_compiler_object_session_for_import_prewarm",
+    );
+    let compiler_session = function_body(&compiler_object, "ensure_compiler_object_session");
+    let broad_matcher = function_body(
+        &security_matcher,
+        "match_rules_against_facts_with_progress_and_mode",
+    );
+    let remap_compiler_object = function_body(&db, "remap_decl_index_to_headers");
+    assert!(
+        package_contexts.contains("visit_compiler_file_objects_uncached")
+            && package_contexts.contains("workspace: Arc::new(workspace)")
+            && package_contexts.contains("workspace.packages.insert(spec.module.clone())")
+            && !package_contexts.contains("insert_import_target_prefixes")
+            && !package_contexts.contains("import_index_uncached")
+            && package_context_prewarm.contains("language_import_package_contexts")
+            && package_context_prewarm.contains("project_language_import_package_contexts")
+            && package_context_prewarm.contains("include_workspace_package_context")
+            && !package_context_prewarm.contains("has_package_text_anchors")
+            && broad_matcher.contains("prewarm_language_import_package_contexts")
+            && broad_matcher.contains("prepare_compiler_object_session_for_import_prewarm")
+            && broad_matcher.contains("prewarmed_import_contexts.get(language.as_str())")
+            && compiler_session_prewarm.contains("FactRetention::Transient")
+            && compiler_session_prewarm.contains("include_workspace_package_context")
+            && compiler_session_prewarm.contains("ensure_compiler_object_session")
+            && compiler_session.contains("store.covers(&descriptors)")
+            && compiler_session.contains("tempfile::Builder::new()")
+            && compiler_session.contains("write_compiler_object_generation")
+            && !compiler_session.contains("workspace_root")
+            && !compiler_session.contains("compiler_object_sidecar_path")
+            && security_matcher.contains("new_with_oversized_singleton")
+            && security_matcher
+                .matches("static LANGUAGE_IMPORT_PACKAGE_CONTEXT_CACHE")
+                .count()
+                == 1
+            && !security_matcher.contains("WORKSPACE_IMPORT_PACKAGE_CONTEXT_CACHE")
+            && !security_matcher.contains("COMPONENT_IMPORT_PACKAGE_CONTEXT_CACHE"),
+        "workspace and component package evidence must share one exact, memory-aware language compiler pass through an unpublished scoped object generation prewarmed before the matcher pool opens"
+    );
+    assert!(
+        broad_matcher
+            .matches("compiler_file_object_uncached(file)")
+            .count()
+            == 2
+            && broad_matcher
+                .matches("remap_decl_index_to_headers")
+                .count()
+                == 2
+            && broad_matcher
+                .matches("file_imports: file_imports.as_ref()")
+                .count()
+                == 2
+            && !broad_matcher.contains("scan_decl_index")
+            && remap_compiler_object.contains("headers.remap_file_to_existing_symbols(index)")
+            && !remap_compiler_object.contains("decl_index_uncached")
+            && !remap_compiler_object.contains("compiler_file_object"),
+        "each serial or parallel matcher path must lower one compiler object per file, remap its owned declarations without reparsing, and reuse its imports for every file-local gate"
+    );
+    assert!(
+        function_body(&workspace, "parser_incomplete_reasons_for_files")
+            .contains("visit_compiler_file_objects_uncached")
+            && function_body(&workspace, "diagnostics")
+                .contains("visit_compiler_file_objects_uncached"),
+        "whole-workspace diagnostics and completeness checks must use the same exact memory-aware compiler schedule"
+    );
+    assert!(
+        function_body(&security_execution, "build_findings_chain_aware")
+            .contains("release_matcher_fact_caches()")
+            && function_body(&security_matcher, "release_matcher_fact_caches")
+                .matches("clear_retained()")
+                .count()
+                == 3
+            && function_body(&security_matcher, "release_matcher_fact_caches")
+                .matches("point_matcher_fact_cache_budget_share")
+                .count()
+                == 3
+            && function_body(
+                &security_matcher,
+                "match_rules_against_facts_with_progress_and_mode"
+            )
+            .contains("prepare_matcher_fact_caches_for_broad_scan()"),
+        "matcher projections must stay warm across broad AST scans, then be released and memory-narrowed before the semantic graph opens"
+    );
     assert!(
         function_body(&resources, "compiler_weighted_batches").contains("compiler_worker_count")
             && function_body(&resources, "compiler_weighted_batches")
@@ -3109,11 +3332,38 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 .contains("decl_index_remapped_to_headers")
             && !function_body(&taint_idg, "build_resolved_call_graph_snapshot_scoped")
                 .contains("global_index()")
-            && function_body(&workspace, "source_reachable_resolved_call_graph")
+            && function_body(&workspace, "source_reachable_resolved_call_graph_with_scope")
+                .contains("build_with_file_semantics_for_funcs_streaming_with_context")
+            && function_body(&workspace, "source_reachable_resolved_call_graph_with_scope")
                 .contains("build_with_file_semantics_for_files_streaming_with_context")
-            && function_body(&workspace, "source_reachable_resolved_call_graph")
-                .contains("decl_index_remapped_to_headers"),
-        "callgraph construction must keep global declaration headers and stream exact per-file bodies"
+            && function_body(&workspace, "source_reachable_resolved_call_graph_with_scope")
+                .contains("decl_index_remapped_to_headers")
+            && function_body(&workspace, "source_reachable_resolved_call_graph_with_scope")
+                .contains("queued_funcs")
+            && function_body(&workspace, "source_reachable_resolved_call_graph_with_scope")
+                .contains("take_exclusive_compiler_header_index()")
+            && function_body(&workspace, "source_reachable_resolved_call_graph_with_scope")
+                .contains("project_linkage_from_remapped_file")
+            && function_body(&workspace, "source_reachable_resolved_call_graph_with_scope")
+                .contains("install_projected_linkage")
+            && function_body(
+                &callgraph,
+                "build_with_file_semantics_streaming_with_context_scoped"
+            )
+            .contains("index.defs.retain"),
+        "callgraph construction must keep complete declaration/type headers and stream exact demand-selected callable bodies and linkage"
+    );
+    let source_reachable = function_body(&workspace, "source_reachable_resolved_call_graph_with_scope");
+    assert!(
+        source_reachable.contains("target_callers_by_callee")
+            && source_reachable.contains("while let Some(callee) = pending.pop()")
+            && source_reachable.contains("compiler_weighted_batches")
+            && source_reachable.contains("pending_reached")
+            && source_reachable.contains("pending_reverse_output")
+            && !source_reachable.contains("while changed")
+            && !source_reachable.contains(".take(")
+            && !source_reachable.contains(".truncate("),
+        "source/callback/return corridors must converge through exact indexed compiler worklists and memory-weighted file batches"
     );
     assert!(
         function_body(&workspace, "build_and_persist_idg_sidecar").contains("compiler_linkage_index()")
@@ -3123,9 +3373,25 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && function_body(&index, "insert_linkage_header_preprocessed")
                 .contains("decl.flow_events.clear()")
             && function_body(&index, "insert_linkage_header_preprocessed").contains("function_linkage_facts")
+            && function_body(&index, "insert_linkage_header_preprocessed")
+                .contains("consumed_call_results_by_symbol")
+            && function_body(&index, "insert_linkage_header_preprocessed")
+                .contains("index.call_argument_values.clear()")
+            && function_body(&index, "insert_linkage_header_preprocessed")
+                .contains("index.static_string_maps.clear()")
+            && function_body(&index, "insert_linkage_header_preprocessed")
+                .contains("index.character_substitutions.clear()")
+            && index.contains("pub consumed_call_results: Vec<Span>")
+            && index.contains("pub has_writeback_arg: bool")
             && index.contains("pub has_summary_output: bool")
             && index.contains("pub returned_constructor_calls: Vec<ReturnedConstructorLinkageFact>")
             && function_body(&workspace, "has_summary_output").contains("linkage_facts")
+            && function_body(&workspace, "target_emission_requires_callee")
+                .contains("consumed_call_results")
+            && function_body(&workspace, "target_emission_requires_callee")
+                .contains("has_writeback_arg")
+            && function_body(&workspace, "target_emission_requires_callee")
+                .contains("receiver_field_writes")
             && function_body(&workspace, "call_edge_passes_target_callback")
                 .contains("span_contains(*arg_span, *target_span)")
             && !function_body(&workspace, "call_edge_passes_target_callback")
@@ -3419,13 +3685,19 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
             && !idg_pipeline_body.contains("build_fingerprint_hash()"),
         "IDG sidecars must use the IDG semantic ABI and exact compiler inputs, not the whole binary identity"
     );
-    let dirty_hash_body = function_body(&workspace_build, "dirty_content_hash");
+    let git_rerun_body = function_body(&workspace_build, "emit_git_rerun_inputs");
     assert!(
-        dirty_hash_body.contains("diff")
-            && dirty_hash_body.contains("--binary")
-            && dirty_hash_body.contains("ls-files")
-            && dirty_hash_body.contains("std::fs::read"),
-        "workspace build fingerprint must hash tracked diffs and untracked contents, not only dirty file names"
+        !workspace_build.contains("dirty_content_hash")
+            && !workspace_build.contains("emit_source_rerun_inputs")
+            && !workspace_build.contains("\"status\"")
+            && !workspace_build.contains("\"diff\""),
+        "producer provenance must not force a workspace rebuild for every source edit; semantic sidecars own exact invalidation"
+    );
+    assert!(
+        git_rerun_body.contains("symbolic-ref")
+            && git_rerun_body.contains("git_path")
+            && workspace_build.contains("rev-parse\", \"--git-path"),
+        "workspace build fingerprint must watch the resolved HEAD ref and support worktree/submodule git paths"
     );
     assert!(
         security_analysis.contains("mod taint_cache;")
@@ -3674,7 +3946,9 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     let unified = function_body(&idg_service, "build_unified");
     let local_lookup = function_body(&idg_service, "local_node_for");
     assert!(
-        unified.contains("func_nodes[start..end].sort_unstable_by_key")
+        unified.contains(
+            "func_node_rows.sort_unstable_by_key(|(func, place, node)| (func.raw(), place.0, node.0))"
+        )
             && local_lookup.contains("binary_search_by_key")
             && !idg_service.contains("segment.nodes.lookup(func, pid)"),
         "warm query lookup must use compact exact per-function ordering, not linear segment scans or full reverse hash tables"
@@ -3702,7 +3976,37 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
 #[test]
 fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
     let matcher = read(&repo_root().join("crates/security/src/matcher/mod.rs"));
+    let dependencies = read(&repo_root().join("crates/security/src/deps.rs"));
     let workspace = read(&repo_root().join("crates/workspace/src/lib.rs"));
+    for path in [
+        "crates/workspace/src/enclosing_index.rs",
+        "crates/workspace/src/class_index.rs",
+        "crates/workspace/src/decl_name_index.rs",
+    ] {
+        let metadata_index = read(&repo_root().join(path));
+        assert!(
+            metadata_index.contains("GlobalIndex")
+                && !metadata_index.contains("AnalyzerDb")
+                && !metadata_index.contains("global_index()"),
+            "{path} must consume compact compiler declaration headers without materializing workspace bodies"
+        );
+    }
+    let security_analysis = read(&repo_root().join("crates/security/src/analysis/mod.rs"));
+    let func_lookup = function_body(&security_analysis, "func_id_for_match");
+    assert!(
+        func_lookup.contains("compiler_linkage_index()")
+            && func_lookup.contains("enclosing_for(global.as_ref()")
+            && !func_lookup.contains("db().global_index()"),
+        "security finding attribution must use compact compiler linkage for enclosing declarations"
+    );
+    let completeness_scan = function_body(&security_analysis, "from_graph");
+    assert!(
+        completeness_scan.contains("unresolved_workspace_call_sites()")
+            && completeness_scan.contains("analyzed_funcs.contains(caller)")
+            && !completeness_scan.contains("exact_decl")
+            && !completeness_scan.contains("global_index"),
+        "whole-scope completeness checks must consume canonical compiler callgraph gaps for the analyzed function set, not rescan AST bodies"
+    );
     let headers = function_body(&matcher, "streaming_global_linkage");
     assert!(
         headers.contains("compiler_linkage_index()"),
@@ -3717,17 +4021,35 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
             && compiler_linkage.contains("build_global_linkage_index()"),
         "Workspace must own the compact compiler linkage lifetime shared by IDG and streamed exact-body consumers"
     );
-    let invalidation = function_body(&workspace, "invalidate_after_file_change");
+    let guarded_invalidation = function_body(&workspace, "invalidate_after_file_change");
+    let invalidation = function_body(&workspace, "invalidate_after_file_change_locked");
+    assert!(
+        guarded_invalidation.contains("taint_analysis_serial.lock()")
+            && guarded_invalidation.contains("idg_build_serial.lock()")
+            && guarded_invalidation.contains("invalidate_after_file_change_locked(file)"),
+        "source edits must own the complete semantic generation before invalidation"
+    );
     assert!(
         invalidation.contains("compiler_linkage.write() = None"),
-        "source edits must invalidate the compact compiler symbol snapshot"
+        "locked source invalidation must clear the compact compiler symbol snapshot"
     );
 
-    let scan = function_body(&matcher, "scan_decl_index");
+    let broad_matcher = function_body(&matcher, "match_rules_against_facts_with_progress_and_mode");
     assert!(
-        scan.contains("FactRetention::Transient")
-            && scan.contains("decl_index_remapped_to_headers(global, file)"),
-        "transient matcher scans must stream one exact compiler body and bind it to stable workspace symbols"
+        broad_matcher
+            .matches("compiler_file_object_uncached(file)")
+            .count()
+            == 2
+            && broad_matcher
+                .matches("remap_decl_index_to_headers")
+                .count()
+                == 2
+            && broad_matcher
+                .matches("file_imports: file_imports.as_ref()")
+                .count()
+                == 2
+            && !broad_matcher.contains("scan_decl_index"),
+        "broad matcher scans must stream one exact compiler body per executable file path, bind it to stable workspace symbols, and share its import IR"
     );
 
     let inferred = function_body(&matcher, "infer_entry_point_sources_for_files_with_progress");
@@ -3739,25 +4061,205 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
     );
 
     let execution = read(&repo_root().join("crates/security/src/analysis/execution.rs"));
+    let shared_corridor = function_body(&execution, "shared_source_sink_corridor");
+    let corridor_visitor = function_body(&execution, "visit_source_sink_corridors");
+    assert!(
+        shared_corridor.contains("visit_source_sink_corridors(")
+            && shared_corridor.contains("source_corridors.insert(source, vec![corridor_index])"),
+        "security must bind every reachable source to a complete exact per-source corridor"
+    );
+    assert!(
+        corridor_visitor.contains("extend_corridor_with_summary_dependency_support")
+            && corridor_visitor.contains("corridor.lineage_funcs.contains(source)")
+            && corridor_visitor.contains("callgraph_source_sink_corridor("),
+        "per-source corridor visitation must preserve exact callgraph and summary-dependency scope"
+    );
+    let source_scheduler = function_body(&execution, "schedule_source_groups");
+    assert!(
+        source_scheduler.contains("admitted_source_groups")
+            && source_scheduler.contains("shared_source_sink_corridor(")
+            && !source_scheduler.contains("group_corridor.extend(coarse_corridor"),
+        "target admission must precede exact per-source corridor materialization, and a node slice must never be widened back to the workspace union"
+    );
+    let taint = read(&repo_root().join("crates/taint/src/reachable.rs"));
+    let closure = function_body(&taint, "closure_evidence_with_targets");
+    assert!(
+        closure.contains("forward_closure_evidence_within_funcs_with_max_precision")
+            && closure.contains(
+                "forward_closure_evidence_within_funcs_and_relevance_with_max_precision"
+            ),
+        "taint closures must enforce both the compiler-proven function scope and reusable target demand during fixed-point propagation"
+    );
+    let source_relevance = function_body(&execution, "source_index_is_target_relevant");
+    assert!(
+        source_relevance.contains("target_relevance.admits_any(&seed_nodes)")
+            && !source_relevance.contains("apply_configured_transfer_fixpoint"),
+        "source scheduling must query the one materialized compiler graph instead of replaying an unindexed transfer engine"
+    );
+    let idg = read(&repo_root().join("crates/idg/src/service.rs"));
+    let external_relation = read(&repo_root().join("crates/idg/src/external_relation.rs"));
+    let fact_sources = read(&repo_root().join("crates/idg/src/fact_source_index.rs"));
+    let function_summaries = read(&repo_root().join("crates/idg/src/function_summary.rs"));
+    let reverse_scalar = read(&repo_root().join("crates/idg/src/reverse_scalar_index.rs"));
+    let reverse_symbolic = read(&repo_root().join("crates/idg/src/reverse_symbolic_index.rs"));
+    let target_relevance = function_body(&idg, "target_relevance_in_func_scope");
+    assert!(
+        target_relevance.contains("reach.backward_neighbours(node)")
+            && target_relevance.contains("contextual.reverse_contextual.get(&node)")
+            && target_relevance.contains("runtime.aggregate_inputs.get(&node)")
+            && target_relevance.contains("runtime.reverse_transforms.visit_incoming(base")
+            && target_relevance.contains(".reverse_scalar_transforms")
+            && target_relevance.contains(".visit_incoming(")
+            && target_relevance.contains("node_is_allowed")
+            && target_relevance.contains("base_is_allowed"),
+        "IDG target demand must reverse ordinary, aggregate, access-path, and scalar-return compiler relations"
+    );
+    let target_relevance_relation = struct_body(&idg, "IdgTargetRelevance");
+    let target_relevance_worklist = struct_body(&idg, "TargetRelevanceWorklist");
+    assert!(
+        target_relevance_relation.matches("SpillSet").count() == 2
+            && target_relevance_worklist.matches("SpillStack").count() == 3
+            && !target_relevance_relation.contains("AHashSet")
+            && !target_relevance_worklist.contains("Vec<"),
+        "backward target demand must spill exact symbolic relations and all work frontiers instead of growing with target fan-out"
+    );
+    let symbolic_runtime = struct_body(&idg, "SymbolicRuntimeIndex");
+    let symbolic_fact_page = function_body(&idg, "build_symbolic_fact_page");
+    let symbolic_fact_propagation = function_body(&idg, "propagate_symbolic_closure_fact");
+    assert!(
+        symbolic_runtime.contains("fact_sources: FactSourceIndex")
+            && target_relevance.contains(".fact_sources")
+            && target_relevance.contains(".visit_key(")
+            && target_relevance.contains(".visit_base(")
+            && fact_sources.contains("struct FactSourceSpool")
+            && fact_sources.contains("ExternalSorter<FactSourceRecord>")
+            && symbolic_runtime.contains("reverse_scalar_transforms: ReverseScalarTransformIndex")
+            && reverse_scalar.contains("ExternalSorter<ReverseScalarRecord>")
+            && symbolic_runtime.contains("reverse_transforms: ReverseSymbolicTransformIndex")
+            && reverse_symbolic.contains("ExternalSorter<ReverseSymbolicRecord>")
+            && external_relation.contains("struct RunMerger")
+            && external_relation.contains("file: &'a File")
+            && external_relation.contains("read_exact_at(self.file, self.offset")
+            && external_relation.contains("merge_page_rows(runs.len(), R::BYTES, READ_ROWS)")
+            && !external_relation.contains("clone exact compiler relation run spool"),
+        "symbolic fact producers and both symbolic reverse relations must use exact external sorting with positioned range reads"
+    );
+    assert!(
+        symbolic_runtime.contains("ordering_sensitive_bases: Box<[u64]>")
+            && function_body(&idg, "local_provenance_id")
+                .contains("retains_local_provenance(base)")
+            && symbolic_fact_page.contains("runtime.local_provenance_id(base, span)")
+            && symbolic_fact_propagation
+                .contains("runtime.local_provenance_id(transform.target, transform.write_span)"),
+        "symbolic fixed points must retain AST write provenance exactly where source-order transfer predicates consume it and canonicalize it everywhere else"
+    );
+    assert!(
+        function_summaries.contains("file: Arc<std::fs::File>")
+            && function_summaries.contains("read_exact_at(self.file.as_ref(), self.offset")
+            && function_summaries
+                .contains("merge_page_rows(runs.len(), BOUNDARY_PAIR_BYTES, BOUNDARY_READ_ROWS)")
+            && !function_summaries.contains("clone call-boundary run spool")
+            && idg.contains("file: Arc<std::fs::File>")
+            && idg.contains("read_exact_at(self.file.as_ref(), self.offset")
+            && idg.contains("merge_page_rows(")
+            && !idg.contains("clone symbolic transform run spool"),
+        "external sort mergers must share one positioned spool descriptor and one bounded page budget instead of scaling descriptors or buffers per run"
+    );
+    assert!(
+        !execution.contains("may_forward_target_nodes_cut_within_funcs_with_max_precision"),
+        "security scheduling must compile target demand once rather than rebuilding a forward closure per source"
+    );
+    let semantic_compile = function_body(&execution, "compile_taint_semantic_graph");
+    assert!(
+        semantic_compile.contains("seed_idg_service_for_rulepack_for_files")
+            && semantic_compile.contains("building persisted scoped semantic graph"),
+        "security must compile one reusable scoped IDG rather than rebuilding source/sink slices"
+    );
+    let scoped_seed = function_body(&security_analysis, "seed_idg_service_for_rulepack_for_files");
+    assert!(
+        scoped_seed
+            .contains("build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph"),
+        "security transfer options must enter the persisted scoped compiler path"
+    );
+    let persisted_scope = function_body(
+        &workspace,
+        "build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph",
+    );
+    assert!(
+        persisted_scope.contains("idg_file_scope_fingerprint(included_files)")
+            && persisted_scope.contains("idg_func_scope_fingerprint(included_funcs)")
+            && persisted_scope.contains("idg_call_graph_fingerprint(call_graph)")
+            && persisted_scope.contains("idg_scoped_semantics_fingerprint(")
+            && persisted_scope.contains(
+                "build_for_persistence_streaming_with_file_semantics_and_options_for_files_and_funcs"
+            )
+            && persisted_scope.contains("workspace.save_into_disk")
+            && persisted_scope.contains("IdgQueryService::load_from_disk"),
+        "large scoped IDGs must lower once into an exact keyed sidecar and reopen through the paged query service"
+    );
+    assert!(
+        !execution.contains("execute_partitioned_source_groups")
+            && !execution.contains("memory_scheduled_source_corridors"),
+        "security must not regress to repeated per-source IDG compilation"
+    );
+    for function in ["source_analysis_worker_count", "security_taint_worker_count"] {
+        let body = function_body(&execution, function);
+        assert!(
+            body.contains("compiler_worker_count(requested)")
+                && body.contains(".min(available)"),
+            "{function} must schedule every exact closure under the shared memory budget without oversubscribing CPUs"
+        );
+    }
     let source_plan = function_body(&execution, "plan_source_work");
     assert!(
-        source_plan.contains("exact_decl_index(file)")
+        source_plan.contains("exact_decl_index_shared(file)")
             && source_plan.contains("source_seed_set(pack, source.source, source_decl)"),
         "taint source seed planning must derive carriers from exact AST bodies, not compact headers"
     );
     let analysis = read(&repo_root().join("crates/security/src/analysis/mod.rs"));
+    for function in [
+        "run_taint_analysis_with_phase_progress",
+        "run_source_analysis_with_phase_progress",
+    ] {
+        assert!(
+            function_body(&analysis, function).contains("begin_workspace_dependency_package_snapshot("),
+            "{function} must retain one immutable dependency-manifest snapshot for the complete analysis"
+        );
+    }
     let source_graph_plan = function_body(&analysis, "schedule_source_graph_groups");
     assert!(
-        source_graph_plan.contains("exact_decl_index(file)")
+        source_graph_plan.contains("exact_decl_index_shared(file)")
             && source_graph_plan.contains("source_seed_set(pack, hit.hit, decl)"),
         "source-analysis seed planning must derive carriers from exact AST bodies, not compact headers"
     );
 
     let package_facts = function_body(&matcher, "build_file_package_set");
+    let broad_match = function_body(&matcher, "match_rules_against_facts_with_progress_and_mode");
     assert!(
-        package_facts.contains("decl_index_uncached(file)") && !package_facts.contains("global_index()"),
-        "file-local package heuristics must consume file-local AST facts without opening the workspace body index"
+        package_facts.contains("insert_file_import_packages")
+            && package_facts.contains("workspace_imports")
+            && package_facts.contains("workspace_packages")
+            && !package_facts.contains("decl_index")
+            && !package_facts.contains("global_index()"),
+        "framework package evidence must come from compiler imports/dependencies, not path or identifier guesses"
     );
+    assert!(
+        broad_match.contains("workspace_dependency_package_scan_lock(&root)")
+            && broad_match.contains("workspace_dependency_package_context_for_scan(")
+            && function_body(&dependencies, "refresh_workspace_dependency_package_context")
+                .contains("cache.insert(root_key, Arc::downgrade(&context))"),
+        "broad matcher phases must refresh non-VFS dependency manifests before sharing package facts"
+    );
+    for forbidden in [
+        "allows_without_package",
+        "routed_controller_request_context",
+        "FILE_USES_REQ_FILES_MARKER",
+    ] {
+        assert!(
+            !matcher.contains(forbidden),
+            "security matcher must not hardcode framework inference hook `{forbidden}`"
+        );
+    }
 
     assert_eq!(
         matcher.matches(".global_index()").count(),
@@ -3769,6 +4271,7 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
 #[test]
 fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
     let workspace = read(&repo_root().join("crates/workspace/src/lib.rs"));
+    let matcher = read(&repo_root().join("crates/security/src/matcher/mod.rs"));
     let security_chain = read(&repo_root().join("crates/security/src/analysis/chain_executor.rs"));
     let security_analysis = read(&repo_root().join("crates/security/src/analysis/mod.rs"));
     for function in [
@@ -3793,11 +4296,67 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
         let source = read(&repo_root().join(path));
         assert!(
             source.contains("compiler_linkage_index()")
-                && source.contains("exact_decl_index(")
+                && source.contains("exact_decl_index_shared(")
                 && !source.contains("global_index()"),
-            "{path} must export exact AST facts without retaining every lowered workspace body"
+            "{path} must export exact AST facts through the memory-scheduled body cache without materializing every workspace body"
         );
     }
+
+    let exact_body_cache = read(&repo_root().join("crates/workspace/src/exact_body_cache.rs"));
+    assert!(
+        exact_body_cache.contains("effective_memory_limit_bytes()")
+            && exact_body_cache.contains("estimated_bytes")
+            && exact_body_cache.contains("LruCache")
+            && exact_body_cache.contains("pop_lru()")
+            && !exact_body_cache.contains("language_id")
+            && !exact_body_cache.contains("match language"),
+        "the exact-body cache must be byte-weighted, memory-aware, evictable, and language-agnostic"
+    );
+    assert!(
+        matcher.contains("matcher_fact_cache_total_budget_bytes")
+            && matcher.contains("effective_memory_limit_bytes()")
+            && matcher.contains("MatcherFactCache")
+            && matcher.contains("pop_lru()")
+            && !matcher.contains("MATCHER_FILE_FACT_CACHE_CAP"),
+        "derived matcher-fact caches must be byte-weighted, memory-aware, single-flight, and evictable"
+    );
+    let endpoint_recheck = function_body(&matcher, "rule_match_passes_constraints_with_taint_view");
+    let taint_only_proof = function_body(&matcher, "endpoint_taint_constraints_pass_without_syntax");
+    assert!(
+        endpoint_recheck.contains("endpoint_taint_constraints_pass_without_syntax")
+            && taint_only_proof.contains("!endpoint_identity_proven")
+            && taint_only_proof.contains("spans_overlap(call.call_span, expected.span)")
+            && taint_only_proof.contains("arg.index == index")
+            && taint_only_proof.contains("call.tainted_receiver.is_none()")
+            && !taint_only_proof.contains("file_package_set")
+            && !taint_only_proof.contains("decl_match_facts"),
+        "source-specific endpoint checks must reuse the initial static compiler proof instead of reparsing AST/package facts per flow"
+    );
+    let source_group_execute = function_body(&security_chain, "execute");
+    let unique_overlap = function_body(&security_chain, "unique_named_overlap_span");
+    assert!(
+        source_group_execute.contains("unique_named_overlap_span")
+            && source_group_execute.contains("endpoint_identity_proven"),
+        "source attribution must carry a compiler-proven endpoint identity into taint-only constraint checks"
+    );
+    assert!(
+        unique_overlap.contains("sink.match_text != call.name")
+            && unique_overlap.contains("span != sink.span")
+            && unique_overlap.contains("return None"),
+        "overlapping adapter spans may reuse endpoint proofs only when the exact candidate identity is unique"
+    );
+    let evidence_kind = function_body(&security_chain, "tainted_call_kind_matches_sink");
+    let candidate_validation = function_body(&security_chain, "sink_candidate_is_valid");
+    assert!(
+        evidence_kind.contains("MatchKind::Call | MatchKind::New")
+            && evidence_kind.contains("TaintedCallKind::Call")
+            && evidence_kind.contains("MatchKind::Write")
+            && evidence_kind.contains("TaintedCallKind::Write")
+            && evidence_kind.contains("MatchKind::Return")
+            && evidence_kind.contains("TaintedCallKind::Return")
+            && candidate_validation.contains("tainted_call_kind_matches_sink"),
+        "sink attribution must join compiler evidence and rule endpoints by typed event kind before span correlation"
+    );
 
     assert!(
         function_body(&security_chain, "compile_source_graph").contains("with_global_index(self.global.as_ref())")
@@ -3811,9 +4370,9 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
     assert!(
         attribution.contains("decl_index_remapped_to_headers(global, file)")
             && attribution.contains("build_function_call_event_summaries")
-            && attribution.contains("let built = file_index")
-            && attribution.contains(".defs"),
-        "compact taint queries must distill exact per-file AST call attribution and release the body"
+            && attribution.contains(".find(|decl| decl.symbol.raw() == func.raw())")
+            && !attribution.contains(".defs.iter().map("),
+        "compact taint queries must distill only the requested function from an exact Tree-sitter body"
     );
     let distilled = function_body(&taint_reachable, "build_function_call_event_summaries");
     assert!(
@@ -3821,6 +4380,27 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
             && distilled.contains("collect_return_spans")
             && distilled.contains("collect_write_event_summaries"),
         "all rendered call/write/return evidence must survive the transient exact-body boundary"
+    );
+    let attribution_cache = struct_body(&taint_reachable, "IdgAttributionCaches");
+    let attribution_insert = function_body(&taint_reachable, "insert_attribution");
+    assert!(
+        attribution_cache.contains("budget_bytes")
+            && attribution_cache.contains("AttributionCacheState")
+            && taint_reachable.contains("LruCache")
+            && attribution_insert.contains("estimated_function_call_event_summaries_bytes")
+            && attribution_insert.contains("pop_lru()")
+            && attribution_insert.contains("estimated_bytes > self.budget_bytes"),
+        "shared AST attribution must be byte-weighted and evictable; function counts are not a memory bound"
+    );
+    let taint_index = read(&repo_root().join("crates/workspace/src/taint_index.rs"));
+    let resident_insert = function_body(&taint_index, "insert_resident");
+    assert!(
+        taint_index.contains("resident_budget_bytes")
+            && taint_index.contains("resident_bytes")
+            && resident_insert.contains("graph.estimated_resident_bytes()")
+            && resident_insert.contains("estimated_bytes > inner.resident_budget_bytes")
+            && resident_insert.contains("evict_oldest_resident(inner)"),
+        "decoded source graphs must be retained by bytes; eviction may change reuse but never exact graph construction"
     );
 }
 
@@ -4124,6 +4704,7 @@ fn structured_security_guards_are_rulepack_driven() {
     let guards = read(&root.join("crates/security/src/analysis/guard_sanitizers.rs"));
     let rules = read(&root.join("crates/security/src/rule.rs"));
     let path_pack = read(&root.join("security-patterns/langs/python/sinks/path.yml"));
+    let xxe_pack = read(&root.join("security-patterns/langs/python/sinks/xxe.yml"));
     let language_types = read(&root.join("crates/lang_api/src/types.rs"));
     let language_kit = read(&root.join("crates/lang_api/src/kit/mod.rs"));
     let ruby = read(&root.join("crates/lang_ruby/src/lib.rs"));
@@ -4169,6 +4750,25 @@ fn structured_security_guards_are_rulepack_driven() {
             && native_export.contains("branch_conditions: index.branch_conditions.clone()"),
         "branch-condition compiler facts must be emitted by shared/custom frontend paths and preserved by export"
     );
+    for spelling in ["XMLParser", "resolve_entities", "no_network"] {
+        assert!(
+            !guards.contains(spelling) && xxe_pack.contains(spelling),
+            "configured factory role `{spelling}` must remain rulepack data"
+        );
+    }
+    let configured_factory = function_body(&guards, "configured_argument_factory_guard_sanitizer");
+    assert!(
+        configured_factory.contains("assignment_values")
+            && configured_factory.contains("call_argument_value_fact")
+            && configured_factory.contains("static_value")
+            && !configured_factory.contains("value_text"),
+        "configured factory guards must consume typed assignment and scalar argument facts"
+    );
+    assert!(
+        rules.contains("pub struct ConfiguredArgumentFactoryGuardSemantics")
+            && xxe_pack.contains("configured_argument_factory_guard:"),
+        "configured argument factory roles must be declared in the rule schema and rulepack"
+    );
 }
 
 /// The unified taint engine is compiler dataflow over the IDG. Semantic
@@ -4178,6 +4778,8 @@ fn structured_security_guards_are_rulepack_driven() {
 fn unified_taint_closure_is_uncapped_compiler_dataflow() {
     let root = repo_root();
     let idg_query = read(&root.join("crates/idg/src/query.rs"));
+    let idg_service = read(&root.join("crates/idg/src/service.rs"));
+    let idg_spill = read(&root.join("crates/idg/src/spill_set.rs"));
     let taint_idg_api = read(&root.join("crates/taint/src/idg_api.rs"));
 
     for function in [
@@ -4219,6 +4821,114 @@ fn unified_taint_closure_is_uncapped_compiler_dataflow() {
         function_body(&idg_query, "forward_neighbourhood").contains("bitvector_bounded_closure")
             && function_body(&idg_query, "backward_neighbourhood").contains("bitvector_bounded_closure"),
         "hop-bounded closure must remain isolated to explicit neighbourhood diagnostics"
+    );
+    let symbolic_closure = function_body(&idg_service, "symbolic_forward_closure_nodes");
+    assert!(
+        symbolic_closure.contains("while worklist.has_pending()")
+            && symbolic_closure.contains("worklist.next_node()")
+            && symbolic_closure.contains("worklist.next_fact()"),
+        "symbolic/contextual closure must remain a monotone compiler fixed point"
+    );
+    for forbidden in [
+        "VecDeque",
+        "pop_front",
+        "max_depth",
+        "max_len",
+        "max_paths",
+        "iteration_limit",
+        "round_limit",
+    ] {
+        assert!(
+            !symbolic_closure.contains(forbidden),
+            "symbolic semantic closure must not contain `{forbidden}`"
+        );
+    }
+    assert!(
+        idg_service.contains("facts: SpillSet")
+            && idg_service.contains("states: SpillSet")
+            && idg_service.contains("pending_nodes: SpillStack")
+            && idg_service.contains("pending_facts: SpillStack")
+            && {
+                let worklist_impl = idg_service
+                    .split_once("impl<'a> SymbolicClosureWorklist<'a>")
+                    .map(|(_, implementation)| implementation)
+                    .expect("missing SymbolicClosureWorklist implementation");
+                function_body(worklist_impl, "enqueue_fact_state").contains("self.facts.insert(key)")
+                    && function_body(worklist_impl, "enqueue_node")
+                        .contains("self.reached.insert(node, context)")
+            }
+            && !idg_service.contains("fact_interner"),
+        "exact symbolic closure node/fact states and frontiers must use external-memory compiler relations, not unbounded resident collections"
+    );
+    assert!(
+        idg_service.contains("let mut symbolic_cross_calls = AHashSet::new()")
+            && function_body(&idg_service, "record_symbolic_cross_call")
+                .contains("out.insert(CrossCallEdge"),
+        "symbolic cross-call evidence must deduplicate when a transform fires, not retain one duplicate row per field/context state"
+    );
+    let context_replay = function_body(&idg_service, "register_context_call");
+    assert!(
+        context_replay.contains("loop")
+            && context_replay.contains("returned_fact_batch(context, after)")
+            && context_replay.contains("after = Some(")
+            && idg_spill.contains("fn keys_with_prefix_batch("),
+        "completed call summaries must replay through an exhaustive cursor, not one workspace-sized resident vector"
+    );
+    let recent_positives = struct_body(&idg_spill, "RecentPositiveCache");
+    let recent_positive_impl = idg_spill
+        .split_once("impl RecentPositiveCache")
+        .map(|(_, implementation)| implementation)
+        .expect("missing RecentPositiveCache implementation");
+    let spill_set_impl = idg_spill
+        .split_once("impl SpillSet")
+        .map(|(_, implementation)| implementation)
+        .expect("missing SpillSet implementation");
+    let spill_insert = function_body(spill_set_impl, "insert");
+    let spill_contains = function_body(spill_set_impl, "contains");
+    let spill_flush = function_body(spill_set_impl, "flush");
+    let spill_new = function_body(spill_set_impl, "new");
+    assert!(
+        recent_positives.contains("keys: Box<[u128]>")
+            && recent_positives.contains("metadata: Box<[AtomicU8]>")
+            && recent_positives.contains("hands: Box<[u8]>")
+            && recent_positives.contains("set_count: usize")
+            && recent_positives.contains("len: usize")
+            && struct_body(&idg_spill, "SpillSet")
+                .contains("recent_positives: RwLock<RecentPositiveCache>")
+            && idg_spill.contains("RECENT_POSITIVE_ASSOCIATIVITY")
+            && idg_spill.contains("RECENT_POSITIVE_SET_BYTES")
+            && !recent_positives.contains("AHashMap")
+            && spill_insert.contains("recent_positives.get_mut().contains(key)")
+            && spill_insert.contains("contains_in_runs(key)")
+            && spill_insert.contains("recent_positives.get_mut().remember_absent(key)")
+            && function_body(recent_positive_impl, "remember_absent")
+                .contains("let set = self.set_index(key)"),
+        "external fixed-point sets may use a compact memory-budget-derived cache of proven positives, but eviction must fall back to exact sorted-run membership"
+    );
+    assert!(
+        spill_contains.contains("let cache = self.recent_positives.read()")
+            && spill_contains.contains("cache.contains(key)")
+            && spill_contains.contains("contains_in_runs(key)")
+            && spill_contains.contains("recent_positives.write().remember(key)")
+            && function_body(recent_positive_impl, "contains")
+                .contains("fetch_or(")
+            && function_body(recent_positive_impl, "remember_absent")
+                .contains("swap(RECENT_POSITIVE_OCCUPIED, Ordering::Relaxed)"),
+        "read-only external-set membership must learn proven positives and refresh set-local CLOCK references through a bounded thread-safe cache"
+    );
+    let spill_set = struct_body(&idg_spill, "SpillSet");
+    let exact_runs = function_body(spill_set_impl, "contains_in_runs");
+    assert!(
+        spill_set.contains("membership_filter: Option<BloomFilter>")
+            && spill_set.contains("membership_filter_budget_bytes: usize")
+            && spill_new.contains("membership_filter: None")
+            && spill_flush.contains("membership_filter.is_none()")
+            && spill_flush.contains("filter.insert(key)")
+            && exact_runs.contains("self.levels.is_empty()")
+            && exact_runs.contains("!filter.may_contain(key)")
+            && exact_runs.contains("run.contains(key)")
+            && !struct_body(&idg_spill, "SortedRun").contains("BloomFilter"),
+        "external fixed-point membership must use one bounded negative filter and exact sorted-run verification, not rehash every key once per LSM level"
     );
 
     assert!(

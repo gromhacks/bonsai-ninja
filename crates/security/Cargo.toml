@@ -23,12 +23,13 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = "0.9"
+serde_yaml = { workspace = true }
 ahash = { workspace = true }
 regex = { workspace = true }
 tracing = { workspace = true }
-parking_lot = "0.12"
+parking_lot = { workspace = true }
 rayon = { workspace = true }
+lru = { workspace = true }
 
 [dev-dependencies]
 bonsai_lang_python = { workspace = true }

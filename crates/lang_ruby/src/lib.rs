@@ -310,6 +310,8 @@ impl LanguageAdapter for RubyAdapter {
         let assignment_values =
             bonsai_lang_api::kit::extract_assignment_value_facts(&tree, file, &HANDLER, src);
         let call_receivers = bonsai_lang_api::kit::extract_call_receiver_facts(&tree, file, &HANDLER, src);
+        let call_argument_values =
+            bonsai_lang_api::kit::extract_call_argument_value_facts(&tree, file, &defs, src);
         let runtime_type_narrowings =
             bonsai_lang_api::kit::extract_runtime_type_narrowing_facts(&tree, file, &HANDLER, src);
         let branch_conditions =
@@ -320,6 +322,9 @@ impl LanguageAdapter for RubyAdapter {
             refs,
             assignment_values,
             call_receivers,
+            call_argument_values,
+            static_string_maps: Vec::new(),
+            character_substitutions: Vec::new(),
             runtime_type_narrowings,
             branch_conditions,
             aggregate_layouts: Vec::new(),

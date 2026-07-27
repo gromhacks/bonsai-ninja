@@ -32,8 +32,9 @@ use crate::builder::{
     ReverseLookupRetention, SpooledStitchOptions,
 };
 use crate::transfer::{
-    declared_receiver_names, receiver_name_matches, transfer_function_for_with_options_and_syntax_facts,
-    TransferOptions, TransferOutput,
+    declared_receiver_names, receiver_name_matches,
+    transfer_function_for_with_compiled_options_and_syntax_facts, CompiledTransferMatchers, TransferOptions,
+    TransferOutput,
 };
 use crate::workspace::{IdgWorkspace, SegmentId};
 
@@ -2605,6 +2606,45 @@ where
     ))
 }
 
+/// Build a file/function-scoped exact IDG for streamed sidecar persistence.
+///
+/// Large semantic consumers use this instead of rebuilding overlapping
+/// resident query graphs. Every selected compiler segment is lowered once,
+/// spilled through the typed stitch pipeline, and later paged by
+/// [`crate::IdgQueryService`]. File/function scope affects only which complete
+/// compiler facts belong to this graph; no traversal or fixed-point work is
+/// capped.
+#[allow(clippy::too_many_arguments)]
+pub fn build_for_persistence_streaming_with_file_semantics_and_options_for_files_and_funcs<S, D>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    semantics: S,
+    transfer_options: &TransferOptions,
+    included_files: &[FileId],
+    included_funcs: &[FuncId],
+    sidecar_path: &std::path::Path,
+    body_for_file: D,
+) -> crate::IdgResult<IdgWorkspace>
+where
+    S: IdgFileSemanticsProvider,
+    D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+{
+    let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
+    let included_funcs: AHashSet<FuncId> = included_funcs.iter().copied().collect();
+    build_with_file_info_and_options_scoped(
+        global,
+        call_graph,
+        semantics,
+        transfer_options,
+        IdgBuildScope::sidecar_scoped(
+            Some(&included_files),
+            Some(&included_funcs),
+            Some(&body_for_file),
+            Some(sidecar_path),
+        ),
+    )
+}
+
 type FileBodyProvider<'a> = dyn Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync + 'a;
 
 struct IdgBuildScope<'a> {
@@ -2634,9 +2674,18 @@ impl<'a> IdgBuildScope<'a> {
         body_for_file: Option<&'a FileBodyProvider<'a>>,
         spool_path: Option<&'a std::path::Path>,
     ) -> Self {
+        Self::sidecar_scoped(None, None, body_for_file, spool_path)
+    }
+
+    fn sidecar_scoped(
+        included_files: Option<&'a AHashSet<FileId>>,
+        included_funcs: Option<&'a AHashSet<FuncId>>,
+        body_for_file: Option<&'a FileBodyProvider<'a>>,
+        spool_path: Option<&'a std::path::Path>,
+    ) -> Self {
         Self {
-            included_files: None,
-            included_funcs: None,
+            included_files,
+            included_funcs,
             reverse_lookup_retention: ReverseLookupRetention::SidecarOnly,
             body_for_file,
             spool_path,
@@ -2895,10 +2944,12 @@ where
         && spool_path.is_some()
         && !transfer_options.include_diagnostic_field_flows
         && !transfer_options.include_receiver_method_propagation;
+    let transfer_matchers = CompiledTransferMatchers::new(transfer_options);
     let batches = transfer_batches.iter().map(|range| {
         lower_transfer_segment_batch(
             global,
             transfer_options,
+            &transfer_matchers,
             &aggregate_layouts,
             &transfer_inputs[range.clone()],
             body_for_file,
@@ -4700,6 +4751,7 @@ fn transfer_inputs_by_segment(
 fn lower_transfer_segment_batch(
     global: &GlobalIndex,
     transfer_options: &TransferOptions,
+    transfer_matchers: &CompiledTransferMatchers,
     aggregate_layouts: &AHashMap<String, Vec<String>>,
     batch: &[SegmentTransferInputs],
     body_for_file: Option<&FileBodyProvider<'_>>,
@@ -4739,9 +4791,10 @@ fn lower_transfer_segment_batch(
                     )
                 });
                 if aggregate_layouts.is_empty() || !flow_events_contain_aggregate_assign(&decl.flow_events) {
-                    return transfer_function_for_with_options_and_syntax_facts(
+                    return transfer_function_for_with_compiled_options_and_syntax_facts(
                         decl,
                         transfer_options,
+                        transfer_matchers,
                         assignment_values,
                         call_receivers,
                     );
@@ -4752,9 +4805,10 @@ fn lower_transfer_segment_batch(
                     &resolved.type_aliases,
                     aggregate_layouts,
                 );
-                transfer_function_for_with_options_and_syntax_facts(
+                transfer_function_for_with_compiled_options_and_syntax_facts(
                     &resolved,
                     transfer_options,
+                    transfer_matchers,
                     assignment_values,
                     call_receivers,
                 )

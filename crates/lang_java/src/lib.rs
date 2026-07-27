@@ -8,9 +8,10 @@ use bonsai_lang_api::{
         collect_kinds, language_from_pack, node_text, package_module_segments_with_workspace_prefix,
         parse_with, span_of, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, AssignValueKind, DeclIndex, DeclKind, FileSnapshot, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ParseRecoveryEdit, SyntaxTree, TypeAliasBinding, Vfs, Visibility,
+    AdapterContext, AdapterError, AssignValueKind, ConditionEquality, ConditionExpressionFact,
+    ConditionOperandFact, DeclIndex, DeclKind, FileSnapshot, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ParseRecoveryEdit,
+    StaticScalarValue, SyntaxTree, TypeAliasBinding, Vfs, Visibility,
 };
 use parse_recovery::java_parse_recovery_edits;
 use tree_sitter::{Language, Node, Tree};
@@ -141,6 +142,8 @@ impl LanguageAdapter for JavaAdapter {
             return index;
         };
         let src = snapshot.text.as_bytes();
+        populate_java_condition_expressions(&mut index.branch_conditions, &tree, file, src);
+        populate_java_static_scalar_facts(&mut index, &tree, file, src);
         // Phase-6 return-type extraction: `T method() {}` populates
         // `Decl.return_type` for `apply_assign_call_result_types`.
         bonsai_lang_api::populate_decl_return_types(&mut index, &tree, src, &HANDLER);
@@ -264,6 +267,188 @@ impl LanguageAdapter for JavaAdapter {
             imports: collect_java_imports(&tree, file, snapshot.text.as_bytes()),
         }
     }
+}
+
+fn populate_java_condition_expressions(
+    facts: &mut [bonsai_lang_api::BranchConditionFact],
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) {
+    for branch in collect_kinds(tree, &["if_statement"]) {
+        let branch_span = span_of(file, &branch);
+        let Some(condition) = branch.child_by_field_name("condition") else {
+            continue;
+        };
+        let Some(fact) = facts.iter_mut().find(|fact| fact.branch_span == branch_span) else {
+            continue;
+        };
+        fact.expression = Some(lower_java_condition_expression(condition, file, src));
+    }
+}
+
+fn lower_java_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionExpressionFact {
+    if node.kind() == "parenthesized_expression" {
+        if let Some(inner) = node.named_child(0) {
+            return lower_java_condition_expression(inner, file, src);
+        }
+    }
+    let span = span_of(file, &node);
+    if node.kind() == "unary_expression" {
+        if let Some(operand) = node
+            .child_by_field_name("operand")
+            .or_else(|| node.named_child(0))
+        {
+            let operator = src
+                .get(node.start_byte()..operand.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            if operator == Some("!") {
+                return ConditionExpressionFact::Not {
+                    span,
+                    operand: Box::new(lower_java_condition_expression(operand, file, src)),
+                };
+            }
+        }
+    }
+    if node.kind() == "binary_expression" {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            let operator = src
+                .get(left.end_byte()..right.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            match operator {
+                Some("||") => {
+                    return merge_java_condition_junction(
+                        span,
+                        lower_java_condition_expression(left, file, src),
+                        lower_java_condition_expression(right, file, src),
+                        false,
+                    );
+                }
+                Some("&&") => {
+                    return merge_java_condition_junction(
+                        span,
+                        lower_java_condition_expression(left, file, src),
+                        lower_java_condition_expression(right, file, src),
+                        true,
+                    );
+                }
+                Some("==" | "!=") => {
+                    return ConditionExpressionFact::Equality {
+                        span,
+                        relation: if operator == Some("==") {
+                            ConditionEquality::Equal
+                        } else {
+                            ConditionEquality::NotEqual
+                        },
+                        left: java_condition_operand(left, file, src),
+                        right: java_condition_operand(right, file, src),
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+    ConditionExpressionFact::Atom { span }
+}
+
+fn merge_java_condition_junction(
+    span: Span,
+    left: ConditionExpressionFact,
+    right: ConditionExpressionFact,
+    all: bool,
+) -> ConditionExpressionFact {
+    let mut operands = Vec::new();
+    let mut push = |operand: ConditionExpressionFact| match (all, operand) {
+        (true, ConditionExpressionFact::All { operands: nested, .. })
+        | (false, ConditionExpressionFact::Any { operands: nested, .. }) => operands.extend(nested),
+        (_, operand) => operands.push(operand),
+    };
+    push(left);
+    push(right);
+    if all {
+        ConditionExpressionFact::All { span, operands }
+    } else {
+        ConditionExpressionFact::Any { span, operands }
+    }
+}
+
+fn java_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
+    ConditionOperandFact {
+        span: span_of(file, &node),
+        value_flow: bonsai_lang_api::kit::expression_flow_from_node(node, file, src),
+        static_string: java_static_string_literal(node, src),
+    }
+}
+
+fn java_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "string_literal" {
+        return None;
+    }
+    let text = node_text(&node, src);
+    let inner = text.strip_prefix('"')?.strip_suffix('"')?;
+    (!inner.contains('\\')).then(|| inner.to_string())
+}
+
+fn java_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
+    match node.kind() {
+        "string_literal" => Some(StaticScalarValue::String(java_static_string_literal(node, src)?)),
+        "true" => Some(StaticScalarValue::Boolean(true)),
+        "false" => Some(StaticScalarValue::Boolean(false)),
+        "null_literal" => Some(StaticScalarValue::Null),
+        _ => None,
+    }
+}
+
+fn populate_java_static_scalar_facts(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    let static_values: std::collections::HashMap<_, _> =
+        collect_kinds(tree, &["string_literal", "true", "false", "null_literal"])
+            .into_iter()
+            .filter_map(|node| {
+                let value = java_static_scalar(node, src)?;
+                let span = span_of(file, &node);
+                Some(((span.start, span.end), value))
+            })
+            .collect();
+    let call_values: std::collections::HashMap<_, _> =
+        collect_kinds(tree, &["method_invocation", "object_creation_expression"])
+            .into_iter()
+            .map(|node| {
+                let span = span_of(file, &node);
+                ((span.start, span.end), node)
+            })
+            .collect();
+    for fact in &mut index.assignment_values {
+        if fact.direct_call_name.is_none() {
+            continue;
+        }
+        let Some(call) = call_values.get(&(fact.value_span.start, fact.value_span.end)) else {
+            continue;
+        };
+        let Some(arguments) = call.child_by_field_name("arguments") else {
+            continue;
+        };
+        let mut cursor = arguments.walk();
+        let argument_nodes: Vec<_> = arguments.named_children(&mut cursor).collect();
+        if argument_nodes.is_empty() {
+            continue;
+        }
+        let values: Option<Vec<_>> = argument_nodes
+            .into_iter()
+            .map(|argument| java_static_scalar(argument, src))
+            .collect();
+        fact.exact_static_call_args = values;
+    }
+    for fact in &mut index.call_receivers {
+        fact.static_value = static_values
+            .get(&(fact.receiver_span.start, fact.receiver_span.end))
+            .cloned();
+    }
+    bonsai_lang_api::kit::populate_call_argument_static_values(index, tree, file, src, java_static_scalar);
 }
 
 /// Build per-method type-alias bindings (`Foo bar` → `bar : Foo`) by

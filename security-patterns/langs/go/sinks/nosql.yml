@@ -17,6 +17,10 @@
   constraints:
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    nosql_filter:
+      filter_arg_index: 1
+      literal_value_operators: ["$eq"]
   match_examples:
   - name: mongo find with bson filter
     code: |

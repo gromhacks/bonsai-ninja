@@ -1377,6 +1377,7 @@ fn has_taint_predicate(rule: &Rule) -> bool {
             bonsai_security::rule::ConstraintKind::ArgTainted { .. }
                 | bonsai_security::rule::ConstraintKind::AnyArgTainted { .. }
                 | bonsai_security::rule::ConstraintKind::ReceiverTainted { .. }
+                | bonsai_security::rule::ConstraintKind::ReceiverOriginCallbackParamReachesCall { .. }
         )
     })
 }

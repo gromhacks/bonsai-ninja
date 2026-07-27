@@ -340,9 +340,14 @@ fn idg_service_drops_when_workspace_root_invalidated() {
 
     let ws = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::full_prewarm())
         .expect("open ws");
-    assert!(ws.db().idg_service().is_some());
-    ws.db().invalidate_idg_service();
+    let service = ws.db().idg_service().expect("canonical service");
+    let linkage = service.global_linkage_index();
+    ws.release_idg_service_cache();
     assert!(ws.db().idg_service().is_none());
+    assert!(
+        Arc::ptr_eq(&linkage, &ws.compiler_linkage_index()),
+        "releasing graph readers must retain the canonical compiler linkage"
+    );
     let svc = ws.build_and_seed_idg_service();
     assert!(svc.segment_count() >= 1);
 
@@ -426,4 +431,83 @@ fn configured_and_scoped_idgs_never_replace_the_canonical_default() {
         ws.db().idg_service().is_none(),
         "a scoped build in a cold workspace must leave the canonical slot empty"
     );
+}
+
+#[test]
+fn configured_scoped_idg_persists_once_and_reuses_the_paged_service() {
+    use bonsai_common::FuncId;
+
+    let tmp = std::env::temp_dir().join(format!(
+        "bonsai-scoped-idg-persistence-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp dir");
+    write_file(
+        &tmp,
+        "app.py",
+        "def entry(value):\n    return helper(value)\n\ndef helper(value):\n    return value\n",
+    );
+
+    let ws =
+        Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::query_only()).expect("open ws");
+    let global = ws.compiler_linkage_index();
+    let files = ws.vfs().all_files();
+    let funcs: Vec<FuncId> = files
+        .iter()
+        .flat_map(|file| global.functions_in(*file))
+        .map(|decl| FuncId::new(decl.symbol.raw()))
+        .collect();
+    let call_graph = ws.cached_resolved_call_graph();
+    let options = bonsai_idg::TransferOptions {
+        include_unresolved_call_result_passthrough: true,
+        ..Default::default()
+    };
+    let first = ws.build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph(
+        &options,
+        &files,
+        &funcs,
+        call_graph.as_ref(),
+    );
+    assert!(first.segment_count() >= 1);
+    assert!(
+        ws.db().idg_service().is_none(),
+        "a persisted scoped graph must not replace the canonical default"
+    );
+
+    let sidecars: Vec<_> = std::fs::read_dir(tmp.join(".bonsai"))
+        .expect("read .bonsai")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(".transfer.") && name.ends_with(".factstore"))
+        })
+        .collect();
+    assert_eq!(sidecars.len(), 1, "one exact scoped transfer sidecar is expected");
+    assert!(
+        std::fs::metadata(&sidecars[0])
+            .expect("scoped sidecar metadata")
+            .len()
+            > 0,
+        "scoped transfer sidecar must contain compiler graph facts"
+    );
+
+    let reused = ws.build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph(
+        &options,
+        &files,
+        &funcs,
+        call_graph.as_ref(),
+    );
+    assert!(
+        Arc::ptr_eq(&first, &reused),
+        "an unchanged scoped compiler generation must reuse one paged query service"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }

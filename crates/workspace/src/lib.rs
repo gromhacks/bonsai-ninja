@@ -19,14 +19,16 @@ pub mod dataflow_disk;
 pub mod decl_name_index;
 pub mod decorators;
 pub mod enclosing_index;
+mod exact_body_cache;
+mod factstore_cleanup;
 pub mod flow_ids;
 pub mod flow_ids_disk;
 pub mod flow_query;
+mod idg_persistence;
 pub mod linkage_sidecar;
 pub mod semantic_context;
 pub mod taint_index;
 pub mod taint_index_disk;
-pub mod transitive_callers;
 pub mod value_flow;
 pub mod value_flow_disk;
 
@@ -45,13 +47,14 @@ use cross_module::CrossModuleTracer;
 use dataflow::DataFlowCache;
 use decl_name_index::DeclNameIndex;
 use enclosing_index::EnclosingIndex;
+use exact_body_cache::{estimated_exact_body_bytes, ExactBodyCache};
 use flow_ids::FlowIdCache;
+use idg_persistence::IdgSidecarWriteGuard;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{io::Read, path::Path, sync::Arc};
 use taint_index::TaintGraphIndex;
 use thiserror::Error;
-use transitive_callers::TransitiveCallersIndex;
 use value_flow::ValueFlowCache;
 
 pub use bonsai_db::{
@@ -68,6 +71,7 @@ pub use semantic_context::{
 #[derive(Clone)]
 pub struct SourceReachableCallGraph {
     pub graph: Arc<bonsai_callgraph::ResolvedCallGraph>,
+    pub linkage_index: Arc<GlobalIndex>,
     pub files: Vec<FileId>,
     pub funcs: Vec<FuncId>,
     pub reached_targets: usize,
@@ -77,10 +81,10 @@ pub struct SourceReachableCallGraph {
 ///
 /// The wrapper keeps the containing [`DeclIndex`] alive while exposing the
 /// selected declaration through [`std::ops::Deref`]. Compiler consumers can
-/// therefore inspect complete flow events without cloning a function body or
-/// retaining bodies for unrelated workspace files.
+/// therefore inspect complete flow events without cloning a function body.
+/// The workspace retains only a memory-scheduled hot set of file bodies.
 pub struct ExactDecl {
-    file_index: DeclIndex,
+    file_index: Arc<DeclIndex>,
     position: usize,
 }
 
@@ -124,6 +128,33 @@ fn has_summary_output(global: &bonsai_index::GlobalIndex, func: FuncId) -> bool 
             .linkage_facts(SymbolId::new(func.raw()))
             .is_some_and(|facts| facts.has_summary_output)
         || summary_output_shape(&decl.flow_events)
+}
+
+fn target_emission_requires_callee(
+    global: &bonsai_index::GlobalIndex,
+    scoped_linkage: &AHashMap<SymbolId, bonsai_index::FunctionLinkageFacts>,
+    edge: &bonsai_callgraph::CallEdge,
+) -> bool {
+    let caller = SymbolId::new(edge.from.raw());
+    let consumed_or_writeback = scoped_linkage
+        .get(&caller)
+        .or_else(|| global.linkage_facts(caller))
+        .is_some_and(|facts| {
+            facts
+                .consumed_call_results
+                .iter()
+                .any(|consumed| spans_overlap(*consumed, edge.span))
+                || facts
+                    .calls
+                    .iter()
+                    .any(|call| call.has_writeback_arg && spans_overlap(call.span, edge.span))
+        });
+    if consumed_or_writeback {
+        return true;
+    }
+    global
+        .decl_of(SymbolId::new(edge.to.raw()))
+        .is_some_and(|decl| !decl.receiver_field_writes.is_empty())
 }
 
 fn summary_output_shape(events: &[FlowEvent]) -> bool {
@@ -414,15 +445,12 @@ struct Inner {
     /// directly; this cache is a presentation projection, not another taint
     /// engine or source-seeding path.
     value_flow: ValueFlowCache,
-    /// Workspace-wide singleton for the interprocedural taint engine's
-    /// internal caches (resolver answers per `(caller_func, call_span)`,
-    /// alias maps per file, function summaries, local bindings). Every
-    /// per-source / per-query run shares the same instance, so the
-    /// resolver memo lands once per call site instead of per
-    /// `InterTaintCaches::default()`. Held in an `Arc` so the dataflow
-    /// cache can take a sharing reference at workspace open. Cleared
-    /// on file edits via `InterTaintCaches::clear()` (interior
-    /// mutability through `parking_lot::RwLock`).
+    /// Workspace-wide singleton for reusable taint-support facts (resolver
+    /// answers per `(caller_func, call_span)`, alias maps, local bindings, and
+    /// compatibility summaries). IDG query surfaces share this instance so
+    /// syntax-derived support facts are compiled once per call site. Held in
+    /// an `Arc` for the dataflow compatibility cache and cleared on edits via
+    /// `InterTaintCaches::clear()`.
     inter_taint: Arc<InterTaintCaches>,
     /// Memoised workspace-wide resolved call graph. The graph is a
     /// pure function of the indexed decls + import maps + adapter
@@ -437,32 +465,39 @@ struct Inner {
     /// owns the same table when present; this slot serves syntax/graph callers
     /// that do not otherwise require an IDG. Cleared on file edits.
     compiler_linkage: parking_lot::RwLock<Option<Arc<GlobalIndex>>>,
+    /// Declaration/type-only compiler symbol table used by syntax lookup.
+    ///
+    /// Targeted semantic sessions take exclusive ownership of this table,
+    /// enrich it with demand-projected linkage, and hand that same allocation
+    /// to their temporary IDG. This prevents a broad query from retaining one
+    /// full linkage index beside a second scoped compiler header.
+    compiler_headers: parking_lot::RwLock<Option<Arc<GlobalIndex>>>,
+    /// Memory-scheduled hot set of exact lowered file bodies. Broad compiler
+    /// phases still stream every file; repeated query/attribution lookups reuse
+    /// these immutable bodies until LRU eviction.
+    exact_bodies: ExactBodyCache,
     /// Workspace-wide cache of `(source_func, seed_set) →
     /// EntryTaintGraph`. Lifted out of the per-invocation
     /// `build_findings_chain_aware` map so a second
     /// `taint-analysis`/`source-analysis` against the same workspace
     /// (within one CLI process or one SDK session) is a lookup
-    /// instead of a full per-source interprocedural pass.
+    /// instead of recomputing the same source-seeded IDG projection.
     taint_index: TaintGraphIndex,
     /// One source/taint scan at a time may own the index's active semantic
     /// configuration and write-through session. The scan's internal IDG work
     /// remains parallel.
     taint_analysis_serial: Mutex<()>,
-    /// Single-flight guard for the canonical default workspace IDG. Configured
-    /// services use AnalyzerDb's per-fingerprint OnceLock map.
-    idg_default_build_serial: Mutex<()>,
+    /// One workspace IDG compiler build at a time. AnalyzerDb's
+    /// fingerprint-keyed OnceLock map deduplicates identical configured
+    /// services; this guard also prevents different exact semantic variants
+    /// from overlapping their peak allocations on memory-constrained hosts.
+    idg_build_serial: Mutex<()>,
     /// Exact compiler-pipeline identity for the current immutable in-memory
     /// source generation and workspace root. Native export deliberately drops
     /// the resident IDG between memory-heavy phases; retaining this small
     /// validation token prevents the reload from rescanning every source and
     /// dependency metadata file. Cleared with all semantic caches on edits.
     idg_pipeline_hash: Mutex<Option<(Option<std::path::PathBuf>, u64)>>,
-    /// Memoised transitive caller closures on the resolved call
-    /// graph. The closure is rulepack-independent — selection by
-    /// `source_returning_indices` is a post-hoc filter — so a
-    /// second `taint-analysis` against a different rulepack still
-    /// hits the cache. Cleared on file edit.
-    transitive_callers: TransitiveCallersIndex,
     /// `(class_sym, method_name) → Vec<FuncId>` and
     /// `class_sym → constructor FuncIds`. Replaces per-resolution
     /// linear scans of `decls_in(class_file)` in resolve.rs and
@@ -800,11 +835,12 @@ impl Workspace {
                 inter_taint: Arc::new(InterTaintCaches::default()),
                 resolved_call_graph: parking_lot::RwLock::new(None),
                 compiler_linkage: parking_lot::RwLock::new(None),
+                compiler_headers: parking_lot::RwLock::new(None),
+                exact_bodies: ExactBodyCache::default(),
                 taint_index: TaintGraphIndex::new(),
                 taint_analysis_serial: Mutex::new(()),
-                idg_default_build_serial: Mutex::new(()),
+                idg_build_serial: Mutex::new(()),
                 idg_pipeline_hash: Mutex::new(None),
-                transitive_callers: TransitiveCallersIndex::new(),
                 class_members: ClassMemberIndex::new(),
                 enclosing: EnclosingIndex::new(),
                 decl_names: DeclNameIndex::new(),
@@ -860,11 +896,10 @@ impl Workspace {
 
     /// Workspace-wide cache of source-seeded entry taint graphs
     /// keyed on `(source_func, sorted_seed_key)`. The security
-    /// analysis pipeline consults it before kicking off the
-    /// per-source interprocedural pass, so a second
-    /// `taint-analysis`/`source-analysis` query against the same
-    /// workspace + rulepack reuses the cached graph instead of
-    /// re-running the engine. Cleared on file edits.
+    /// analysis pipeline consults it before requesting a source-seeded IDG
+    /// projection, so a second `taint-analysis`/`source-analysis` query
+    /// against the same workspace + rulepack reuses the exact result. Cleared
+    /// on file edits.
     pub fn taint_index(&self) -> &TaintGraphIndex {
         &self.inner.taint_index
     }
@@ -874,15 +909,6 @@ impl Workspace {
     /// finish one another's write-through state.
     pub fn lock_taint_analysis(&self) -> parking_lot::MutexGuard<'_, ()> {
         self.inner.taint_analysis_serial.lock()
-    }
-
-    /// Workspace-cached transitive caller closures on the resolved
-    /// call graph. `taint-analysis` consults this when scheduling
-    /// caller-frontier expansion for source-returning helpers; the
-    /// closure is rulepack-independent so the cache survives
-    /// rulepack swaps. Builds on first request, cleared on edit.
-    pub fn transitive_callers(&self) -> &TransitiveCallersIndex {
-        &self.inner.transitive_callers
     }
 
     /// Workspace-level class/method/constructor index. Replaces
@@ -1102,11 +1128,60 @@ impl Workspace {
         linkage
     }
 
+    /// Complete workspace declaration/type headers without call linkage or
+    /// function bodies.
+    ///
+    /// Syntax-only symbol lookup shares this table. A later targeted semantic
+    /// phase can take its allocation exclusively and add only the linkage
+    /// proven necessary by its compiler worklist.
+    #[must_use]
+    pub fn compiler_header_index(&self) -> Arc<GlobalIndex> {
+        if let Some(headers) = self.inner.compiler_headers.read().clone() {
+            return headers;
+        }
+        let mut slot = self.inner.compiler_headers.write();
+        if let Some(headers) = slot.as_ref() {
+            return headers.clone();
+        }
+        let headers = self.inner.db.build_global_header_index();
+        *slot = Some(headers.clone());
+        headers
+    }
+
+    fn take_exclusive_compiler_header_index(&self) -> Arc<GlobalIndex> {
+        let mut slot = self.inner.compiler_headers.write();
+        if let Some(headers) = slot.take() {
+            if Arc::strong_count(&headers) == 1 {
+                return headers;
+            }
+            // Concurrent syntax readers keep their immutable generation.
+            // Restore the shared cache and build an independent exact header
+            // rather than cloning its complete workspace allocation.
+            *slot = Some(headers);
+        }
+        drop(slot);
+        self.inner.db.build_global_header_index()
+    }
+
     /// Release the resident canonical IDG between whole-workspace compiler
     /// phases. This never removes the validated sidecar or changes source
     /// state; the next semantic consumer reloads or rebuilds the same exact
     /// graph on demand.
+    ///
+    /// Preserve the service's compact compiler linkage before dropping graph
+    /// readers. Large persisted IDGs can map gigabytes of graph pages; later
+    /// scoped phases still need the same symbols, but must not keep that
+    /// canonical mapping resident beside a smaller query graph.
     pub fn release_idg_service_cache(&self) {
+        if self.inner.compiler_linkage.read().is_none() {
+            if let Some(service) = self.inner.db.idg_service() {
+                let linkage = service.global_linkage_index();
+                let mut slot = self.inner.compiler_linkage.write();
+                if slot.is_none() {
+                    *slot = Some(linkage);
+                }
+            }
+        }
         self.inner.db.invalidate_idg_service();
     }
 
@@ -1149,26 +1224,82 @@ impl Workspace {
         *self.inner.compiler_linkage.write() = None;
     }
 
-    /// Stream one exact file body from its compiler object (or lower a cache
-    /// miss) and bind local declaration identities to stable workspace symbols.
+    /// Release the syntax-only declaration/type header cache.
+    ///
+    /// This controls allocation lifetime only; the next lookup rebuilds the
+    /// same symbols from immutable compiler objects.
+    pub fn release_compiler_header_cache(&self) {
+        *self.inner.compiler_headers.write() = None;
+    }
+
+    /// Release the memory-scheduled hot set of exact file bodies.
+    ///
+    /// Compiler objects and VFS snapshots remain authoritative, so a later
+    /// lookup replays the identical adapter-lowered body. Broad multi-phase
+    /// analyses use this after endpoint matching and callgraph scoping to keep
+    /// prior file bodies from overlapping a workspace IDG fixed point.
+    pub fn release_exact_body_cache(&self) {
+        self.inner.exact_bodies.clear();
+    }
+
+    /// Release the lowercased declaration-name projection after a syntax
+    /// candidate phase.
+    ///
+    /// Selected declarations and stable symbols remain owned by the caller;
+    /// a later syntax query recreates the same projection from compiler
+    /// headers.
+    pub fn release_decl_name_index_cache(&self) {
+        self.inner.decl_names.clear();
+    }
+
+    /// Return a shared exact file body, loading it from the memory-scheduled
+    /// hot cache or lowering it from the compiler object on a miss.
+    ///
+    /// Cache eviction controls allocation lifetime only. Every miss replays
+    /// the same Tree-sitter adapter IR and binds it to the same workspace
+    /// symbols.
+    #[must_use]
+    pub fn exact_decl_index_shared(&self, file: FileId) -> Option<Arc<DeclIndex>> {
+        let snapshot = self.inner.vfs.snapshot(file).ok()?;
+        self.inner.exact_bodies.get_or_insert_with(
+            (file, snapshot.version),
+            estimated_exact_body_bytes(snapshot.text.len()),
+            || {
+                let headers = self.compiler_header_index();
+                self.inner
+                    .db
+                    .decl_index_remapped_to_headers(headers.as_ref(), file)
+                    .map(Arc::new)
+            },
+        )
+    }
+
+    /// Compatibility wrapper returning an owned exact file body.
+    ///
+    /// Prefer [`Self::exact_decl_index_shared`] for read-only consumers so
+    /// repeated lookups do not clone the complete lowered body.
     #[must_use]
     pub fn exact_decl_index(&self, file: FileId) -> Option<DeclIndex> {
-        let linkage = self.compiler_linkage_index();
-        self.inner
-            .db
-            .decl_index_remapped_to_headers(linkage.as_ref(), file)
+        self.exact_decl_index_shared(file).map(|index| (*index).clone())
     }
 
     /// Return one exact declaration from the streamed compiler object without
     /// materializing a workspace-wide body index.
     #[must_use]
     pub fn exact_decl(&self, symbol: SymbolId) -> Option<ExactDecl> {
-        let linkage = self.compiler_linkage_index();
-        let file = linkage.declaring_file(symbol)?;
-        let file_index = self
-            .inner
-            .db
-            .decl_index_remapped_to_headers(linkage.as_ref(), file)?;
+        let headers = self.compiler_header_index();
+        let file = headers.declaring_file(symbol)?;
+        let snapshot = self.inner.vfs.snapshot(file).ok()?;
+        let file_index = self.inner.exact_bodies.get_or_insert_with(
+            (file, snapshot.version),
+            estimated_exact_body_bytes(snapshot.text.len()),
+            || {
+                self.inner
+                    .db
+                    .decl_index_remapped_to_headers(headers.as_ref(), file)
+                    .map(Arc::new)
+            },
+        )?;
         let position = file_index.defs.iter().position(|decl| decl.symbol == symbol)?;
         Some(ExactDecl { file_index, position })
     }
@@ -1251,7 +1382,42 @@ impl Workspace {
         target_funcs: &[FuncId],
         max_precision: Option<Precision>,
     ) -> SourceReachableCallGraph {
-        let global = self.compiler_linkage_index();
+        self.source_reachable_resolved_call_graph_with_scope(source_funcs, target_funcs, max_precision, false)
+    }
+
+    /// Compile the exact callgraph region needed to emit flows inside
+    /// `target_funcs`.
+    ///
+    /// Unlike a source-to-sink security query, syntax-flow inspection emits
+    /// rows only from functions that contain the query/filter hits. A
+    /// downstream callee body can affect such a row only when the callee is
+    /// itself a target or its compiler linkage advertises return, out-param,
+    /// receiver, or callback output. Restricting body compilation to those
+    /// syntax-derived capabilities avoids exploring unrelated application
+    /// behavior while retaining every semantic provider for the requested
+    /// target emissions.
+    pub fn target_emission_resolved_call_graph(
+        &self,
+        source_funcs: &[FuncId],
+        target_funcs: &[FuncId],
+        max_precision: Option<Precision>,
+    ) -> SourceReachableCallGraph {
+        self.source_reachable_resolved_call_graph_with_scope(source_funcs, target_funcs, max_precision, true)
+    }
+
+    fn source_reachable_resolved_call_graph_with_scope(
+        &self,
+        source_funcs: &[FuncId],
+        target_funcs: &[FuncId],
+        max_precision: Option<Precision>,
+        target_emissions_only: bool,
+    ) -> SourceReachableCallGraph {
+        let mut global = if target_emissions_only {
+            self.take_exclusive_compiler_header_index()
+        } else {
+            self.compiler_linkage_index()
+        };
+        let mut scoped_linkage: AHashMap<SymbolId, bonsai_index::FunctionLinkageFacts> = AHashMap::new();
         let target_set: AHashSet<FuncId> = target_funcs.iter().copied().collect();
         let mut reached_funcs: AHashSet<FuncId> = source_funcs.iter().copied().collect();
         let mut reverse_output_funcs: AHashSet<FuncId> = source_funcs
@@ -1261,14 +1427,41 @@ impl Workspace {
             .collect();
         let mut queued_files: AHashSet<FileId> = AHashSet::new();
         let mut built_files: AHashSet<FileId> = AHashSet::new();
-        for func in source_funcs {
-            if let Some(file) = global.declaring_file(SymbolId::new(func.raw())) {
+        let mut queued_funcs: AHashSet<FuncId> = AHashSet::new();
+        let mut built_funcs: AHashSet<FuncId> = AHashSet::new();
+        // Forward propagation starts at sources, while return-value
+        // propagation may enter a target caller from one of its callees.
+        // Compile both endpoint file sets up front so a target in another
+        // file cannot be invisible merely because the forward source walk
+        // has not visited its caller yet.
+        for func in source_funcs.iter().chain(target_funcs) {
+            if target_emissions_only {
+                queued_funcs.insert(*func);
+            } else if let Some(file) = global.declaring_file(SymbolId::new(func.raw())) {
                 queued_files.insert(file);
             }
         }
 
-        let mut known_edges_by_file: AHashMap<FileId, Vec<bonsai_callgraph::CallEdge>> = AHashMap::new();
-        let mut merged = bonsai_callgraph::CallGraph::new();
+        // Store each resolved edge once. Compact outgoing/incoming indexes
+        // drive the two monotone facts below:
+        //
+        // - ordinary source reachability propagates from caller to callee;
+        // - summary-output capability propagates from callee to caller.
+        //
+        // The previous implementation retained edges by file and rescanned
+        // the complete accumulated set after every compiler batch. On a
+        // highly connected workspace that was quadratic and also overlapped
+        // one unbounded batch graph with the complete retained graph.
+        let mut known_edges: Vec<bonsai_callgraph::CallEdge> = Vec::new();
+        let mut outgoing_edge_ids: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
+        let mut incoming_edge_ids: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
+        let mut admitted_edge_ids: AHashSet<usize> = AHashSet::new();
+        let mut pending_reached: Vec<FuncId> = reached_funcs.iter().copied().collect();
+        pending_reached.sort_unstable_by_key(|func| std::cmp::Reverse(func.raw()));
+        let mut processed_reached: AHashSet<FuncId> = AHashSet::new();
+        let mut pending_reverse_output: Vec<FuncId> = reverse_output_funcs.iter().copied().collect();
+        pending_reverse_output.sort_unstable_by_key(|func| std::cmp::Reverse(func.raw()));
+        let mut processed_reverse_output: AHashSet<FuncId> = AHashSet::new();
         let callgraph_context = bonsai_callgraph::ResolvedCallGraph::build_context(
             global.as_ref(),
             |file| {
@@ -1293,103 +1486,265 @@ impl Workspace {
                     .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported)
             },
         );
-        while !queued_files.is_empty() {
-            let mut batch: Vec<FileId> = queued_files.drain().collect();
-            batch.retain(|file| !built_files.contains(file));
-            if batch.is_empty() {
-                break;
-            }
-            batch.sort_by_key(|file| file.raw());
-            batch.dedup();
-
-            let batch_graph =
-                bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context(
-                    global.as_ref(),
-                    |file| {
-                        bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for_uncached(file))
-                    },
-                    |file| {
-                        bonsai_lang_api::alias_map_from_import_specs(
-                            &self.inner.db.imports_for_uncached(file),
-                        )
-                            .into_iter()
-                            .collect()
-                    },
-                    &batch,
-                    &callgraph_context,
-                    |file| {
-                        self.inner
-                            .db
-                            .decl_index_remapped_to_headers(global.as_ref(), file)
-                    },
-                );
-            for edge in &batch_graph.inner().edges {
-                let Some(file) = global.declaring_file(SymbolId::new(edge.from.raw())) else {
+        while !queued_files.is_empty()
+            || !queued_funcs.is_empty()
+            || !pending_reached.is_empty()
+            || !pending_reverse_output.is_empty()
+        {
+            while let Some(func) = pending_reached.pop() {
+                if !processed_reached.insert(func) {
+                    continue;
+                }
+                if target_emissions_only {
+                    if !built_funcs.contains(&func) {
+                        queued_funcs.insert(func);
+                    }
+                } else if let Some(file) = global.declaring_file(SymbolId::new(func.raw())) {
+                    if !built_files.contains(&file) {
+                        queued_files.insert(file);
+                    }
+                }
+                let Some(edge_ids) = outgoing_edge_ids.get(&func) else {
                     continue;
                 };
-                known_edges_by_file.entry(file).or_default().push(edge.clone());
-            }
-            for file in &batch {
-                built_files.insert(*file);
-            }
-
-            let mut newly_reached = Vec::new();
-            let mut changed = true;
-            while changed {
-                changed = false;
-                for edges in known_edges_by_file.values() {
-                    for edge in edges {
-                        if max_precision.is_some_and(|max| edge.precision > max) {
-                            continue;
-                        }
-                        if !reached_funcs.contains(&edge.from) {
-                            if reverse_output_funcs.contains(&edge.to) {
-                                merged.add_edge(edge.clone());
-                                if has_summary_output(global.as_ref(), edge.from) {
-                                    reverse_output_funcs.insert(edge.from);
-                                }
-                                if reached_funcs.insert(edge.from) {
-                                    newly_reached.push(edge.from);
-                                    changed = true;
-                                }
-                            }
-                            continue;
-                        }
-                        merged.add_edge(edge.clone());
-                        if reached_funcs.insert(edge.to) {
-                            newly_reached.push(edge.to);
-                            changed = true;
-                        }
+                for &edge_id in edge_ids {
+                    let edge = &known_edges[edge_id];
+                    admitted_edge_ids.insert(edge_id);
+                    let compile_callee = !target_emissions_only
+                        || target_set.contains(&edge.to)
+                        || target_emission_requires_callee(global.as_ref(), &scoped_linkage, edge);
+                    if compile_callee && reached_funcs.insert(edge.to) {
+                        pending_reached.push(edge.to);
                     }
                 }
             }
 
-            for func in newly_reached.drain(..) {
-                let Some(file) = global.declaring_file(SymbolId::new(func.raw())) else {
+            while let Some(callee) = pending_reverse_output.pop() {
+                if !processed_reverse_output.insert(callee) {
+                    continue;
+                }
+                let Some(edge_ids) = incoming_edge_ids.get(&callee) else {
                     continue;
                 };
-                if !built_files.contains(&file) {
-                    queued_files.insert(file);
+                for &edge_id in edge_ids {
+                    let edge = &known_edges[edge_id];
+                    if !has_summary_output(global.as_ref(), edge.from) {
+                        continue;
+                    }
+                    admitted_edge_ids.insert(edge_id);
+                    if reverse_output_funcs.insert(edge.from) {
+                        pending_reverse_output.push(edge.from);
+                    }
+                    if reached_funcs.insert(edge.from) {
+                        pending_reached.push(edge.from);
+                    }
+                }
+            }
+
+            if queued_files.is_empty() && queued_funcs.is_empty() {
+                continue;
+            }
+            let mut requested_funcs: Vec<FuncId> = queued_funcs.drain().collect();
+            requested_funcs.retain(|func| !built_funcs.contains(func));
+            requested_funcs.sort_unstable_by_key(|func| func.raw());
+            requested_funcs.dedup();
+
+            let mut batch: Vec<FileId> = if target_emissions_only {
+                requested_funcs
+                    .iter()
+                    .filter_map(|func| global.declaring_file(SymbolId::new(func.raw())))
+                    .collect()
+            } else {
+                queued_files.drain().collect()
+            };
+            if !target_emissions_only {
+                batch.retain(|file| !built_files.contains(file));
+            }
+            batch.sort_unstable_by_key(|file| file.raw());
+            batch.dedup();
+            if batch.is_empty() || (target_emissions_only && requested_funcs.is_empty()) {
+                continue;
+            }
+
+            let source_bytes: Vec<u64> = batch
+                .iter()
+                .map(|file| {
+                    self.inner
+                        .db
+                        .vfs()
+                        .snapshot(*file)
+                        .map_or(0, |snapshot| snapshot.text.len() as u64)
+                })
+                .collect();
+            for range in bonsai_common::resources::compiler_weighted_batches(
+                &source_bytes,
+                rayon::current_num_threads(),
+            ) {
+                let files = &batch[range];
+                let funcs: Vec<FuncId> = if target_emissions_only {
+                    let files: AHashSet<FileId> = files.iter().copied().collect();
+                    requested_funcs
+                        .iter()
+                        .copied()
+                        .filter(|func| {
+                            global
+                                .declaring_file(SymbolId::new(func.raw()))
+                                .is_some_and(|file| files.contains(&file))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let aliases_for_file =
+                    |file| bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for_uncached(file));
+                let alias_targets_for_file = |file| {
+                    bonsai_lang_api::alias_map_from_import_specs(&self.inner.db.imports_for_uncached(file))
+                        .into_iter()
+                        .collect()
+                };
+                let projected_linkage = parking_lot::Mutex::new(Vec::new());
+                let body_for_file = |file| {
+                    let index = self
+                        .inner
+                        .db
+                        .decl_index_remapped_to_headers(global.as_ref(), file);
+                    if target_emissions_only {
+                        if let Some(index) = index.as_ref() {
+                            projected_linkage
+                                .lock()
+                                .extend(global.project_linkage_from_remapped_file(index));
+                        }
+                    }
+                    index
+                };
+                let batch_graph = if target_emissions_only {
+                    bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_funcs_streaming_with_context(
+                        global.as_ref(),
+                        aliases_for_file,
+                        alias_targets_for_file,
+                        &funcs,
+                        &callgraph_context,
+                        body_for_file,
+                    )
+                } else {
+                    bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context(
+                        global.as_ref(),
+                        aliases_for_file,
+                        alias_targets_for_file,
+                        files,
+                        &callgraph_context,
+                        body_for_file,
+                    )
+                };
+                scoped_linkage.extend(projected_linkage.into_inner());
+                for edge in &batch_graph.inner().edges {
+                    if max_precision.is_some_and(|max| edge.precision > max) {
+                        continue;
+                    }
+                    let edge_id = known_edges.len();
+                    known_edges.push(edge.clone());
+                    outgoing_edge_ids.entry(edge.from).or_default().push(edge_id);
+                    incoming_edge_ids.entry(edge.to).or_default().push(edge_id);
+
+                    // A fact whose endpoint was processed before this caller
+                    // file existed must consume the new edge immediately.
+                    if processed_reached.contains(&edge.from) {
+                        admitted_edge_ids.insert(edge_id);
+                        let compile_callee = !target_emissions_only
+                            || target_set.contains(&edge.to)
+                            || target_emission_requires_callee(global.as_ref(), &scoped_linkage, edge);
+                        if compile_callee && reached_funcs.insert(edge.to) {
+                            pending_reached.push(edge.to);
+                        }
+                    }
+                    if processed_reverse_output.contains(&edge.to)
+                        && has_summary_output(global.as_ref(), edge.from)
+                    {
+                        admitted_edge_ids.insert(edge_id);
+                        if reverse_output_funcs.insert(edge.from) {
+                            pending_reverse_output.push(edge.from);
+                        }
+                        if reached_funcs.insert(edge.from) {
+                            pending_reached.push(edge.from);
+                        }
+                    }
+                }
+                if target_emissions_only {
+                    built_funcs.extend(funcs);
+                } else {
+                    built_files.extend(files.iter().copied());
                 }
             }
         }
 
         let mut return_corridor_funcs: AHashSet<FuncId> = AHashSet::new();
         if !target_set.is_empty() {
-            for edges in known_edges_by_file.values() {
-                for edge in edges {
-                    if max_precision.is_some_and(|max| edge.precision > max) {
-                        continue;
+            let mut target_callers_by_callee: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
+            for &target in &target_set {
+                if let Some(edge_ids) = outgoing_edge_ids.get(&target) {
+                    for &edge_id in edge_ids {
+                        let edge = &known_edges[edge_id];
+                        if max_precision.is_none_or(|max| edge.precision <= max) {
+                            target_callers_by_callee.entry(edge.to).or_default().push(edge_id);
+                        }
                     }
-                    if target_set.contains(&edge.from) && reached_funcs.contains(&edge.to) {
-                        merged.add_edge(edge.clone());
-                        reached_funcs.insert(edge.from);
-                        return_corridor_funcs.insert(edge.from);
-                        return_corridor_funcs.insert(edge.to);
+                }
+            }
+            for edge_ids in target_callers_by_callee.values_mut() {
+                edge_ids.sort_by_key(|edge_id| {
+                    let edge = &known_edges[*edge_id];
+                    (
+                        edge.from.raw(),
+                        edge.span.file.raw(),
+                        edge.span.start,
+                        edge.span.end,
+                        edge.precision.rank(),
+                    )
+                });
+            }
+
+            // A target can consume the return of another target, so one
+            // unordered pass over candidate edges is neither complete nor
+            // deterministic. Compile the exact reverse target-call relation
+            // to a least fixed point. This is a finite compiler worklist:
+            // every function is processed once and no depth/work cap changes
+            // the admitted graph.
+            let mut pending: Vec<FuncId> = reached_funcs.iter().copied().collect();
+            pending.sort_unstable_by_key(|func| std::cmp::Reverse(func.raw()));
+            let mut processed = AHashSet::default();
+            while let Some(callee) = pending.pop() {
+                if !processed.insert(callee) {
+                    continue;
+                }
+                let Some(edges) = target_callers_by_callee.get(&callee) else {
+                    continue;
+                };
+                for &edge_id in edges {
+                    let edge = &known_edges[edge_id];
+                    admitted_edge_ids.insert(edge_id);
+                    return_corridor_funcs.insert(edge.from);
+                    return_corridor_funcs.insert(edge.to);
+                    if reached_funcs.insert(edge.from) {
+                        pending.push(edge.from);
                     }
                 }
             }
         }
+
+        // Compact the compiler relation in place before allocating final
+        // adjacency. This moves no edge payload into a duplicate vector and
+        // releases the temporary reachability indexes before the resolved
+        // graph builds its canonical caller/callee tables.
+        let mut edge_id = 0usize;
+        known_edges.retain(|_| {
+            let admitted = admitted_edge_ids.contains(&edge_id);
+            edge_id += 1;
+            admitted
+        });
+        drop(admitted_edge_ids);
+        drop(outgoing_edge_ids);
+        drop(incoming_edge_ids);
+        let merged = bonsai_callgraph::CallGraph::from_unique_edges(known_edges);
 
         let reached_target_set: AHashSet<FuncId> = target_set
             .iter()
@@ -1415,23 +1770,30 @@ impl Workspace {
         };
         let mut relevant_funcs = relevant_funcs;
         relevant_funcs.extend(return_corridor_funcs);
-        let mut edges_by_from: AHashMap<FuncId, Vec<FuncId>> = AHashMap::new();
-        for edge in &merged.edges {
+        let mut edges_by_from: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
+        for (edge_id, edge) in merged.edges.iter().enumerate() {
             if reached_funcs.contains(&edge.to) {
-                edges_by_from.entry(edge.from).or_default().push(edge.to);
+                edges_by_from.entry(edge.from).or_default().push(edge_id);
             }
         }
         let mut provider_stack: Vec<FuncId> = relevant_funcs.iter().copied().collect();
         while let Some(func) = provider_stack.pop() {
-            let Some(callees) = edges_by_from.get(&func) else {
+            let Some(edge_ids) = edges_by_from.get(&func) else {
                 continue;
             };
-            for callee in callees {
-                if relevant_funcs.contains(callee) || !has_summary_output(global.as_ref(), *callee) {
+            for &edge_id in edge_ids {
+                let edge = &merged.edges[edge_id];
+                let callee = edge.to;
+                let needs_provider = if target_emissions_only {
+                    target_emission_requires_callee(global.as_ref(), &scoped_linkage, edge)
+                } else {
+                    has_summary_output(global.as_ref(), callee)
+                };
+                if relevant_funcs.contains(&callee) || !needs_provider {
                     continue;
                 }
-                relevant_funcs.insert(*callee);
-                provider_stack.push(*callee);
+                relevant_funcs.insert(callee);
+                provider_stack.push(callee);
             }
         }
         extend_func_set_with_semantic_callback_dispatchers_in_call_graph(
@@ -1445,7 +1807,9 @@ impl Workspace {
 
         let mut filtered = bonsai_callgraph::CallGraph::new();
         for edge in &merged.edges {
-            if semantic_funcs.contains(&edge.from) && semantic_funcs.contains(&edge.to) {
+            if semantic_funcs.contains(&edge.from)
+                && (semantic_funcs.contains(&edge.to) || target_emissions_only)
+            {
                 filtered.add_edge(edge.clone());
             }
         }
@@ -1462,8 +1826,19 @@ impl Workspace {
             .iter()
             .filter(|target| reached_funcs.contains(target))
             .count();
+        if target_emissions_only {
+            let mut header = Arc::try_unwrap(global)
+                .unwrap_or_else(|_| panic!("scoped compiler header unexpectedly shared"));
+            header.install_projected_linkage(scoped_linkage);
+            global = Arc::new(header);
+            let mut slot = self.inner.compiler_headers.write();
+            if slot.is_none() {
+                *slot = Some(global.clone());
+            }
+        }
         SourceReachableCallGraph {
             graph: Arc::new(bonsai_callgraph::ResolvedCallGraph::from_call_graph(filtered)),
+            linkage_index: global,
             files,
             funcs,
             reached_targets,
@@ -1484,7 +1859,7 @@ impl Workspace {
         if let Some(svc) = self.inner.db.idg_service() {
             return svc;
         }
-        let _build_guard = self.inner.idg_default_build_serial.lock();
+        let _build_guard = self.inner.idg_build_serial.lock();
         // The first caller may have completed while this caller waited.
         if let Some(svc) = self.inner.db.idg_service() {
             return svc;
@@ -1508,10 +1883,20 @@ impl Workspace {
         // workspace.
         let use_idg_sidecar = self.is_complete_workspace_index();
         if use_idg_sidecar {
-            if let Some(root) = self.root_path() {
-                if self.load_idg_sidecar(&root).ok().flatten().is_some() {
-                    if let Some(service) = self.inner.db.idg_service() {
-                        return service;
+            if let Some(root) = root_path.as_deref() {
+                match self.load_idg_sidecar(root) {
+                    Ok(Some(_)) => {
+                        if let Some(service) = self.inner.db.idg_service() {
+                            return service;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %bonsai_idg::workspace::idg_sidecar_path(root).display(),
+                            error = %error,
+                            "workspace IDG sidecar load failed; rebuilding exact graph"
+                        );
                     }
                 }
             }
@@ -1520,6 +1905,35 @@ impl Workspace {
                 complete_workspace = self.is_complete_workspace_index(),
                 "skipping workspace IDG sidecar load"
             );
+        }
+        // Own this target before starting expensive compiler work. A peer
+        // process may have published the graph while this process waited, so
+        // recheck under the advisory lock before rebuilding.
+        let persistence = if use_idg_sidecar {
+            root_path.as_deref().and_then(|root| {
+                let sidecar = bonsai_idg::workspace::idg_sidecar_path(root);
+                match IdgSidecarWriteGuard::acquire(&sidecar) {
+                    Ok(guard) => {
+                        if self.load_idg_sidecar(root).ok().flatten().is_some() {
+                            return None;
+                        }
+                        Some((sidecar, guard))
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %sidecar.display(),
+                            error = %error,
+                            "workspace IDG writer lock unavailable; building an exact resident graph"
+                        );
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
+        if let Some(service) = self.inner.db.idg_service() {
+            return service;
         }
         let cg = self.cached_resolved_call_graph();
         // Thread per-file alias maps into the IDG resolver so
@@ -1545,18 +1959,15 @@ impl Workspace {
         // open warm-starts. Failures (read-only filesystem, full disk)
         // are tracing-logged but not surfaced — the in-memory IDG is
         // still valid for this run.
-        if use_idg_sidecar {
-            if let Some(root) = self.root_path() {
-                let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
-                if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
-                    tracing::warn!(
-                        path = %sidecar.display(),
-                        error = %err,
-                        "workspace IDG save_to_disk failed"
-                    );
-                }
+        if let Some((sidecar, _guard)) = persistence.as_ref() {
+            if let Err(error) = ws.save_to_disk(sidecar, pipeline_hash) {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    error = %error,
+                    "workspace IDG save_to_disk failed"
+                );
             }
-        } else {
+        } else if !use_idg_sidecar {
             tracing::debug!(
                 complete_workspace = self.is_complete_workspace_index(),
                 "skipping workspace IDG sidecar save"
@@ -1593,13 +2004,20 @@ impl Workspace {
         let Some(root) = self.root_path() else {
             return Ok(None);
         };
-        let _build_guard = self.inner.idg_default_build_serial.lock();
+        let _build_guard = self.inner.idg_build_serial.lock();
         let pipeline_hash = self.cached_idg_workspace_pipeline_hash(Some(&root));
+        let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
+        let _sidecar_guard = IdgSidecarWriteGuard::acquire(&sidecar)?;
+        if let Ok(segment_count) = bonsai_idg::workspace::IdgWorkspace::validate_sidecar_layout_with_pipeline(
+            &sidecar,
+            pipeline_hash,
+        ) {
+            return Ok(Some(segment_count));
+        }
         let call_graph = self.cached_resolved_call_graph();
         let global = self.compiler_linkage_index();
         let transfer_options = default_workspace_idg_transfer_options(&self.inner.db);
         let semantics = bonsai_taint::compiler_idg_file_semantics(&self.inner.db);
-        let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
         let workspace =
             bonsai_idg::workspace_adapter::build_for_persistence_streaming_with_file_semantics_and_options(
                 global.as_ref(),
@@ -1635,9 +2053,16 @@ impl Workspace {
         if transfer_options.is_empty() {
             return self.build_and_seed_idg_service();
         }
+        let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
+        if let Some(service) = self.inner.db.idg_service_for_semantics(transfer_hash) {
+            return service;
+        }
+        let _build_guard = self.inner.idg_build_serial.lock();
+        if let Some(service) = self.inner.db.idg_service_for_semantics(transfer_hash) {
+            return service;
+        }
         let global = self.compiler_linkage_index();
         let root_path = self.root_path();
-        let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
         let pipeline_hash = self.cached_idg_transfer_pipeline_hash(root_path.as_deref(), transfer_hash);
         let use_idg_sidecar = self.is_complete_workspace_index();
         if use_idg_sidecar {
@@ -1660,6 +2085,39 @@ impl Workspace {
                 "skipping workspace transfer IDG sidecar load"
             );
         }
+        let persistence = if use_idg_sidecar {
+            root_path.as_deref().and_then(|root| {
+                let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
+                match IdgSidecarWriteGuard::acquire(&sidecar) {
+                    Ok(guard) => {
+                        if let Ok(Some(service)) = bonsai_idg::IdgQueryService::load_from_disk(
+                            &sidecar,
+                            pipeline_hash,
+                            global.clone(),
+                        ) {
+                            self.inner
+                                .db
+                                .set_idg_service_for_semantics(transfer_hash, Arc::new(service));
+                            return None;
+                        }
+                        Some((sidecar, guard))
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %sidecar.display(),
+                            error = %error,
+                            "workspace transfer IDG writer lock unavailable; building an exact resident graph"
+                        );
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
+        if let Some(service) = self.inner.db.idg_service_for_semantics(transfer_hash) {
+            return service;
+        }
         let cg = self.cached_resolved_call_graph();
         let db = &self.inner.db;
         let semantics = bonsai_taint::compiler_idg_file_semantics(db);
@@ -1674,18 +2132,15 @@ impl Workspace {
                     .decl_index_remapped_to_headers(global.as_ref(), file)
             },
         );
-        if use_idg_sidecar {
-            if let Some(root) = root_path.as_deref() {
-                let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
-                if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
-                    tracing::warn!(
-                        path = %sidecar.display(),
-                        error = %err,
-                        "workspace transfer IDG save_to_disk failed"
-                    );
-                }
+        if let Some((sidecar, _guard)) = persistence.as_ref() {
+            if let Err(error) = ws.save_to_disk(sidecar, pipeline_hash) {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    error = %error,
+                    "workspace transfer IDG save_to_disk failed"
+                );
             }
-        } else {
+        } else if !use_idg_sidecar {
             tracing::debug!(
                 complete_workspace = self.is_complete_workspace_index(),
                 "skipping workspace transfer IDG sidecar save"
@@ -1714,11 +2169,18 @@ impl Workspace {
         included_files: &[FileId],
     ) -> Arc<bonsai_idg::IdgQueryService> {
         let transfer_options = transfer_options.clone().canonicalized();
-        let global = self.compiler_linkage_index();
-        let root_path = self.root_path();
         let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
         let scope_hash = idg_file_scope_fingerprint(included_files);
-        let scoped_hash = transfer_hash ^ scope_hash ^ 0x5C0F_ED1D_65C0_9E5D_u64;
+        let scoped_hash = idg_scoped_semantics_fingerprint(transfer_hash, scope_hash, None, None);
+        if let Some(service) = self.inner.db.idg_service_for_semantics(scoped_hash) {
+            return service;
+        }
+        let _build_guard = self.inner.idg_build_serial.lock();
+        if let Some(service) = self.inner.db.idg_service_for_semantics(scoped_hash) {
+            return service;
+        }
+        let global = self.compiler_linkage_index();
+        let root_path = self.root_path();
         let pipeline_hash = self.cached_idg_transfer_pipeline_hash(root_path.as_deref(), scoped_hash);
         if let Some(root) = root_path.as_deref() {
             let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
@@ -1729,6 +2191,33 @@ impl Workspace {
                 let service = self.inner.db.set_idg_service_for_semantics(scoped_hash, service);
                 return service;
             }
+        }
+        let persistence = root_path.as_deref().and_then(|root| {
+            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
+            match IdgSidecarWriteGuard::acquire(&sidecar) {
+                Ok(guard) => {
+                    if let Ok(Some(service)) =
+                        bonsai_idg::IdgQueryService::load_from_disk(&sidecar, pipeline_hash, global.clone())
+                    {
+                        self.inner
+                            .db
+                            .set_idg_service_for_semantics(scoped_hash, Arc::new(service));
+                        return None;
+                    }
+                    Some((sidecar, guard))
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %sidecar.display(),
+                        error = %error,
+                        "workspace scoped transfer IDG writer lock unavailable; building an exact resident graph"
+                    );
+                    None
+                }
+            }
+        });
+        if let Some(service) = self.inner.db.idg_service_for_semantics(scoped_hash) {
+            return service;
         }
         let cg = build_resolved_call_graph_snapshot_for_files(&self.inner.db, included_files);
         let db = &self.inner.db;
@@ -1745,12 +2234,11 @@ impl Workspace {
                     .decl_index_remapped_to_headers(global.as_ref(), file)
             },
         );
-        if let Some(root) = root_path.as_deref() {
-            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
-            if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
+        if let Some((sidecar, _guard)) = persistence.as_ref() {
+            if let Err(error) = ws.save_to_disk(sidecar, pipeline_hash) {
                 tracing::warn!(
                     path = %sidecar.display(),
-                    error = %err,
+                    error = %error,
                     "workspace scoped transfer IDG save_to_disk failed"
                 );
             }
@@ -1781,6 +2269,150 @@ impl Workspace {
             included_funcs,
             call_graph,
         )
+    }
+
+    /// Build one exact file/function-scoped configured IDG sidecar and open it
+    /// through the paged query service.
+    ///
+    /// Broad security scans can have thousands of overlapping source/sink
+    /// corridors. Rebuilding a resident graph for each corridor repeats the
+    /// same compiler work and scales with query count rather than program
+    /// size. This path lowers each selected Tree-sitter compiler object once,
+    /// streams typed stitch records to disk, and reuses the resulting graph
+    /// for every closure. The file/function scope and transfer semantics are
+    /// all part of the sidecar identity.
+    pub fn build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph(
+        &self,
+        transfer_options: &bonsai_idg::TransferOptions,
+        included_files: &[FileId],
+        included_funcs: &[FuncId],
+        call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    ) -> Arc<bonsai_idg::IdgQueryService> {
+        let transfer_options = transfer_options.clone().canonicalized();
+        let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
+        let file_scope_hash = idg_file_scope_fingerprint(included_files);
+        let func_scope_hash = idg_func_scope_fingerprint(included_funcs);
+        let call_graph_hash = idg_call_graph_fingerprint(call_graph);
+        let scoped_hash = idg_scoped_semantics_fingerprint(
+            transfer_hash,
+            file_scope_hash,
+            Some(func_scope_hash),
+            Some(call_graph_hash),
+        );
+        if let Some(service) = self.inner.db.idg_service_for_semantics(scoped_hash) {
+            return service;
+        }
+
+        let _build_guard = self.inner.idg_build_serial.lock();
+        if let Some(service) = self.inner.db.idg_service_for_semantics(scoped_hash) {
+            return service;
+        }
+
+        let global = self.compiler_linkage_index();
+        let Some(root) = self.root_path() else {
+            let service = self.build_idg_service_with_transfer_options_for_files_and_call_graph(
+                &transfer_options,
+                included_files,
+                included_funcs,
+                call_graph,
+            );
+            return self.inner.db.set_idg_service_for_semantics(scoped_hash, service);
+        };
+        let pipeline_hash = self.cached_idg_transfer_pipeline_hash(Some(&root), scoped_hash);
+        let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(&root, scoped_hash);
+        if let Ok(Some(service)) =
+            bonsai_idg::IdgQueryService::load_from_disk(&sidecar, pipeline_hash, global.clone())
+        {
+            return self
+                .inner
+                .db
+                .set_idg_service_for_semantics(scoped_hash, Arc::new(service));
+        }
+        let _sidecar_guard = match IdgSidecarWriteGuard::acquire(&sidecar) {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    error = %error,
+                    "scoped transfer IDG writer lock unavailable; falling back to an exact resident graph"
+                );
+                let service = self.build_idg_service_with_transfer_options_for_files_and_call_graph(
+                    &transfer_options,
+                    included_files,
+                    included_funcs,
+                    call_graph,
+                );
+                return self.inner.db.set_idg_service_for_semantics(scoped_hash, service);
+            }
+        };
+        // The lock may have blocked behind another analyzer that published the
+        // same immutable generation. Reuse it instead of compiling twice.
+        if let Ok(Some(service)) =
+            bonsai_idg::IdgQueryService::load_from_disk(&sidecar, pipeline_hash, global.clone())
+        {
+            return self
+                .inner
+                .db
+                .set_idg_service_for_semantics(scoped_hash, Arc::new(service));
+        }
+
+        let semantics = bonsai_taint::compiler_idg_file_semantics(&self.inner.db);
+        let persisted = bonsai_idg::workspace_adapter::
+            build_for_persistence_streaming_with_file_semantics_and_options_for_files_and_funcs(
+                global.as_ref(),
+                call_graph,
+                semantics,
+                &transfer_options,
+                included_files,
+                included_funcs,
+                &sidecar,
+                |file| {
+                    self.inner
+                        .db
+                        .decl_index_remapped_to_headers(global.as_ref(), file)
+                },
+            )
+            .and_then(|workspace| workspace.save_into_disk(&sidecar, pipeline_hash))
+            .and_then(|()| {
+                bonsai_idg::IdgQueryService::load_from_disk(
+                    &sidecar,
+                    pipeline_hash,
+                    global.clone(),
+                )
+            });
+        match persisted {
+            Ok(Some(service)) => self
+                .inner
+                .db
+                .set_idg_service_for_semantics(scoped_hash, Arc::new(service)),
+            Ok(None) => {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    "scoped transfer IDG sidecar did not reopen; falling back to an exact resident graph"
+                );
+                let service = self.build_idg_service_with_transfer_options_for_files_and_call_graph(
+                    &transfer_options,
+                    included_files,
+                    included_funcs,
+                    call_graph,
+                );
+                self.inner.db.set_idg_service_for_semantics(scoped_hash, service)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    error = %error,
+                    "scoped transfer IDG persistence failed; falling back to an exact resident graph"
+                );
+                let service = self.build_idg_service_with_transfer_options_for_files_and_call_graph(
+                    &transfer_options,
+                    included_files,
+                    included_funcs,
+                    call_graph,
+                );
+                self.inner.db.set_idg_service_for_semantics(scoped_hash, service)
+            }
+        }
     }
 
     /// Build a file/function-scoped workspace IDG using an already
@@ -1843,13 +2475,39 @@ impl Workspace {
         *self.inner.complete_workspace_index.lock() = complete;
     }
 
-    /// Drop the persisted IDG sidecar (if any) so a stale snapshot
-    /// can't survive a file edit. Best-effort: missing file and
-    /// permission errors are swallowed since the in-memory invalidation
-    /// is the authoritative source of truth.
+    /// Drop persisted IDG sidecars after a file edit when no peer compiler
+    /// owns them. Header fingerprints already reject stale generations; this
+    /// best-effort cleanup only reclaims disk and must never unlink another
+    /// process's active publication target.
     fn delete_idg_sidecar(&self) {
         if let Some(root) = self.root_path() {
-            let _ = std::fs::remove_file(bonsai_idg::workspace::idg_sidecar_path(&root));
+            let remove_if_unowned = |path: &Path| match IdgSidecarWriteGuard::try_acquire(path) {
+                Ok(_guard) => {
+                    if let Err(error) = std::fs::remove_file(path) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %error,
+                                "stale IDG sidecar cleanup failed"
+                            );
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "skipping IDG sidecar cleanup owned by another compiler"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "could not establish IDG sidecar cleanup ownership"
+                    );
+                }
+            };
+            remove_if_unowned(&bonsai_idg::workspace::idg_sidecar_path(&root));
             let bonsai_dir = bonsai_common::workspace_bonsai_dir(&root);
             if let Ok(entries) = std::fs::read_dir(bonsai_dir) {
                 for entry in entries.flatten() {
@@ -1861,11 +2519,8 @@ impl Workspace {
                     }
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
-                    if name.starts_with("idg.v")
-                        && name.contains(".transfer.")
-                        && name.ends_with(".factstore")
-                    {
-                        let _ = std::fs::remove_file(entry.path());
+                    if name.contains(".transfer.") && idg_persistence::idg_sidecar_family(&name).is_some() {
+                        remove_if_unowned(&entry.path());
                     }
                 }
             }
@@ -1877,11 +2532,17 @@ impl Workspace {
     /// intentionally centralized so watch/SDK refresh, bulk ingest,
     /// and in-memory edits keep the same correctness contract.
     fn invalidate_after_file_change(&self, file: FileId) {
-        // A security scan owns a coherent source snapshot from match through
-        // IDG closure and sidecar commit. Saved-file refresh waits for that
-        // snapshot to finish instead of clearing its caches/write session
-        // midway through analysis.
         let _taint_analysis_guard = self.inner.taint_analysis_serial.lock();
+        let _idg_build_guard = self.inner.idg_build_serial.lock();
+        self.invalidate_after_file_change_locked(file);
+    }
+
+    /// Invalidate derived state while the caller owns both semantic-generation
+    /// guards. Mutating VFS contents and invalidating caches must be one
+    /// critical section: acquiring the guards only after `Vfs::write` would
+    /// let a concurrent compiler build observe a mixture of old indexes and
+    /// new source text.
+    fn invalidate_after_file_change_locked(&self, file: FileId) {
         self.inner.db.invalidate_file(file);
         // Dataflow tracks per-entry transitive file dependencies, so
         // retain unrelated in-memory facts while evicting entries that
@@ -1897,8 +2558,9 @@ impl Workspace {
         self.inner.inter_taint.clear();
         *self.inner.resolved_call_graph.write() = None;
         *self.inner.compiler_linkage.write() = None;
+        *self.inner.compiler_headers.write() = None;
+        self.inner.exact_bodies.clear();
         self.inner.taint_index.clear();
-        self.inner.transitive_callers.clear();
         self.inner.class_members.clear();
         self.inner.enclosing.invalidate_file(file);
         self.inner.decl_names.clear();
@@ -2489,6 +3151,11 @@ impl Workspace {
     }
 
     pub fn ingest_dir(&self, root: &Path) -> Result<Vec<FileId>, WorkspaceError> {
+        // A whole ingest publishes one coherent source generation. Security
+        // analysis and IDG compilation finish their current immutable
+        // snapshot before any VFS entry changes.
+        let _taint_analysis_guard = self.inner.taint_analysis_serial.lock();
+        let _idg_build_guard = self.inner.idg_build_serial.lock();
         *self.inner.root_label.lock() = root.display().to_string();
         self.set_complete_workspace_index(true);
         let canonical_root = canonical_workspace_root(root);
@@ -2499,7 +3166,7 @@ impl Workspace {
             let old_id = self.inner.vfs.lookup(path);
             let id = self.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
             if let Some(prev) = old_id {
-                self.invalidate_after_file_change(prev);
+                self.invalidate_after_file_change_locked(prev);
             }
             *self.inner.reparse_counter.lock() += 1;
             ingested.push(id);
@@ -2618,8 +3285,10 @@ impl Workspace {
     /// Remove one file from the live workspace. Used by watch/SDK
     /// refresh paths after an on-disk delete.
     pub fn remove_file_from_index(&self, path: &Path) -> Option<FileId> {
+        let _taint_analysis_guard = self.inner.taint_analysis_serial.lock();
+        let _idg_build_guard = self.inner.idg_build_serial.lock();
         let file = self.inner.vfs.remove(path)?;
-        self.invalidate_after_file_change(file);
+        self.invalidate_after_file_change_locked(file);
         *self.inner.reparse_counter.lock() += 1;
         Some(file)
     }
@@ -2634,15 +3303,20 @@ impl Workspace {
     /// exact command scopes rebuild from the current source tree.
     /// Flow-id labels and the reparse counter both bump.
     pub fn apply_edit(&self, path: &Path, new_text: String) -> FileId {
+        // Preserve the same lock order used by security analysis
+        // (`taint_analysis_serial` then `idg_build_serial`) so edits wait for
+        // the current compiler generation before changing its source snapshot.
+        let _taint_analysis_guard = self.inner.taint_analysis_serial.lock();
+        let _idg_build_guard = self.inner.idg_build_serial.lock();
         let old_id = self.inner.vfs.lookup(path);
         let id = self
             .inner
             .vfs
             .write(path.to_path_buf(), Arc::<str>::from(new_text));
         if let Some(prev) = old_id {
-            self.invalidate_after_file_change(prev);
+            self.invalidate_after_file_change_locked(prev);
         } else {
-            self.invalidate_after_file_change(id);
+            self.invalidate_after_file_change_locked(id);
         }
         *self.inner.reparse_counter.lock() += 1;
         id
@@ -2661,9 +3335,10 @@ impl Workspace {
     /// snapshot, so a warm query does not reparse the project merely to report
     /// syntax coverage.
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
-        for file in self.inner.vfs.all_files() {
-            let _ = self.inner.db.compiler_file_object_uncached(file);
-        }
+        let files = self.inner.vfs.all_files();
+        self.inner
+            .db
+            .visit_compiler_file_objects_uncached(&files, |_, _| {});
         self.inner.db.diagnostics()
     }
 
@@ -2697,8 +3372,9 @@ impl Workspace {
             }
         };
 
-        for &file in files {
-            match self.inner.db.compiler_file_object_uncached(file) {
+        self.inner
+            .db
+            .visit_compiler_file_objects_uncached(files, |file, object| match object {
                 Some(object) => {
                     for diagnostic in &object.diagnostics {
                         record_diagnostic(diagnostic);
@@ -2707,8 +3383,7 @@ impl Workspace {
                 None => {
                     missing_object_files.push(file);
                 }
-            }
-        }
+            });
         for diagnostic in self.inner.db.diagnostics() {
             record_diagnostic(&diagnostic);
         }
@@ -2935,17 +3610,14 @@ impl Workspace {
         //   2. Per-adapter constructor-name fallback against the
         //      class's methods (catches adapters that name `__init__`
         //      or `new` but don't tag the kind).
-        let constructors = self
-            .inner
-            .class_members
-            .constructors_of(&self.inner.db, class_sym);
+        let global = self.compiler_linkage_index();
+        let constructors = self.inner.class_members.constructors_of(&global, class_sym);
         if !constructors.is_empty() {
             return constructors
                 .into_iter()
                 .map(|func| SymbolId::new(func.raw()))
                 .collect();
         }
-        let global = self.inner.db.global_index();
         let Some(class_file) = global.declaring_file(class_sym) else {
             return Vec::new();
         };
@@ -2957,10 +3629,7 @@ impl Workspace {
             .unwrap_or(&[]);
         let mut out = Vec::new();
         for name in names {
-            let candidates = self
-                .inner
-                .class_members
-                .methods_of(&self.inner.db, class_sym, name);
+            let candidates = self.inner.class_members.methods_of(&global, class_sym, name);
             out.extend(candidates.into_iter().map(|func| SymbolId::new(func.raw())));
         }
         out.sort_by_key(|sym| sym.raw());
@@ -3453,16 +4122,20 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // names directly from numeric IDG places and always hydrates the exact
     // per-file compiler object instead of treating non-empty compact linkage
     // headers as complete function bodies.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 47;
+    // v48 (2026-07-25): compact linkage records AST-consumed call-result and
+    // write-back demand, and target-emission corridors compile only demanded
+    // return/mutation providers. Rebuild IDG and linkage sidecars so an older
+    // broad provider projection cannot be reused as the compiler contract.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 48;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
-/// Build-time producer fingerprint emitted by `build.rs` — combines
-/// `git rev-parse HEAD` with the working-tree dirty hash, folded into a
-/// `u64`. Presentation/aggregate metadata can retain this identity for
+/// Build-time producer fingerprint emitted by `build.rs`.
+///
+/// Presentation and aggregate metadata retain the release/commit identity for
 /// provenance. Semantic compiler sidecars use their own ABI version and exact
-/// source, dependency, matcher, rule, and transfer fingerprints so unrelated
-/// binary changes do not invalidate valid AST-derived facts.
+/// source, dependency, matcher, rule, and transfer fingerprints; producer
+/// identity is never used as a substitute for those compiler inputs.
 pub(crate) fn build_fingerprint_hash() -> u64 {
     const FINGERPRINT_HEX: &str = env!(
         "BONSAI_BUILD_FINGERPRINT_HASH",
@@ -3473,9 +4146,9 @@ pub(crate) fn build_fingerprint_hash() -> u64 {
 
 /// Analyzer build identity shared by semantic and presentation caches.
 ///
-/// The workspace build script binds this to the git commit plus the actual
-/// tracked/untracked dirty payload, so rebuilding after another local source
-/// edit cannot reuse artifacts produced by an older analyzer binary.
+/// The workspace build script binds this to the release version and Git
+/// commit. Cache correctness is governed separately by explicit semantic and
+/// source fingerprints.
 #[must_use]
 pub fn analyzer_build_fingerprint() -> &'static str {
     env!(
@@ -3516,6 +4189,99 @@ fn idg_file_scope_fingerprint(files: &[FileId]) -> u64 {
         hasher.absorb(&file.to_le_bytes());
         hasher.absorb_separator();
     }
+    hasher.finish()
+}
+
+fn idg_func_scope_fingerprint(funcs: &[FuncId]) -> u64 {
+    let mut func_ids: Vec<u32> = funcs.iter().map(|func| func.raw()).collect();
+    func_ids.sort_unstable();
+    func_ids.dedup();
+
+    let mut hasher = StableHasher::new();
+    hasher.absorb(b"bonsai-idg-func-scope-v1");
+    hasher.absorb_separator();
+    hasher.absorb(&(func_ids.len() as u64).to_le_bytes());
+    hasher.absorb_separator();
+    for func in func_ids {
+        hasher.absorb(&func.to_le_bytes());
+        hasher.absorb_separator();
+    }
+    hasher.finish()
+}
+
+fn idg_call_graph_fingerprint(call_graph: &bonsai_callgraph::ResolvedCallGraph) -> u64 {
+    let mut edges: Vec<_> = call_graph
+        .inner()
+        .edges
+        .iter()
+        .map(|edge| {
+            let kind = match edge.kind {
+                bonsai_callgraph::EdgeKind::Direct => 0_u8,
+                bonsai_callgraph::EdgeKind::Virtual => 1,
+                bonsai_callgraph::EdgeKind::Indirect => 2,
+                bonsai_callgraph::EdgeKind::Unknown => 3,
+            };
+            (
+                edge.from.raw(),
+                edge.to.raw(),
+                edge.span.file.raw(),
+                edge.span.start,
+                edge.span.end,
+                kind,
+                edge.precision.rank(),
+            )
+        })
+        .collect();
+    edges.sort_unstable();
+
+    let mut bindings: Vec<_> = call_graph.local_callable_bindings().collect();
+    bindings.sort_unstable_by(|left, right| {
+        (left.0.raw(), left.1, left.2.raw()).cmp(&(right.0.raw(), right.1, right.2.raw()))
+    });
+
+    let mut hasher = StableHasher::new();
+    hasher.absorb(b"bonsai-idg-call-graph-v1");
+    hasher.absorb_separator();
+    hasher.absorb(&(edges.len() as u64).to_le_bytes());
+    hasher.absorb_separator();
+    for (from, to, file, start, end, kind, precision) in edges {
+        hasher.absorb(&from.to_le_bytes());
+        hasher.absorb(&to.to_le_bytes());
+        hasher.absorb(&file.to_le_bytes());
+        hasher.absorb(&start.to_le_bytes());
+        hasher.absorb(&end.to_le_bytes());
+        hasher.absorb(&[kind, precision]);
+        hasher.absorb_separator();
+    }
+    hasher.absorb(&(bindings.len() as u64).to_le_bytes());
+    hasher.absorb_separator();
+    for (caller, name, target) in bindings {
+        hasher.absorb(&caller.raw().to_le_bytes());
+        hasher.absorb(&(name.len() as u64).to_le_bytes());
+        hasher.absorb(name.as_bytes());
+        hasher.absorb(&target.raw().to_le_bytes());
+        hasher.absorb_separator();
+    }
+    hasher.finish()
+}
+
+fn idg_scoped_semantics_fingerprint(
+    transfer_hash: u64,
+    file_scope_hash: u64,
+    func_scope_hash: Option<u64>,
+    call_graph_hash: Option<u64>,
+) -> u64 {
+    let mut hasher = StableHasher::new();
+    hasher.absorb(b"bonsai-idg-scoped-semantics-v2");
+    hasher.absorb_separator();
+    hasher.absorb(&transfer_hash.to_le_bytes());
+    hasher.absorb(&file_scope_hash.to_le_bytes());
+    hasher.absorb(&func_scope_hash.unwrap_or_default().to_le_bytes());
+    hasher.absorb(&call_graph_hash.unwrap_or_default().to_le_bytes());
+    hasher.absorb(&[
+        u8::from(func_scope_hash.is_some()),
+        u8::from(call_graph_hash.is_some()),
+    ]);
     hasher.finish()
 }
 
@@ -3888,6 +4654,15 @@ fn path_filter_matches(path: &str, filter: &str) -> bool {
     let filter = normalize_path_for_filter(filter);
     if filter.is_empty() {
         return false;
+    }
+    if let Some(root_relative) = filter.strip_prefix('^') {
+        let root_relative = root_relative.trim_start_matches('/');
+        if root_relative.is_empty() {
+            return false;
+        }
+        let path = path.trim_start_matches('/');
+        let root_relative = root_relative.trim_end_matches('/');
+        return path == root_relative || path.starts_with(&format!("{root_relative}/"));
     }
     if filter.contains('/') {
         return path_filter_with_separator_matches(&path, &filter);

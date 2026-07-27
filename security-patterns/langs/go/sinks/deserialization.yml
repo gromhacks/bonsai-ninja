@@ -6,7 +6,7 @@
   enabled: true
   language: go
   tag: insecure-deserialization
-  severity: medium
+  severity: high
   packages: ["encoding/gob"]
   cwe: [CWE-502]
   match:

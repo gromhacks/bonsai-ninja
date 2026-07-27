@@ -1,5 +1,7 @@
 - id: python.graphql.graphql_core_execute
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: graphql-injection
   severity: medium
@@ -26,10 +28,12 @@
       def example(schema, user_input):
           return graphql.graphql_sync(schema, 'safe')
     expect_no_match: true
-  description: "graphql.graphql_sync(tainted_query) - dynamic GraphQL documents can expose introspection or resolver-side injection paths."
+  description: "Disabled - accepting an untrusted GraphQL document is the normal server protocol, not injection by itself. Detect resolver dataflow into concrete SQL/NoSQL/OS/path sinks and model introspection or complexity policy separately."
 
 - id: python.graphql.graphql_core_graphql
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: graphql-injection
   severity: medium
@@ -57,10 +61,12 @@
       def example(schema, user_input):
           return graphql.graphql(schema, 'safe')
     expect_no_match: true
-  description: "graphql.graphql(schema, tainted_query) - dynamic GraphQL documents reach query execution."
+  description: "Disabled - accepting an untrusted GraphQL document is the normal server protocol, not injection by itself. Detect resolver dataflow into concrete sinks instead."
 
 - id: python.graphql.schema_execute
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: graphql-injection
   severity: medium
@@ -88,10 +94,12 @@
       def example(schema, user_input):
           return schema.execute('safe')
     expect_no_match: true
-  description: "schema.execute(tainted_query) - Graphene/graphql-core schema execution with attacker-controlled query text."
+  description: "Disabled - schema.execute is a normal GraphQL server boundary. Resolver dataflow to concrete sinks is the security boundary; treating every request document as injection creates unavoidable endpoint false positives."
 
 - id: python.graphql.strawberry_schema_execute
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: graphql-injection
   severity: high
@@ -124,10 +132,12 @@
       class Schema:
           def execute_sync(self, *args): pass
     expect_no_match: true
-  description: "Strawberry GraphQL schema.execute_sync(tainted_query) - attacker-controlled query string drives resolver execution and may probe introspection."
+  description: "Disabled - Strawberry executes attacker-authored GraphQL documents by design. Introspection and query-complexity policy require dedicated configuration evidence; resolver injection remains covered at concrete sinks."
 
 - id: python.graphql.ariadne_graphql_sync
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: graphql-injection
   severity: high
@@ -154,7 +164,7 @@
       def example(schema, user_input):
           return ariadne.graphql_sync(schema, '{ viewer { id } }')
     expect_no_match: true
-  description: "Ariadne ariadne.graphql_sync(schema, tainted_data) - synchronous GraphQL execution with attacker-controlled query body."
+  description: "Disabled - Ariadne receives attacker-authored request documents by design. Report resolver dataflow to concrete sinks instead of the protocol execution boundary."
 
 - id: python.graphql.gql_client_execute
   enabled: true

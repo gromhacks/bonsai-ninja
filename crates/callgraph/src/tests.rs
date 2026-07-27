@@ -204,14 +204,7 @@ fn insert_file(global: &mut GlobalIndex, file: FileId, defs: Vec<Decl>) {
     global.insert(DeclIndex {
         file,
         defs,
-        refs: Vec::new(),
-        assignment_values: Vec::new(),
-        aggregate_layouts: Vec::new(),
-        strings: Vec::new(),
-        comments: Vec::new(),
-        call_receivers: Vec::new(),
-        runtime_type_narrowings: Vec::new(),
-        branch_conditions: Vec::new(),
+        ..DeclIndex::default()
     });
 }
 
@@ -1559,24 +1552,33 @@ fn overloaded_call_drops_candidates_when_type_evidence_is_missing() {
     insert_file(
         &mut global,
         caller_file,
-        vec![decl(
-            caller_file,
-            0,
-            "entry",
-            vec![call_with_args(caller_file, "printResults", &["a", "b", "c"])],
+        vec![with_module_path(
+            decl(
+                caller_file,
+                0,
+                "entry",
+                vec![call_with_args(caller_file, "printResults", &["a", "b", "c"])],
+            ),
+            &["app"],
         )],
     );
     insert_file(
         &mut global,
         helper_file,
         vec![
-            with_params_and_types(
-                decl(helper_file, 1, "printResults", Vec::new()),
-                &[("a", "A"), ("b", "B"), ("c", "C")],
+            with_module_path(
+                with_params_and_types(
+                    decl(helper_file, 1, "printResults", Vec::new()),
+                    &[("a", "A"), ("b", "B"), ("c", "C")],
+                ),
+                &["app"],
             ),
-            with_params_and_types(
-                decl(helper_file, 2, "printResults", Vec::new()),
-                &[("a", "A"), ("b", "B"), ("c", "D")],
+            with_module_path(
+                with_params_and_types(
+                    decl(helper_file, 2, "printResults", Vec::new()),
+                    &[("a", "A"), ("b", "B"), ("c", "D")],
+                ),
+                &["app"],
             ),
         ],
     );
@@ -1589,6 +1591,34 @@ fn overloaded_call_drops_candidates_when_type_evidence_is_missing() {
         edges.len(),
         0,
         "missing caller type evidence must not fan out ambiguously"
+    );
+    let unresolved = vec![(
+        entry,
+        Span::new(
+            caller_file,
+            0,
+            u64::try_from("printResults".len()).expect("name length"),
+        ),
+    )];
+    assert_eq!(
+        cg.unresolved_workspace_call_sites().collect::<Vec<_>>(),
+        unresolved,
+        "workspace candidates without enough compiler evidence must be reported exactly"
+    );
+
+    let encoded = bonsai_common::wire::encode(&cg).expect("encode graph with resolver gap");
+    let decoded: ResolvedCallGraph =
+        bonsai_common::wire::decode(&encoded).expect("decode graph with resolver gap");
+    assert_eq!(
+        decoded.unresolved_workspace_call_sites().collect::<Vec<_>>(),
+        vec![(
+            entry,
+            Span::new(
+                caller_file,
+                0,
+                u64::try_from("printResults".len()).expect("name length"),
+            ),
+        )]
     );
 }
 
@@ -2214,6 +2244,10 @@ fn dynamic_parameter_receiver_resolves_only_unique_same_file_method() {
         cg.callees_of(entry).count(),
         0,
         "ambiguous local method names must not fan out from an untyped receiver"
+    );
+    assert!(
+        cg.unresolved_workspace_call_sites().next().is_none(),
+        "an untyped dynamic receiver is not workspace evidence merely because an unrelated method shares its tail"
     );
 }
 

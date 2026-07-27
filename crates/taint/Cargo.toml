@@ -21,7 +21,8 @@ bonsai_idg = { workspace = true }
 ahash = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
-parking_lot = "0.12"
+parking_lot = { workspace = true }
+lru = { workspace = true }
 
 [dev-dependencies]
 bonsai_lang_c = { workspace = true }

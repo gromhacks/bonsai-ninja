@@ -16,6 +16,7 @@ const WEIGHTED_COMPILER_UNIT_BASE_BYTES: u64 = 64 * BYTES_PER_MIB;
 const WEIGHTED_COMPILER_SOURCE_AMPLIFICATION: u64 = 40;
 const WEIGHTED_COMPILER_MIN_HEADROOM_BYTES: u64 = 128 * BYTES_PER_MIB;
 const WEIGHTED_COMPILER_HEADROOM_DIVISOR: u64 = 5;
+const WEIGHTED_SYNTAX_HEADROOM_BYTES: u64 = 384 * BYTES_PER_MIB;
 
 /// Return the effective memory limit available to the analyzer process.
 ///
@@ -80,6 +81,36 @@ pub fn compiler_weighted_batches(source_bytes: &[u64], cpu_workers: usize) -> Ve
     )
 }
 
+/// Partition Tree-sitter frontend units by their measured source sizes and
+/// the process's current resident working set.
+///
+/// Unlike [`syntax_worker_count`], this scheduler can safely keep several
+/// small files in flight while isolating a large file. Every returned range
+/// covers the input exactly once; memory changes batching only.
+#[must_use]
+pub fn syntax_weighted_batches(source_bytes: &[u64], cpu_workers: usize) -> Vec<Range<usize>> {
+    syntax_weighted_batches_for_limit_and_resident(
+        source_bytes,
+        cpu_workers,
+        effective_memory_limit_bytes(),
+        current_process_resident_bytes(),
+    )
+}
+
+fn syntax_weighted_batches_for_limit_and_resident(
+    source_bytes: &[u64],
+    cpu_workers: usize,
+    limit: Option<u64>,
+    resident_bytes: Option<u64>,
+) -> Vec<Range<usize>> {
+    let working_bytes = limit.map(|limit| {
+        let headroom = WEIGHTED_SYNTAX_HEADROOM_BYTES.min(limit.saturating_sub(1));
+        let resident = resident_bytes.unwrap_or(SYNTAX_RESIDENT_RESERVE_BYTES);
+        limit.saturating_sub(resident).saturating_sub(headroom).max(1)
+    });
+    weighted_batches_for_working_set(source_bytes, cpu_workers, working_bytes)
+}
+
 #[cfg(test)]
 fn compiler_weighted_batches_for_limit(
     source_bytes: &[u64],
@@ -97,6 +128,15 @@ fn compiler_weighted_batches_for_limit_and_resident(
 ) -> Vec<Range<usize>> {
     let cpu_workers = cpu_workers.max(1);
     let working_bytes = limit.map(|limit| weighted_working_memory_bytes(limit, resident_bytes));
+    weighted_batches_for_working_set(source_bytes, cpu_workers, working_bytes)
+}
+
+fn weighted_batches_for_working_set(
+    source_bytes: &[u64],
+    cpu_workers: usize,
+    working_bytes: Option<u64>,
+) -> Vec<Range<usize>> {
+    let cpu_workers = cpu_workers.max(1);
     let mut batches = Vec::new();
     let mut start = 0usize;
     while start < source_bytes.len() {
@@ -152,7 +192,11 @@ fn weighted_compiler_unit_bytes(source_bytes: u64) -> u64 {
 /// same detected process budget and exact-work contract.
 #[must_use]
 pub fn syntax_worker_count(cpu_workers: usize) -> usize {
-    syntax_worker_count_for_limit(cpu_workers, effective_memory_limit_bytes())
+    syntax_worker_count_for_limit_and_resident(
+        cpu_workers,
+        effective_memory_limit_bytes(),
+        current_process_resident_bytes(),
+    )
 }
 
 fn compiler_worker_count_for_limit(cpu_workers: usize, limit: Option<u64>) -> usize {
@@ -164,13 +208,20 @@ fn compiler_worker_count_for_limit(cpu_workers: usize, limit: Option<u64>) -> us
     )
 }
 
+#[cfg(test)]
 fn syntax_worker_count_for_limit(cpu_workers: usize, limit: Option<u64>) -> usize {
-    worker_count_for_limit(
-        cpu_workers,
-        SYNTAX_UNIT_TRANSIENT_BYTES,
-        SYNTAX_RESIDENT_RESERVE_BYTES,
-        limit,
-    )
+    syntax_worker_count_for_limit_and_resident(cpu_workers, limit, None)
+}
+
+fn syntax_worker_count_for_limit_and_resident(
+    cpu_workers: usize,
+    limit: Option<u64>,
+    resident_bytes: Option<u64>,
+) -> usize {
+    let reserved_bytes = resident_bytes
+        .map(|resident| resident.max(SYNTAX_RESIDENT_RESERVE_BYTES))
+        .unwrap_or(SYNTAX_RESIDENT_RESERVE_BYTES);
+    worker_count_for_limit(cpu_workers, SYNTAX_UNIT_TRANSIENT_BYTES, reserved_bytes, limit)
 }
 
 fn worker_count_for_limit(
@@ -296,13 +347,55 @@ const fn physical_memory_bytes() -> Option<u64> {
 
 #[cfg(target_os = "linux")]
 fn linux_cgroup_memory_limit_bytes() -> Option<u64> {
-    let v2 = read_numeric_limit("/sys/fs/cgroup/memory.max");
-    let v1 = read_numeric_limit("/sys/fs/cgroup/memory/memory.limit_in_bytes");
-    min_present(v2, v1)
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    linux_cgroup_limit_paths(&cgroup)
+        .iter()
+        .filter_map(|path| read_numeric_limit(path))
+        .min()
 }
 
-#[cfg(target_os = "linux")]
-fn read_numeric_limit(path: &str) -> Option<u64> {
+#[cfg(any(target_os = "linux", test))]
+fn linux_cgroup_limit_paths(cgroup: &str) -> Vec<std::path::PathBuf> {
+    use std::path::{Component, Path, PathBuf};
+
+    fn nested_limit_path(root: &Path, cgroup_path: &str, file: &str) -> PathBuf {
+        let mut path = root.to_path_buf();
+        for component in Path::new(cgroup_path).components() {
+            if let Component::Normal(component) = component {
+                path.push(component);
+            }
+        }
+        path.push(file);
+        path
+    }
+
+    let v2_root = Path::new("/sys/fs/cgroup");
+    let v1_root = Path::new("/sys/fs/cgroup/memory");
+    let mut paths = vec![v2_root.join("memory.max"), v1_root.join("memory.limit_in_bytes")];
+    for line in cgroup.lines() {
+        let mut fields = line.splitn(3, ':');
+        let Some(_hierarchy) = fields.next() else {
+            continue;
+        };
+        let Some(controllers) = fields.next() else {
+            continue;
+        };
+        let Some(cgroup_path) = fields.next() else {
+            continue;
+        };
+        if controllers.is_empty() {
+            paths.push(nested_limit_path(v2_root, cgroup_path, "memory.max"));
+        } else if controllers.split(',').any(|controller| controller == "memory") {
+            paths.push(nested_limit_path(v1_root, cgroup_path, "memory.limit_in_bytes"));
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn read_numeric_limit(path: &std::path::Path) -> Option<u64> {
     let raw = std::fs::read_to_string(path).ok()?;
     let raw = raw.trim();
     if raw.eq_ignore_ascii_case("max") {
@@ -323,9 +416,11 @@ fn min_present(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 mod tests {
     use super::{
         compiler_weighted_batches_for_limit, compiler_weighted_batches_for_limit_and_resident,
-        compiler_worker_count_for_limit, min_present, syntax_worker_count_for_limit, worker_count_for_limit,
+        compiler_worker_count_for_limit, min_present, syntax_weighted_batches_for_limit_and_resident,
+        syntax_worker_count_for_limit, syntax_worker_count_for_limit_and_resident, worker_count_for_limit,
         BYTES_PER_GIB,
     };
+    use super::{linux_cgroup_limit_paths, read_numeric_limit};
 
     #[test]
     fn configured_budget_cannot_raise_a_detected_machine_limit() {
@@ -364,6 +459,18 @@ mod tests {
     }
 
     #[test]
+    fn syntax_workers_subtract_the_live_compiler_working_set() {
+        assert_eq!(
+            syntax_worker_count_for_limit_and_resident(32, Some(3 * BYTES_PER_GIB), Some(2 * BYTES_PER_GIB),),
+            1
+        );
+        assert_eq!(
+            syntax_worker_count_for_limit_and_resident(32, Some(8 * BYTES_PER_GIB), Some(2 * BYTES_PER_GIB),),
+            8
+        );
+    }
+
+    #[test]
     fn weighted_batches_cover_every_unit_and_isolate_large_files() {
         let mib = 1024 * 1024;
         let batches =
@@ -391,5 +498,45 @@ mod tests {
             ),
             vec![0..6, 6..10]
         );
+    }
+
+    #[test]
+    fn weighted_syntax_batches_keep_small_files_parallel_beside_large_resident_state() {
+        assert_eq!(
+            syntax_weighted_batches_for_limit_and_resident(
+                &[1; 10],
+                8,
+                Some(3 * BYTES_PER_GIB),
+                Some(2 * BYTES_PER_GIB),
+            ),
+            vec![0..8, 8..10]
+        );
+    }
+
+    #[test]
+    fn nested_cgroup_v1_and_v2_paths_are_detected_without_path_escape() {
+        let paths = linux_cgroup_limit_paths(
+            "0::/kubepods.slice/pod-1\n7:cpu,memory:/docker/container-2\n8:cpu:/ignored\n",
+        );
+        assert!(paths.contains(&"/sys/fs/cgroup/kubepods.slice/pod-1/memory.max".into()));
+        assert!(paths.contains(&"/sys/fs/cgroup/memory/docker/container-2/memory.limit_in_bytes".into()));
+        assert!(!paths
+            .iter()
+            .any(|path| path.to_string_lossy().contains("ignored")));
+
+        let escaped = linux_cgroup_limit_paths("0::/../../outside\n");
+        assert!(escaped.contains(&"/sys/fs/cgroup/outside/memory.max".into()));
+    }
+
+    #[test]
+    fn cgroup_numeric_limit_parser_rejects_unbounded_and_zero_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let limit = dir.path().join("memory.max");
+        std::fs::write(&limit, "max\n").expect("write unbounded limit");
+        assert_eq!(read_numeric_limit(&limit), None);
+        std::fs::write(&limit, "0\n").expect("write zero limit");
+        assert_eq!(read_numeric_limit(&limit), None);
+        std::fs::write(&limit, "3145728\n").expect("write numeric limit");
+        assert_eq!(read_numeric_limit(&limit), Some(3_145_728));
     }
 }

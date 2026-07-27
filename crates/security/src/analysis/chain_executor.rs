@@ -20,6 +20,14 @@ struct SourceGroupMetrics {
 struct GroupTaintTargets {
     nodes: Option<Vec<bonsai_idg::WsNodeId>>,
     unresolved_sink_funcs: Option<AHashSet<FuncId>>,
+    target_relevance: Option<bonsai_idg::IdgTargetRelevance>,
+}
+
+struct SinkCandidate<'a> {
+    source: &'a RuleMatch,
+    call: &'a bonsai_taint::TaintedCall,
+    sink: &'a RuleMatch,
+    endpoint_identity_proven: bool,
 }
 
 impl GroupTaintTargets {
@@ -32,6 +40,60 @@ impl GroupTaintTargets {
     }
 }
 
+fn unique_named_overlap_span(
+    candidate_sinks: &[&RuleMatch],
+    language: &str,
+    call: &bonsai_taint::TaintedCall,
+) -> Option<Span> {
+    let mut unique = None;
+    for sink in candidate_sinks {
+        if sink.language != language
+            || sink.match_text != call.name
+            || !spans_overlap(call.call_span, sink.span)
+        {
+            continue;
+        }
+        match unique {
+            Some(span) if span != sink.span => return None,
+            Some(_) => {}
+            None => unique = Some(sink.span),
+        }
+    }
+    unique
+}
+
+fn tainted_call_kind_matches_sink(call: &TaintedCall, sink_rule: &Rule) -> bool {
+    match sink_rule.match_spec.kind {
+        MatchKind::Call | MatchKind::New => call.kind == bonsai_taint::TaintedCallKind::Call,
+        MatchKind::Write => call.kind == bonsai_taint::TaintedCallKind::Write,
+        MatchKind::Return => call.kind == bonsai_taint::TaintedCallKind::Return,
+        MatchKind::Read | MatchKind::Param | MatchKind::Missing => false,
+    }
+}
+
+fn sink_endpoint_identity_is_proven(
+    call: &TaintedCall,
+    sink: &RuleMatch,
+    sink_kind: MatchKind,
+    exact_span_exists: bool,
+    uniquely_named_overlap_span: Option<Span>,
+) -> bool {
+    if exact_span_exists {
+        return sink.span == call.call_span;
+    }
+    // Return matchers deliberately canonicalise the reported endpoint to
+    // the returned value expression, while adapters attach the typed
+    // `FlowEvent::Return` to the enclosing return/yield statement. Those
+    // are two spans for one compiler endpoint, and a return expression
+    // cannot contain a second return endpoint. Preserve the typed boundary
+    // instead of requiring the synthetic evidence name (`return`) to equal
+    // the expression rendering.
+    if matches!(call.kind, bonsai_taint::TaintedCallKind::Return) && sink_kind == MatchKind::Return {
+        return spans_overlap(call.call_span, sink.span);
+    }
+    uniquely_named_overlap_span == Some(sink.span) && tainted_call_matches_sink(call, sink)
+}
+
 impl SourceGroupExecutor<'_> {
     fn plan_group_targets(
         &self,
@@ -39,9 +101,6 @@ impl SourceGroupExecutor<'_> {
         idg: &bonsai_idg::IdgQueryService,
     ) -> GroupTaintTargets {
         let nodes = self.sink_target_nodes_for_graph.and_then(|global_targets| {
-            if !group.corridor.target_nodes.is_empty() {
-                return Some(group.corridor.target_nodes.clone());
-            }
             let mut nodes: Vec<_> = global_targets
                 .iter()
                 .copied()
@@ -65,9 +124,25 @@ impl SourceGroupExecutor<'_> {
                 (!funcs.is_empty()).then_some(funcs)
             })
         });
+        let target_funcs = if nodes.is_some() {
+            unresolved_sink_funcs.as_ref()
+        } else {
+            Some(&group.corridor.terminal_sinks)
+        };
+        let target_nodes = nodes.as_deref().unwrap_or_default();
+        let target_relevance =
+            (!target_nodes.is_empty() || target_funcs.is_some_and(|funcs| !funcs.is_empty())).then(|| {
+                idg.target_relevance_within_funcs_with_max_precision(
+                    target_nodes,
+                    target_funcs,
+                    &group.corridor.lineage_funcs,
+                    self.config.max_edge_precision,
+                )
+            });
         GroupTaintTargets {
             nodes,
             unresolved_sink_funcs,
+            target_relevance,
         }
     }
 
@@ -104,18 +179,11 @@ impl SourceGroupExecutor<'_> {
         metrics: &mut SourceGroupMetrics,
     ) -> Arc<EntryTaintGraph> {
         let source_func = group.src_func_id;
-        let source = source_item.source;
-        let output_arg_names = self
-            .global
-            .decl_of(SymbolId::new(source_func.raw()))
-            .map(|decl| output_arg_names_for_match(self.pack, source, decl))
-            .unwrap_or_default();
-        let anchor = source_anchor_for_rule_match(self.pack, source);
         let mut seed_key = effective_source_seed_key(
             source_func,
             &source_item.seeds,
-            anchor,
-            &output_arg_names,
+            source_item.anchor,
+            &source_item.output_arg_names,
             self.global.as_ref(),
             idg,
         );
@@ -130,11 +198,7 @@ impl SourceGroupExecutor<'_> {
             metrics.group_graph_hits = metrics.group_graph_hits.saturating_add(1);
             Arc::clone(hit)
         } else {
-            let workspace_hit = if self.use_partitioned_scoped_idg {
-                None
-            } else {
-                self.workspace_taint_index.get(source_func, &seed_key)
-            };
+            let workspace_hit = self.workspace_taint_index.get(source_func, &seed_key);
             if let Some(hit) = workspace_hit {
                 metrics.workspace_graph_hits = metrics.workspace_graph_hits.saturating_add(1);
                 group_graphs.insert(seed_key, Arc::clone(&hit));
@@ -146,8 +210,8 @@ impl SourceGroupExecutor<'_> {
                         bonsai_taint::IdgTaintSource::rule_match(
                             source_func,
                             &source_item.seeds,
-                            anchor,
-                            &output_arg_names,
+                            source_item.anchor,
+                            &source_item.output_arg_names,
                         ),
                         self.ws.db(),
                         idg,
@@ -162,16 +226,14 @@ impl SourceGroupExecutor<'_> {
                         nodes: targets.nodes.as_deref(),
                         funcs: sink_funcs,
                         lineage_funcs,
+                        relevance: targets.target_relevance.as_ref(),
                     })
                     .with_max_precision(self.config.max_edge_precision)
                     .with_caches(self.taint_caches),
                 ));
-                let graph = if self.use_partitioned_scoped_idg {
-                    graph
-                } else {
-                    self.workspace_taint_index
-                        .insert_if_absent(source_func, seed_key.clone(), graph)
-                };
+                let graph = self
+                    .workspace_taint_index
+                    .insert_if_absent(source_func, seed_key.clone(), graph);
                 group_graphs.insert(seed_key, Arc::clone(&graph));
                 graph
             }
@@ -185,12 +247,16 @@ impl SourceGroupExecutor<'_> {
     fn sink_candidate_is_valid(
         &self,
         source_func: FuncId,
-        source: &RuleMatch,
-        call: &bonsai_taint::TaintedCall,
-        sink: &RuleMatch,
+        candidate: SinkCandidate<'_>,
         trace_index: &AHashMap<u64, &TaintedCallEdge>,
         metrics: &mut SourceGroupMetrics,
     ) -> bool {
+        let SinkCandidate {
+            source,
+            call,
+            sink,
+            endpoint_identity_proven,
+        } = candidate;
         if !source_can_precede_sink(self.ws, self.pack, source, source_func, sink, call.caller) {
             bonsai_diagnostics::debug_log!(
                 "security-taint",
@@ -203,6 +269,35 @@ impl SourceGroupExecutor<'_> {
                 call.name,
                 source.span,
                 sink.span,
+                call.call_span
+            );
+            return false;
+        }
+        let Some(sink_rule) = self.pack.find_rule_by_id(&sink.rule_id) else {
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "sink_match_missing_rule source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?} tainted_args={:?} receiver={:?}",
+                source.rule_id,
+                sink.rule_id,
+                call.caller.raw(),
+                call.name,
+                call.call_span,
+                call.kind,
+                call.tainted_args,
+                call.tainted_receiver
+            );
+            return false;
+        };
+        if !tainted_call_kind_matches_sink(call, sink_rule) {
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "sink_match_rejected_evidence_kind source_rule={} sink_rule={} sink_kind={:?} caller={} evidence={} evidence_kind={:?} span={:?}",
+                source.rule_id,
+                sink.rule_id,
+                sink_rule.match_spec.kind,
+                call.caller.raw(),
+                call.name,
+                call.kind,
                 call.call_span
             );
             return false;
@@ -268,21 +363,6 @@ impl SourceGroupExecutor<'_> {
             );
             return false;
         }
-        let Some(sink_rule) = self.pack.find_rule_by_id(&sink.rule_id) else {
-            bonsai_diagnostics::debug_log!(
-                "security-taint",
-                "sink_match_missing_rule source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?} tainted_args={:?} receiver={:?}",
-                source.rule_id,
-                sink.rule_id,
-                call.caller.raw(),
-                call.name,
-                call.call_span,
-                call.kind,
-                call.tainted_args,
-                call.tainted_receiver
-            );
-            return false;
-        };
         if !source_rule_allows_sink_tag(self.pack, &source.rule_id, sink_rule) {
             bonsai_diagnostics::debug_log!(
                 "security-taint",
@@ -313,6 +393,7 @@ impl SourceGroupExecutor<'_> {
                 sink_rule,
                 sink,
                 &current_call_taint_view,
+                endpoint_identity_proven,
                 self.factory_returns,
                 self.receiver_base_map_cell,
             ) {
@@ -347,7 +428,6 @@ impl SourceGroupExecutor<'_> {
         let chain_call_graph = self.chain_call_graph;
         let sink_by_func = self.sink_by_func;
         let san_by_func = self.san_by_func;
-        let workspace_callable_cache = self.workspace_callable_cache;
         let debug_taint_phase = self.debug_taint_phase;
         let src_func_id = group.src_func_id;
         let indices = group.indices.as_ref();
@@ -436,39 +516,66 @@ impl SourceGroupExecutor<'_> {
                 metrics.sink_candidate_checks = metrics
                     .sink_candidate_checks
                     .saturating_add(candidate_sinks.len());
-                // Multi-sink attribution: when several sinks live in
-                // the same function, prefer span-equality over text
-                // overlap. If ANY candidate sink shares a span with
-                // this call, attribute to span-matches only — text
-                // match is a fallback used when no sink overlaps the
-                // call's span (e.g. cross-file references). The
-                // Strapi `_.template(layout)` / `fs.readFileSync(path)`
-                // case is the canonical motivator: previously the same
-                // source attached to BOTH because text-matching is
-                // loose enough to bridge unrelated calls.
-                let any_exact_span_match = candidate_sinks
-                    .iter()
-                    .any(|snk| snk.language == src.language && snk.span == call.call_span);
-                let any_span_match = candidate_sinks
-                    .iter()
-                    .any(|snk| snk.language == src.language && spans_overlap(call.call_span, snk.span));
+                // Multi-sink attribution is compiler-endpoint based. Exact
+                // call spans win. When adapters expose a narrower callee span
+                // inside the call expression, accept it only when one unique
+                // same-name AST endpoint overlaps. Ambiguous nested calls are
+                // not interchangeable merely because their ranges overlap.
+                let any_exact_span_match = candidate_sinks.iter().any(|snk| {
+                    snk.language == src.language
+                        && snk.span == call.call_span
+                        && pack
+                            .find_rule_by_id(&snk.rule_id)
+                            .is_some_and(|rule| tainted_call_kind_matches_sink(call, rule))
+                });
+                let uniquely_named_overlap_span =
+                    unique_named_overlap_span(candidate_sinks, &src.language, call);
                 for snk in candidate_sinks {
                     if snk.language != src.language {
                         continue;
                     }
-                    if any_exact_span_match {
-                        if snk.span != call.call_span {
-                            continue;
-                        }
-                    } else if any_span_match {
-                        if !spans_overlap(call.call_span, snk.span) {
-                            continue;
-                        }
-                    } else if !tainted_call_matches_sink(call, snk) {
+                    let Some(sink_kind) = pack
+                        .find_rule_by_id(&snk.rule_id)
+                        .map(|rule| rule.match_spec.kind)
+                    else {
+                        continue;
+                    };
+                    let endpoint_identity_proven = sink_endpoint_identity_is_proven(
+                        call,
+                        snk,
+                        sink_kind,
+                        any_exact_span_match,
+                        uniquely_named_overlap_span,
+                    );
+                    if !endpoint_identity_proven {
+                        bonsai_diagnostics::debug_log!(
+                            "security-taint",
+                            "sink_match_rejected_endpoint source_rule={} sink_rule={} caller={} evidence={} evidence_kind={:?} evidence_span={:?} sink_text={} sink_kind={:?} sink_span={:?} exact_competitor={} unique_named_overlap={:?}",
+                            src.rule_id,
+                            snk.rule_id,
+                            call.caller.raw(),
+                            call.name,
+                            call.kind,
+                            call.call_span,
+                            snk.match_text,
+                            sink_kind,
+                            snk.span,
+                            any_exact_span_match,
+                            uniquely_named_overlap_span
+                        );
                         continue;
                     }
-                    if !self.sink_candidate_is_valid(src_func_id, src, call, snk, &trace_index, &mut metrics)
-                    {
+                    if !self.sink_candidate_is_valid(
+                        src_func_id,
+                        SinkCandidate {
+                            source: src,
+                            call,
+                            sink: snk,
+                            endpoint_identity_proven,
+                        },
+                        &trace_index,
+                        &mut metrics,
+                    ) {
                         continue;
                     }
                     if !emitted_for_source_sink_flow.insert(source_sink_flow_emission_key(idx, snk, call)) {
@@ -536,11 +643,7 @@ impl SourceGroupExecutor<'_> {
                             precision: evidence.chain_precision,
                             analysis_incomplete_reasons: unresolved_call_index
                                 .get_or_insert_with(|| {
-                                    GraphUnresolvedCallIndex::new(
-                                        global.as_ref(),
-                                        graph.as_ref(),
-                                        workspace_callable_cache,
-                                    )
+                                    GraphUnresolvedCallIndex::new(chain_call_graph, graph.as_ref())
                                 })
                                 .reasons_for_terminal_call(call),
                         },
@@ -602,3 +705,7 @@ impl SourceGroupExecutor<'_> {
         group_out
     }
 }
+
+#[cfg(test)]
+#[path = "chain_executor_tests.rs"]
+mod tests;

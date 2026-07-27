@@ -80,6 +80,10 @@ struct DbInner {
     /// before use; a changed file simply falls through to exact Tree-sitter
     /// lowering while unchanged objects remain reusable.
     compiler_object_store: RwLock<Option<Arc<compiler_object::CompilerObjectStore>>>,
+    /// Serializes persistent or ephemeral compiler-object generation. File
+    /// lowering inside one generation remains memory-aware and parallel; only
+    /// publication of the immutable generation is single-flight.
+    compiler_object_generation_build: Mutex<()>,
     /// Snapshots whose persisted diagnostics have already been published into
     /// the process sink. Broad phases may read one compiler object repeatedly;
     /// diagnostics remain complete without multiplying identical messages.
@@ -162,6 +166,7 @@ impl AnalyzerDb {
                 global_index_build: Mutex::new(()),
                 workspace_root: RwLock::new(None),
                 compiler_object_store: RwLock::new(None),
+                compiler_object_generation_build: Mutex::new(()),
                 compiler_diagnostics_published: RwLock::new(AHashSet::new()),
                 compiler_diagnostics_gate: Mutex::new(()),
                 idg_service: RwLock::new(None),
@@ -600,13 +605,14 @@ impl AnalyzerDb {
         Some(self.adapter_context_with_diagnostics(diagnostics, |ctx| adapter.extract_imports(file, ctx)))
     }
 
-    /// Build an import index for `file` without storing it in the
-    /// process cache. Broad rule scans use this streaming path when
-    /// import aliases are only needed while scanning the current file.
+    /// Build an import index for `file` without storing it in the process
+    /// cache. Broad rule scans use this streaming path when import aliases
+    /// are only needed while scanning the current file. Reuse the validated
+    /// compiler object when available: its imports are the exact output of
+    /// the same adapter/Tree-sitter snapshot, so reparsing here would
+    /// duplicate frontend work without adding syntax evidence.
     pub fn import_index_uncached(&self, file: FileId) -> Option<ImportIndex> {
-        let index = self.build_import_index_uncached(file);
-        self.release_syntax(file);
-        index
+        self.compiler_file_object_uncached(file)?.imports
     }
 
     /// Single source of truth for "the imports of `file`". Reads the
@@ -785,7 +791,19 @@ impl AnalyzerDb {
     #[must_use]
     pub fn decl_index_remapped_to_headers(&self, headers: &GlobalIndex, file: FileId) -> Option<DeclIndex> {
         self.decl_index_uncached(file)
-            .map(|index| headers.remap_file_to_existing_symbols(index))
+            .map(|index| self.remap_decl_index_to_headers(headers, index))
+    }
+
+    /// Bind an already-lowered file declaration index to immutable global
+    /// header symbols without reparsing its source.
+    ///
+    /// Compiler phases that consume a [`CompiledFileObject`] use this form so
+    /// the object's declaration and import IR can serve the complete file
+    /// pass. The same declaration-drift invariant as
+    /// [`Self::decl_index_remapped_to_headers`] applies.
+    #[must_use]
+    pub fn remap_decl_index_to_headers(&self, headers: &GlobalIndex, index: DeclIndex) -> DeclIndex {
+        headers.remap_file_to_existing_symbols(index)
     }
 
     fn build_global_index_uncached(&self) -> Arc<GlobalIndex> {

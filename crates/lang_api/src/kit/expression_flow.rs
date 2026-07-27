@@ -332,6 +332,8 @@ fn is_positional_aggregate(kind: &str) -> bool {
         "tuple"
             | "tuple_expression"
             | "tuple_literal"
+            | "set"
+            | "set_literal"
             | "list"
             | "list_literal"
             | "array"

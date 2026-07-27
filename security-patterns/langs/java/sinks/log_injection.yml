@@ -111,7 +111,7 @@
   enabled: true
   language: java
   tag: log-injection
-  severity: medium
+  severity: high
   cwe:
   - CWE-117
   packages:
@@ -157,7 +157,7 @@
   enabled: true
   language: java
   tag: log-injection
-  severity: medium
+  severity: high
   cwe:
   - CWE-117
   match:
@@ -185,7 +185,7 @@
   enabled: true
   language: java
   tag: log-injection
-  severity: medium
+  severity: high
   cwe:
   - CWE-117
   packages:
@@ -259,7 +259,7 @@
   enabled: true
   language: java
   tag: log-injection
-  severity: medium
+  severity: high
   cwe:
   - CWE-117
   match:
@@ -287,7 +287,7 @@
   enabled: true
   language: java
   tag: log-injection
-  severity: medium
+  severity: high
   cwe:
   - CWE-117
   packages:

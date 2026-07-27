@@ -90,6 +90,15 @@
   constraints:
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    character_escape:
+      value_arg_indices: [1]
+      required_mappings:
+      - {input: "\\", output: "\\5c"}
+      - {input: "*", output: "\\2a"}
+      - {input: "(", output: "\\28"}
+      - {input: ")", output: "\\29"}
+      - {input: "\u0000", output: "\\00"}
   match_examples:
   - name: ldapjs search options filter
     code: |

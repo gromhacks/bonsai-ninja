@@ -67,9 +67,13 @@ pub use report::{
     SecurityReport,
 };
 pub use rule::{
-    AnalysisSemantics, ArgTaintedSpec, ConstraintKind, ContextFlowRole, ContextFlowSemantics, FlowClass,
-    GuardProfile, MatchKind, MatchOrigin, MatchSpec, MustAliasSpec, PathContainmentGuardSemantics,
-    PayloadType, PostSinkPolicy, RequiresStateSpec, Rule, RuleConstraint, RuleKind, RuleTarget,
-    RuntimeTypeSpec, Severity, TrustClass,
+    AnalysisSemantics, ArgTaintedSpec, ConfiguredArgumentFactoryGuardSemantics, ConstraintKind,
+    ContextFlowRole, ContextFlowSemantics, FlowClass, GuardProfile, MatchKind, MatchOrigin, MatchSpec,
+    MustAliasSpec, NoSqlFilterSemantics, ParameterizedQuerySemantics, PathConsumerContainmentGuardSemantics,
+    PathContainmentGuardSemantics, PayloadType, PostSinkPolicy, RelativePathContainmentGuardSemantics,
+    RequiredNamedArgumentSemantics, RequiresStateSpec, Rule, RuleConstraint, RuleKind, RuleTarget,
+    RuntimeTypeSpec, Severity, TrustClass, UrlComponentSemantics, UrlDnsGuardSemantics,
+    UrlGuardRootSemantics, UrlHostAllowlistSemantics, UrlNetworkGuardSemantics, UrlRedirectGuardSemantics,
+    UrlSchemeGuardSemantics,
 };
 pub use sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};

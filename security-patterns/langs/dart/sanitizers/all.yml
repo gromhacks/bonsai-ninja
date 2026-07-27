@@ -549,6 +549,26 @@
     expect_match_text: [Uri.decodeFull]
   description: "Uri.decodeFull(s) - preserves taint."
 
+- id: dart.passthrough.mirrors_symbol
+  enabled: true
+  language: dart
+  tag: passthrough-transform
+  packages: ["dart:mirrors"]
+  imports: ["dart:mirrors"]
+  match:
+    kind: call
+    callee:
+      name: Symbol
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: mirror symbol preserves dynamic name
+    code: |
+      import 'dart:mirrors';
+      void test(String input) { Symbol(input); }
+    expect_match_text: [Symbol]
+  description: "dart:mirrors Symbol(name) preserves attacker control in the reflective name value."
+
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
 # class. Reviewer enumerates with `security sanitizers --tag

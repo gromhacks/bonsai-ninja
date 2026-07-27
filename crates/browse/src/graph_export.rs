@@ -277,7 +277,7 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
     );
 
     for file in ws.vfs().all_files() {
-        let Some(index) = ws.exact_decl_index(file) else {
+        let Some(index) = ws.exact_decl_index_shared(file) else {
             continue;
         };
         for decl in &index.defs {
