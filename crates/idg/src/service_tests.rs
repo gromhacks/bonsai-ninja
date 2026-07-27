@@ -161,9 +161,7 @@ fn contextual_closure_visited_spills_exact_states_and_erases_context_only_in_res
         "out-of-range contextual nodes must stay excluded"
     );
 
-    let mut nodes = Vec::new();
-    visited.append_nodes(&mut nodes);
-    nodes.sort_unstable_by_key(|node| node.0);
+    let nodes: Vec<_> = visited.nodes.iter().collect();
     assert_eq!(
         nodes.iter().filter(|node| **node == NodeId(7)).count(),
         1,
@@ -171,6 +169,21 @@ fn contextual_closure_visited_spills_exact_states_and_erases_context_only_in_res
     );
     assert_eq!(visited.len(), 65, "distinct context/node states remain exact");
     assert_eq!(nodes.len(), 64, "the context-erased result contains unique nodes");
+}
+
+#[test]
+fn closure_result_unions_root_and_context_states_in_node_order() {
+    let mut visited = ClosureVisited::new(32, 1);
+    assert!(visited.insert(NodeId(17), 0));
+    assert!(visited.insert(NodeId(3), 0));
+    assert!(visited.insert(NodeId(9), 1));
+    assert!(visited.insert(NodeId(3), 2));
+
+    assert_eq!(
+        visited.nodes(),
+        vec![NodeId(3), NodeId(9), NodeId(17)],
+        "context erasure must preserve every reached node exactly once in deterministic order"
+    );
 }
 
 #[test]
@@ -210,7 +223,48 @@ fn call_context_tabulation_is_finite_and_replays_recursive_returns() {
     });
     let (_, late_registered) = contexts.register_call(late_context, first);
     assert!(late_registered);
-    assert_eq!(contexts.returned_nodes_for(first_context), vec![returned]);
+    assert_eq!(contexts.returned_node_batch(first_context, None), vec![returned]);
+}
+
+#[test]
+fn call_context_return_nodes_replay_from_exact_bounded_batches() {
+    let boundary = ContextBoundaryKey {
+        caller: FuncId::new(1),
+        callee: FuncId::new(2),
+        span: span(0, 10, 20),
+    };
+    let mut contexts = CallContexts::new();
+    contexts.returned_nodes = SpillSet::new(64, 128, 128, true);
+    let (context, registered) = contexts.register_call(0, boundary);
+    assert!(registered);
+
+    let count = CONTEXT_REPLAY_BATCH_ENTRIES + 3;
+    for raw in 0..count {
+        assert_eq!(
+            contexts.complete_node_return(context, NodeId(raw as u32)),
+            vec![0],
+            "every new return must replay to the registered caller"
+        );
+    }
+    assert!(
+        contexts
+            .complete_node_return(context, NodeId((count - 1) as u32))
+            .is_empty(),
+        "duplicate returns must remain deduplicated after spilling"
+    );
+
+    let first = contexts.returned_node_batch(context, None);
+    assert_eq!(first.len(), CONTEXT_REPLAY_BATCH_ENTRIES);
+    let cursor = (u128::from(context) << 96) | u128::from(first.last().expect("first page").0);
+    let second = contexts.returned_node_batch(context, Some(cursor));
+    assert_eq!(
+        second,
+        vec![
+            NodeId(count as u32 - 3),
+            NodeId(count as u32 - 2),
+            NodeId(count as u32 - 1)
+        ]
+    );
 }
 
 #[test]
