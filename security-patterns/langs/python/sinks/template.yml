@@ -54,6 +54,10 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    receiver_factory_guard:
+      factories:
+      - name: SandboxedEnvironment
   match_examples:
   - name: jinja2 env from string instance
     code: |

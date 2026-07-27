@@ -13,6 +13,20 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer:
+        attribute: [path, resolve]
+      base_canonicalizer:
+        attribute: [fs, realpath]
+      path_constructor:
+        attribute: [path, resolve]
+      containment_check:
+        name: startsWith
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: [path.sep]
   match_examples:
   - name: fs readfile
     code: |
@@ -75,6 +89,20 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer:
+        attribute: [path, resolve]
+      base_canonicalizer:
+        attribute: [fs, realpath]
+      path_constructor:
+        attribute: [path, resolve]
+      containment_check:
+        name: startsWith
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: [path.sep]
   match_examples:
   - name: fs writefile
     code: |

@@ -337,10 +337,9 @@ Concrete wiring:
 | `ValueFlowCache` | `crates/workspace/src/value_flow.rs` | lazy `graph_for_with_caches`; explicit compatibility prewarm only | clear |
 | `FlowIdCache` | `crates/workspace/src/flow_ids.rs` | `prewarm_all` | clear |
 | `TaintGraphIndex` | `crates/workspace/src/taint_index.rs` | lazy on first `taint-analysis` | clear |
-| `TransitiveCallersIndex` | `crates/workspace/src/transitive_callers.rs` | lazy | clear |
-| `ClassMemberIndex` | `crates/workspace/src/class_index.rs` | lazy | clear |
-| `EnclosingIndex` | `crates/workspace/src/enclosing_index.rs` | lazy per file | per-file |
-| `DeclNameIndex` | `crates/workspace/src/decl_name_index.rs` | lazy | clear |
+| `ClassMemberIndex` | `crates/workspace/src/class_index.rs` | lazy | exact `GlobalIndex` snapshot identity |
+| `EnclosingIndex` | `crates/workspace/src/enclosing_index.rs` | lazy per file | exact `GlobalIndex` snapshot identity; all files reset together |
+| `DeclNameIndex` | `crates/workspace/src/decl_name_index.rs` | lazy | exact `GlobalIndex` snapshot identity |
 | `cached_resolved_call_graph` | `crates/workspace/src/lib.rs` | lazy | clear |
 | `inter_taint_caches` | `crates/workspace/src/lib.rs` | per-key lazy | clear |
 

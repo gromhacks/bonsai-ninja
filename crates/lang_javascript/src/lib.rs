@@ -6,8 +6,10 @@ use bonsai_lang_api::{
         collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
         with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
+    ConditionExpressionFact, ConditionOperandFact, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, StaticStringMapEntry, StaticStringMapFact,
+    TypeAliasBinding, Visibility,
 };
 use bonsai_lang_api::{CallArg, DeclKind, FlowEvent};
 use std::collections::{HashMap, HashSet};
@@ -73,7 +75,9 @@ impl LanguageAdapter for JavaScriptAdapter {
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-            apply_js_ts_commonjs_named_export_aliases(&mut decl_index, &tree, snapshot.text.as_bytes(), file);
+            let src = snapshot.text.as_bytes();
+            populate_ecmascript_compiler_facts(&mut decl_index, &tree, file, src);
+            apply_js_ts_commonjs_named_export_aliases(&mut decl_index, &tree, src, file);
         }
         // Module identity = workspace-relative path with the JS/TS extension stripped.
         let module_segments = ctx
@@ -187,6 +191,533 @@ impl LanguageAdapter for JavaScriptAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+/// Attach ECMAScript-specific syntax meaning to the language-neutral compiler
+/// IR. TypeScript deliberately reuses this lowering because its expression
+/// grammar extends ECMAScript; downstream engines see only typed boolean
+/// relations and exact decoded literal values.
+pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    for branch in collect_kinds(tree, &["if_statement"]) {
+        let branch_span = span_of(file, &branch);
+        let Some(condition) = branch.child_by_field_name("condition") else {
+            continue;
+        };
+        let Some(fact) = index
+            .branch_conditions
+            .iter_mut()
+            .find(|fact| fact.branch_span == branch_span)
+        else {
+            continue;
+        };
+        fact.expression = Some(lower_ecmascript_condition_expression(condition, file, src));
+    }
+
+    for node in collect_kinds(tree, &["string", "string_literal"]) {
+        let span = span_of(file, &node);
+        let Some(value) = ecmascript_static_string_literal(node, src) else {
+            continue;
+        };
+        if let Some(literal) = index.strings.iter_mut().find(|literal| literal.span == span) {
+            literal.static_value = Some(value);
+        }
+    }
+    index.static_string_maps = ecmascript_static_string_maps(index, tree, file, src);
+    index.character_substitutions = ecmascript_character_substitutions(&index.defs, tree, file, src);
+}
+
+fn ecmascript_static_string_maps(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<StaticStringMapFact> {
+    let mut maps = Vec::new();
+    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+        let Some(target_node) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(value_node) = declarator.child_by_field_name("value") else {
+            continue;
+        };
+        if target_node.kind() != "identifier" || value_node.kind() != "object" {
+            continue;
+        }
+        let target = node_text(&target_node, src).trim();
+        if target.is_empty() {
+            continue;
+        }
+        let Some(entries) = ecmascript_exact_string_map_entries(value_node, src) else {
+            continue;
+        };
+        let value_span = span_of(file, &value_node);
+        let Some(assignment_span) = index.assignment_values.iter().find_map(|fact| {
+            (fact.value_span == value_span && fact.target.as_deref() == Some(target))
+                .then_some(fact.assignment_span)
+        }) else {
+            continue;
+        };
+        maps.push(StaticStringMapFact {
+            assignment_span,
+            target: target.to_string(),
+            entries,
+        });
+    }
+    maps.sort_by_key(|fact| (fact.assignment_span.start, fact.assignment_span.end));
+    maps
+}
+
+fn ecmascript_exact_string_map_entries(object: Node<'_>, src: &[u8]) -> Option<Vec<StaticStringMapEntry>> {
+    let mut entries = Vec::new();
+    let mut cursor = object.walk();
+    for child in object.named_children(&mut cursor) {
+        if child.kind() != "pair" {
+            return None;
+        }
+        let key = child.child_by_field_name("key")?;
+        let value = child.child_by_field_name("value")?;
+        entries.push(StaticStringMapEntry {
+            key: ecmascript_static_property_name(key, src)?,
+            value: ecmascript_static_string_literal(value, src)?,
+        });
+    }
+    (!entries.is_empty()).then_some(entries)
+}
+
+fn ecmascript_static_property_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    ecmascript_static_string_literal(node, src).or_else(|| {
+        matches!(node.kind(), "property_identifier" | "identifier")
+            .then(|| node_text(&node, src).trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn ecmascript_character_substitutions(
+    defs: &[bonsai_lang_api::Decl],
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<CharacterSubstitutionFact> {
+    let mut facts = Vec::new();
+    for return_node in collect_kinds(tree, &["return_statement"]) {
+        let return_span = span_of(file, &return_node);
+        let Some(decl) = defs
+            .iter()
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) && decl.span.start <= return_span.start
+                    && return_span.end <= decl.span.end
+            })
+            .min_by_key(|decl| decl.span.len())
+        else {
+            continue;
+        };
+        let Some(expression) = return_node.named_child(0) else {
+            continue;
+        };
+        let Some((input_param_index, table, domain, transform_span)) =
+            ecmascript_character_substitution(expression, &decl.params, file, src)
+        else {
+            continue;
+        };
+        facts.push(CharacterSubstitutionFact {
+            function_span: decl.span,
+            transform_span,
+            input_param_index,
+            table,
+            domain,
+        });
+    }
+    facts.sort_by_key(|fact| (fact.function_span.start, fact.transform_span.start));
+    facts.dedup();
+    facts
+}
+
+fn ecmascript_character_substitution(
+    expression: Node<'_>,
+    params: &[String],
+    file: FileId,
+    src: &[u8],
+) -> Option<(usize, String, CharacterSubstitutionDomain, bonsai_common::Span)> {
+    let call = unwrap_ecmascript_expression(expression);
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let function = call.child_by_field_name("function")?;
+    if function.kind() != "member_expression" {
+        return None;
+    }
+    let receiver = function.child_by_field_name("object")?;
+    let method = function.child_by_field_name("property")?;
+    let method = node_text(&method, src).trim();
+    let arguments = ecmascript_call_arguments(call);
+
+    if method == "replace" {
+        let input = node_text(&receiver, src).trim();
+        let input_param_index = params.iter().position(|param| param == input)?;
+        let pattern = arguments.first().copied()?;
+        let callback = arguments.get(1).copied()?;
+        let characters = ecmascript_exact_regex_characters(pattern, src)?;
+        let (table, callback_parameter) = ecmascript_map_lookup_callback(callback, src)?;
+        if callback_parameter.is_empty() {
+            return None;
+        }
+        return Some((
+            input_param_index,
+            table,
+            CharacterSubstitutionDomain::ExactCharacters { characters },
+            span_of(file, &call),
+        ));
+    }
+
+    if method != "join" || receiver.kind() != "call_expression" {
+        return None;
+    }
+    let join_separator = arguments.first().copied()?;
+    if ecmascript_static_string_literal(join_separator, src).as_deref() != Some("") {
+        return None;
+    }
+    let map_function = receiver.child_by_field_name("function")?;
+    if map_function.kind() != "member_expression"
+        || map_function
+            .child_by_field_name("property")
+            .map(|property| node_text(&property, src).trim() == "map")
+            != Some(true)
+    {
+        return None;
+    }
+    let iterated = map_function.child_by_field_name("object")?;
+    let input = ecmascript_spread_only_array_input(iterated, src)?;
+    let input_param_index = params.iter().position(|param| param == input)?;
+    let callback = ecmascript_call_arguments(receiver).first().copied()?;
+    let (table, callback_parameter) = ecmascript_identity_fallback_map_callback(callback, src)?;
+    if callback_parameter.is_empty() {
+        return None;
+    }
+    Some((
+        input_param_index,
+        table,
+        CharacterSubstitutionDomain::TableKeysWithIdentityFallback,
+        span_of(file, &call),
+    ))
+}
+
+fn unwrap_ecmascript_expression(mut node: Node<'_>) -> Node<'_> {
+    while matches!(node.kind(), "parenthesized_expression" | "expression") && node.named_child_count() == 1 {
+        node = node.named_child(0).expect("single named child");
+    }
+    node
+}
+
+fn ecmascript_call_arguments(call: Node<'_>) -> Vec<Node<'_>> {
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return Vec::new();
+    };
+    let mut cursor = arguments.walk();
+    arguments.named_children(&mut cursor).collect()
+}
+
+fn ecmascript_spread_only_array_input<'a>(array: Node<'a>, src: &'a [u8]) -> Option<&'a str> {
+    if array.kind() != "array" || array.named_child_count() != 1 {
+        return None;
+    }
+    let spread = array.named_child(0)?;
+    if spread.kind() != "spread_element" {
+        return None;
+    }
+    let argument = spread.named_child(0)?;
+    (argument.kind() == "identifier").then(|| node_text(&argument, src).trim())
+}
+
+fn ecmascript_map_lookup_callback(callback: Node<'_>, src: &[u8]) -> Option<(String, String)> {
+    let (parameter, body) = ecmascript_arrow_parts(callback, src)?;
+    let (table, key) = ecmascript_subscript_parts(body, src)?;
+    (key == parameter).then_some((table.to_string(), parameter.to_string()))
+}
+
+fn ecmascript_identity_fallback_map_callback(callback: Node<'_>, src: &[u8]) -> Option<(String, String)> {
+    let (parameter, body) = ecmascript_arrow_parts(callback, src)?;
+    if body.kind() != "binary_expression" {
+        return None;
+    }
+    let left = body.child_by_field_name("left")?;
+    let right = body.child_by_field_name("right")?;
+    if src
+        .get(left.end_byte()..right.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim)
+        != Some("??")
+        || node_text(&right, src).trim() != parameter
+    {
+        return None;
+    }
+    let (table, key) = ecmascript_subscript_parts(left, src)?;
+    (key == parameter).then_some((table.to_string(), parameter.to_string()))
+}
+
+fn ecmascript_arrow_parts<'a>(arrow: Node<'a>, src: &'a [u8]) -> Option<(&'a str, Node<'a>)> {
+    if arrow.kind() != "arrow_function" {
+        return None;
+    }
+    let parameter_node = arrow
+        .child_by_field_name("parameter")
+        .or_else(|| arrow.child_by_field_name("parameters"))?;
+    let parameter = if parameter_node.kind() == "identifier" {
+        parameter_node
+    } else {
+        let mut stack = vec![parameter_node];
+        let mut found = None;
+        while let Some(node) = stack.pop() {
+            if node.kind() == "identifier" {
+                found = Some(node);
+                break;
+            }
+            let mut cursor = node.walk();
+            stack.extend(node.named_children(&mut cursor));
+        }
+        found?
+    };
+    let body = arrow.child_by_field_name("body")?;
+    Some((node_text(&parameter, src).trim(), body))
+}
+
+fn ecmascript_subscript_parts<'a>(subscript: Node<'a>, src: &'a [u8]) -> Option<(&'a str, &'a str)> {
+    if subscript.kind() != "subscript_expression" {
+        return None;
+    }
+    let object = subscript.child_by_field_name("object")?;
+    let index = subscript.child_by_field_name("index")?;
+    if object.kind() != "identifier" || index.kind() != "identifier" {
+        return None;
+    }
+    Some((node_text(&object, src).trim(), node_text(&index, src).trim()))
+}
+
+fn ecmascript_exact_regex_characters(regex: Node<'_>, src: &[u8]) -> Option<Vec<String>> {
+    if regex.kind() != "regex" {
+        return None;
+    }
+    let pattern = regex.child_by_field_name("pattern")?;
+    let pattern = node_text(&pattern, src);
+    let inner = pattern.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.starts_with('^') || inner.is_empty() {
+        return None;
+    }
+    let mut characters = Vec::new();
+    let mut chars = inner.chars();
+    while let Some(character) = chars.next() {
+        if character == '-' {
+            return None;
+        }
+        let decoded = if character == '\\' {
+            let escaped = chars.next()?;
+            if escaped.is_ascii_alphanumeric() {
+                return None;
+            }
+            escaped
+        } else {
+            character
+        };
+        characters.push(decoded.to_string());
+    }
+    characters.sort();
+    characters.dedup();
+    Some(characters)
+}
+
+fn lower_ecmascript_condition_expression(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) -> ConditionExpressionFact {
+    if node.kind() == "parenthesized_expression" {
+        if let Some(inner) = node.named_child(0) {
+            return lower_ecmascript_condition_expression(inner, file, src);
+        }
+    }
+
+    let span = span_of(file, &node);
+    if node.kind() == "unary_expression" {
+        if let Some(operand) = node
+            .child_by_field_name("argument")
+            .or_else(|| node.named_child(0))
+        {
+            let prefix = src
+                .get(node.start_byte()..operand.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            if prefix == Some("!") {
+                return ConditionExpressionFact::Not {
+                    span,
+                    operand: Box::new(lower_ecmascript_condition_expression(operand, file, src)),
+                };
+            }
+        }
+    }
+
+    if node.kind() == "binary_expression" {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            let operator = src
+                .get(left.end_byte()..right.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            match operator {
+                Some("||") => {
+                    return merge_ecmascript_condition_junction(
+                        span,
+                        lower_ecmascript_condition_expression(left, file, src),
+                        lower_ecmascript_condition_expression(right, file, src),
+                        false,
+                    );
+                }
+                Some("&&") => {
+                    return merge_ecmascript_condition_junction(
+                        span,
+                        lower_ecmascript_condition_expression(left, file, src),
+                        lower_ecmascript_condition_expression(right, file, src),
+                        true,
+                    );
+                }
+                Some("==" | "===" | "!=" | "!==") => {
+                    let relation = if matches!(operator, Some("==" | "===")) {
+                        ConditionEquality::Equal
+                    } else {
+                        ConditionEquality::NotEqual
+                    };
+                    return ConditionExpressionFact::Equality {
+                        span,
+                        relation,
+                        left: ecmascript_condition_operand(left, file, src),
+                        right: ecmascript_condition_operand(right, file, src),
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+
+    ConditionExpressionFact::Atom { span }
+}
+
+fn merge_ecmascript_condition_junction(
+    span: bonsai_common::Span,
+    left: ConditionExpressionFact,
+    right: ConditionExpressionFact,
+    all: bool,
+) -> ConditionExpressionFact {
+    let mut operands = Vec::new();
+    let mut push = |operand: ConditionExpressionFact| match (all, operand) {
+        (true, ConditionExpressionFact::All { operands: nested, .. })
+        | (false, ConditionExpressionFact::Any { operands: nested, .. }) => operands.extend(nested),
+        (_, operand) => operands.push(operand),
+    };
+    push(left);
+    push(right);
+    if all {
+        ConditionExpressionFact::All { span, operands }
+    } else {
+        ConditionExpressionFact::Any { span, operands }
+    }
+}
+
+fn ecmascript_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
+    ConditionOperandFact {
+        span: span_of(file, &node),
+        value_flow: bonsai_lang_api::kit::expression_flow_from_node(node, file, src),
+        static_string: ecmascript_static_string_literal(node, src),
+    }
+}
+
+fn ecmascript_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if !matches!(node.kind(), "string" | "string_literal") {
+        return None;
+    }
+    let text = node_text(&node, src);
+    let quote = text.as_bytes().first().copied()?;
+    if !matches!(quote, b'\'' | b'"') || text.as_bytes().last().copied() != Some(quote) {
+        return None;
+    }
+    let inner = text.get(1..text.len().checked_sub(1)?)?;
+    decode_ecmascript_string_contents(inner, quote as char)
+}
+
+fn decode_ecmascript_string_contents(inner: &str, quote: char) -> Option<String> {
+    let mut output = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            if matches!(character, '\r' | '\n') {
+                return None;
+            }
+            output.push(character);
+            continue;
+        }
+        let escaped = chars.next()?;
+        match escaped {
+            '\\' => output.push('\\'),
+            '\'' if quote == '\'' => output.push('\''),
+            '"' if quote == '"' => output.push('"'),
+            '/' => output.push('/'),
+            'b' => output.push('\u{0008}'),
+            'f' => output.push('\u{000c}'),
+            'n' => output.push('\n'),
+            'r' => output.push('\r'),
+            't' => output.push('\t'),
+            'v' => output.push('\u{000b}'),
+            '0' if !chars.peek().is_some_and(char::is_ascii_digit) => output.push('\0'),
+            'x' => output.push(decode_ecmascript_hex(&mut chars, 2)?),
+            'u' => {
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    let mut digits = String::new();
+                    for digit in chars.by_ref() {
+                        if digit == '}' {
+                            break;
+                        }
+                        if !digit.is_ascii_hexdigit() || digits.len() == 6 {
+                            return None;
+                        }
+                        digits.push(digit);
+                    }
+                    if digits.is_empty() {
+                        return None;
+                    }
+                    output.push(char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?);
+                } else {
+                    output.push(decode_ecmascript_hex(&mut chars, 4)?);
+                }
+            }
+            '\n' => {}
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            // ECMAScript identity escapes decode to the escaped code point.
+            // Decimal/octal escapes are context-sensitive and deliberately
+            // remain unknown.
+            other if !other.is_ascii_digit() => output.push(other),
+            _ => return None,
+        }
+    }
+    Some(output)
+}
+
+fn decode_ecmascript_hex(
+    chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
+    digits: usize,
+) -> Option<char> {
+    let mut value = 0_u32;
+    for _ in 0..digits {
+        value = value.checked_mul(16)?;
+        value = value.checked_add(chars.next()?.to_digit(16)?)?;
+    }
+    char::from_u32(value)
 }
 
 /// Type locals initialized by an ECMAScript array literal from the CST. This

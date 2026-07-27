@@ -12,6 +12,60 @@ fn conformance_traced() {
 }
 
 #[test]
+fn url_guard_syntax_emits_typed_conditions_and_static_scalars() {
+    use bonsai_lang_api::{ConditionExpressionFact, LanguageAdapter, StaticScalarValue};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "UrlGuard.java",
+            r#"
+import java.net.*;
+import java.util.*;
+class UrlGuard {
+  private static final Set<String> ALLOWED_HOSTS = Set.of("api.example.com", "partner.example.com");
+  void fetch(String raw) throws Exception {
+    URL parsed = new URL(raw);
+    if (!"https".equalsIgnoreCase(parsed.getProtocol())) throw new SecurityException();
+    if (!ALLOWED_HOSTS.contains(parsed.getHost())) throw new SecurityException();
+    InetAddress addr = InetAddress.getByName(parsed.getHost());
+    if (addr.isLoopbackAddress() || addr.isSiteLocalAddress()) throw new SecurityException();
+    HttpURLConnection conn = (HttpURLConnection) parsed.openConnection();
+    conn.setInstanceFollowRedirects(false);
+  }
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+
+    assert!(index
+        .branch_conditions
+        .iter()
+        .any(|fact| matches!(&fact.expression, Some(ConditionExpressionFact::Not { .. }))));
+    assert!(index.branch_conditions.iter().any(|fact| matches!(
+        &fact.expression,
+        Some(ConditionExpressionFact::Any { operands, .. }) if operands.len() == 2
+    )));
+    assert!(index
+        .call_receivers
+        .iter()
+        .any(|fact| { fact.static_value == Some(StaticScalarValue::String("https".to_string())) }));
+    assert!(index
+        .call_argument_values
+        .iter()
+        .any(|fact| { fact.static_value == Some(StaticScalarValue::Boolean(false)) }));
+    let allowlist = index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("ALLOWED_HOSTS"))
+        .expect("static Set.of assignment");
+    assert_eq!(allowlist.exact_static_call_args.as_ref().map(Vec::len), Some(2));
+}
+
+#[test]
 fn inherited_bare_member_call_has_explicit_receiver_fact() {
     use bonsai_lang_api::{CallKind, FlowEvent, LanguageAdapter};
 

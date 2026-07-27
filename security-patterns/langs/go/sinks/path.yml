@@ -75,6 +75,23 @@
   severity: high
   packages: [os]
   cwe: [CWE-22]
+  analysis_semantics:
+    guard_profile: relative-path-containment
+    relative_path_containment_guard:
+      candidate_canonicalizer:
+        attribute: [filepath, Clean]
+      base_canonicalizer:
+        attribute: [filepath, Abs]
+      relative_path:
+        attribute: [filepath, Rel]
+      relative_path_result_index: 0
+      relative_base_arg_index: 0
+      relative_candidate_arg_index: 1
+      guarded_path_arg_index: 0
+      rejection_check:
+        name: hasDotDotPrefix
+      rejection_check_arg_index: 0
+      rejected_exact_values: [".."]
   match:
     kind: call
     callee:
@@ -552,6 +569,22 @@
   severity: high
   packages: ["path/filepath"]
   cwe: [CWE-22]
+  analysis_semantics:
+    guard_profile: relative-path-containment
+    relative_path_containment_guard:
+      candidate_canonicalizer:
+        attribute: [filepath, Clean]
+      base_canonicalizer:
+        attribute: [filepath, Abs]
+      relative_path:
+        attribute: [filepath, Rel]
+      relative_path_result_index: 0
+      relative_base_arg_index: 0
+      relative_candidate_arg_index: 1
+      rejection_check:
+        name: hasDotDotPrefix
+      rejection_check_arg_index: 0
+      rejected_exact_values: [".."]
   match:
     kind: call
     callee:

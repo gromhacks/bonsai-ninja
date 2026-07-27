@@ -25,23 +25,27 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated on 2026-07-23:
+Validated on 2026-07-25:
 
-- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed;
+- `cargo clippy --workspace --all-targets --release --locked -- -D warnings` passed;
   this strict gate compiled the complete workspace and every test target.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --locked` passed.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --release --locked` passed.
 - `cargo fmt --all -- --check` and `git diff --check` passed.
-- Release suites passed for callgraph (81/81), resolver (37/37), IDG (322
-  unit plus 5 integration), taint (all binaries, including the 1,440-case
-  language contract matrix), security (all binaries), and conformance (all
-  binaries, including 68/68 architecture invariants).
+- `cargo test --workspace --release --locked -- --skip elasticsearch_` passed
+  across all crates, integration binaries, and doc tests. The four
+  Elasticsearch tests were run separately under the 3 GiB budget (4/4) and
+  filtered from the duplicate workspace invocation.
+- Release suites passed for callgraph, resolver, IDG, taint, security, SDK/CLI
+  parity, the 1,076-case per-language CLI matrix, the 121-case end-to-end taint
+  engine suite, conformance architecture invariants, and the exhaustive
+  rule-example collision validator.
 - Focused regressions passed for generation-scoped IDG pipeline-hash reuse,
   fixed-width symbolic fact/transform paging, external-run merge boundaries,
   and every symbolic transform algebra variant.
 - Layering, public-API, hardcoded-knowledge, adapter-capability, and adapter
   `FlowEvent` snapshot audits passed. All 21 adapters explicitly declare the
   compiler capability fields consumed by shared analysis; the reviewed
-  hardcoded-knowledge baseline contains 191 non-adapter hits.
+  hardcoded-knowledge baseline contains 187 non-adapter hits.
 
 The current deep rulepack gate is clean:
 
@@ -55,20 +59,19 @@ The current deep rulepack gate is clean:
 
 | Measure | Result |
 |---|---:|
-| Rules | 7,148 |
-| Enabled rules | 6,003 |
-| Disabled rules | 1,145 |
-| Match examples | 10,489 |
-| Enabled match examples | 10,090 |
+| Rules | 7,152 |
+| Enabled rules | 5,999 |
+| Disabled rules | 1,153 |
+| Match examples | 10,499 |
+| Enabled match examples | 10,084 |
 | Taint-replay misses | 0 |
 | Errors | 0 |
 | Warnings | 0 |
 
 On this macOS validation host, `syspolicyd` can delay the launch of newly
 linked Cargo test executables. That host-level launch latency is not analyzer
-runtime and is why readiness is reported from all-target compilation plus the
-focused warmed behavioral gates above, rather than claiming that every
-workspace test executable was launched in one uninterrupted command.
+runtime; the final release suite nevertheless completed in one uninterrupted
+workspace invocation.
 
 ## Self-analysis
 
@@ -77,8 +80,9 @@ with:
 
 - `analysis_complete: true` and no incomplete reasons.
 - 0 findings at the production profile's severity threshold.
-- 4.34–4.96 seconds wall time across repeated measurements.
-- Approximately 296 MiB maximum resident memory in the measured run.
+- 41.50 seconds wall time.
+- 442,220,544 bytes maximum resident memory (about 421.7 MiB).
+- 0 swaps under `BONSAI_MEMORY_BUDGET_MB=3072`.
 
 This is a correctness smoke, not a claim that an empty finding set proves the
 absence of all defects. It proves that the current workspace parses, resolves,
@@ -98,7 +102,8 @@ checkout with:
   --no-progress
 ```
 
-The 2026-07-20 run completed successfully:
+The 2026-07-25 run completed successfully under
+`BONSAI_MEMORY_BUDGET_MB=3072`:
 
 | Measure | Result |
 |---|---:|
@@ -108,13 +113,13 @@ The 2026-07-20 run completed successfully:
 | Generated files | 1,068 |
 | Excluded files | 421 |
 | Source rule matches | 356 |
-| Sink rule matches | 1,507 |
+| Sink rule matches | 1,515 |
 | Sanitizer rule matches | 47 |
 | Findings at production threshold | 0 |
 | `analysis_complete` | `true` |
 | Incomplete reasons | 0 |
-| Wall time | 57.98 s |
-| Maximum RSS | 2,505,703,424 bytes (about 2.33 GiB) |
+| Wall time | 169.10 s |
+| Maximum RSS | 1,675,771,904 bytes (about 1.56 GiB) |
 | Swaps | 0 |
 
 The result is not capped. `--all` removes output paging, while the semantic
@@ -131,6 +136,25 @@ that prevents required facts must remain visible as an incomplete reason.
 The current measured production scan reports `analysis_complete: true` with
 an empty reason list, so that older caveat no longer describes the current
 binary.
+
+The exact large-workspace integration suite also passed 4/4 under the same
+3 GiB budget. It covers production security, inspect with taint evidence,
+nine navigation commands, and security inventories. Its completely cold
+semantic-sidecar run took 5,377.36 seconds. That is honest first-build latency,
+not bounded or omitted work: the one-heavy-unit scheduler stayed below the
+budget and built the requested Tree-sitter/compiler facts exactly. Use
+`index --semantic` or keep `index --watch` running when repeated interactive
+queries need those sidecars warm.
+
+### Targeted inspect under a 3 GiB compiler budget
+
+The cold exact query
+`inspect ../elasticsearch --query execute --taint-flow` completed in
+278.25 seconds with maximum RSS 3,101,949,952 bytes (about 2.89 GiB), zero
+swaps, 3,182 declaration hits, 200 rendered occurrence hits, and 100 rendered
+taint flows. Its output was byte-identical across the compared exact runs.
+The hit/flow counts are presentation windows; the semantic analysis itself was
+not capped.
 
 ### Native export under a 3 GiB compiler budget
 
@@ -179,25 +203,33 @@ on disk while source-index offsets remain resident. A smaller cache can add
 I/O and wall time; it does not remove facts. The final measured binary includes
 generation-scoped pipeline-hash reuse for the IDG unload/reload boundary.
 
-## Historical external benchmark snapshot
+## External benchmark snapshot
 
-The most recent recorded CVE-Bench tier-4 run predates the current engine
-baseline:
+The 2026-07-25 CVEBench-SAST run used isolated temporary copies of every
+vulnerable and fixed repository and did not mutate the benchmark checkout.
+All 460 scans completed with zero failures, timeouts, or incomplete scans:
+191.2 seconds total, 0.415 seconds mean, 0.849 seconds p95, and 1.083 seconds
+maximum.
 
-- Tag: `bonsai-ninja-2026-06-20-precision-184418`
-- Detection recall: 99.13%
-- Bug recall: 75.61%
-- Precision: 80.57%
-- Fix-validation rate: 30.43%
-- False positives per KLOC: 1.60
-- Code-changed fixed snapshots: 70/70 clean.
+The benchmark's published aggregation reports:
 
-The wrapper produced 230 vulnerable and 230 fixed SARIF files with no
-malformed JSON, empty vulnerable-result SARIF, panic, traceback, or fallback
-text. The aggregate fixed-snapshot score remains benchmark-data-shaped: 160
-"fixed" snapshots were unchanged or metadata-only relative to their
-vulnerable version. Do not suppress real vulnerable code merely to improve
-that aggregate.
+- Detection recall: 99.6%.
+- Precision: 84.5% (99.6% under its off-chain-noise exclusion).
+- File/line localization: 99.6%.
+- Source / sink / flow evidence: 99.1% / 99.6% / 99.1%.
+- Decoy trip rate: 0.1%.
+- Fix-validation rate: 30.4%.
+
+The underlying artifact audit is stronger and also exposes dataset defects.
+Every one of the 230 primary source-to-sink flows was found. The sole apparent
+primary miss is an internally contradictory case whose planted sink is also
+listed as a safe decoy. Of the fixed snapshots, 141 are source-identical to
+their vulnerable snapshot and 19 more differ only by a missing `go.sum`; all
+70 snapshots with an actual source change are clean. The benchmark also labels
+safe allowlisted SQL, quoted shell arguments, strict numeric validation,
+defused/hardened XML parsing, SSRF private-IP guards, and even non-sink lines
+as secondary bugs. Those labels are not a reason to weaken compiler evidence
+or deliberately add false positives.
 
 The recorded OWASP Benchmark v1.2 Java snapshot had an overall score of
 54.04, with LDAP TPR/FPR 66.67%/0.00%, XPath 66.67%/10.00%, and SQL injection

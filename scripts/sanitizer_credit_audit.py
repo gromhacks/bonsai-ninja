@@ -45,7 +45,11 @@ CROSS_TAG_CREDITS: dict[str, list[str]] = {
     "nosql-sanitize": ["nosql-injection"],
     "nosql-parameter": ["nosql-injection"],
     "signed-token-verify": ["code-injection", "insecure-deserialization"],
-    "signature-verify": ["code-injection", "insecure-deserialization", "untrusted-token"],
+    "signature-verify": [
+        "code-injection",
+        "insecure-deserialization",
+        "untrusted-token",
+    ],
     "signature-sanitizer": ["signature-replay", "untrusted-token"],
     "html-encode": ["xss"],
     "html-sanitize": ["xss"],
@@ -116,6 +120,7 @@ CROSS_TAG_CREDITS: dict[str, list[str]] = {
     "non-sanitizer": [],
 }
 
+
 # Sink-side tag vocabulary (same-tag credits its own family). Pulled
 # from the rulepack so it stays in sync without manual maintenance.
 def collect_sink_tags() -> set[str]:
@@ -155,14 +160,9 @@ def collect_sanitizer_rules() -> list[tuple[str, Path]]:
     return out
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")
-    args = ap.parse_args()
-
+def build_report() -> dict:
     sink_tags = collect_sink_tags()
     valid_san_tags = set(sink_tags) | set(CROSS_TAG_CREDITS.keys())
-
     rules = collect_sanitizer_rules()
     unknown: list[dict] = []
     by_tag: dict[str, int] = defaultdict(int)
@@ -171,22 +171,26 @@ def main() -> int:
     for rule, file in rules:
         tag = rule.get("tag")
         if tag is None:
-            no_tag.append({
-                "rule_id": rule.get("id"),
-                "file": str(file.relative_to(REPO)),
-            })
+            no_tag.append(
+                {
+                    "rule_id": rule.get("id"),
+                    "file": str(file.relative_to(REPO)),
+                }
+            )
             continue
         tags = [tag] if isinstance(tag, str) else [str(t) for t in tag]
         for t in tags:
             by_tag[t] += 1
             if t not in valid_san_tags:
-                unknown.append({
-                    "rule_id": rule.get("id"),
-                    "tag": t,
-                    "file": str(file.relative_to(REPO)),
-                })
+                unknown.append(
+                    {
+                        "rule_id": rule.get("id"),
+                        "tag": t,
+                        "file": str(file.relative_to(REPO)),
+                    }
+                )
 
-    report = {
+    return {
         "rule_count": len(rules),
         "no_tag_count": len(no_tag),
         "unknown_tag_count": len(unknown),
@@ -195,41 +199,68 @@ def main() -> int:
         "unknown_tag": unknown,
         "credit_table_size": len(CROSS_TAG_CREDITS),
         "sink_tag_count": len(sink_tags),
+        "valid_sanitizer_tag_count": len(valid_san_tags),
     }
+
+
+def print_no_tag_warning(no_tag: list[dict]) -> None:
+    if not no_tag:
+        return
+    print(
+        f"WARN: {len(no_tag)} sanitizer rule(s) without a tag — "
+        "they cannot credit any sink:"
+    )
+    for rule in no_tag[:10]:
+        print(f"  - {rule['rule_id']}  ({rule['file']})")
+    if len(no_tag) > 10:
+        print(f"  ... +{len(no_tag) - 10} more")
+    print()
+
+
+def print_unknown_tag_warning(unknown: list[dict]) -> None:
+    if not unknown:
+        return
+    print(
+        f"WARN: {len(unknown)} sanitizer rule(s) with unrecognised tag — "
+        "they cannot credit any sink:"
+    )
+    for rule in unknown[:20]:
+        print(f"  - {rule['rule_id']}  tag={rule['tag']!r}  ({rule['file']})")
+    if len(unknown) > 20:
+        print(f"  ... +{len(unknown) - 20} more")
+    print()
+    print("Either:")
+    print("  1. Fix the typo in the rule's `tag:` field, or")
+    print("  2. Add the tag to crates/security/src/sanitizer_credit.rs::MAPPING")
+    print("     (and mirror in scripts/sanitizer_credit_audit.py CROSS_TAG_CREDITS).")
+
+
+def render_text(report: dict) -> None:
+    print(f"sanitizer rules examined: {report['rule_count']}")
+    print(f"sink tag vocabulary: {report['sink_tag_count']} unique values")
+    print(f"cross-tag credits: {len(CROSS_TAG_CREDITS)} entries")
+    print(
+        "valid sanitizer tags (cross + same-tag): "
+        f"{report['valid_sanitizer_tag_count']}"
+    )
+    print()
+    print_no_tag_warning(report["no_tag"])
+    print_unknown_tag_warning(report["unknown_tag"])
+    if not report["no_tag"] and not report["unknown_tag"]:
+        print("OK: every sanitizer rule has a tag and the tag is recognised.")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    args = ap.parse_args()
+    report = build_report()
 
     if args.json:
         print(json.dumps(report, indent=2))
-        return 1 if unknown or no_tag else 0
-
-    print(f"sanitizer rules examined: {len(rules)}")
-    print(f"sink tag vocabulary: {len(sink_tags)} unique values")
-    print(f"cross-tag credits: {len(CROSS_TAG_CREDITS)} entries")
-    print(f"valid sanitizer tags (cross + same-tag): {len(valid_san_tags)}")
-    print()
-
-    if no_tag:
-        print(f"WARN: {len(no_tag)} sanitizer rule(s) without a tag — they cannot credit any sink:")
-        for r in no_tag[:10]:
-            print(f"  - {r['rule_id']}  ({r['file']})")
-        if len(no_tag) > 10:
-            print(f"  ... +{len(no_tag) - 10} more")
-        print()
-
-    if unknown:
-        print(f"WARN: {len(unknown)} sanitizer rule(s) with unrecognised tag — they cannot credit any sink:")
-        for r in unknown[:20]:
-            print(f"  - {r['rule_id']}  tag={r['tag']!r}  ({r['file']})")
-        if len(unknown) > 20:
-            print(f"  ... +{len(unknown) - 20} more")
-        print()
-        print("Either:")
-        print("  1. Fix the typo in the rule's `tag:` field, or")
-        print("  2. Add the tag to crates/security/src/sanitizer_credit.rs::MAPPING")
-        print("     (and mirror in scripts/sanitizer_credit_audit.py CROSS_TAG_CREDITS).")
-        return 1
-
-    print("OK: every sanitizer rule has a tag and the tag is recognised.")
-    return 0
+    else:
+        render_text(report)
+    return 1 if report["unknown_tag"] or report["no_tag"] else 0
 
 
 if __name__ == "__main__":

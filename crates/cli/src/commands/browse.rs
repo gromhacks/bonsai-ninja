@@ -70,10 +70,9 @@ fn open_browse_project(
     regex: bool,
 ) -> Result<(bonsai_sdk::Project, WorkspaceFooter, bool)> {
     let use_literal_prefilter = browse_literal_prefilter_enabled(root, literal, regex);
-    let (project, footer) = if use_literal_prefilter {
-        open_project_index_matching_literal(root, literal.expect("checked above"))?
-    } else {
-        open_project(root)?
+    let (project, footer) = match (use_literal_prefilter, literal) {
+        (true, Some(literal)) => open_project_index_matching_literal(root, literal)?,
+        _ => open_project(root)?,
     };
     Ok((project, footer, use_literal_prefilter))
 }

@@ -88,32 +88,35 @@
   constraints:
   - arg_tainted:
       index: 0
+  - receiver_tainted: true
   match_examples:
   - name: uploadedFile mv tainted destination
     code: |
-      const { UploadedFile } = require("express-fileupload");
-      function save(input) {
-        const uploadedFile = new UploadedFile();
-        return uploadedFile.mv(input);
+      const _fileupload = require("express-fileupload");
+      function save(req) {
+        const uploadedFile = req.files.avatar;
+        const destination = "/srv/uploads/" + uploadedFile.name;
+        return uploadedFile.mv(destination);
       }
     expect_match_text: [uploadedFile.mv]
   - name: file mv tainted destination
     code: |
-      const { UploadedFile } = require("express-fileupload");
-      function save(input) {
-        const file = new UploadedFile();
-        return file.mv(input);
+      const _fileupload = require("express-fileupload");
+      function save(req) {
+        const file = req.files.document;
+        const destination = "/srv/uploads/" + file.name;
+        return file.mv(destination);
       }
     expect_match_text: [file.mv]
   - name: file mv literal destination negative
     code: |
-      const { UploadedFile } = require("express-fileupload");
-      function save() {
-        const file = new UploadedFile();
+      const _fileupload = require("express-fileupload");
+      function save(req) {
+        const file = req.files.avatar;
         return file.mv("/srv/uploads/avatar.png");
       }
     expect_no_match: true
-  description: "express-fileupload .mv(dest) - writing uploaded content to attacker-influenced destination paths. Receiver-agnostic; package context gate on express-fileupload narrows to that ecosystem."
+  description: "express-fileupload .mv(dest) - moving a remotely supplied upload to an attacker-influenced destination. The receiver and destination must both carry compiler-proven taint, and receiver-agnostic syntax is admitted only with package evidence."
 
 - id: javascript.upload.path_join_original_filename
   enabled: true

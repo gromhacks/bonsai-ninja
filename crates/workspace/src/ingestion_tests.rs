@@ -128,3 +128,23 @@ fn root_relative_source_filters_still_accept_explicit_absolute_paths() {
     };
     assert!(source_path_allowed(&root, &root.join("app.py"), filter));
 }
+
+#[test]
+fn root_anchored_filters_do_not_match_java_package_namespaces() {
+    let root = PathBuf::from("/tmp/repo");
+    let include_filters = Vec::new();
+    let exclude_filters = vec!["^example/".to_string()];
+    let filter = PathFilterSpec {
+        include_filters: &include_filters,
+        exclude_filters: &exclude_filters,
+    };
+
+    assert!(
+        !source_path_allowed(&root, &root.join("example/App.java"), filter),
+        "a root-level example project must remain excludable"
+    );
+    assert!(
+        source_path_allowed(&root, &root.join("src/main/java/com/example/App.java"), filter),
+        "a Java package component named `example` is production namespace syntax, not an example project"
+    );
+}

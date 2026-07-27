@@ -71,7 +71,8 @@ impl Matcher {
 /// `for file in global.all_files() for decl in decls_in(file)`
 /// double-loop.
 pub fn matching_decls(ws: &Workspace, matcher: &Matcher) -> Vec<Decl> {
-    let entries = ws.decl_name_index().entries(ws.db());
+    let headers = ws.compiler_header_index();
+    let entries = ws.decl_name_index().entries(headers.as_ref());
     let mut hits: Vec<Decl> = Vec::new();
     for entry in entries.iter() {
         let matches = match matcher {

@@ -13,9 +13,11 @@ use bonsai_security::loader::LanguagePack;
 use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
 use bonsai_security::{
     run_taint_analysis, run_taint_analysis_with_phase_progress, AnalysisSemantics, ConstraintKind,
-    FindingStatus, FlowClass, GuardProfile, MatchKind, MatchSpec, PathContainmentGuardSemantics, Rule,
-    RuleConstraint, RuleKind, RuleTarget, Rulepack, SourceAnalysisOptions, SourceLineageLimits,
-    TaintAnalysisOptions, TrustClass,
+    FindingStatus, FlowClass, GuardProfile, MatchKind, MatchSpec, NoSqlFilterSemantics,
+    PathContainmentGuardSemantics, RelativePathContainmentGuardSemantics, Rule, RuleConstraint, RuleKind,
+    RuleTarget, Rulepack, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions, TrustClass,
+    UrlComponentSemantics, UrlDnsGuardSemantics, UrlGuardRootSemantics, UrlHostAllowlistSemantics,
+    UrlNetworkGuardSemantics, UrlRedirectGuardSemantics, UrlSchemeGuardSemantics,
 };
 use bonsai_taint::{compose_idg_seed_nodes, ensure_idg_service, IdgSeedRequest, TokenSet};
 use bonsai_workspace::Workspace;
@@ -632,6 +634,52 @@ fn c_recv_output_rulepack() -> Rulepack {
     pack
 }
 
+fn go_bind_output_rulepack() -> Rulepack {
+    let mut source = rule(
+        "go",
+        RuleKind::Source,
+        "go.test.bind_output_source",
+        Some(TrustClass::Remote),
+        None,
+        "BindJSON",
+    );
+    source.taint_semantics = Some(TaintSemantics {
+        clean_output_overwrite: None,
+        source_output_args: vec![0],
+        source_callback_args: Vec::new(),
+        call_result_passthrough_args: Vec::new(),
+        call_result_passthrough_receiver: false,
+        output_arg_flows: Vec::new(),
+        taint_receiver_from_args: false,
+    });
+    let mut sink = rule(
+        "go",
+        RuleKind::Sink,
+        "go.test.command_sink",
+        None,
+        Some(Severity::Critical),
+        "dangerous",
+    );
+    sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(0),
+            kw: None,
+        },
+    }]);
+    let mut pack = Rulepack::default();
+    pack.packs.insert(
+        "go".to_string(),
+        LanguagePack {
+            language: "go".to_string(),
+            sources: vec![source],
+            sinks: vec![sink],
+            sanitizers: Vec::new(),
+            typing: Vec::new(),
+        },
+    );
+    pack
+}
+
 fn rule(
     lang: &str,
     kind: RuleKind,
@@ -765,6 +813,93 @@ void handle(int fd) {
     )
     .expect("taint analysis");
     assert!(report.findings.is_empty(), "{:#?}", report.findings);
+}
+
+#[test]
+fn go_write_back_source_keeps_exact_ast_output_carrier_through_scheduling() {
+    let ws = workspace(&[
+        (
+            "handler.go",
+            r#"
+package fixture
+
+type Context struct{}
+type Request struct{ URL string }
+
+func (c *Context) BindJSON(dst any) error { return nil }
+
+func handle(c *Context) {
+    var body Request
+    if err := c.BindJSON(&body); err != nil {
+        return
+    }
+    forward(body.URL)
+}
+"#,
+        ),
+        (
+            "service.go",
+            r#"
+package fixture
+
+func forward(url string) {
+    dangerous(url)
+}
+
+func dangerous(value string) {}
+"#,
+        ),
+    ]);
+    let report = run_taint_analysis(
+        &ws,
+        &go_bind_output_rulepack(),
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "the exact write-back carrier from the parsed call must survive the memory-light linkage snapshot: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn go_aggregate_call_source_taints_parsed_descendant_after_tuple_binding() {
+    let ws = workspace(&[(
+        "main.go",
+        r#"
+package fixture
+
+type Result struct{ Value string }
+
+func source() (*Result, error) { return &Result{}, nil }
+func sink(value string) {}
+
+func handle() {
+    result, _ := source()
+    sink(result.Value)
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &rulepack("go", "source", "sink"),
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "the parsed tuple binding identifies the aggregate returned by the source call: {:#?}",
+        report.findings
+    );
 }
 
 #[test]
@@ -2076,6 +2211,289 @@ engine = psycopg2.connect("")
 }
 
 #[test]
+fn python_structured_safety_proofs_distinguish_guarded_and_unguarded_flows() {
+    let mut pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads");
+    let python = pack.packs.get_mut("python").expect("python pack");
+    let mut fixture_source = rule(
+        "python",
+        RuleKind::Source,
+        "python.test.compiler_fact_source",
+        Some(TrustClass::Remote),
+        None,
+        "source",
+    );
+    fixture_source.tag = Some("remote-input".to_string());
+    python.sources.push(fixture_source);
+
+    let root = temp_real_workspace("structured-safety-proofs");
+    std::fs::write(
+        root.join("a_decoy.py"),
+        r#"
+def decoy_one():
+    return 1
+
+def decoy_two():
+    return 2
+
+def decoy_three():
+    return 3
+"#,
+    )
+    .expect("write symbol-id collision fixture");
+    let fixture = root.join("guards.py");
+    std::fs::write(
+        &fixture,
+        r#"
+import os
+import pymongo
+import requests
+import sqlite3
+from jinja2 import Environment
+from jinja2.sandbox import SandboxedEnvironment
+from lxml import etree
+
+_SAFE_PARSER = etree.XMLParser(
+    resolve_entities=False,
+    no_network=True,
+    load_dtd=False,
+)
+_PARTIAL_PARSER = etree.XMLParser(resolve_entities=False)
+_VALID_COLUMNS = {"amount", "quantity"}
+_BASE = "/srv/files"
+
+def source():
+    return ""
+
+def safe_http(provider):
+    providers = {
+        "a": "https://a.example/health",
+        "b": "https://b.example/health",
+    }
+    selected = providers.get(provider, providers["a"])
+    return requests.get(selected)
+
+def safe_http_entry():
+    return safe_http(source())
+
+def unsafe_http(url):
+    return requests.get(url)
+
+def unsafe_http_entry():
+    return unsafe_http(source())
+
+def safe_xml(blob):
+    return etree.fromstring(blob, parser=_SAFE_PARSER)
+
+def safe_xml_entry():
+    return safe_xml(source())
+
+def safe_xml_positional(blob):
+    return etree.fromstring(blob, _SAFE_PARSER)
+
+def safe_xml_positional_entry():
+    return safe_xml_positional(source())
+
+def partial_xml(blob):
+    return etree.fromstring(blob, parser=_PARTIAL_PARSER)
+
+def partial_xml_entry():
+    return partial_xml(source())
+
+def overwritten_xml(blob):
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    parser = etree.XMLParser(resolve_entities=False)
+    return etree.fromstring(blob, parser=parser)
+
+def overwritten_xml_entry():
+    return overwritten_xml(source())
+
+def unsafe_xml(blob):
+    return etree.fromstring(blob)
+
+def unsafe_xml_entry():
+    return unsafe_xml(source())
+
+def safe_template(template_text):
+    env = SandboxedEnvironment(autoescape=True)
+    return env.from_string(template_text)
+
+def safe_template_entry():
+    return safe_template(source())
+
+def unsafe_template(template_text):
+    return Environment.from_string(template_text)
+
+def unsafe_template_entry():
+    return unsafe_template(source())
+
+def safe_nosql(email):
+    return pymongo.collection.find_one({"email": {"$eq": email}})
+
+def safe_nosql_entry():
+    return safe_nosql(source())
+
+def unsafe_nosql(email):
+    return pymongo.collection.find_one({"email": email})
+
+def unsafe_nosql_entry():
+    return unsafe_nosql(source())
+
+def safe_query(column, tenant):
+    if column not in _VALID_COLUMNS:
+        return []
+    sql = "SELECT " + column + " FROM reports WHERE tenant_id = %s"
+    params = (tenant,)
+    return cursor.execute(sql, params)
+
+def safe_query_entry():
+    return safe_query(source(), source())
+
+def unsafe_query(value):
+    sql = "SELECT * FROM reports WHERE tenant_id = '" + value + "'"
+    return cursor.execute(sql)
+
+def unsafe_query_entry():
+    return unsafe_query(source())
+
+def safe_path(name):
+    base_real = os.path.realpath(_BASE)
+    candidate = os.path.realpath(os.path.join(base_real, name))
+    if not candidate.startswith(base_real + os.sep):
+        raise FileNotFoundError(candidate)
+    return open(candidate, "rb")
+
+def safe_path_entry():
+    return safe_path(source())
+
+def unsafe_path(name):
+    return open(os.path.join(_BASE, name), "rb")
+
+def unsafe_path_entry():
+    return unsafe_path(source())
+"#,
+    )
+    .expect("write structured safety fixture");
+    let ws = Workspace::index(&root, bonsai_adapters::all_languages_registry())
+        .expect("index structured safety fixture");
+
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let finding_for = |function: &str, sink_rule: &str| {
+        report
+            .findings
+            .iter()
+            .find(|finding| {
+                finding.finding.sink.enclosing_fn.as_deref() == Some(function)
+                    && finding.finding.sink.rule_id == sink_rule
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing {sink_rule} finding in {function}; findings={:#?}",
+                    report.findings
+                )
+            })
+    };
+
+    for (safe_fn, unsafe_fn, safe_sink_rule, unsafe_sink_rule, sanitizer_rule) in [
+        (
+            "safe_http",
+            "unsafe_http",
+            "python.ssrf.requests_get",
+            "python.ssrf.requests_get",
+            "engine.sanitizer.literal_map_value_allowlist",
+        ),
+        (
+            "safe_xml",
+            "unsafe_xml",
+            "python.xxe.lxml_fromstring",
+            "python.xxe.lxml_fromstring",
+            "engine.sanitizer.configured_argument_factory_guard",
+        ),
+        (
+            "safe_template",
+            "unsafe_template",
+            "python.template.jinja2_env_from_string_instance",
+            "python.template.jinja2_environment_from_string",
+            "python.sanitizer.jinja2_sandboxed_from_string",
+        ),
+        (
+            "safe_query",
+            "unsafe_query",
+            "python.sqli.cursor_execute",
+            "python.sqli.cursor_execute",
+            "engine.sanitizer.parameterized_query_allowlisted_fragments",
+        ),
+        (
+            "safe_nosql",
+            "unsafe_nosql",
+            "python.nosql.pymongo_find_one",
+            "python.nosql.pymongo_find_one",
+            "engine.sanitizer.nosql_literal_operator_filter",
+        ),
+        (
+            "safe_path",
+            "unsafe_path",
+            "python.path.open",
+            "python.path.open",
+            "engine.sanitizer.path_consumer_containment_guard",
+        ),
+    ] {
+        let safe = &finding_for(safe_fn, safe_sink_rule).finding;
+        assert_eq!(safe.status, FindingStatus::Sanitized, "{safe:#?}");
+        assert!(
+            safe.sanitizers_seen
+                .iter()
+                .any(|sanitizer| sanitizer.rule_id == sanitizer_rule),
+            "{safe_fn} must carry {sanitizer_rule} compiler-fact evidence: {safe:#?}"
+        );
+
+        let unsafe_finding = &finding_for(unsafe_fn, unsafe_sink_rule).finding;
+        assert_eq!(
+            unsafe_finding.status,
+            FindingStatus::Unsanitized,
+            "unguarded twin must remain reportable: {unsafe_finding:#?}"
+        );
+    }
+    {
+        let safe_fn = "safe_xml_positional";
+        let safe = &finding_for(safe_fn, "python.xxe.lxml_fromstring").finding;
+        assert_eq!(safe.status, FindingStatus::Sanitized, "{safe:#?}");
+        assert!(
+            safe.sanitizers_seen.iter().any(|sanitizer| {
+                sanitizer.rule_id == "engine.sanitizer.configured_argument_factory_guard"
+            }),
+            "{safe_fn} must use the same typed configured-factory proof: {safe:#?}"
+        );
+    }
+    {
+        let unsafe_fn = "partial_xml";
+        let unsafe_finding = &finding_for(unsafe_fn, "python.xxe.lxml_fromstring").finding;
+        assert_eq!(
+            unsafe_finding.status,
+            FindingStatus::Unsanitized,
+            "{unsafe_fn} must fail closed when the latest factory call lacks a required option: {unsafe_finding:#?}"
+        );
+    }
+    let overwritten = &finding_for("overwritten_xml", "python.xxe.lxml_fromstring").finding;
+    assert!(
+        !overwritten
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| { sanitizer.rule_id == "engine.sanitizer.configured_argument_factory_guard" }),
+        "the generic configured-factory proof must reject a weaker latest overwrite: {overwritten:#?}"
+    );
+    drop(ws);
+    std::fs::remove_dir_all(&root).expect("remove structured safety fixture");
+}
+
+#[test]
 fn typescript_dotted_local_model_import_carries_mongoose_package_evidence() {
     let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads");
     let ws = workspace(&[
@@ -2758,14 +3176,204 @@ def handle():
     );
 }
 
+fn relative_path_containment_semantics(guarded_path_arg_index: Option<usize>) -> AnalysisSemantics {
+    AnalysisSemantics {
+        guard_profile: Some(GuardProfile::RelativePathContainment),
+        relative_path_containment_guard: Some(RelativePathContainmentGuardSemantics {
+            candidate_canonicalizer: RuleTarget {
+                attribute: Some(vec!["filepath".to_string(), "Clean".to_string()]),
+                ..RuleTarget::default()
+            },
+            base_canonicalizer: RuleTarget {
+                attribute: Some(vec!["filepath".to_string(), "Abs".to_string()]),
+                ..RuleTarget::default()
+            },
+            relative_path: RuleTarget {
+                attribute: Some(vec!["filepath".to_string(), "Rel".to_string()]),
+                ..RuleTarget::default()
+            },
+            relative_path_result_index: 0,
+            relative_base_arg_index: 0,
+            relative_candidate_arg_index: 1,
+            guarded_path_arg_index,
+            rejection_check: RuleTarget {
+                name: Some("hasDotDotPrefix".to_string()),
+                ..RuleTarget::default()
+            },
+            rejection_check_arg_index: 0,
+            rejected_exact_values: vec!["..".to_string()],
+        }),
+        ..AnalysisSemantics::default()
+    }
+}
+
+#[test]
+fn go_relative_path_containment_requires_complete_compiler_proof() {
+    let ws = workspace(&[(
+        "/app/app.go",
+        r#"
+package app
+
+import (
+    "os"
+    "path/filepath"
+)
+
+const baseDir = "/var/data/files"
+
+func source() string { return "user" }
+
+func safeRead() ([]byte, error) {
+    rootAbs, err := filepath.Abs(baseDir)
+    if err != nil { return nil, err }
+    candidate := filepath.Clean(filepath.Join(rootAbs, source()))
+    rel, err := filepath.Rel(rootAbs, candidate)
+    if err != nil || rel == ".." || hasDotDotPrefix(rel) {
+        return nil, os.ErrNotExist
+    }
+    return os.ReadFile(candidate)
+}
+
+func unsafeRead() ([]byte, error) {
+    rootAbs, _ := filepath.Abs(baseDir)
+    candidate := filepath.Clean(filepath.Join(rootAbs, source()))
+    return os.ReadFile(candidate)
+}
+
+func hasDotDotPrefix(rel string) bool { return len(rel) > 3 }
+"#,
+    )]);
+
+    let mut consumer_pack = rulepack("go", "source", "os.ReadFile");
+    let consumer_sink = &mut consumer_pack.packs.get_mut("go").unwrap().sinks[0];
+    consumer_sink.tag = Some("path-traversal".to_string());
+    consumer_sink.analysis_semantics = Some(relative_path_containment_semantics(Some(0)));
+    consumer_sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(0),
+            kw: None,
+        },
+    }]);
+
+    let report =
+        run_taint_analysis(&ws, &consumer_pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    assert_eq!(
+        report.findings[0].finding.sink.enclosing_fn.as_deref(),
+        Some("unsafeRead"),
+        "{:#?}",
+        report.findings
+    );
+
+    let explicit = run_taint_analysis(
+        &ws,
+        &consumer_pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let safe = explicit
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.enclosing_fn.as_deref() == Some("safeRead"))
+        .expect("safe read finding");
+    assert_eq!(safe.finding.status, FindingStatus::Sanitized, "{safe:#?}");
+    assert!(
+        safe.finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.relative_path_containment_guard"),
+        "{safe:#?}"
+    );
+
+    let mut incomplete_pack = consumer_pack.clone();
+    incomplete_pack.packs.get_mut("go").unwrap().sinks[0]
+        .analysis_semantics
+        .as_mut()
+        .unwrap()
+        .relative_path_containment_guard
+        .as_mut()
+        .unwrap()
+        .rejected_exact_values = vec!["../".to_string()];
+    let incomplete =
+        run_taint_analysis(&ws, &incomplete_pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        incomplete
+            .findings
+            .iter()
+            .any(|finding| finding.finding.sink.enclosing_fn.as_deref() == Some("safeRead")),
+        "the exact rejected relative value is rulepack-owned: {:#?}",
+        incomplete.findings
+    );
+
+    let mut construction_pack = rulepack("go", "source", "filepath.Join");
+    let construction_sink = &mut construction_pack.packs.get_mut("go").unwrap().sinks[0];
+    construction_sink.tag = Some("path-traversal".to_string());
+    construction_sink.analysis_semantics = Some(relative_path_containment_semantics(None));
+    construction_sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(1),
+            kw: None,
+        },
+    }]);
+    let construction =
+        run_taint_analysis(&ws, &construction_pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(construction.findings.len(), 1, "{:#?}", construction.findings);
+    assert_eq!(
+        construction.findings[0].finding.sink.enclosing_fn.as_deref(),
+        Some("unsafeRead"),
+        "{:#?}",
+        construction.findings
+    );
+}
+
 #[test]
 fn java_url_constructor_guarded_by_scheme_host_and_private_ip_is_sanitized() {
     let mut pack = rulepack("java", "source", "URL");
     let java_pack = pack.packs.get_mut("java").expect("java pack");
     java_pack.sinks[0].id = "java.ssrf.url_ctor".to_string();
     java_pack.sinks[0].tag = Some("ssrf".to_string());
+    let target = |name: &str| RuleTarget {
+        name: Some(name.to_string()),
+        ..RuleTarget::default()
+    };
     java_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
-        guard_profile: Some(GuardProfile::JavaUrlSsrfGuard),
+        url_network_guard: Some(UrlNetworkGuardSemantics {
+            root: UrlGuardRootSemantics::SinkAssignmentTarget,
+            parser: target("URL"),
+            scheme: UrlSchemeGuardSemantics {
+                component: UrlComponentSemantics {
+                    field: None,
+                    accessor: Some(target("getProtocol")),
+                },
+                comparison_predicate: Some(target("equalsIgnoreCase")),
+                allowed_values: vec!["https".to_string()],
+            },
+            host_allowlist: UrlHostAllowlistSemantics {
+                component: UrlComponentSemantics {
+                    field: None,
+                    accessor: Some(target("getHost")),
+                },
+                membership_predicate: Some(target("contains")),
+                static_collection_factories: vec![target("of")],
+            },
+            dns: UrlDnsGuardSemantics {
+                resolver: target("getByName"),
+                private_address_predicates: [
+                    "isLoopbackAddress",
+                    "isSiteLocalAddress",
+                    "isLinkLocalAddress",
+                    "isAnyLocalAddress",
+                    "isMulticastAddress",
+                ]
+                .into_iter()
+                .map(target)
+                .collect(),
+            },
+            redirect: None,
+        }),
         ..AnalysisSemantics::default()
     });
     java_pack.sinks[0].match_spec.kind = MatchKind::New;
@@ -2828,7 +3436,7 @@ class App {
         finding
             .sanitizers_seen
             .iter()
-            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.java_url_ssrf_guard"),
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.url_network_guard"),
         "expected Java URL guard evidence, got {:#?}",
         finding.sanitizers_seen
     );
@@ -2866,6 +3474,159 @@ class App {
         FindingStatus::Unsanitized,
         "{:#?}",
         missing_host_report.findings
+    );
+}
+
+#[test]
+fn go_url_client_guard_requires_exact_ast_projections_dns_and_redirect_callback() {
+    let mut pack = rulepack("go", "source", "client.Get");
+    let go_pack = pack.packs.get_mut("go").expect("Go pack");
+    go_pack.sinks[0].id = "go.ssrf.http_client_get".to_string();
+    go_pack.sinks[0].tag = Some("ssrf".to_string());
+    let target = |name: &str| RuleTarget {
+        name: Some(name.to_string()),
+        ..RuleTarget::default()
+    };
+    go_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        url_network_guard: Some(UrlNetworkGuardSemantics {
+            root: UrlGuardRootSemantics::SinkArgumentAccessor {
+                argument_index: 0,
+                accessor: Box::new(target("String")),
+            },
+            parser: RuleTarget {
+                regex: Some(r"^[A-Za-z_][A-Za-z0-9_]*\.Parse$".to_string()),
+                ..RuleTarget::default()
+            },
+            scheme: UrlSchemeGuardSemantics {
+                component: UrlComponentSemantics {
+                    field: Some("Scheme".to_string()),
+                    accessor: None,
+                },
+                comparison_predicate: None,
+                allowed_values: vec!["https".to_string()],
+            },
+            host_allowlist: UrlHostAllowlistSemantics {
+                component: UrlComponentSemantics {
+                    field: None,
+                    accessor: Some(target("Hostname")),
+                },
+                membership_predicate: None,
+                static_collection_factories: Vec::new(),
+            },
+            dns: UrlDnsGuardSemantics {
+                resolver: RuleTarget {
+                    regex: Some(r"^net\.LookupIP$".to_string()),
+                    ..RuleTarget::default()
+                },
+                private_address_predicates: ["IsLoopback", "IsPrivate", "IsLinkLocalUnicast"]
+                    .into_iter()
+                    .map(target)
+                    .collect(),
+            },
+            redirect: Some(UrlRedirectGuardSemantics::ReceiverFieldExactCallback {
+                field: "CheckRedirect".to_string(),
+                required_return_place: "http.ErrUseLastResponse".to_string(),
+            }),
+        }),
+        ..AnalysisSemantics::default()
+    });
+    go_pack.sinks[0].constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(0),
+            kw: None,
+        },
+    }]);
+
+    let ws = workspace(&[(
+        "/app/app.go",
+        r#"
+package app
+
+import (
+    "net"
+    "net/http"
+    neturl "net/url"
+)
+
+var allowedHosts = map[string]bool{"api.example.com": true}
+
+func source() string { return "" }
+
+func guarded() {
+    u, err := neturl.Parse(source())
+    if err != nil || u.Scheme != "https" || !allowedHosts[u.Hostname()] {
+        return
+    }
+    addrs, err := net.LookupIP(u.Hostname())
+    if err != nil {
+        return
+    }
+    for _, ip := range addrs {
+        if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+            return
+        }
+    }
+    client := &http.Client{
+        CheckRedirect: func(*http.Request, []*http.Request) error {
+            return http.ErrUseLastResponse
+        },
+    }
+    _, _ = client.Get(u.String())
+}
+
+func missingRedirect() {
+    u, err := neturl.Parse(source())
+    if err != nil || u.Scheme != "https" || !allowedHosts[u.Hostname()] {
+        return
+    }
+    addrs, err := net.LookupIP(u.Hostname())
+    if err != nil {
+        return
+    }
+    for _, ip := range addrs {
+        if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+            return
+        }
+    }
+    client := &http.Client{}
+    _, _ = client.Get(u.String())
+}
+"#,
+    )]);
+
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(default_report.findings.len(), 1, "{:#?}", default_report.findings);
+    assert_eq!(
+        default_report.findings[0].finding.sink.enclosing_fn.as_deref(),
+        Some("missingRedirect"),
+        "{:#?}",
+        default_report.findings
+    );
+
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let guarded = explicit_report
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.enclosing_fn.as_deref() == Some("guarded"))
+        .expect("guarded Go URL finding");
+    assert_eq!(guarded.finding.status, FindingStatus::Sanitized, "{guarded:#?}");
+    assert!(
+        guarded
+            .finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.url_network_guard"),
+        "{:#?}",
+        guarded.finding.sanitizers_seen
     );
 }
 
@@ -3209,6 +3970,13 @@ fn javascript_mongo_eq_filter_wrapper_is_sanitized() {
     let js_pack = pack.packs.get_mut("javascript").expect("javascript pack");
     js_pack.sinks[0].id = "javascript.nosql.mongo_find".to_string();
     js_pack.sinks[0].tag = Some("nosql-injection".to_string());
+    js_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        nosql_filter: Some(NoSqlFilterSemantics {
+            filter_arg_index: 0,
+            literal_value_operators: vec!["$eq".to_string()],
+        }),
+        ..AnalysisSemantics::default()
+    });
 
     let ws = workspace(&[(
         "/app/auth.js",
@@ -3248,7 +4016,7 @@ function login() {
         finding
             .sanitizers_seen
             .iter()
-            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.nosql_eq_filter_wrapper"),
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.nosql_literal_operator_filter"),
         "expected NoSQL $eq wrapper sanitizer evidence, got {:#?}",
         finding.sanitizers_seen
     );

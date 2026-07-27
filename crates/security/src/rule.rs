@@ -4,7 +4,7 @@
 //! fields are rejected by the loader so rulepacks catch typos at load time
 //! instead of silently failing to match.
 
-use bonsai_lang_api::{DeclKind, Visibility};
+use bonsai_lang_api::{DeclKind, StaticScalarValue, Visibility};
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 /// Which of the three rule families a rule belongs to. Derived from the
@@ -410,8 +410,13 @@ pub enum MatchOrigin {
 pub enum GuardProfile {
     GoJwtInlineKeyfuncAlgorithm,
     GoXmlDecoderHardening,
-    JavaUrlSsrfGuard,
     PythonPathContainment,
+    #[serde(
+        rename = "path-consumer-containment",
+        alias = "python-path-consumer-containment"
+    )]
+    PathConsumerContainment,
+    RelativePathContainment,
 }
 
 /// Rulepack-owned callable roles used by the structured path-containment
@@ -430,6 +435,237 @@ pub struct PathContainmentGuardSemantics {
     /// AST-derived place operands that must accompany the base argument in
     /// the containment check (for example a platform path separator).
     pub boundary_places: Vec<String>,
+}
+
+/// Rulepack-owned roles for proving that a value consumed by a later path
+/// sink was canonicalized, built below a trusted base, and rejected on
+/// containment failure before the consumer executes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathConsumerContainmentGuardSemantics {
+    pub canonicalizer: RuleTarget,
+    /// Canonicalizer used to establish the trusted base. When omitted, the
+    /// candidate canonicalizer is used for both roles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_canonicalizer: Option<RuleTarget>,
+    pub path_constructor: RuleTarget,
+    pub containment_check: RuleTarget,
+    pub sink_path_arg_index: usize,
+    pub path_constructor_base_arg_index: usize,
+    pub boundary_places: Vec<String>,
+}
+
+/// Rulepack-owned roles for a canonical relative-path containment proof.
+///
+/// The engine proves the complete sequence from compiler facts:
+/// canonicalized candidate → relative-path result → rejecting branch →
+/// guarded construction/consumer. Callable names, argument conventions,
+/// tuple-result position, and unsafe relative values all remain language
+/// rulepack data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelativePathContainmentGuardSemantics {
+    pub candidate_canonicalizer: RuleTarget,
+    pub base_canonicalizer: RuleTarget,
+    pub relative_path: RuleTarget,
+    pub relative_path_result_index: usize,
+    pub relative_base_arg_index: usize,
+    pub relative_candidate_arg_index: usize,
+    /// `Some(index)` guards a path consumer argument. `None` guards the
+    /// canonicalized assignment containing the matched construction sink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guarded_path_arg_index: Option<usize>,
+    pub rejection_check: RuleTarget,
+    pub rejection_check_arg_index: usize,
+    pub rejected_exact_values: Vec<String>,
+}
+
+/// Rulepack-owned argument roles for a parameterized query API.
+///
+/// The engine proves from compiler facts that the query value contains only
+/// literal or allowlisted structural fragments and that dynamic values travel
+/// through the distinct bindings argument. Driver method names and argument
+/// conventions therefore remain rulepack data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParameterizedQuerySemantics {
+    pub query_arg_index: usize,
+    pub bindings_arg_index: usize,
+}
+
+/// Rulepack-owned roles for a document-database filter.
+///
+/// The engine proves the filter's nested object shape from compiler facts.
+/// Operator spellings and the API's filter-argument convention remain data in
+/// the language rulepack.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoSqlFilterSemantics {
+    pub filter_arg_index: usize,
+    pub literal_value_operators: Vec<String>,
+}
+
+/// Rulepack-owned roles for proving that a dynamic-key sink is protected by
+/// an exact denylist. The language frontend supplies decoded literal values
+/// and typed branch/call facts; the engine supplies only generic control-flow
+/// proof and therefore carries no language, API, or forbidden-key inventory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DynamicKeyDenylistGuardSemantics {
+    /// Constructor used to materialize a static collection.
+    pub collection_constructor: RuleTarget,
+    /// Membership predicate invoked on that collection.
+    pub membership_check: RuleTarget,
+    /// Argument of `membership_check` that carries the dynamic key.
+    pub membership_subject_arg_index: usize,
+    /// Constructor argument holding the literal collection values.
+    pub collection_values_arg_index: usize,
+    /// Every value that must be rejected before a sink is safe.
+    pub rejected_exact_values: Vec<String>,
+}
+
+/// Rulepack-owned factory roles that make a receiver safe for one sink rule.
+///
+/// The engine proves that the matched receiver's latest preceding assignment
+/// is a direct call to one of these factories. Factory names remain language
+/// rulepack data; the proof itself consumes only compiler assignment facts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiverFactoryGuardSemantics {
+    pub factories: Vec<RuleTarget>,
+}
+
+/// One exact named argument required on a configured factory call.
+///
+/// The owning language frontend decodes the scalar value from the parsed
+/// argument node. The security engine compares that typed fact directly and
+/// never interprets rendered source text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredNamedArgumentSemantics {
+    pub name: String,
+    pub value: StaticScalarValue,
+}
+
+/// Rulepack-owned roles for a sink argument made safe by a configured
+/// factory.
+///
+/// The engine proves that the selected sink argument is an addressable value,
+/// its latest preceding assignment is the declared direct factory call, and
+/// every required named argument has the exact frontend-decoded scalar value.
+/// Argument positions, factory identity, option names, and required values
+/// therefore remain language rulepack data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredArgumentFactoryGuardSemantics {
+    pub sink_argument_index: usize,
+    pub factory: RuleTarget,
+    pub required_named_arguments: Vec<RequiredNamedArgumentSemantics>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExactStringMapping {
+    pub input: String,
+    pub output: String,
+}
+
+/// Required substitutions for a compiler-proven local character transform.
+/// Helper/API names are irrelevant: the frontend proves the transform shape,
+/// while the rulepack owns the security-specific mapping inventory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterEscapeSemantics {
+    /// Sink arguments whose complete value must be escaped. Empty selects a
+    /// matched return-expression value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub value_arg_indices: Vec<usize>,
+    pub required_mappings: Vec<ExactStringMapping>,
+}
+
+/// Where the guarded parsed URL value appears at the matched sink.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum UrlGuardRootSemantics {
+    SinkReceiver,
+    SinkAssignmentTarget,
+    SinkArgumentAccessor {
+        argument_index: usize,
+        accessor: Box<RuleTarget>,
+    },
+}
+
+/// A URL component represented either by an exact projected field or by a
+/// rulepack-owned accessor call on the parsed URL value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UrlComponentSemantics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessor: Option<RuleTarget>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UrlSchemeGuardSemantics {
+    pub component: UrlComponentSemantics,
+    /// Optional comparison predicate such as a language/platform string
+    /// equality method. When absent, adapters must lower an exact equality
+    /// expression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_predicate: Option<RuleTarget>,
+    pub allowed_values: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UrlHostAllowlistSemantics {
+    pub component: UrlComponentSemantics,
+    /// Optional predicate such as a collection `contains` method. When absent,
+    /// the adapter must emit typed membership syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership_predicate: Option<RuleTarget>,
+    /// Factories allowed to construct a static finite collection. Literal
+    /// aggregate initializers need no factory entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_collection_factories: Vec<RuleTarget>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UrlDnsGuardSemantics {
+    pub resolver: RuleTarget,
+    pub private_address_predicates: Vec<RuleTarget>,
+}
+
+/// Redirect hardening required at an outbound-request boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum UrlRedirectGuardSemantics {
+    ReceiverFieldExactCallback {
+        field: String,
+        required_return_place: String,
+    },
+    PostSinkCall {
+        call: Box<RuleTarget>,
+        argument_index: usize,
+        required_value: StaticScalarValue,
+    },
+}
+
+/// Compiler-fact proof for a parsed, scheme-restricted, host-allowlisted,
+/// DNS-checked outbound URL.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UrlNetworkGuardSemantics {
+    pub root: UrlGuardRootSemantics,
+    pub parser: RuleTarget,
+    pub scheme: UrlSchemeGuardSemantics,
+    pub host_allowlist: UrlHostAllowlistSemantics,
+    pub dns: UrlDnsGuardSemantics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<UrlRedirectGuardSemantics>,
 }
 
 /// Role a sink rule plays in an implicit context channel.
@@ -483,10 +719,34 @@ pub struct AnalysisSemantics {
     /// Higher values sort later in otherwise identical report ordering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_reporting_rank: Option<u8>,
+    /// Prefer this sink as the canonical reporting boundary over a
+    /// lower-priority sink reached strictly downstream on the same proven
+    /// source flow. Higher values win. This affects presentation only: both
+    /// sinks remain in the compiler facts and taint graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sink_terminal_priority: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard_profile: Option<GuardProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_containment_guard: Option<PathContainmentGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_consumer_containment_guard: Option<PathConsumerContainmentGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_path_containment_guard: Option<RelativePathContainmentGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameterized_query: Option<ParameterizedQuerySemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nosql_filter: Option<NoSqlFilterSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_key_denylist_guard: Option<DynamicKeyDenylistGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_factory_guard: Option<ReceiverFactoryGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured_argument_factory_guard: Option<ConfiguredArgumentFactoryGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_escape: Option<CharacterEscapeSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_network_guard: Option<UrlNetworkGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_flow: Option<ContextFlowSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -546,6 +806,14 @@ pub enum ConstraintKind {
     },
     AnyArgTainted {
         any_arg_tainted: bool,
+    },
+    /// A write to a receiver member is dangerous only when the receiver came
+    /// from a declared factory with a tainted input and the assigned callback
+    /// forwards one of its parameters to a declared call argument. The
+    /// matcher proves every relationship from compiler flow facts; API and
+    /// member names remain rulepack data.
+    ReceiverOriginCallbackParamReachesCall {
+        receiver_origin_callback_param_reaches_call: Box<ReceiverOriginCallbackParamReachesCallSpec>,
     },
     FormatArgIndex {
         format_arg_index: u32,
@@ -648,6 +916,9 @@ impl ConstraintKind {
             Self::ArgTainted { .. } => "arg_tainted",
             Self::ReceiverTainted { .. } => "receiver_tainted",
             Self::AnyArgTainted { .. } => "any_arg_tainted",
+            Self::ReceiverOriginCallbackParamReachesCall { .. } => {
+                "receiver_origin_callback_param_reaches_call"
+            }
             Self::FormatArgIndex { .. } => "format_arg_index",
             Self::Namespace { .. } => "namespace",
             Self::TopLevel { .. } => "top_level",
@@ -681,6 +952,7 @@ impl ConstraintKind {
             Self::ArgTainted { .. }
                 | Self::ReceiverTainted { .. }
                 | Self::AnyArgTainted { .. }
+                | Self::ReceiverOriginCallbackParamReachesCall { .. }
                 | Self::SecondArgEquals { .. }
                 | Self::ArgEquals { .. }
                 | Self::KeywordArgEquals { .. }
@@ -697,6 +969,25 @@ impl ConstraintKind {
                 | Self::RequiresState { .. }
         )
     }
+}
+
+/// Compiler proof for a callback extension on a factory-created receiver.
+///
+/// For a matched write such as `decoder.extension = callback`, the matcher
+/// proves that:
+/// 1. the reaching definition of `decoder` is `receiver_factory(...)`;
+/// 2. `factory_tainted_arg_index` carries the current source taint;
+/// 3. the assigned callback's `callback_param_index` reaches
+///    `callback_call` argument `callback_call_arg_index`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiverOriginCallbackParamReachesCallSpec {
+    pub receiver_factory: RuleTarget,
+    pub factory_tainted_arg_index: u32,
+    pub receiver_member: RuleTarget,
+    pub callback_param_index: u32,
+    pub callback_call: RuleTarget,
+    pub callback_call_arg_index: u32,
 }
 
 /// `{ source_arg, sink_arg }` for the must-alias constraint.

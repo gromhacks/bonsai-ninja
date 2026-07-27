@@ -234,6 +234,15 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    dynamic_key_denylist_guard:
+      collection_constructor:
+        name: Set
+      membership_check:
+        name: has
+      membership_subject_arg_index: 0
+      collection_values_arg_index: 0
+      rejected_exact_values: ["__proto__", "constructor", "prototype"]
   match_examples:
   - name: recursive merge write by key
     code: |
@@ -271,6 +280,15 @@
       regex: "\\[[^\\]]+\\]"
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    dynamic_key_denylist_guard:
+      collection_constructor:
+        name: Set
+      membership_check:
+        name: has
+      membership_subject_arg_index: 0
+      collection_values_arg_index: 0
+      rejected_exact_values: ["__proto__", "constructor", "prototype"]
   match_examples:
   - name: recursive walk call keyed source
     code: |

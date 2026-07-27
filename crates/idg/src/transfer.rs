@@ -463,6 +463,133 @@ pub struct ReceiverStatePropagationSpec {
     pub receiver_type: Option<String>,
 }
 
+/// Build-scoped, immutable indexes for declarative transfer matchers.
+///
+/// Rulepacks may contain regular-expression callees. Compiling those patterns
+/// at every call site made transfer lowering proportional to
+/// `call sites × regex compilation cost`. The compiler prepares each matcher
+/// once per graph build and shares this read-only index across lowering
+/// workers. Indices point back into [`TransferOptions`], so the declarative
+/// options remain the canonical, hashable representation.
+#[derive(Debug)]
+pub(crate) struct CompiledTransferMatchers {
+    call_result_passthroughs: ConfiguredNameIndex,
+    source_output_args: ConfiguredNameIndex,
+    source_callback_args: ConfiguredNameIndex,
+    output_arg_flows: ConfiguredNameIndex,
+    receiver_state_propagations: ConfiguredNameIndex,
+    clean_output_overwrites: ConfiguredNameIndex,
+}
+
+impl CompiledTransferMatchers {
+    pub(crate) fn new(options: &TransferOptions) -> Self {
+        Self {
+            call_result_passthroughs: ConfiguredNameIndex::new(
+                options
+                    .call_result_passthroughs
+                    .iter()
+                    .map(|shape| shape.callee.as_str()),
+            ),
+            source_output_args: ConfiguredNameIndex::new(
+                options
+                    .source_output_args
+                    .iter()
+                    .map(|shape| shape.callee.as_str()),
+            ),
+            source_callback_args: ConfiguredNameIndex::new(
+                options
+                    .source_callback_args
+                    .iter()
+                    .map(|shape| shape.callee.as_str()),
+            ),
+            output_arg_flows: ConfiguredNameIndex::new(
+                options.output_arg_flows.iter().map(|shape| shape.callee.as_str()),
+            ),
+            receiver_state_propagations: ConfiguredNameIndex::new(
+                options
+                    .receiver_state_propagations
+                    .iter()
+                    .map(|shape| shape.method.as_str()),
+            ),
+            clean_output_overwrites: ConfiguredNameIndex::new(
+                options
+                    .clean_output_overwrites
+                    .iter()
+                    .map(|shape| shape.callee.as_str()),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ConfiguredNameIndex {
+    exact: ahash::AHashMap<String, Vec<usize>>,
+    regex: Vec<(usize, regex::Regex)>,
+}
+
+impl ConfiguredNameIndex {
+    fn new<'a>(configured_names: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut index = Self::default();
+        for (position, configured) in configured_names.into_iter().enumerate() {
+            let configured = configured.trim();
+            if let Some(pattern) = configured.strip_prefix("regex:") {
+                // Invalid rulepack regexes never matched in the previous
+                // implementation. Validation reports them at the rulepack
+                // boundary; keeping them absent here preserves that behavior
+                // for direct library callers.
+                if let Ok(regex) = regex::Regex::new(pattern) {
+                    index.regex.push((position, regex));
+                }
+                continue;
+            }
+            let configured = normalise_callee_text(configured);
+            if !configured.is_empty() {
+                index.exact.entry(configured).or_default().push(position);
+            }
+        }
+        index
+    }
+
+    fn matching_indices(&self, observed: &ObservedCallee<'_>) -> SmallVec<[usize; 4]> {
+        let mut matches = SmallVec::new();
+        if !observed.normalised.is_empty() {
+            if let Some(indices) = self.exact.get(observed.normalised.as_str()) {
+                matches.extend_from_slice(indices);
+            }
+            let tail = short_tail(&observed.normalised);
+            if tail != observed.normalised {
+                if let Some(indices) = self.exact.get(tail) {
+                    matches.extend_from_slice(indices);
+                }
+            }
+        }
+        matches.extend(
+            self.regex
+                .iter()
+                .filter_map(|(position, regex)| regex.is_match(observed.raw).then_some(*position)),
+        );
+        // Preserve declarative option order when exact and regex matchers
+        // overlap. Some shapes intentionally use first-match semantics.
+        matches.sort_unstable();
+        matches.dedup();
+        matches
+    }
+}
+
+struct ObservedCallee<'a> {
+    raw: &'a str,
+    normalised: String,
+}
+
+impl<'a> ObservedCallee<'a> {
+    fn new(observed: &'a str) -> Self {
+        Self {
+            raw: observed.trim(),
+            normalised: normalise_callee_text(observed),
+        }
+    }
+}
+
 /// One call site recorded by the transfer pass for the Phase 3
 /// builder to stitch cross-function edges.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -879,6 +1006,23 @@ pub fn transfer_function_for_with_options_and_syntax_facts(
     assignment_values: &[AssignmentValueFact],
     call_receivers: &[CallReceiverFact],
 ) -> TransferOutput {
+    let matchers = CompiledTransferMatchers::new(options);
+    transfer_function_for_with_compiled_options_and_syntax_facts(
+        decl,
+        options,
+        &matchers,
+        assignment_values,
+        call_receivers,
+    )
+}
+
+pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
+    decl: &Decl,
+    options: &TransferOptions,
+    matchers: &CompiledTransferMatchers,
+    assignment_values: &[AssignmentValueFact],
+    call_receivers: &[CallReceiverFact],
+) -> TransferOutput {
     let func = FuncId::new(decl.symbol.raw());
     let mut out = TransferOutput::new(func);
     out.is_constructor = matches!(decl.kind, DeclKind::Constructor);
@@ -898,6 +1042,7 @@ pub fn transfer_function_for_with_options_and_syntax_facts(
     let mut ctx = TransferCtx {
         out: &mut out,
         options,
+        matchers,
         last_writer: ahash::AHashMap::new(),
         descendant_writer_ids_by_base: ahash::AHashMap::new(),
         catch_projection_receivers: ahash::AHashSet::default(),
@@ -1490,6 +1635,8 @@ fn span_strictly_contains(outer: Span, inner: Span) -> bool {
 struct TransferCtx<'a> {
     out: &'a mut TransferOutput,
     options: &'a TransferOptions,
+    /// Build-scoped compiled lookup for the declarative options above.
+    matchers: &'a CompiledTransferMatchers,
     /// Per-name "current writers" — the `Write` nodes that the
     /// transfer pass considers most-recent for each name in CFG
     /// order. Each entry is a small set because branch joins union
@@ -3094,7 +3241,16 @@ fn walk_assign(
                 arg_values.push(arg.clone());
             }
             if !source_call_site_hint.is_some_and(|hint| hint.sibling_call_event) {
-                apply_call_result_passthrough_edges(site_span, callee, &[], &arg_nodes, None, ret_node, ctx);
+                let observed_callee = ObservedCallee::new(callee);
+                apply_call_result_passthrough_edges(
+                    site_span,
+                    &observed_callee,
+                    &[],
+                    &arg_nodes,
+                    None,
+                    ret_node,
+                    ctx,
+                );
                 ctx.out.call_sites.push(CallSiteRef {
                     site,
                     callee_name: callee.to_string(),
@@ -3434,9 +3590,10 @@ fn walk_call(
     debug_assert_eq!(arg_values.len(), arg_nodes.len());
     debug_assert_eq!(arg_writeback_targets.len(), arg_nodes.len());
     debug_assert_eq!(arg_names.len(), arg_nodes.len());
+    let observed_callee = ObservedCallee::new(name);
     apply_call_result_passthrough_edges(
         span,
-        name,
+        &observed_callee,
         receiver_types,
         &arg_nodes,
         receiver_arg_node,
@@ -3460,7 +3617,7 @@ fn walk_call(
         call_arg_values: arg_values,
         call_arg_writeback_targets: arg_writeback_targets,
         call_arg_names: arg_names,
-        source_callback_args: source_callback_args_for_call(name, ctx),
+        source_callback_args: source_callback_args_for_call(&observed_callee, ctx),
         is_assign_rhs: false,
         unresolved_result_passthrough: ctx.options.include_unresolved_call_result_passthrough,
         unresolved_receiver_result_passthrough: (ctx.options.include_unresolved_call_result_passthrough
@@ -3468,15 +3625,15 @@ fn walk_call(
             && matches!(call_kind, CallKind::Method)
             && receiver.is_some(),
     });
-    apply_source_output_arg_writes(span, name, args, ctx);
-    apply_output_arg_flow_call(span, name, args, ctx);
-    apply_receiver_state_propagation_call(span, name, receiver, receiver_types, args, ctx);
-    apply_clean_output_overwrite_call(span, name, args, ctx);
+    apply_source_output_arg_writes(span, &observed_callee, args, ctx);
+    apply_output_arg_flow_call(span, &observed_callee, args, ctx);
+    apply_receiver_state_propagation_call(span, &observed_callee, receiver, receiver_types, args, ctx);
+    apply_clean_output_overwrite_call(span, &observed_callee, args, ctx);
 }
 
 fn apply_call_result_passthrough_edges(
     span: Span,
-    name: &str,
+    callee: &ObservedCallee<'_>,
     receiver_types: &[String],
     arg_nodes: &[NodeId],
     receiver_arg_node: Option<NodeId>,
@@ -3484,10 +3641,11 @@ fn apply_call_result_passthrough_edges(
     ctx: &mut TransferCtx<'_>,
 ) {
     let selected: Vec<(Vec<usize>, bool)> = ctx
-        .options
+        .matchers
         .call_result_passthroughs
-        .iter()
-        .filter(|shape| configured_name_match(&shape.callee, name))
+        .matching_indices(callee)
+        .into_iter()
+        .filter_map(|index| ctx.options.call_result_passthroughs.get(index))
         .filter(|shape| {
             shape
                 .receiver_type
@@ -3567,12 +3725,18 @@ fn apply_yield_callback_call(
     }
 }
 
-fn apply_source_output_arg_writes(span: Span, name: &str, args: &[CallArg], ctx: &mut TransferCtx<'_>) {
+fn apply_source_output_arg_writes(
+    span: Span,
+    callee: &ObservedCallee<'_>,
+    args: &[CallArg],
+    ctx: &mut TransferCtx<'_>,
+) {
     let output_indices: Vec<usize> = ctx
-        .options
+        .matchers
         .source_output_args
-        .iter()
-        .filter(|shape| configured_name_match(&shape.callee, name))
+        .matching_indices(callee)
+        .into_iter()
+        .filter_map(|index| ctx.options.source_output_args.get(index))
         .flat_map(|shape| shape.output_arg_indices.iter().copied())
         .collect();
     for output_arg_index in output_indices {
@@ -3588,12 +3752,18 @@ fn apply_source_output_arg_writes(span: Span, name: &str, args: &[CallArg], ctx:
     }
 }
 
-fn apply_output_arg_flow_call(span: Span, name: &str, args: &[CallArg], ctx: &mut TransferCtx<'_>) {
+fn apply_output_arg_flow_call(
+    span: Span,
+    callee: &ObservedCallee<'_>,
+    args: &[CallArg],
+    ctx: &mut TransferCtx<'_>,
+) {
     let selected: Vec<(usize, Vec<usize>, Option<usize>)> = ctx
-        .options
+        .matchers
         .output_arg_flows
-        .iter()
-        .filter(|shape| configured_name_match(&shape.callee, name))
+        .matching_indices(callee)
+        .into_iter()
+        .filter_map(|index| ctx.options.output_arg_flows.get(index))
         .map(|shape| {
             (
                 shape.output_arg_index,
@@ -3635,7 +3805,7 @@ fn apply_output_arg_flow_call(span: Span, name: &str, args: &[CallArg], ctx: &mu
 
 fn apply_receiver_state_propagation_call(
     span: Span,
-    name: &str,
+    callee: &ObservedCallee<'_>,
     receiver: Option<&str>,
     receiver_types: &[String],
     args: &[CallArg],
@@ -3644,13 +3814,18 @@ fn apply_receiver_state_propagation_call(
     let Some(receiver) = receiver.map(str::trim).filter(|receiver| !receiver.is_empty()) else {
         return;
     };
-    let matches = ctx.options.receiver_state_propagations.iter().any(|shape| {
-        configured_name_match(&shape.method, name)
-            && shape
+    let matches = ctx
+        .matchers
+        .receiver_state_propagations
+        .matching_indices(callee)
+        .into_iter()
+        .filter_map(|index| ctx.options.receiver_state_propagations.get(index))
+        .any(|shape| {
+            shape
                 .receiver_type
                 .as_deref()
                 .is_none_or(|expected| receiver_name_matches(expected, receiver_types))
-    });
+        });
     if !matches || args.is_empty() {
         return;
     }
@@ -3671,21 +3846,31 @@ fn apply_receiver_state_propagation_call(
     ctx.commit_writer(receiver, write_node);
 }
 
-fn source_callback_args_for_call(name: &str, ctx: &TransferCtx<'_>) -> Vec<SourceCallbackArgSpec> {
-    ctx.options
+fn source_callback_args_for_call(
+    callee: &ObservedCallee<'_>,
+    ctx: &TransferCtx<'_>,
+) -> Vec<SourceCallbackArgSpec> {
+    ctx.matchers
         .source_callback_args
-        .iter()
-        .filter(|shape| configured_name_match(&shape.callee, name))
+        .matching_indices(callee)
+        .into_iter()
+        .filter_map(|index| ctx.options.source_callback_args.get(index))
         .cloned()
         .collect()
 }
 
-fn apply_clean_output_overwrite_call(span: Span, name: &str, args: &[CallArg], ctx: &mut TransferCtx<'_>) {
+fn apply_clean_output_overwrite_call(
+    span: Span,
+    callee: &ObservedCallee<'_>,
+    args: &[CallArg],
+    ctx: &mut TransferCtx<'_>,
+) {
     let Some((output_arg_index, value_start_arg_index)) = ctx
-        .options
+        .matchers
         .clean_output_overwrites
-        .iter()
-        .find(|shape| configured_name_match(&shape.callee, name))
+        .matching_indices(callee)
+        .into_iter()
+        .find_map(|index| ctx.options.clean_output_overwrites.get(index))
         .map(|shape| (shape.output_arg_index, shape.value_start_arg_index))
     else {
         return;
@@ -3887,20 +4072,6 @@ fn push_unique_string(out: &mut Vec<String>, value: String) {
     if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
         out.push(value);
     }
-}
-
-fn configured_name_match(configured: &str, observed: &str) -> bool {
-    if let Some(regex) = configured.trim().strip_prefix("regex:") {
-        return regex::Regex::new(regex)
-            .ok()
-            .is_some_and(|re| re.is_match(observed.trim()));
-    }
-    let configured = normalise_callee_text(configured);
-    let observed = normalise_callee_text(observed);
-    if configured.is_empty() || observed.is_empty() {
-        return false;
-    }
-    configured == observed || configured == short_tail(&observed)
 }
 
 fn normalise_callee_text(text: &str) -> String {
@@ -4287,9 +4458,12 @@ pub fn transfer_for_many_with_options<'d>(
     decls: impl IntoIterator<Item = &'d Decl>,
     options: &TransferOptions,
 ) -> Vec<TransferOutput> {
+    let matchers = CompiledTransferMatchers::new(options);
     decls
         .into_iter()
-        .map(|decl| transfer_function_for_with_options(decl, options))
+        .map(|decl| {
+            transfer_function_for_with_compiled_options_and_syntax_facts(decl, options, &matchers, &[], &[])
+        })
         .collect()
 }
 

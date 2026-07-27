@@ -10,10 +10,10 @@
 //!   backward closures.
 //! - `reachable_from_any(seeds)`: union forward closure from a bag
 //!   of sources — the canonical security-analysis kernel.
-//! - `paths(src, sink, max_paths, max_len)`: demand-driven path
-//!   enumeration inside the cut. Capped by user budget; the closure
-//!   pre-computation makes path enumeration O(actual paths) instead
-//!   of O(graph size).
+//! - `paths_with_truncation(src, sink, max_paths, max_len)`: demand-driven
+//!   diagnostic path enumeration inside the cut. Rendering bounds are
+//!   reported explicitly; the closure pre-computation makes path enumeration
+//!   O(actual paths) instead of O(graph size).
 //!
 //! Algorithmic shape: classical compiler dataflow over numeric IR. Ordinary
 //! value edges are compact CSR relations; access-path transfers stay symbolic
@@ -25,6 +25,7 @@ use crate::bitset::NodeBitSet;
 use crate::csr::EdgeCsr;
 use crate::edge::IdgEdge;
 use crate::node::NodeId;
+use bonsai_callgraph::PathTruncation;
 use bonsai_common::Precision;
 
 /// Cached bitvector adjacency for one IDG. Built once from the
@@ -34,38 +35,6 @@ pub struct ReachabilityIndex {
     forward: EdgeCsr,
     backward: EdgeCsr,
     n_nodes: usize,
-}
-
-/// Forward-only compiler relation used by contextual summary evaluation.
-///
-/// User-facing reachability keeps [`ReachabilityIndex`]'s two directions for
-/// cuts and diagnostics. Function-summary compilation only advances facts,
-/// so retaining the complete transpose would duplicate hundreds of
-/// megabytes on a large workspace for no query operation.
-#[derive(Clone, Debug)]
-pub(crate) struct ForwardReachabilityIndex {
-    forward: EdgeCsr,
-    n_nodes: usize,
-}
-
-impl ForwardReachabilityIndex {
-    pub(crate) fn from_pair_visitor<F>(n_nodes: usize, visit_pairs: F) -> Self
-    where
-        F: Fn(&mut dyn FnMut(u32, u32)),
-    {
-        Self {
-            forward: EdgeCsr::forward_from_pair_visitor(n_nodes, visit_pairs),
-            n_nodes,
-        }
-    }
-
-    pub(crate) fn forward_closure_nodes(&self, seeds: &[NodeId]) -> Vec<NodeId> {
-        sparse_closure_nodes(&self.forward, self.n_nodes, seeds)
-    }
-
-    pub(crate) fn forward_neighbours(&self, node: NodeId) -> &[u32] {
-        self.forward.neighbours(node)
-    }
 }
 
 impl ReachabilityIndex {
@@ -144,6 +113,14 @@ impl ReachabilityIndex {
         sparse_closure_nodes(&self.forward, self.n_nodes, seeds)
     }
 
+    pub(crate) fn forward_neighbours(&self, node: NodeId) -> &[u32] {
+        self.forward.neighbours(node)
+    }
+
+    pub(crate) fn backward_neighbours(&self, node: NodeId) -> &[u32] {
+        self.backward.neighbours(node)
+    }
+
     /// Forward closure restricted to `allowed` nodes.
     ///
     /// A source-to-target query computes `allowed` as the target's backward
@@ -202,12 +179,45 @@ impl ReachabilityIndex {
 
     /// Demand-driven path enumeration. Walks paths from `src` to
     /// `sink` within `cut` (the precomputed reachable intersection).
-    /// Bounded by `max_paths` and `max_len`; returns paths as `Vec<NodeId>`.
+    /// Bounded by `max_paths` and `max_len`; reports when either rendering
+    /// bound omitted diagnostic paths.
     ///
     /// The `cut` argument lets the caller compute one bitvector cut
     /// once and enumerate paths for many `(src, sink)` pairs —
     /// matching how security analysis emits multiple findings on
     /// shared graph slices.
+    pub fn paths_in_cut_with_truncation(
+        &self,
+        src: NodeId,
+        sink: NodeId,
+        cut: &NodeBitSet,
+        max_paths: usize,
+        max_len: usize,
+    ) -> (Vec<Vec<NodeId>>, PathTruncation) {
+        if !cut.contains(src) || !cut.contains(sink) {
+            return (Vec::new(), PathTruncation::None);
+        }
+        if max_paths == 0 {
+            return (Vec::new(), PathTruncation::MaxPaths);
+        }
+        if max_len == 0 {
+            return (Vec::new(), PathTruncation::MaxDepth);
+        }
+        let search_limit = max_paths.saturating_add(1);
+        let (mut out, mut truncation) = enumerate_paths(self, cut, src, sink, search_limit, max_len);
+        if out.len() > max_paths {
+            out.truncate(max_paths);
+            truncation = PathTruncation::MaxPaths;
+        }
+        (out, truncation)
+    }
+
+    /// Compatibility wrapper that drops explicit truncation metadata.
+    ///
+    /// New diagnostic renderers should call
+    /// [`Self::paths_in_cut_with_truncation`] or
+    /// [`Self::paths_with_truncation`].
+    #[deprecated(note = "use paths_in_cut_with_truncation so rendering bounds remain visible")]
     pub fn paths_in_cut(
         &self,
         src: NodeId,
@@ -216,32 +226,27 @@ impl ReachabilityIndex {
         max_paths: usize,
         max_len: usize,
     ) -> Vec<Vec<NodeId>> {
-        if max_paths == 0 || max_len == 0 || !cut.contains(src) || !cut.contains(sink) {
-            return Vec::new();
-        }
-        let mut out: Vec<Vec<NodeId>> = Vec::new();
-        let mut path: Vec<NodeId> = Vec::with_capacity(max_len);
-        path.push(src);
-        let mut visited = NodeBitSet::zeros(self.n_nodes);
-        visited.set(src);
-        enumerate_paths(
-            self,
-            cut,
-            sink,
-            &mut path,
-            &mut visited,
-            &mut out,
-            max_paths,
-            max_len,
-        );
-        out
+        self.paths_in_cut_with_truncation(src, sink, cut, max_paths, max_len)
+            .0
     }
 
-    /// Convenience wrapper: compute the cut from `(src, sink)` and
-    /// then enumerate up to `max_paths` paths inside it.
-    pub fn paths(&self, src: NodeId, sink: NodeId, max_paths: usize, max_len: usize) -> Vec<Vec<NodeId>> {
+    /// Convenience wrapper: compute the cut from `(src, sink)` and then
+    /// enumerate bounded diagnostic paths with explicit truncation metadata.
+    pub fn paths_with_truncation(
+        &self,
+        src: NodeId,
+        sink: NodeId,
+        max_paths: usize,
+        max_len: usize,
+    ) -> (Vec<Vec<NodeId>>, PathTruncation) {
         let cut = self.cut(&[src], &[sink]);
-        self.paths_in_cut(src, sink, &cut, max_paths, max_len)
+        self.paths_in_cut_with_truncation(src, sink, &cut, max_paths, max_len)
+    }
+
+    /// Compatibility wrapper that drops explicit truncation metadata.
+    #[deprecated(note = "use paths_with_truncation so rendering bounds remain visible")]
+    pub fn paths(&self, src: NodeId, sink: NodeId, max_paths: usize, max_len: usize) -> Vec<Vec<NodeId>> {
+        self.paths_with_truncation(src, sink, max_paths, max_len).0
     }
 
     /// Forward neighborhood: every node reachable in `≤ k` hops
@@ -405,47 +410,78 @@ fn bitvector_bounded_closure(csr: &EdgeCsr, n_nodes: usize, seeds: &[NodeId], k_
     reached
 }
 
-/// Recursive helper for [`ReachabilityIndex::paths_in_cut`].
-/// Walks forward edges, restricted to the precomputed `cut`.
-#[allow(clippy::too_many_arguments)]
+/// Iterative DFS for [`ReachabilityIndex::paths_in_cut_with_truncation`].
+///
+/// `path_next_edges` is the explicit call stack: each entry records the next
+/// outgoing edge to examine for the node at the same index in `path`. This
+/// keeps deep but valid source graphs off the Rust thread stack.
 fn enumerate_paths(
     rix: &ReachabilityIndex,
     cut: &NodeBitSet,
+    src: NodeId,
     sink: NodeId,
-    path: &mut Vec<NodeId>,
-    visited: &mut NodeBitSet,
-    out: &mut Vec<Vec<NodeId>>,
     max_paths: usize,
     max_len: usize,
-) {
-    if out.len() >= max_paths {
-        return;
-    }
-    let cur = *path.last().expect("non-empty path");
-    if cur == sink {
-        out.push(path.clone());
-        return;
-    }
-    if path.len() >= max_len {
-        return;
-    }
-    for &target in rix.forward.neighbours(cur) {
-        let nid = NodeId(target);
-        if !cut.contains(nid) {
+) -> (Vec<Vec<NodeId>>, PathTruncation) {
+    let capacity = max_len.min(rix.n_nodes);
+    let mut out = Vec::new();
+    let mut path = Vec::with_capacity(capacity);
+    let mut path_next_edges = Vec::with_capacity(capacity);
+    let mut visited = NodeBitSet::zeros(rix.n_nodes);
+    let mut truncation = PathTruncation::None;
+    path.push(src);
+    path_next_edges.push(0_usize);
+    visited.set(src);
+
+    while !path.is_empty() && out.len() < max_paths {
+        let path_index = path.len() - 1;
+        let cur = path[path_index];
+        if cur == sink {
+            out.push(path.clone());
+            visited.clear(cur);
+            path.pop();
+            path_next_edges.pop();
             continue;
         }
-        if visited.contains(nid) {
+
+        let neighbours = rix.forward.neighbours(cur);
+        if path.len() >= max_len {
+            if truncation == PathTruncation::None
+                && neighbours
+                    .iter()
+                    .copied()
+                    .map(NodeId)
+                    .any(|target| cut.contains(target) && !visited.contains(target))
+            {
+                truncation = PathTruncation::MaxDepth;
+            }
+            visited.clear(cur);
+            path.pop();
+            path_next_edges.pop();
             continue;
         }
-        visited.set(nid);
-        path.push(nid);
-        enumerate_paths(rix, cut, sink, path, visited, out, max_paths, max_len);
-        path.pop();
-        visited.clear(nid);
-        if out.len() >= max_paths {
-            return;
+
+        let next_edge = &mut path_next_edges[path_index];
+        let mut selected = None;
+        while let Some(&target) = neighbours.get(*next_edge) {
+            *next_edge += 1;
+            let target = NodeId(target);
+            if cut.contains(target) && !visited.contains(target) {
+                selected = Some(target);
+                break;
+            }
+        }
+        if let Some(target) = selected {
+            visited.set(target);
+            path.push(target);
+            path_next_edges.push(0);
+        } else {
+            visited.clear(cur);
+            path.pop();
+            path_next_edges.pop();
         }
     }
+    (out, truncation)
 }
 
 #[cfg(test)]

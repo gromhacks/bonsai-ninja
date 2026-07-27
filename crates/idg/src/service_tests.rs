@@ -36,7 +36,7 @@ fn symbolic_fact_pager_round_trips_sparse_fixed_width_pages() {
         facts: vec![SymbolicFactTemplate {
             base: 7,
             field: 11,
-            span: Some(span(2, 13, 29)),
+            span: 13,
         }]
         .into_boxed_slice(),
     };
@@ -47,10 +47,80 @@ fn symbolic_fact_pager_round_trips_sparse_fixed_width_pages() {
     assert!(decoded.get(NodeId(1)).is_empty());
     let facts = decoded.get(NodeId(0));
     assert_eq!(facts.len(), 1);
+    assert_eq!((facts[0].base, facts[0].field, facts[0].span), (7, 11, 13));
+}
+
+#[test]
+fn symbolic_worklist_facts_are_fixed_width_and_drop_unused_interprocedural_spans() {
+    assert_eq!(std::mem::size_of::<SymbolicNodeFact>(), 16);
+    assert_eq!(std::mem::size_of::<SymbolicFactIdentity>(), 12);
+    let local = SymbolicNodeFact::new(1, 2, Some(3), false, 4);
+    assert_eq!(local.span_id(), Some(3));
+    assert!(!local.is_interprocedural());
+
+    let interprocedural = SymbolicNodeFact::new(1, 2, Some(99), true, 4);
+    assert_eq!(interprocedural.span_id(), None);
+    assert!(interprocedural.is_interprocedural());
+}
+
+#[test]
+fn symbolic_local_provenance_is_retained_only_for_order_sensitive_bases() {
+    let first = SymbolicFactSpan::from(span(0, 10, 11));
+    let second = SymbolicFactSpan::from(span(0, 20, 21));
+    let runtime = SymbolicRuntimeIndex {
+        spans: vec![first, second].into_boxed_slice(),
+        // Base 3 has an outgoing transform whose source-order predicate reads
+        // provenance; base 2 has no such consumer.
+        ordering_sensitive_bases: Box::new([1_u64 << 3]),
+        ..SymbolicRuntimeIndex::default()
+    };
+
+    assert_eq!(runtime.local_provenance_id(3, span(0, 10, 11)), Some(0));
+    assert_eq!(runtime.local_provenance_id(3, span(0, 20, 21)), Some(1));
+    assert_eq!(runtime.local_provenance_id(2, span(0, 10, 11)), None);
+    assert_eq!(runtime.local_provenance_id(2, span(0, 20, 21)), None);
+
+    let insensitive_first =
+        SymbolicNodeFact::new(2, 7, runtime.local_provenance_id(2, span(0, 10, 11)), false, 0);
+    let insensitive_second =
+        SymbolicNodeFact::new(2, 7, runtime.local_provenance_id(2, span(0, 20, 21)), false, 0);
     assert_eq!(
-        (facts[0].base, facts[0].field, facts[0].span),
-        (7, 11, Some(span(2, 13, 29)))
+        insensitive_first.identity(),
+        insensitive_second.identity(),
+        "unused AST write positions must not multiply exact fact states"
     );
+
+    let sensitive_first =
+        SymbolicNodeFact::new(3, 7, runtime.local_provenance_id(3, span(0, 10, 11)), false, 0);
+    let sensitive_second =
+        SymbolicNodeFact::new(3, 7, runtime.local_provenance_id(3, span(0, 20, 21)), false, 0);
+    assert_ne!(
+        sensitive_first.identity(),
+        sensitive_second.identity(),
+        "source-order predicates require distinct AST write positions"
+    );
+}
+
+#[test]
+fn symbolic_worklist_spills_exact_fact_states_and_preserves_every_context() {
+    let mut worklist = SymbolicClosureWorklist::new(1, 0, None, None, None);
+    let first = SymbolicNodeFact::new(7, 11, Some(13), false, 3);
+    let second_context = SymbolicNodeFact::new(7, 11, Some(13), false, 5);
+    assert_eq!(SymbolicNodeFact::from_state_key(first.state_key()), first);
+
+    worklist.enqueue_fact_state(first);
+    worklist.enqueue_fact_state(first);
+    worklist.enqueue_fact_state(second_context);
+
+    assert_eq!(worklist.facts.len(), 2);
+    assert_eq!(worklist.pending_facts.len(), 2);
+
+    let mut contexts = [
+        worklist.next_fact().expect("first exact fact").context,
+        worklist.next_fact().expect("second exact fact").context,
+    ];
+    contexts.sort_unstable();
+    assert_eq!(contexts, [3, 5]);
 }
 
 #[test]
@@ -76,6 +146,34 @@ fn root_closure_visited_promotes_from_sparse_to_dense_without_changing_membershi
 }
 
 #[test]
+fn contextual_closure_visited_spills_exact_states_and_erases_context_only_in_results() {
+    let node_count = 4096usize;
+    let mut visited = ContextualClosureVisited::new(node_count);
+
+    assert!(visited.insert(1, NodeId(7)));
+    assert!(!visited.insert(1, NodeId(7)));
+    assert!(visited.insert(2, NodeId(7)));
+    for raw in 0..64 {
+        visited.insert(1, NodeId(raw as u32));
+    }
+    assert!(
+        !visited.insert(1, NodeId(node_count as u32)),
+        "out-of-range contextual nodes must stay excluded"
+    );
+
+    let mut nodes = Vec::new();
+    visited.append_nodes(&mut nodes);
+    nodes.sort_unstable_by_key(|node| node.0);
+    assert_eq!(
+        nodes.iter().filter(|node| **node == NodeId(7)).count(),
+        1,
+        "the public closure result erases context after exact state evaluation"
+    );
+    assert_eq!(visited.len(), 65, "distinct context/node states remain exact");
+    assert_eq!(nodes.len(), 64, "the context-erased result contains unique nodes");
+}
+
+#[test]
 fn call_context_tabulation_is_finite_and_replays_recursive_returns() {
     let first = ContextBoundaryKey {
         caller: FuncId::new(1),
@@ -88,13 +186,15 @@ fn call_context_tabulation_is_finite_and_replays_recursive_returns() {
         span: span(1, 30, 40),
     };
     let mut contexts = CallContexts::new();
-    let (first_context, _, _) = contexts.register_call(0, first);
-    let (second_context, _, _) = contexts.register_call(first_context, second);
+    let (first_context, first_registered) = contexts.register_call(0, first);
+    let (second_context, second_registered) = contexts.register_call(first_context, second);
+    assert!(first_registered && second_registered);
 
     // Re-entering an existing boundary records another tabulation caller; it
     // never allocates the recursive call string first→second→first→… .
-    let (recursive_context, _, _) = contexts.register_call(second_context, first);
+    let (recursive_context, recursive_registered) = contexts.register_call(second_context, first);
     assert_eq!(recursive_context, first_context);
+    assert!(recursive_registered);
     assert_eq!(contexts.boundaries.len(), 3);
 
     let returned = NodeId(17);
@@ -108,8 +208,9 @@ fn call_context_tabulation_is_finite_and_replays_recursive_returns() {
         callee: FuncId::new(1),
         span: span(2, 50, 60),
     });
-    let (_, replayed, _) = contexts.register_call(late_context, first);
-    assert_eq!(replayed, vec![returned]);
+    let (_, late_registered) = contexts.register_call(late_context, first);
+    assert!(late_registered);
+    assert_eq!(contexts.returned_nodes_for(first_context), vec![returned]);
 }
 
 #[test]
@@ -217,14 +318,7 @@ fn build_index(decls: Vec<Decl>) -> GlobalIndex {
         idx.insert(DeclIndex {
             file,
             defs,
-            refs: Vec::new(),
-            assignment_values: Vec::new(),
-            call_receivers: Vec::new(),
-            runtime_type_narrowings: Vec::new(),
-            branch_conditions: Vec::new(),
-            aggregate_layouts: Vec::new(),
-            strings: Vec::new(),
-            comments: Vec::new(),
+            ..DeclIndex::default()
         });
     }
     idx
@@ -433,6 +527,248 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
         ],
         "closure evidence must preserve every fired AST access-path boundary in dataflow order"
     );
+
+    let allowed_funcs: AHashSet<FuncId> = [caller, middle].into_iter().collect();
+    let scoped = service.forward_closure_evidence_within_funcs_with_max_precision(
+        &[params[0]],
+        &allowed_funcs,
+        Some(Precision::Narrowed),
+    );
+    assert!(
+        !scoped.nodes.contains(&callee_return),
+        "a compiler-proven function scope must reject symbolic transforms into unrelated functions"
+    );
+    assert_eq!(
+        scoped
+            .symbolic_cross_calls
+            .iter()
+            .map(|edge| (edge.caller, edge.callee))
+            .collect::<Vec<_>>(),
+        vec![(caller, middle)],
+        "provenance must contain exactly the admitted symbolic call boundaries"
+    );
+    assert!(
+        service
+            .forward_target_nodes_cut_within_funcs_with_max_precision(
+                &[params[0]],
+                &[callee_return],
+                &allowed_funcs,
+                Some(Precision::Narrowed),
+            )
+            .is_empty(),
+        "a target outside the compiler-proven scope must not admit the broader graph"
+    );
+
+    let all_funcs: AHashSet<FuncId> = [caller, middle, callee].into_iter().collect();
+    let relevance =
+        service.target_relevance_with_max_precision(&[callee_return], None, Some(Precision::Narrowed));
+    assert!(
+        relevance.admits_any(&[params[0]]),
+        "backward relevance must retain the AST-derived symbolic target path"
+    );
+    assert!(
+        !relevance.admits_any(&[params[1]]),
+        "backward relevance must reject an unrelated sibling-field seed"
+    );
+    let relevant = service.forward_closure_evidence_within_funcs_and_relevance_with_max_precision(
+        &[params[0]],
+        &all_funcs,
+        &relevance,
+        Some(Precision::Narrowed),
+    );
+    assert!(relevant.nodes.contains(&callee_return));
+    assert_eq!(
+        relevant
+            .symbolic_cross_calls
+            .iter()
+            .map(|edge| (edge.caller, edge.callee, edge.relation))
+            .collect::<Vec<_>>(),
+        evidence
+            .symbolic_cross_calls
+            .iter()
+            .map(|edge| (edge.caller, edge.callee, edge.relation))
+            .collect::<Vec<_>>(),
+        "target pruning must preserve every realized symbolic boundary on the target path"
+    );
+
+    let corridor_funcs: AHashSet<FuncId> = [caller, middle].into_iter().collect();
+    let corridor_relevance = service.target_relevance_within_funcs_with_max_precision(
+        &[callee_return],
+        None,
+        &corridor_funcs,
+        Some(Precision::Narrowed),
+    );
+    assert!(
+        !corridor_relevance.admits_any(&[params[0]]),
+        "a target outside the compiler corridor must not contribute demand to that corridor"
+    );
+}
+
+#[test]
+fn symbolic_read_consumption_preserves_write_order_for_earlier_copies() {
+    let func = FuncId::new(1);
+    let mut segment = crate::segment::IdgSegment::new();
+    let object = segment.strings.intern("object");
+    let earlier = segment.strings.intern("earlier");
+    let field = segment.strings.intern("field");
+    let param = segment.intern_place(Place::Param { idx: 0 });
+    let later_write = segment.intern_place(Place::Write {
+        name: object,
+        path: smallvec::smallvec![field],
+        span: span(0, 20, 21),
+    });
+    let object_read = segment.intern_place(Place::Read {
+        name: object,
+        path: smallvec::smallvec![field],
+    });
+    let earlier_read = segment.intern_place(Place::Read {
+        name: earlier,
+        path: smallvec::smallvec![field],
+    });
+    let return_place = segment.intern_place(Place::Return);
+    let param = segment.intern_node(func, param);
+    let later_write = segment.intern_node(func, later_write);
+    let _object_read = segment.intern_node(func, object_read);
+    let earlier_read = segment.intern_node(func, earlier_read);
+    let return_node = segment.intern_node(func, return_place);
+    segment.add_edge(IdgEdge::intra_assign(param, later_write, span(0, 20, 21)));
+    segment.add_edge(IdgEdge::intra_assign(earlier_read, return_node, span(0, 12, 13)));
+    segment.record_func(func);
+
+    let mut workspace = IdgWorkspace::new();
+    let segment_id = workspace.register_segment(segment);
+    let mut symbolic = SymbolicFieldGraph::new();
+    let source = symbolic.intern_base(segment_id, func, "object");
+    let target = symbolic.intern_base(segment_id, func, "earlier");
+    symbolic.push_transform(SymbolicFieldTransform {
+        source,
+        target,
+        exact_field: NO_SYMBOLIC_STRING,
+        call_span: span(0, 10, 11),
+        write_span: span(0, 10, 11),
+        precision: Precision::Exact,
+        call_kind: EdgeKind::Direct,
+        kind: SymbolicFieldTransformKind::Copy,
+        arg_idx: u32::MAX,
+        param_idx: u32::MAX,
+        allow_out_of_order_source: false,
+    });
+    workspace.set_symbolic_field(symbolic);
+
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+    let reached: AHashSet<_> = service
+        .forward_closure(&[service.param_nodes_of(func)[0]])
+        .into_iter()
+        .collect();
+    assert!(
+        !reached.contains(&WsNodeId(return_node.0)),
+        "consuming the later object.field fact at its shared read must not \
+         erase provenance and flow backward through the earlier aggregate copy"
+    );
+}
+
+#[test]
+fn target_relevance_reverses_exact_scalar_field_returns() {
+    let callee = FuncId::new(4);
+    let caller = FuncId::new(5);
+    let callee_write_span = span(0, 10, 20);
+    let unrelated_write_span = span(0, 21, 30);
+    let call_span = span(1, 40, 55);
+    let caller_write_span = span(1, 56, 62);
+
+    let mut callee_segment = crate::segment::IdgSegment::new();
+    let object = callee_segment.strings.intern("object");
+    let selected = callee_segment.strings.intern("selected");
+    let unrelated = callee_segment.strings.intern("unrelated");
+    let selected_param = callee_segment.intern_place(Place::Param { idx: 0 });
+    let unrelated_param = callee_segment.intern_place(Place::Param { idx: 1 });
+    let selected_write = callee_segment.intern_place(Place::Write {
+        name: object,
+        path: smallvec::smallvec![selected],
+        span: callee_write_span,
+    });
+    let unrelated_write = callee_segment.intern_place(Place::Write {
+        name: object,
+        path: smallvec::smallvec![unrelated],
+        span: unrelated_write_span,
+    });
+    let selected_param = callee_segment.intern_node(callee, selected_param);
+    let unrelated_param = callee_segment.intern_node(callee, unrelated_param);
+    let selected_write = callee_segment.intern_node(callee, selected_write);
+    let unrelated_write = callee_segment.intern_node(callee, unrelated_write);
+    callee_segment.add_edge(IdgEdge::intra_assign(
+        selected_param,
+        selected_write,
+        callee_write_span,
+    ));
+    callee_segment.add_edge(IdgEdge::intra_assign(
+        unrelated_param,
+        unrelated_write,
+        unrelated_write_span,
+    ));
+    callee_segment.record_func(callee);
+
+    let mut caller_segment = crate::segment::IdgSegment::new();
+    let result = caller_segment.strings.intern("result");
+    let result_write = caller_segment.intern_place(Place::Write {
+        name: result,
+        path: smallvec::smallvec![],
+        span: caller_write_span,
+    });
+    let return_place = caller_segment.intern_place(Place::Return);
+    let result_write = caller_segment.intern_node(caller, result_write);
+    let return_node = caller_segment.intern_node(caller, return_place);
+    caller_segment.add_edge(IdgEdge::intra_assign(
+        result_write,
+        return_node,
+        caller_write_span,
+    ));
+    caller_segment.record_func(caller);
+
+    let mut workspace = IdgWorkspace::new();
+    let callee_segment_id = workspace.register_segment(callee_segment);
+    let caller_segment_id = workspace.register_segment(caller_segment);
+    let mut symbolic = SymbolicFieldGraph::new();
+    let source = symbolic.intern_base(callee_segment_id, callee, "object");
+    let target = symbolic.intern_base(caller_segment_id, caller, "result");
+    let exact_field = symbolic.intern_string("selected");
+    symbolic.push_transform(SymbolicFieldTransform {
+        source,
+        target,
+        exact_field,
+        call_span,
+        write_span: caller_write_span,
+        precision: Precision::Exact,
+        call_kind: EdgeKind::Direct,
+        kind: SymbolicFieldTransformKind::ScalarReturn,
+        arg_idx: u32::MAX,
+        param_idx: u32::MAX,
+        allow_out_of_order_source: false,
+    });
+    workspace.set_symbolic_field(symbolic);
+
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+    let params = service.param_nodes_of(callee);
+    let target = service.return_node_of(caller).expect("caller return");
+    let allowed_funcs: AHashSet<FuncId> = [callee, caller].into_iter().collect();
+    let relevance = service.target_relevance_with_max_precision(&[target], None, Some(Precision::Narrowed));
+    assert!(relevance.admits_any(&[params[0]]));
+    assert!(
+        !relevance.admits_any(&[params[1]]),
+        "the inverse scalar-return relation must retain only the exact consumed suffix"
+    );
+    let evidence = service.forward_closure_evidence_within_funcs_and_relevance_with_max_precision(
+        &[params[0]],
+        &allowed_funcs,
+        &relevance,
+        Some(Precision::Narrowed),
+    );
+    assert!(evidence.nodes.contains(&target));
+    assert_eq!(evidence.symbolic_cross_calls.len(), 1);
+    assert_eq!(
+        evidence.symbolic_cross_calls[0].relation,
+        CrossCallRelation::Return
+    );
 }
 
 #[test]
@@ -616,6 +952,14 @@ fn target_node_cut_accepts_exact_unresolved_aggregate_argument_evidence() {
 
     let seeds = service.param_nodes_of(func);
     let target_nodes = service.nodes_at_span(func, call_span);
+    assert_eq!(
+        target_nodes
+            .iter()
+            .filter_map(|node| service.call_arg_identity(*node))
+            .collect::<Vec<_>>(),
+        vec![(func, call_span, 0)],
+        "call-argument identity must come from the unified compiler index"
+    );
     let scalar = service.forward_closure(&seeds);
     assert!(
         target_nodes.iter().all(|target| !scalar.contains(target)),
@@ -629,6 +973,24 @@ fn target_node_cut_accepts_exact_unresolved_aggregate_argument_evidence() {
     );
     assert_eq!(
         service.tainted_call_args_in_reachable_nodes(&cut),
+        vec![(func, call_span, 0)]
+    );
+    let allowed_funcs: AHashSet<FuncId> = [func].into_iter().collect();
+    let relevance =
+        service.target_relevance_with_max_precision(&target_nodes, None, Some(Precision::Narrowed));
+    assert!(
+        relevance.admits_any(&seeds),
+        "aggregate-consumption targets must reverse to their exact scalar inputs"
+    );
+    let relevant = service.forward_closure_within_funcs_and_relevance_with_max_precision(
+        &seeds,
+        &allowed_funcs,
+        &relevance,
+        Some(Precision::Narrowed),
+    );
+    assert_eq!(relevant, scalar);
+    assert_eq!(
+        service.tainted_call_args_in_reachable_nodes(&relevant),
         vec![(func, call_span, 0)]
     );
 }
@@ -834,6 +1196,20 @@ fn compiler_return_summaries_compose_calls_and_mutual_recursion() {
 
     assert_eq!(summaries.get(&f), Some(&vec![0]));
     assert_eq!(summaries.get(&g), Some(&vec![0]));
+    let cached = service
+        .return_summaries
+        .lock()
+        .get(&Some(Precision::Narrowed))
+        .map(|cache| cache.covered.clone())
+        .expect("precision cache");
+    assert_eq!(cached, AHashSet::from_iter([f, g]));
+    assert_eq!(
+        service
+            .return_taint_param_indices_for_funcs_with_max_precision(&[f], Some(Precision::Narrowed))
+            .get(&f),
+        Some(&vec![0]),
+        "single-function consumers must reuse the prewarmed compiler summary"
+    );
 }
 
 #[test]

@@ -13,7 +13,7 @@ established a **baseline** (a parameter flowing *directly* into a real enabled
 sink fires ≥1 finding) so that a dimension FAIL is a genuine engine gap and not a
 missing sink rule or a fixture-quality artifact.
 
-Current rule-example gate: 2026-07-20. The hand-built dimension matrix and
+Current rule-example gate: 2026-07-25. The hand-built dimension matrix and
 the investigation notes below were last refreshed on 2026-06-16; they are
 retained as historical evidence of the fixes, not as a substitute for the
 generated conformance and replay gates.
@@ -23,8 +23,8 @@ generated conformance and replay gates.
 `security <pack> pack --validate --taint-replay` replays every taint-dependent
 rule's positive `match_example` through live taint across all 21 languages.
 
-- **Current result: 0 misses, 0 errors, and 0 warnings** across 7,148
-  rules and 10,489 examples (6,003 rules and 10,090 examples enabled).
+- **Current result: 0 misses, 0 errors, and 0 warnings** across 7,152
+  rules and 10,499 examples (5,999 rules and 10,084 examples enabled).
   The three misses recorded by the 2026-06-16 audit have since been closed.
   Run the command above rather than copying these counts into another status
   page.

@@ -54,6 +54,7 @@ use bindings::{
 pub use branch_conditions::extract_branch_condition_facts;
 pub use call_results::normalize_call_result_assignment_sources;
 pub use comments::extract_comments;
+use comments::is_comment_node_kind;
 pub use decorators::extract_decorators;
 use elixir::{
     elixir_call_name, elixir_unwrap_def, emit_elixir_control_flow_call, emit_erlang_functional_loop_call,
@@ -112,6 +113,19 @@ use branch_repair::{looks_like_branch_arm_node, repair_branch_events_by_else_key
 /// `...` parameters. This is syntax semantics, not a security rule.
 pub const SYNTHETIC_VARARGS_PARAM: &str = "__bonsai_varargs";
 pub const SYNTHETIC_TUPLE_RESULT_PREFIX: &str = "__bonsai_tuple_result_";
+
+/// Read the compiler-owned tuple projection attached to one assignment.
+///
+/// This decodes an internal IR carrier, never source text. Consumers use the
+/// helper instead of depending on the synthetic spelling.
+#[must_use]
+pub fn tuple_result_projection_index(source_names: &[String]) -> Option<usize> {
+    source_names.iter().find_map(|source| {
+        source
+            .strip_prefix(SYNTHETIC_TUPLE_RESULT_PREFIX)
+            .and_then(|index| index.parse().ok())
+    })
+}
 
 /// Lower C/C++ variadic ABI builtins into ordinary assignment facts while
 /// they are still in the language-semantic layer. The IDG then sees only
@@ -1178,6 +1192,10 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         // Go `var x T = value` declarations.
         "var_declaration",
         "var_spec",
+        // Go package/local constants. The generic walker may omit module
+        // bindings from function flow, but file-level compiler facts still
+        // need their exact target/value relationship for static provenance.
+        "const_spec",
         // Rust `let x = ...` binding.
         "let_declaration",
         // Python walrus operator `x := value`.
@@ -3052,6 +3070,9 @@ pub fn call_arg_from_nodes(
     src: &[u8],
     name: Option<String>,
 ) -> Option<CallArg> {
+    if is_comment_node_kind(argument.kind()) || is_comment_node_kind(value.kind()) {
+        return None;
+    }
     let value_text = normalize_call_name_whitespace(node_text(&value, src));
     if value_text.is_empty() {
         return None;
@@ -4362,7 +4383,15 @@ pub fn extract_assignment_value_facts(
                     let direct_call_name = if callable_reference_name(&value, src).is_some() {
                         None
                     } else {
-                        extract_direct_call_info(&value, src).and_then(|(name, _)| name)
+                        extract_direct_call_info(&value, src)
+                            .and_then(|(name, _)| name)
+                            .or_else(|| {
+                                handler
+                                    .is_call(value.kind())
+                                    .then(|| parsed_call_target(&value, src))
+                                    .flatten()
+                                    .map(|target| normalize_call_name_whitespace(&target.full_text))
+                            })
                     };
                     let direct_call_receiver = direct_call_name.as_deref().and_then(call_receiver_from_name);
                     let call_sites = if callable_reference_name(&value, src).is_some() {
@@ -4372,10 +4401,14 @@ pub fn extract_assignment_value_facts(
                     };
                     facts.push(crate::AssignmentValueFact {
                         assignment_span: span,
+                        target: assignment_target_node(node, src)
+                            .and_then(|target| argument_place(&target, src)),
                         target_span,
                         value_span,
                         call_sites,
                         value_flow: expression_flow_from_node(value, file, src),
+                        exact_callable_return: None,
+                        exact_static_call_args: None,
                         direct_call_name,
                         direct_call_receiver,
                     });
@@ -4427,12 +4460,12 @@ pub fn extract_call_receiver_facts(
         };
         if let Some((receiver, call_span)) = receiver_and_span {
             let value_flow = expression_flow_from_node(receiver, file, src);
-            if !value_flow.is_empty() {
-                facts.push(crate::CallReceiverFact {
-                    call_span,
-                    value_flow,
-                });
-            }
+            facts.push(crate::CallReceiverFact {
+                call_span,
+                receiver_span: span_of(file, &receiver),
+                value_flow,
+                static_value: None,
+            });
         }
         let mut cursor = node.walk();
         stack.extend(node.named_children(&mut cursor));
@@ -4440,6 +4473,224 @@ pub fn extract_call_receiver_facts(
     facts.sort_by_key(|fact| (fact.call_span.start, fact.call_span.end));
     facts.dedup();
     facts
+}
+
+/// Collect nested call-argument value shapes from the same Tree-sitter nodes
+/// that produced the adapter-normalized [`FlowEvent::Call`] records.
+///
+/// Flow events supply canonical callee spans and argument order. The syntax
+/// tree supplies exact argument expression nodes. Joining them here keeps
+/// downstream engines independent of language delimiters and rendered
+/// argument text.
+#[must_use]
+pub fn extract_call_argument_value_facts(
+    tree: &Tree,
+    file: FileId,
+    defs: &[crate::Decl],
+    src: &[u8],
+) -> Vec<crate::CallArgumentValueFact> {
+    fn collect_requests(events: &[FlowEvent], out: &mut Vec<(Span, usize, Span)>) {
+        for event in events {
+            match event {
+                FlowEvent::Call { span, args, .. } => {
+                    out.extend(
+                        args.iter()
+                            .enumerate()
+                            .map(|(index, argument)| (*span, index, argument.span)),
+                    );
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect_requests(then_events, out);
+                    collect_requests(else_events, out);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => collect_requests(body, out),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    collect_requests(body, out);
+                    collect_requests(catch_events, out);
+                    collect_requests(finally_events, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut requests = Vec::new();
+    for decl in defs {
+        collect_requests(&decl.flow_events, &mut requests);
+    }
+    requests
+        .sort_by_key(|(call, index, argument)| (call.start, call.end, *index, argument.start, argument.end));
+    requests.dedup();
+
+    let mut nodes_by_span: std::collections::HashMap<(u64, u64), Vec<Node<'_>>> =
+        std::collections::HashMap::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.is_named() {
+            let span = span_of(file, &node);
+            nodes_by_span
+                .entry((span.start, span.end))
+                .or_default()
+                .push(node);
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+
+    let mut facts = Vec::new();
+    for (call_span, argument_index, argument_span) in requests {
+        let value_flow = nodes_by_span
+            .get(&(argument_span.start, argument_span.end))
+            .and_then(|nodes| {
+                nodes
+                    .iter()
+                    .map(|node| expression_flow_from_node(argument_value_node(*node), file, src))
+                    .max_by_key(|flow| {
+                        (
+                            flow.aggregate_fields.len() + flow.tuple_items.len() + flow.spreads.len(),
+                            usize::from(!flow.is_empty()),
+                        )
+                    })
+            });
+        if let Some(value_flow) = value_flow.filter(|flow| !flow.is_empty()) {
+            facts.push(crate::CallArgumentValueFact {
+                call_span,
+                argument_index,
+                argument_span,
+                value_flow,
+                static_value: None,
+            });
+        }
+    }
+    facts.sort_by_key(|fact| {
+        (
+            fact.call_span.file.raw(),
+            fact.call_span.start,
+            fact.call_span.end,
+            fact.argument_index,
+        )
+    });
+    facts.dedup();
+    facts
+}
+
+/// Attach adapter-decoded scalar literals to compiler call-argument facts.
+///
+/// The shared walker owns only the syntax relationship between a normalized
+/// call argument and its exact Tree-sitter value node. Each language adapter
+/// supplies the literal decoder, so boolean/null/string syntax never leaks
+/// into downstream analysis engines.
+pub fn populate_call_argument_static_values(
+    index: &mut crate::DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+    decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
+) {
+    fn collect_requests(events: &[FlowEvent], out: &mut Vec<(Span, usize, Span)>) {
+        for event in events {
+            match event {
+                FlowEvent::Call { span, args, .. } => out.extend(
+                    args.iter()
+                        .enumerate()
+                        .map(|(index, argument)| (*span, index, argument.span)),
+                ),
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect_requests(then_events, out);
+                    collect_requests(else_events, out);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => collect_requests(body, out),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    collect_requests(body, out);
+                    collect_requests(catch_events, out);
+                    collect_requests(finally_events, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut requests = Vec::new();
+    for decl in &index.defs {
+        collect_requests(&decl.flow_events, &mut requests);
+    }
+    requests.sort_by_key(|(call, argument_index, argument)| {
+        (
+            call.file.raw(),
+            call.start,
+            call.end,
+            *argument_index,
+            argument.start,
+            argument.end,
+        )
+    });
+    requests.dedup();
+
+    let mut argument_nodes = std::collections::HashMap::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.is_named() {
+            let span = span_of(file, &node);
+            argument_nodes.insert((span.start, span.end), node);
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+
+    for (call_span, argument_index, argument_span) in requests {
+        let Some(static_value) = argument_nodes
+            .get(&(argument_span.start, argument_span.end))
+            .and_then(|node| decode(argument_value_node(*node), src))
+        else {
+            continue;
+        };
+        if let Some(fact) = index
+            .call_argument_values
+            .iter_mut()
+            .find(|fact| fact.call_span == call_span && fact.argument_index == argument_index)
+        {
+            fact.static_value = Some(static_value);
+        } else {
+            index.call_argument_values.push(crate::CallArgumentValueFact {
+                call_span,
+                argument_index,
+                argument_span,
+                value_flow: Default::default(),
+                static_value: Some(static_value),
+            });
+        }
+    }
+    index.call_argument_values.sort_by_key(|fact| {
+        (
+            fact.call_span.file.raw(),
+            fact.call_span.start,
+            fact.call_span.end,
+            fact.argument_index,
+        )
+    });
+    index.call_argument_values.dedup();
 }
 
 /// Read-only inputs shared by the declaration-lowering passes.
@@ -5043,6 +5294,7 @@ pub fn decl_index_with_handler(
     let comments = extract_comments(&tree, file, src);
     let assignment_values = extract_assignment_value_facts(&tree, file, handler, src);
     let call_receivers = extract_call_receiver_facts(&tree, file, handler, src);
+    let call_argument_values = extract_call_argument_value_facts(&tree, file, &defs, src);
     let runtime_type_narrowings = extract_runtime_type_narrowing_facts(&tree, file, handler, src);
     let branch_conditions = extract_branch_condition_facts(&tree, file, handler, src);
     crate::DeclIndex {
@@ -5051,6 +5303,9 @@ pub fn decl_index_with_handler(
         refs,
         assignment_values,
         call_receivers,
+        call_argument_values,
+        static_string_maps: Vec::new(),
+        character_substitutions: Vec::new(),
         runtime_type_narrowings,
         branch_conditions,
         aggregate_layouts: Vec::new(),
@@ -5532,6 +5787,7 @@ pub fn extract_string_literals(
                     span: span_of(file, &node),
                     category: crate::StringCategory::classify(&text),
                     text,
+                    static_value: None,
                 });
                 continue;
             }

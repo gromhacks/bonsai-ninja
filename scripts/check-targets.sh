@@ -79,7 +79,33 @@ fi
 if [[ "$install_targets" == true ]] && command -v rustup >/dev/null 2>&1; then
     rustup target add "${targets[@]}"
 elif [[ "$install_targets" == true ]]; then
-    echo "rustup not found; assuming requested target std libraries are already installed" >&2
+    echo "rustup not found; validating the requested target std libraries" >&2
+fi
+
+missing_std_targets=()
+for target in "${targets[@]}"; do
+    target_libdir=$(rustc --print target-libdir --target "$target" 2>/dev/null || true)
+    if [[ -z "$target_libdir" || ! -d "$target_libdir" ]] \
+        || ! find "$target_libdir" -maxdepth 1 -name 'libstd-*' -print -quit 2>/dev/null | grep -q .
+    then
+        missing_std_targets+=("$target")
+    fi
+done
+
+if ((${#missing_std_targets[@]} > 0)); then
+    printf 'missing Rust std library for target(s):\n' >&2
+    printf '  %s\n' "${missing_std_targets[@]}" >&2
+    if command -v rustup >/dev/null 2>&1; then
+        printf 'install them with: rustup target add' >&2
+        printf ' %q' "${missing_std_targets[@]}" >&2
+        printf '\n' >&2
+    else
+        cat >&2 <<'EOF'
+install them with your Rust distribution, or install rustup and run
+`rustup target add <target>`. No Cargo checks were started.
+EOF
+    fi
+    exit 2
 fi
 
 for target in "${targets[@]}"; do

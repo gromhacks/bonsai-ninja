@@ -22,7 +22,7 @@
 #[global_allocator]
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use theme::Theme;
 use ui::Ui;
@@ -300,7 +300,7 @@ fn main() -> Result<()> {
         .name("bonsai-main".to_string())
         .stack_size(configured_main_stack_bytes())
         .spawn(real_main)
-        .expect("spawn bonsai worker thread");
+        .context("spawning the bonsai CLI worker thread")?;
     match worker.join() {
         Ok(result) => result,
         Err(_) => std::process::exit(101),

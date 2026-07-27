@@ -1050,7 +1050,7 @@ fn build_export_structural_metadata(
             languages_set.insert(language.clone());
         }
 
-        let Some(idx) = ws.exact_decl_index(file) else {
+        let Some(idx) = ws.exact_decl_index_shared(file) else {
             continue;
         };
 
@@ -1162,8 +1162,8 @@ impl Serialize for ExportFilesStreaming<'_> {
         let files = export_files_in_path_order(self.ws);
         let mut sequence = serializer.serialize_seq(Some(files.len()))?;
         for (file, path) in files {
-            let index = self.ws.exact_decl_index(file);
-            let export_file = build_export_file(self.ws, index.as_ref(), self.spans, file, path);
+            let index = self.ws.exact_decl_index_shared(file);
+            let export_file = build_export_file(self.ws, index.as_deref(), self.spans, file, path);
             sequence.serialize_element(&export_file)?;
         }
         SerializeSeq::end(sequence)
@@ -2114,7 +2114,7 @@ impl Serialize for ExportReachableFactsStreaming<'_> {
         let mut sequence = serializer.serialize_seq(None)?;
         let mut count = 0usize;
         for functions in functions_by_file(self.functions) {
-            let Some(index) = self.ws.exact_decl_index(functions[0].file_id) else {
+            let Some(index) = self.ws.exact_decl_index_shared(functions[0].file_id) else {
                 continue;
             };
             let positions: ahash::AHashMap<u32, usize> = index
@@ -2245,7 +2245,7 @@ impl Serialize for ExportIntraTaintStreaming<'_> {
         let mut sequence = serializer.serialize_seq(None)?;
         let mut count = 0usize;
         for functions in functions_by_file(self.functions) {
-            let Some(index) = self.ws.exact_decl_index(functions[0].file_id) else {
+            let Some(index) = self.ws.exact_decl_index_shared(functions[0].file_id) else {
                 continue;
             };
             let positions: ahash::AHashMap<u32, usize> = index
@@ -2399,7 +2399,7 @@ fn export_class_fields(ws: &Workspace, spans: &ExportSpanCache) -> Vec<ExportCla
     let phase_started = Instant::now();
     let mut class_fields: Vec<ExportClassFields> = Vec::new();
     for file in ws.vfs().all_files() {
-        let Some(index) = ws.exact_decl_index(file) else {
+        let Some(index) = ws.exact_decl_index_shared(file) else {
             continue;
         };
         let decls = &index.defs;
@@ -2991,7 +2991,7 @@ fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec
     let mut entry_params: EntryParamMap = std::collections::BTreeMap::new();
 
     for file in ws.vfs().all_files() {
-        let Some(index) = ws.exact_decl_index(file) else {
+        let Some(index) = ws.exact_decl_index_shared(file) else {
             continue;
         };
         for decl in &index.defs {
@@ -3165,7 +3165,7 @@ fn collect_class_field_taints_for_entries(
     let mut out: ahash::AHashMap<bonsai_common::SymbolId, ahash::AHashSet<String>> =
         ahash::AHashMap::default();
     for file in ws.vfs().all_files() {
-        let Some(index) = ws.exact_decl_index(file) else {
+        let Some(index) = ws.exact_decl_index_shared(file) else {
             continue;
         };
         for decl in &index.defs {

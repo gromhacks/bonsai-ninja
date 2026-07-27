@@ -7,7 +7,7 @@
 //! per entry; `Regex` queries fall through to the original name. The
 //! cache is workspace-wide; rebuilt on demand and cleared on edit.
 
-use bonsai_db::AnalyzerDb;
+use bonsai_index::{GlobalIndex, GlobalIndexIdentity};
 use bonsai_lang_api::Decl;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ pub struct DeclNameEntry {
 
 #[derive(Default, Debug)]
 pub struct DeclNameIndex {
-    inner: RwLock<Option<Arc<Vec<DeclNameEntry>>>>,
+    inner: RwLock<Option<(GlobalIndexIdentity, Arc<Vec<DeclNameEntry>>)>>,
 }
 
 impl DeclNameIndex {
@@ -31,16 +31,31 @@ impl DeclNameIndex {
 
     /// Snapshot of every decl in the workspace, with lowercased
     /// names precomputed. Built lazily on first access.
-    pub fn entries(&self, db: &AnalyzerDb) -> Arc<Vec<DeclNameEntry>> {
+    pub fn entries(&self, headers: &GlobalIndex) -> Arc<Vec<DeclNameEntry>> {
+        let identity = headers.identity();
         // Drop the read guard's temporary before the write upgrade.
-        let cached = self.inner.read().clone();
+        let cached = self
+            .inner
+            .read()
+            .as_ref()
+            .filter(|(cached_identity, _)| cached_identity == &identity)
+            .map(|(_, entries)| Arc::clone(entries));
         if let Some(hit) = cached {
             return hit;
         }
-        let global = db.global_index();
+        // Serialize the one workspace scan with invalidation. Otherwise an
+        // old header snapshot could finish after `clear()` and become the
+        // cache visible to queries in the new source generation.
+        let mut slot = self.inner.write();
+        if let Some((_, existing)) = slot
+            .as_ref()
+            .filter(|(cached_identity, _)| cached_identity == &identity)
+        {
+            return Arc::clone(existing);
+        }
         let mut out: Vec<DeclNameEntry> = Vec::new();
-        for file in global.all_files() {
-            for decl in global.decls_in(file) {
+        for file in headers.all_files() {
+            for decl in headers.decls_in(file) {
                 let lowercased_name = decl.name.to_lowercase();
                 out.push(DeclNameEntry {
                     lowercased_name,
@@ -49,11 +64,7 @@ impl DeclNameIndex {
             }
         }
         let arc = Arc::new(out);
-        let mut slot = self.inner.write();
-        if let Some(existing) = slot.clone() {
-            return existing;
-        }
-        *slot = Some(arc.clone());
+        *slot = Some((identity, arc.clone()));
         arc
     }
 

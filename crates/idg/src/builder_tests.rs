@@ -256,6 +256,36 @@ fn spooled_stitch_preserves_the_exact_canonical_graph() {
 }
 
 #[test]
+fn spooled_stitch_rejects_duplicate_compiler_segments_without_panicking() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["x".to_string()];
+    let output = transfer_function_for(&decl);
+    let batches = vec![vec![
+        (SegmentId(0), vec![output.clone()]),
+        (SegmentId(0), vec![output]),
+    ]];
+    let resolver = MockResolver::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("duplicate-segment.factstore");
+
+    let error = stitch_idg_from_spooled_segment_batches(
+        batches,
+        2,
+        &resolver,
+        SpooledStitchOptions {
+            spool_path: &path,
+            include_field_argument_forwarding: true,
+            symbolic_field_forwarding: false,
+            symbolic_funcs: None,
+            capture_funcs: None,
+        },
+    )
+    .expect_err("duplicate compiler segment must be rejected");
+
+    assert!(matches!(error, crate::IdgError::Invariant(message) if message.contains("repeated segment 0")));
+}
+
+#[test]
 fn spooled_sidecar_preserves_cross_segment_calls_byte_for_byte() {
     let mut caller = empty_decl(1, "caller");
     caller.params = vec!["source".to_string()];
@@ -816,6 +846,51 @@ fn callback_formal_position_above_255_resolves_without_truncation() {
                 && edge.edge.meta.call_kind == CallEdgeKind::Indirect
         }),
         "callback formal 299 must resolve to the bound callback"
+    );
+}
+
+#[test]
+fn receiver_form_callback_uses_exact_adapter_binding_identity() {
+    let mut host = empty_decl(1, "host");
+    host.params = vec!["callback".to_string(), "value".to_string()];
+    host.flow_events = vec![FlowEvent::Call {
+        span: span(20, 40),
+        name: "callback.accept".to_string(),
+        receiver: Some("callback".to_string()),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Method,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(36, 39),
+            name: None,
+            value_text: "value".to_string(),
+            place: Some("value".to_string()),
+            source_names: Vec::new(),
+        }],
+    }];
+    let mut callback = empty_decl(2, "bound_callback");
+    callback.params = vec!["input".to_string()];
+
+    let mut resolver = MockResolver::new();
+    resolver.add_callback_binding(FuncId::new(1), 0, vec![FuncId::new(2)]);
+    let ws = stitch_idg(
+        vec![transfer_function_for(&host), transfer_function_for(&callback)],
+        &resolver,
+        &StaticF2S(AHashMap::from([
+            (FuncId::new(1), SegmentId(0)),
+            (FuncId::new(2), SegmentId(1)),
+        ])),
+    );
+    let caller_segment = ws.segment(SegmentId(0)).expect("host segment");
+    let callee_segment = ws.segment(SegmentId(1)).expect("callback segment");
+    assert!(
+        ws.cross_file().edges.iter().any(|edge| {
+            edge.edge.meta.kind == IdgEdgeKind::InterCallArg
+                && call_arg_idx(caller_segment, edge.edge.from) == Some(0)
+                && param_idx(callee_segment, edge.edge.to) == Some(0)
+                && edge.edge.meta.call_kind == CallEdgeKind::Indirect
+        }),
+        "adapter-emitted receiver binding must resolve the callback"
     );
 }
 

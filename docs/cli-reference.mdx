@@ -80,8 +80,12 @@ source snapshot once; later phases stream those objects. IDG transfer lowering
 also runs once and replays a compact typed stitch spool. Process exits reclaim
 phase arenas, and file-size-weighted scheduling subtracts current process RSS
 and safety headroom from detected memory before adapting concurrency, without
-capping semantic work. A 3 GiB process budget serializes exact compiler units.
-After the IDG worker, the parent validates
+capping semantic work. A 3 GiB process budget serializes transient exact
+compiler units. The workspace linker keeps only compact declaration/type/module
+headers and stable symbols; consumers stream exact bodies and remap them to
+those symbols. Repeated exact-body consumers share a byte-weighted hot cache
+derived from the same memory budget; eviction causes exact recomputation, not
+missing files or facts. After the IDG worker, the parent validates
 that every artifact describes the same workspace snapshot; an intervening edit
 restarts the exact worker sequence until a coherent generation is current.
 
@@ -520,7 +524,7 @@ they produce reusable sidecars. The manifest is JSON metadata for cache
 coverage and fingerprints; command hot paths still use the binary factstores
 and validate sidecar headers and payload readability before reuse. Retrieval
 sidecars are also checked against the same query-time
-source/dependency/build pipeline fingerprint, so copied or moved candidate
+source/dependency/schema pipeline fingerprint, so copied or moved candidate
 indexes are stale until rebuilt. Exact indexes decide candidates; canonical
 facts and semantic graph verification decide truth. Vector similarity is
 never evidence. Retrieval sidecars are complete-workspace artifacts; scoped

@@ -1606,15 +1606,25 @@ where
     let mut callee_endpoints = CalleeEndpointIndex::with_capacity(function_count);
     let mut schedule_to_workspace: AHashMap<SegmentId, SegmentId> = AHashMap::new();
     let mut stitch_spool = WireChunkSpool::new(spool_path, 1, "IDG stitch object")?;
-    let mut previous_placeholder = None;
+    let mut previous_placeholder: Option<SegmentId> = None;
     let mut canonical_function_count = 0usize;
 
     for batch in canonical_batches {
         for (placeholder, mut outputs) in batch {
-            debug_assert!(
-                previous_placeholder.is_none_or(|previous| previous < placeholder),
-                "canonical segment batches must be strictly ordered"
-            );
+            if let Some(previous) = previous_placeholder {
+                if previous == placeholder {
+                    return Err(crate::IdgError::Invariant(format!(
+                        "canonical segment schedule repeated segment {}",
+                        placeholder.0
+                    )));
+                }
+                if previous > placeholder {
+                    return Err(crate::IdgError::Invariant(format!(
+                        "canonical segment schedule is not strictly ordered: segment {} followed segment {}",
+                        placeholder.0, previous.0
+                    )));
+                }
+            }
             previous_placeholder = Some(placeholder);
             outputs.sort_by_key(|out| out.func.raw());
             let place_capacity = outputs.iter().map(|out| out.places.len()).sum();
@@ -1634,11 +1644,12 @@ where
             }
             canonical_function_count = canonical_function_count.saturating_add(segment_funcs.len());
             let segment_id = ws.register_segment(segment);
-            assert!(
-                schedule_to_workspace.insert(placeholder, segment_id).is_none(),
-                "canonical segment schedule must not repeat segment {}",
-                placeholder.0
-            );
+            if schedule_to_workspace.insert(placeholder, segment_id).is_some() {
+                return Err(crate::IdgError::Invariant(format!(
+                    "canonical segment schedule repeated segment {}",
+                    placeholder.0
+                )));
+            }
             extend_callee_endpoints_for_segment(
                 segment_id,
                 &segment_funcs,
@@ -1650,14 +1661,22 @@ where
             let functions = segment_funcs
                 .iter()
                 .copied()
-                .map(|caller| StitchFunctionRecord {
-                    caller,
-                    remap: remap_by_func.remove(&caller).expect("canonical function remap"),
-                    data: data_by_func
-                        .remove(&caller)
-                        .expect("canonical function stitch data"),
+                .map(|caller| {
+                    let remap = remap_by_func.remove(&caller).ok_or_else(|| {
+                        crate::IdgError::Invariant(format!(
+                            "canonical function {} is missing its node remap",
+                            caller.raw()
+                        ))
+                    })?;
+                    let data = data_by_func.remove(&caller).ok_or_else(|| {
+                        crate::IdgError::Invariant(format!(
+                            "canonical function {} is missing its stitch data",
+                            caller.raw()
+                        ))
+                    })?;
+                    Ok(StitchFunctionRecord { caller, remap, data })
                 })
-                .collect();
+                .collect::<crate::IdgResult<Vec<_>>>()?;
             stitch_spool.push(StitchSegmentRecord {
                 scheduled_segment: placeholder,
                 functions,
@@ -1668,10 +1687,11 @@ where
             ws.spill_segment(segment_id)?;
         }
     }
-    assert_eq!(
-        canonical_function_count, function_count,
-        "canonical lowering pass must cover the complete function schedule"
-    );
+    if canonical_function_count != function_count {
+        return Err(crate::IdgError::Invariant(format!(
+            "canonical lowering covered {canonical_function_count} functions, expected {function_count}"
+        )));
+    }
     stitch_spool.check_error()?;
     callee_endpoints.finish_build();
     stitch_debug_log(format_args!(
@@ -1698,24 +1718,29 @@ where
             let segment_id = schedule_to_workspace
                 .get(&scheduled_segment)
                 .copied()
-                .unwrap_or_else(|| {
-                    panic!(
+                .ok_or_else(|| {
+                    crate::IdgError::Invariant(format!(
                         "stitch pass referenced unscheduled segment {}",
                         scheduled_segment.0
-                    )
-                });
+                    ))
+                })?;
             ws.hydrate_segment(segment_id)?;
             let Some(segment) = ws.segment_mut(segment_id) else {
-                panic!("stitch object referenced missing segment {}", segment_id.0);
+                return Err(crate::IdgError::Invariant(format!(
+                    "stitch object referenced missing segment {}",
+                    segment_id.0
+                )));
             };
             segment.rebuild_build_lookups();
             for record in batch.functions {
                 let StitchFunctionRecord { caller, remap, data } = record;
-                assert_eq!(
-                    ws.segment_for_func(caller),
-                    Some(segment_id),
-                    "stitch caller must remain in its canonical segment"
-                );
+                if ws.segment_for_func(caller) != Some(segment_id) {
+                    return Err(crate::IdgError::Invariant(format!(
+                        "stitch caller {} moved outside canonical segment {}",
+                        caller.raw(),
+                        segment_id.0
+                    )));
+                }
                 state.stitch_caller(
                     &mut ws,
                     WorkspaceCallerStitch {
@@ -1746,10 +1771,11 @@ where
         }
         Ok(())
     })?;
-    assert_eq!(
-        stitched_function_count, function_count,
-        "stitch lowering pass must cover the complete function schedule"
-    );
+    if stitched_function_count != function_count {
+        return Err(crate::IdgError::Invariant(format!(
+            "stitch replay covered {stitched_function_count} functions, expected {function_count}"
+        )));
+    }
     ws.finish_spool_generation()?;
     // Call stitching is complete. Endpoint vectors include parameter names,
     // capture nodes, returns, throws, and receiver writes for every function;
@@ -2264,37 +2290,24 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
             stats.resolve_nanos = stats.resolve_nanos.saturating_add(started.elapsed().as_nanos());
         }
     }
-    // Callback-binding resolution: indirect calls through a
-    // function-typed parameter take two syntactic forms:
-    //   1. `callback(args)` — callee-name matches a param name.
-    //   2. `callback.invoke(args)` / `callback.call(args)` /
-    //      `callback.accept(args)` — receiver matches a param.
-    // Both should resolve to whatever functions were ever bound to
-    // that parameter across the callgraph. Merge in the
-    // `callback_bindings` results so `run(executor, t)` /
-    // `callback(value)` and `run(callback, t)` / `callback.call(value)`
-    // both surface the cross-call edge to executor.
+    // Callback-binding resolution consumes the adapter-emitted call
+    // identity directly. A free invocation names the bound parameter as its
+    // callee; a receiver-form invocation carries that parameter in
+    // `receiver`. Language syntax such as sigils or invocation punctuation
+    // must be represented consistently by the owning Tree-sitter adapter,
+    // never reinterpreted here.
+    // Merge the callgraph's proven parameter bindings into the ordinary
+    // candidate set so both forms surface the cross-call edge.
     let callback_param_idx: Option<u32> =
         if let Some(recv) = site.receiver.as_deref().filter(|r| !r.is_empty()) {
-            // Receiver-form callback. The receiver text might be the
-            // param name directly (`cb.accept(...)` → receiver "cb")
-            // or a sigil'd form (`$cb` in perl). Strip leading `$`/`@`
-            // sigils before matching.
-            let stripped = recv.trim_start_matches(['$', '@', '%', '&']);
             caller_params
                 .iter()
-                .position(|p| p == recv || p == stripped)
+                .position(|param| param == recv)
                 .and_then(|i| u32::try_from(i).ok())
         } else {
-            // Free-call form: callee name itself is the param.
-            // Some adapters keep an explicit invocation marker on the
-            // name even without a receiver — elixir emits `cb.(value)`
-            // as `name="cb."` with no receiver. Strip a single trailing
-            // `.` / `()` punct before the match.
-            let bare_name = site.callee_name.trim_end_matches('.').trim_end_matches("()");
             caller_params
                 .iter()
-                .position(|p| p == &site.callee_name || p == bare_name)
+                .position(|param| param == &site.callee_name)
                 .and_then(|i| u32::try_from(i).ok())
         };
     if let Some(param_idx) = callback_param_idx {

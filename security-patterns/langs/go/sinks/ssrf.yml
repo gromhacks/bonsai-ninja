@@ -2,7 +2,7 @@
   enabled: true
   language: go
   tag: ssrf
-  severity: medium
+  severity: high
   packages:
   - net/http
   cwe:
@@ -50,6 +50,32 @@
   - net/http
   cwe:
   - CWE-918
+  analysis_semantics:
+    url_network_guard:
+      root:
+        kind: sink-argument-accessor
+        argument_index: 0
+        accessor: {name: String}
+      parser:
+        regex: '^[A-Za-z_][A-Za-z0-9_]*\.Parse$'
+      scheme:
+        component:
+          field: Scheme
+        allowed_values: [https]
+      host_allowlist:
+        component:
+          accessor: {name: Hostname}
+      dns:
+        resolver:
+          regex: '^net\.LookupIP$'
+        private_address_predicates:
+        - {name: IsLoopback}
+        - {name: IsPrivate}
+        - {name: IsLinkLocalUnicast}
+      redirect:
+        kind: receiver-field-exact-callback
+        field: CheckRedirect
+        required_return_place: http.ErrUseLastResponse
   match:
     kind: call
     callee:

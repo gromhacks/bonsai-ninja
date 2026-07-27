@@ -4,7 +4,7 @@
   enabled: true
   language: typescript
   tag: log-injection
-  severity: medium
+  severity: high
   cwe: [CWE-117]
   match:
     kind: call

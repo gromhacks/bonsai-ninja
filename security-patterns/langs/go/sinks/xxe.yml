@@ -43,8 +43,95 @@
     expect_no_match: true
   description: "encoding/xml.NewDecoder(tainted reader) - stdlib ignores DOCTYPE entities by default, but flag because many handlers then stream-decode untrusted XML."
 
-- id: go.xxe.xml_decoder_charsetreader
+- id: go.xxe.xml_decoder_remote_charset_callback
   enabled: true
+  language: go
+  tag: xxe
+  severity: high
+  packages: ["encoding/xml", "net/http"]
+  imports: ["encoding/xml", "net/http"]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [xml, NewDecoder]
+  constraints:
+  - receiver_origin_callback_param_reaches_call:
+      receiver_factory:
+        attribute: [xml, NewDecoder]
+      factory_tainted_arg_index: 0
+      receiver_member:
+        regex: ^[^\.\s]+\.CharsetReader$
+      callback_param_index: 0
+      callback_call:
+        attribute: [http, Get]
+      callback_call_arg_index: 0
+  match_examples:
+  - name: tainted decoder remote charset callback
+    code: |
+      package main
+      import (
+        "encoding/xml"
+        "github.com/labstack/echo"
+        "io"
+        "net/http"
+      )
+      func parse(c echo.Context) {
+        dec := xml.NewDecoder(c.Request().Body)
+        dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
+          response, err := http.Get("https://charset.invalid/" + charset)
+          if err != nil {
+            return nil, err
+          }
+          return response.Body, nil
+        }
+      }
+    expect_match_text: [dec.CharsetReader]
+  - name: callback parameter not sent to remote call negative
+    code: |
+      package main
+      import (
+        "encoding/xml"
+        "io"
+        "net/http"
+      )
+      func parse(userInput io.Reader) {
+        dec := xml.NewDecoder(userInput)
+        dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
+          response, err := http.Get("https://charset.invalid/utf-8")
+          if err != nil {
+            return nil, err
+          }
+          return response.Body, nil
+        }
+      }
+    expect_no_match: true
+  - name: clean decoder input negative
+    code: |
+      package main
+      import (
+        "encoding/xml"
+        "io"
+        "net/http"
+        "strings"
+      )
+      func parse() {
+        dec := xml.NewDecoder(strings.NewReader("<root/>"))
+        dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
+          response, err := http.Get("https://charset.invalid/" + charset)
+          if err != nil {
+            return nil, err
+          }
+          return response.Body, nil
+        }
+      }
+    expect_no_match: true
+  description: "A tainted XML decoder is extended with a CharsetReader callback whose attacker-selected charset parameter reaches an outbound HTTP request. Factory, extension, callback parameter, and network call roles are declared here and proven from compiler facts."
+
+- id: go.xxe.xml_decoder_charsetreader
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: go
   tag: xxe
   category: source-independent
@@ -89,7 +176,7 @@
         }
       }
     expect_no_match: true
-  description: "xml.Decoder.CharsetReader assignment - custom charset readers are XML parser extension points; audit implementations that fetch external resources or expand attacker-controlled encodings."
+  description: "Disabled sink-grep rule: assigning a custom CharsetReader is not itself a vulnerability. The enabled remote-callback rule requires compiler proof from a tainted decoder through the callback's charset parameter to an outbound request."
 
 - id: go.xxe.xml_decoder_strict_false
   enabled: true

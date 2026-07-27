@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Current compiler-linkage schema and semantic ABI.
-pub const LINKAGE_CACHE_VERSION: u32 = 1;
+pub const LINKAGE_CACHE_VERSION: u32 = 2;
 
 const LINKAGE_TABLE_ID: u32 = 103;
 const METADATA_KEY: u64 = 0;

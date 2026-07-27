@@ -19,6 +19,7 @@ impl DeclIndex {
             reference.name.shrink_to_fit();
         }
         for fact in &mut self.assignment_values {
+            compact_optional_string(&mut fact.target);
             fact.call_sites.shrink_to_fit();
             compact_expression_flow_storage(&mut fact.value_flow);
             compact_optional_string(&mut fact.direct_call_name);
@@ -26,6 +27,23 @@ impl DeclIndex {
         }
         for fact in &mut self.call_receivers {
             compact_expression_flow_storage(&mut fact.value_flow);
+        }
+        for fact in &mut self.call_argument_values {
+            compact_expression_flow_storage(&mut fact.value_flow);
+        }
+        for fact in &mut self.static_string_maps {
+            fact.target.shrink_to_fit();
+            for entry in &mut fact.entries {
+                entry.key.shrink_to_fit();
+                entry.value.shrink_to_fit();
+            }
+            fact.entries.shrink_to_fit();
+        }
+        for fact in &mut self.character_substitutions {
+            fact.table.shrink_to_fit();
+            if let crate::CharacterSubstitutionDomain::ExactCharacters { characters } = &mut fact.domain {
+                compact_strings(characters);
+            }
         }
         for fact in &mut self.runtime_type_narrowings {
             fact.subject.shrink_to_fit();
@@ -37,6 +55,7 @@ impl DeclIndex {
         }
         for literal in &mut self.strings {
             literal.text.shrink_to_fit();
+            compact_optional_string(&mut literal.static_value);
         }
         for comment in &mut self.comments {
             comment.text.shrink_to_fit();
@@ -45,6 +64,9 @@ impl DeclIndex {
         self.refs.shrink_to_fit();
         self.assignment_values.shrink_to_fit();
         self.call_receivers.shrink_to_fit();
+        self.call_argument_values.shrink_to_fit();
+        self.static_string_maps.shrink_to_fit();
+        self.character_substitutions.shrink_to_fit();
         self.runtime_type_narrowings.shrink_to_fit();
         self.branch_conditions.shrink_to_fit();
         self.aggregate_layouts.shrink_to_fit();

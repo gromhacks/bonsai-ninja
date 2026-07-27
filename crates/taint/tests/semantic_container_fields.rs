@@ -134,6 +134,7 @@ function handle(input) {
             nodes: Some(&target_nodes),
             funcs: None,
             lineage_funcs: None,
+            relevance: None,
         }),
     );
     assert!(
@@ -693,6 +694,7 @@ fn sink_cmd(_cmd: String) {}
             nodes: None,
             funcs: Some(&target_funcs),
             lineage_funcs: None,
+            relevance: None,
         }),
     );
     assert!(
@@ -716,6 +718,7 @@ fn sink_cmd(_cmd: String) {}
             nodes: None,
             funcs: Some(&target_funcs),
             lineage_funcs: None,
+            relevance: None,
         }),
     );
     assert!(

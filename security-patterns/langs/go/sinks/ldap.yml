@@ -1,5 +1,7 @@
 - id: go.ldap.conn_search
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: go
   tag: ldap-injection
   severity: high
@@ -36,9 +38,13 @@
         conn.Search("constantRequest")
       }
     expect_no_match: true
-  description: "go-ldap Conn.Search(req) - tainted Filter = LDAP injection; escape with ldap.EscapeFilter."
+  description: "Disabled: go-ldap Conn.Search accepts a typed *SearchRequest, not a filter string. Crediting whole-object
+    taint duplicates the precise NewSearchRequest filter finding and can mislabel tainted non-filter fields. Filter
+    construction and field-write rules own the injection boundary."
 - id: go.ldap.conn_searchwithpaging
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: go
   tag: ldap-injection
   severity: high
@@ -75,7 +81,8 @@
         conn.SearchWithPaging("constantRequest")
       }
     expect_no_match: true
-  description: "go-ldap Conn.SearchWithPaging - tainted filter search variant."
+  description: "Disabled: Conn.SearchWithPaging also accepts a typed *SearchRequest; whole-request taint is not proof
+    that its Filter field is attacker-controlled. The precise constructor/field-write model owns LDAP injection."
 - id: go.ldap.conn_modify
   enabled: true
   language: go
@@ -191,6 +198,24 @@
         user := c.GetString("user")
         filter := fmt.Sprintf("(uid=%s)", user)
         _ = ldap.NewSearchRequest("dc=example,dc=com", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false, filter, []string{"cn", "mail"}, nil)
+      }
+    expect_match_text:
+    - ldap.NewSearchRequest
+  - name: comments do not shift ldap filter argument
+    code: |
+      package main
+      import (
+        "github.com/gin-gonic/gin"
+        "github.com/go-ldap/ldap/v3"
+      )
+      func handler(c *gin.Context) {
+        user := c.Query("user")
+        _ = ldap.NewSearchRequest(
+          "dc=example,dc=com", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
+          // Security comments are syntax trivia, not positional arguments.
+          "(uid=" + user + ")", // filter sink
+          []string{"cn"}, nil,
+        )
       }
     expect_match_text:
     - ldap.NewSearchRequest

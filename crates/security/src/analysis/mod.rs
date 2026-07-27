@@ -12,7 +12,7 @@ use crate::finding::{
 };
 use crate::loader::Rulepack;
 use crate::matcher::{
-    infer_entry_point_sources_for_files_with_progress,
+    callback_extension_attribution_match, infer_entry_point_sources_for_files_with_progress,
     match_rules_against_facts_for_inventory_with_progress_on_files,
     match_rules_against_facts_for_sink_inventory_with_progress_on_files,
     match_rules_against_facts_for_taint_support_with_progress_on_files,
@@ -22,8 +22,8 @@ use crate::matcher::{
 };
 use crate::rule::{
     ConstraintKind, ContextFlowRole, FlowClass, GuardProfile, MatchKind, MatchOrigin,
-    PathContainmentGuardSemantics, PostSinkPolicy, Rule, RuleKind, RuleTarget, Severity,
-    SourceCallbackArgSemantics,
+    PathContainmentGuardSemantics, PostSinkPolicy, RelativePathContainmentGuardSemantics, Rule, RuleKind,
+    RuleTarget, Severity, SourceCallbackArgSemantics,
 };
 use crate::sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};
 use ahash::{AHashMap, AHashSet};
@@ -31,13 +31,13 @@ use anyhow::Result;
 use bonsai_common::{FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
-    branch_condition_fact_for_span, AssignValueKind, BranchConditionFact, BranchConditionPolarity, DeclKind,
-    FlowEvent, LanguageRegistry,
+    branch_condition_fact_for_span, AssignValueKind, BranchConditionFact, BranchConditionPolarity,
+    ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclKind, FlowEvent, LanguageRegistry,
 };
 use bonsai_taint::{
-    apply_configured_transfer_fixpoint, compose_idg_seed_nodes, CallResultPassthrough, CleanOutputOverwrite,
-    EntryTaintGraph, IdgSeedRequest, InterTaintCaches, InterTaintConfig, OutputArgFlow,
-    ReceiverStatePropagation, SourceCallbackArgs, SourceOutputArgs, TaintedCall, TaintedCallEdge, TokenSet,
+    compose_idg_seed_nodes, CallResultPassthrough, CleanOutputOverwrite, EntryTaintGraph, IdgSeedRequest,
+    InterTaintCaches, InterTaintConfig, OutputArgFlow, ReceiverStatePropagation, SourceCallbackArgs,
+    SourceOutputArgs, TaintedCall, TaintedCallEdge, TokenSet,
 };
 use bonsai_workspace::Workspace;
 use regex::Regex;
@@ -80,14 +80,16 @@ use findings_build::{
 #[cfg(test)]
 use guard_sanitizers::header_char_allowlist_condition;
 use guard_sanitizers::{
+    character_escape_sanitizer, configured_argument_factory_guard_sanitizer,
     dev_only_environment_guard_sanitizer, finite_literal_map_lookup_allowlist_sanitizer,
     go_jwt_inline_keyfunc_algorithm_guard_sanitizer, go_same_origin_redirect_helper_guard_sanitizer,
     go_xml_decoder_hardening_sanitizer, guarded_char_append_allowlist_sanitizer,
-    java_local_html_escape_helper_return_sanitizer, java_url_ssrf_guard_sanitizer,
-    js_ts_local_html_escape_helper_sanitizer, local_ldap_escape_helper_sanitizer,
-    nosql_eq_filter_wrapper_sanitizer, path_containment_guard_sanitizer,
-    python_compiled_regex_guard_sanitizer, python_lxml_parser_keyword_sanitizer,
-    python_url_ssrf_guard_sanitizer, source_sink_pair_is_low_signal,
+    java_local_html_escape_helper_return_sanitizer, js_ts_local_html_escape_helper_sanitizer,
+    local_ldap_escape_helper_sanitizer, nosql_eq_filter_wrapper_sanitizer,
+    parameterized_query_guard_sanitizer, path_consumer_containment_guard_sanitizer,
+    path_containment_guard_sanitizer, python_compiled_regex_guard_sanitizer, python_url_ssrf_guard_sanitizer,
+    receiver_factory_guard_sanitizer, relative_path_containment_guard_sanitizer,
+    source_sink_pair_is_low_signal, url_network_guard_sanitizer,
 };
 use prototype_guard::prototype_pollution_sink_is_guarded;
 #[cfg(test)]
@@ -554,8 +556,7 @@ impl TaintAnalysisReport {
 
 #[derive(Clone, Debug, Default)]
 struct ResolutionCoverage {
-    analyzed_funcs: AHashSet<FuncId>,
-    resolved_sites: AHashSet<(FuncId, Span)>,
+    unresolved_workspace_sites: AHashSet<(FuncId, Span)>,
 }
 
 impl ResolutionCoverage {
@@ -563,14 +564,11 @@ impl ResolutionCoverage {
         graph: &bonsai_callgraph::ResolvedCallGraph,
         analyzed_funcs: impl IntoIterator<Item = FuncId>,
     ) -> Self {
+        let analyzed_funcs: AHashSet<FuncId> = analyzed_funcs.into_iter().collect();
         Self {
-            analyzed_funcs: analyzed_funcs.into_iter().collect(),
-            resolved_sites: graph
-                .inner()
-                .edges
-                .iter()
-                .filter(|edge| edge.precision.is_semantic())
-                .map(|edge| (edge.from, edge.span))
+            unresolved_workspace_sites: graph
+                .unresolved_workspace_call_sites()
+                .filter(|(caller, _)| analyzed_funcs.contains(caller))
                 .collect(),
         }
     }
@@ -587,7 +585,7 @@ fn workspace_analysis_incomplete_reasons(
         .collect();
 
     if let Some(resolution) = resolution {
-        let unresolved_workspace_calls = unresolved_workspace_call_site_count(ws, resolution);
+        let unresolved_workspace_calls = resolution.unresolved_workspace_sites.len();
         if unresolved_workspace_calls > 0 {
             reasons.insert(format!(
                 "unresolved-workspace-call-sites:{unresolved_workspace_calls}"
@@ -621,78 +619,6 @@ fn taint_analysis_incomplete_reasons(
         }
     }
     reasons.into_iter().collect()
-}
-
-fn unresolved_workspace_call_site_count(ws: &Workspace, resolution: &ResolutionCoverage) -> usize {
-    let global = ws.compiler_linkage_index();
-    let mut unresolved = AHashSet::new();
-    for &caller in &resolution.analyzed_funcs {
-        let Some(decl) = ws.exact_decl(SymbolId::new(caller.raw())) else {
-            continue;
-        };
-        if !matches!(
-            decl.kind,
-            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-        ) {
-            continue;
-        }
-        collect_unresolved_workspace_calls(
-            &decl.flow_events,
-            caller,
-            global.as_ref(),
-            &resolution.resolved_sites,
-            &mut unresolved,
-        );
-    }
-    unresolved.len()
-}
-
-fn collect_unresolved_workspace_calls(
-    events: &[FlowEvent],
-    caller: FuncId,
-    global: &GlobalIndex,
-    resolved_sites: &AHashSet<(FuncId, Span)>,
-    unresolved: &mut AHashSet<(FuncId, Span)>,
-) {
-    for event in events {
-        match event {
-            FlowEvent::Call { span, name, .. } => {
-                if !resolved_sites.contains(&(caller, *span))
-                    && workspace_has_callable_named_in_context(global, caller, name)
-                {
-                    unresolved.insert((caller, *span));
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_unresolved_workspace_calls(then_events, caller, global, resolved_sites, unresolved);
-                collect_unresolved_workspace_calls(else_events, caller, global, resolved_sites, unresolved);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_unresolved_workspace_calls(body, caller, global, resolved_sites, unresolved);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_unresolved_workspace_calls(body, caller, global, resolved_sites, unresolved);
-                collect_unresolved_workspace_calls(catch_events, caller, global, resolved_sites, unresolved);
-                collect_unresolved_workspace_calls(
-                    finally_events,
-                    caller,
-                    global,
-                    resolved_sites,
-                    unresolved,
-                );
-            }
-            _ => {}
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -982,6 +908,7 @@ where
     if !options.show_sanitized {
         findings.retain(|combined| combined.finding.status != FindingStatus::Sanitized);
     }
+    drop_rulepack_terminal_dominated_findings(&mut findings, pack);
     drop_dominated_wrapper_findings(&mut findings);
     drop_dominated_receiver_projection_findings(&mut findings);
     // §C cleanup pass: when `--inferred-sources` synthesizes
@@ -1186,7 +1113,21 @@ where
     F: FnMut(AnalysisProgress),
 {
     let _taint_analysis_guard = ws.lock_taint_analysis();
+    let _dependency_package_snapshot = ws.db().workspace_root().map(|root| {
+        crate::deps::begin_workspace_dependency_package_snapshot(&root, ws.db().vfs().instance_id())
+    });
     let _ = crate::matcher::drain_runtime_disabled_rules();
+    // The SDK may have opened the complete canonical graph while refreshing
+    // warm sidecars. Endpoint discovery is a separate Tree-sitter compiler
+    // phase and needs only the compact linkage headers. Preserve those
+    // headers, then unmap graph/body readers before broad matching so the
+    // parser scheduler measures the real phase-local working set. Every cache
+    // miss reloads the same validated artifact; this changes locality and
+    // wall time, never the analyzed files or fixed-point semantics.
+    ws.release_idg_service_cache();
+    ws.release_resolved_call_graph_cache();
+    ws.release_exact_body_cache();
+    ws.db().release_global_index();
     let options = options.semantic_precision_only();
     let SelectedTaintRules {
         sources,
@@ -1535,7 +1476,7 @@ fn schedule_source_graph_groups(
             continue;
         };
         if active_file != Some(file) {
-            active_index = ws.exact_decl_index(file);
+            active_index = ws.exact_decl_index_shared(file);
             active_file = Some(file);
         }
         let Some(decl) = active_index
@@ -1768,6 +1709,7 @@ fn build_source_group_candidates(
                     nodes: None,
                     funcs: group.lineage_funcs.as_ref(),
                     lineage_funcs: group.lineage_funcs.as_ref(),
+                    relevance: None,
                 })
                 .with_max_precision(context.graph_config.max_edge_precision)
                 .with_caches(context.caches),
@@ -1982,6 +1924,9 @@ where
     F: FnMut(AnalysisProgress),
 {
     let _taint_analysis_guard = ws.lock_taint_analysis();
+    let _dependency_package_snapshot = ws.db().workspace_root().map(|root| {
+        crate::deps::begin_workspace_dependency_package_snapshot(&root, ws.db().vfs().instance_id())
+    });
     let _ = crate::matcher::drain_runtime_disabled_rules();
     let mut sources = select_rules(pack, RuleKind::Source, None, options.source.as_deref(), |r| {
         source_rule_matches_filters(
@@ -2923,9 +2868,10 @@ fn source_finding_match(hit: &RuleMatch, pack: &Rulepack) -> Option<FindingMatch
 
 fn func_id_for_match(ws: &Workspace, hit: &RuleMatch) -> Option<FuncId> {
     let expected_name = hit.enclosing_fn.as_deref();
+    let global = ws.compiler_linkage_index();
     if let Some(entry) = ws
         .enclosing_index()
-        .enclosing_for(ws.db(), hit.span.file, hit.span.start)
+        .enclosing_for(global.as_ref(), hit.span.file, hit.span.start)
     {
         if expected_name.is_none_or(|name| name == entry.name) {
             return Some(FuncId::new(entry.symbol.raw()));
@@ -2933,7 +2879,6 @@ fn func_id_for_match(ws: &Workspace, hit: &RuleMatch) -> Option<FuncId> {
     }
 
     let name = expected_name?;
-    let global = ws.compiler_linkage_index();
     let decls = global.decls_in(hit.span.file);
     let mut best_containing: Option<(u64, FuncId)> = None;
     let mut unique_named: Option<FuncId> = None;
@@ -3061,38 +3006,26 @@ struct GraphUnresolvedCallIndex {
     by_caller: AHashMap<FuncId, Vec<UnresolvedWorkspaceCallSite>>,
 }
 
-type WorkspaceCallableCache = parking_lot::RwLock<AHashMap<FuncId, AHashMap<String, bool>>>;
-
 impl GraphUnresolvedCallIndex {
-    fn new(
-        global: &bonsai_index::GlobalIndex,
-        graph: &EntryTaintGraph,
-        callable_cache: &WorkspaceCallableCache,
-    ) -> Self {
-        let resolved_sites: AHashSet<(FuncId, Span)> = graph
-            .call_records
-            .iter()
-            .map(|record| (record.caller, record.call_span))
-            .collect();
+    fn new(call_graph: &bonsai_callgraph::ResolvedCallGraph, graph: &EntryTaintGraph) -> Self {
+        let unresolved_sites: AHashSet<(FuncId, Span)> =
+            call_graph.unresolved_workspace_call_sites().collect();
         let mut seen_sites: AHashSet<(FuncId, Span)> = AHashSet::new();
         let mut by_caller: AHashMap<FuncId, Vec<UnresolvedWorkspaceCallSite>> = AHashMap::new();
         for call in &graph.tainted_calls {
             if !matches!(call.kind, bonsai_taint::TaintedCallKind::Call)
-                || resolved_sites.contains(&(call.caller, call.call_span))
+                || !unresolved_sites.contains(&(call.caller, call.call_span))
                 || !seen_sites.insert((call.caller, call.call_span))
             {
                 continue;
             }
-            if cached_workspace_has_callable_named_in_context(global, call.caller, &call.name, callable_cache)
-            {
-                by_caller
-                    .entry(call.caller)
-                    .or_default()
-                    .push(UnresolvedWorkspaceCallSite {
-                        span: call.call_span,
-                        name: call.name.clone(),
-                    });
-            }
+            by_caller
+                .entry(call.caller)
+                .or_default()
+                .push(UnresolvedWorkspaceCallSite {
+                    span: call.call_span,
+                    name: call.name.clone(),
+                });
         }
         for sites in by_caller.values_mut() {
             sites.sort_by(|a, b| {
@@ -3122,50 +3055,8 @@ impl GraphUnresolvedCallIndex {
     }
 }
 
-fn cached_workspace_has_callable_named_in_context(
-    global: &bonsai_index::GlobalIndex,
-    caller: FuncId,
-    name: &str,
-    cache: &WorkspaceCallableCache,
-) -> bool {
-    if let Some(hit) = cache
-        .read()
-        .get(&caller)
-        .and_then(|names| names.get(name))
-        .copied()
-    {
-        return hit;
-    }
-    let resolved = workspace_has_callable_named_in_context(global, caller, name);
-    let mut write = cache.write();
-    *write
-        .entry(caller)
-        .or_default()
-        .entry(name.to_string())
-        .or_insert(resolved)
-}
-
 fn unresolved_call_site_is_in_terminal_expression(terminal_span: Span, unresolved_span: Span) -> bool {
     span_contains(terminal_span, unresolved_span)
-}
-
-fn workspace_has_callable_named_in_context(
-    global: &bonsai_index::GlobalIndex,
-    caller: FuncId,
-    name: &str,
-) -> bool {
-    let Some(caller_decl) = global.decl_of(SymbolId::new(caller.raw())) else {
-        return false;
-    };
-    let caller_file = global
-        .declaring_file(caller_decl.symbol)
-        .unwrap_or(caller_decl.span.file);
-    let ctx = bonsai_resolve::ResolveContext::new(caller_file, &caller_decl.module_path);
-    let short = bonsai_lang_api::kit::short_name_of(name);
-    [name, short].into_iter().any(|candidate| {
-        !candidate.is_empty()
-            && !bonsai_resolve::resolve_callable_with_context(global, candidate, &ctx).is_empty()
-    })
 }
 
 struct CallEvidence {
@@ -5066,6 +4957,73 @@ fn all_sink_matches(group: &CombinedFindingWithChain) -> Vec<FindingMatch> {
     sinks
 }
 
+/// Keep the rulepack-designated security boundary when the exact same source
+/// flow continues into a lower-priority transport sink.
+///
+/// This is deliberately stricter than tag-based deduplication: the preferred
+/// finding must have a higher declared terminal priority and its compiler
+/// function chain must be a proper prefix of the downstream finding's chain.
+/// Sibling sinks, equal-length paths, and unrelated flows therefore remain
+/// independently reportable.
+fn drop_rulepack_terminal_dominated_findings(findings: &mut Vec<CombinedFindingWithChain>, pack: &Rulepack) {
+    if findings.len() < 2 {
+        return;
+    }
+    let mut dominated = AHashSet::new();
+    for (idx, downstream) in findings.iter().enumerate() {
+        if findings.iter().enumerate().any(|(other_idx, preferred)| {
+            other_idx != idx && terminal_finding_dominates(preferred, downstream, pack)
+        }) {
+            dominated.insert(idx);
+        }
+    }
+    if dominated.is_empty() {
+        return;
+    }
+    let mut next_idx = 0usize;
+    findings.retain(|_| {
+        let keep = !dominated.contains(&next_idx);
+        next_idx = next_idx.saturating_add(1);
+        keep
+    });
+}
+
+fn terminal_finding_dominates(
+    preferred: &CombinedFindingWithChain,
+    downstream: &CombinedFindingWithChain,
+    pack: &Rulepack,
+) -> bool {
+    let preferred_finding = &preferred.finding;
+    let downstream_finding = &downstream.finding;
+    let preferred_priority = sink_terminal_priority(pack, preferred);
+    let downstream_priority = sink_terminal_priority(pack, downstream);
+
+    preferred_priority > downstream_priority
+        && preferred_priority > 0
+        && preferred_finding.language == downstream_finding.language
+        && preferred_finding.tag == downstream_finding.tag
+        && preferred_finding.status == downstream_finding.status
+        && same_source_site(&preferred_finding.source, &downstream_finding.source)
+        && cwe_sets_overlap_or_unknown(&preferred_finding.cwe, &downstream_finding.cwe)
+        && function_chain_is_strict_prefix(&preferred.chain_funcs, &downstream.chain_funcs)
+}
+
+fn sink_terminal_priority(pack: &Rulepack, finding: &CombinedFindingWithChain) -> u8 {
+    all_sink_matches(finding)
+        .into_iter()
+        .filter_map(|sink| {
+            pack.find_rule_by_id(&sink.rule_id)
+                .and_then(|rule| rule.analysis_semantics.as_ref())
+                .and_then(|semantics| semantics.sink_terminal_priority)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn function_chain_is_strict_prefix(prefix: &[FuncId], chain: &[FuncId]) -> bool {
+    !prefix.is_empty() && chain.len() > prefix.len() && chain.starts_with(prefix)
+}
+
 /// Prefer the semantic sink inside a nested call over the transport
 /// wrapper that merely sends that nested result. Example:
 /// `res.end(renderResults(q))` and `renderResults -> return "<div>"+q`
@@ -6859,50 +6817,7 @@ fn seed_idg_service_for_rulepack_for_files(
         options.include_field_argument_forwarding,
         options.symbolic_field_languages.len()
     );
-    ws.build_and_seed_idg_service_with_transfer_options_for_files_and_call_graph(
-        &options,
-        included_files,
-        included_funcs,
-        call_graph,
-    )
-}
-
-fn build_idg_service_for_rulepack_for_files(
-    ws: &Workspace,
-    pack: &Rulepack,
-    languages: &AHashSet<String>,
-    included_files: &[FileId],
-    included_funcs: &[FuncId],
-    call_graph: &bonsai_callgraph::ResolvedCallGraph,
-) -> Arc<bonsai_idg::IdgQueryService> {
-    let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, languages);
-    let source_outputs = source_output_args_from_rulepack_for_languages(pack, languages);
-    let source_callbacks = source_callback_args_from_rulepack_for_languages(pack, languages);
-    let output_arg_flows = output_arg_flows_from_rulepack_for_languages(pack, languages);
-    let receiver_state_propagations =
-        receiver_state_propagations_from_rulepack_for_languages(pack, languages);
-    let mut options = idg_transfer_options_from_rulepack_shapes(
-        &overwrites,
-        &source_outputs,
-        &source_callbacks,
-        &output_arg_flows,
-        &receiver_state_propagations,
-    );
-    options.call_result_passthroughs = idg_call_result_passthrough_specs(
-        &call_result_passthroughs_from_rulepack_for_languages(pack, languages),
-    );
-    options.symbolic_field_languages = symbolic_field_languages(ws, included_files);
-    options.symbolic_field_forwarding = !options.symbolic_field_languages.is_empty();
-    bonsai_diagnostics::debug_log!(
-        "security-phase",
-        "semantic graph transfer options languages={} funcs={} receiver_method_propagation={} field_argument_forwarding={} symbolic_field_languages={}",
-        languages.len(),
-        included_funcs.len(),
-        options.include_receiver_method_propagation,
-        options.include_field_argument_forwarding,
-        options.symbolic_field_languages.len()
-    );
-    ws.build_idg_service_with_transfer_options_for_files_and_call_graph(
+    ws.build_and_seed_persisted_idg_service_with_transfer_options_for_files_and_call_graph(
         &options,
         included_files,
         included_funcs,
@@ -6920,19 +6835,6 @@ fn symbolic_field_languages(ws: &Workspace, files: &[FileId]) -> Vec<String> {
     languages.sort();
     languages.dedup();
     languages
-}
-
-fn symbolic_field_source_funcs(ws: &Workspace, global: &GlobalIndex, funcs: &[FuncId]) -> AHashSet<FuncId> {
-    funcs
-        .iter()
-        .copied()
-        .filter(|func| {
-            global
-                .declaring_file(SymbolId::new(func.raw()))
-                .and_then(|file| ws.db().adapter_for(file))
-                .is_some_and(|adapter| adapter.capabilities().field_places_complete)
-        })
-        .collect()
 }
 
 fn source_output_args_from_rulepack_for_languages(
@@ -7316,6 +7218,10 @@ mod source_lineage_tests;
 mod finding_completeness_tests;
 
 #[cfg(test)]
+#[path = "match_attribution_tests.rs"]
+mod match_attribution_tests;
+
+#[cfg(test)]
 #[path = "taint_path_tests.rs"]
 mod taint_path_tests;
 
@@ -7516,55 +7422,6 @@ mod source_seed_tests {
             same_name_nodes.iter().all(|node| !nodes.contains(node)),
             "anchored call-return sources must not widen to same-named reads/writes elsewhere in the function"
         );
-    }
-
-    #[test]
-    fn unresolved_internal_call_is_scan_incompleteness_evidence() {
-        let file = FileId::new(1);
-        let call_span = Span::new(file, 20, 31);
-        let mut caller = source_decl(vec![FlowEvent::Call {
-            span: call_span,
-            name: "sink".to_string(),
-            receiver: None,
-            receiver_types: Vec::new(),
-            call_kind: bonsai_lang_api::CallKind::Function,
-            args: Vec::new(),
-        }]);
-        caller.name = "caller".to_string();
-        let mut callee = source_decl(Vec::new());
-        callee.symbol = SymbolId::new(2);
-        callee.name = "sink".to_string();
-        callee.span = Span::new(file, 100, 140);
-        callee.name_span = Span::new(file, 103, 107);
-        callee.body_span = Some(Span::new(file, 108, 140));
-
-        let mut global = bonsai_index::GlobalIndex::new();
-        global.insert(bonsai_lang_api::DeclIndex {
-            file,
-            defs: vec![caller, callee],
-            refs: Vec::new(),
-            assignment_values: Vec::new(),
-            call_receivers: Vec::new(),
-            runtime_type_narrowings: Vec::new(),
-            branch_conditions: Vec::new(),
-            aggregate_layouts: Vec::new(),
-            strings: Vec::new(),
-            comments: Vec::new(),
-        });
-
-        let caller = FuncId::new(global.find_by_name("caller")[0].raw());
-        let mut unresolved = AHashSet::new();
-        let events = &global
-            .decl_of(SymbolId::new(caller.raw()))
-            .expect("caller")
-            .flow_events;
-        collect_unresolved_workspace_calls(events, caller, &global, &AHashSet::new(), &mut unresolved);
-        assert_eq!(unresolved, AHashSet::from_iter([(caller, call_span)]));
-
-        unresolved.clear();
-        let resolved = AHashSet::from_iter([(caller, call_span)]);
-        collect_unresolved_workspace_calls(events, caller, &global, &resolved, &mut unresolved);
-        assert!(unresolved.is_empty());
     }
 }
 

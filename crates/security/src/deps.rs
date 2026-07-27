@@ -122,14 +122,51 @@ pub(crate) struct WorkspaceDependencyPackages {
 }
 
 #[derive(Clone, Debug)]
-struct WorkspaceDependencyPackageContext {
+pub(crate) struct WorkspaceDependencyPackageContext {
     fingerprint: u64,
     by_language: AHashMap<String, Arc<AHashSet<String>>>,
 }
 
 static WORKSPACE_DEPENDENCY_PACKAGE_CACHE: std::sync::LazyLock<
-    parking_lot::RwLock<AHashMap<String, Arc<WorkspaceDependencyPackageContext>>>,
+    parking_lot::RwLock<AHashMap<String, std::sync::Weak<WorkspaceDependencyPackageContext>>>,
 > = std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
+static WORKSPACE_DEPENDENCY_PACKAGE_SCAN_LOCKS: std::sync::LazyLock<
+    parking_lot::Mutex<AHashMap<String, std::sync::Weak<parking_lot::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(AHashMap::new()));
+type WorkspaceDependencyPackageRoots = AHashMap<String, std::sync::Weak<WorkspaceDependencyPackageContext>>;
+type ActiveWorkspaceDependencyPackages = AHashMap<u64, WorkspaceDependencyPackageRoots>;
+static ACTIVE_WORKSPACE_DEPENDENCY_PACKAGES: std::sync::LazyLock<
+    parking_lot::RwLock<ActiveWorkspaceDependencyPackages>,
+> = std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
+
+/// Own one immutable dependency-manifest snapshot for a complete analysis run.
+///
+/// The workspace id separates two SDK workspaces opened on the same root.
+/// Point constraint rechecks can therefore reuse the exact package facts
+/// proved by endpoint discovery even if a manifest is saved concurrently.
+pub(crate) struct WorkspaceDependencyPackageSnapshot {
+    workspace_id: u64,
+    root_key: String,
+    context: Arc<WorkspaceDependencyPackageContext>,
+}
+
+impl Drop for WorkspaceDependencyPackageSnapshot {
+    fn drop(&mut self) {
+        let mut active = ACTIVE_WORKSPACE_DEPENDENCY_PACKAGES.write();
+        if let Some(workspace) = active.get_mut(&self.workspace_id) {
+            if workspace
+                .get(&self.root_key)
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|context| Arc::ptr_eq(&context, &self.context))
+            {
+                workspace.remove(&self.root_key);
+            }
+            if workspace.is_empty() {
+                active.remove(&self.workspace_id);
+            }
+        }
+    }
+}
 
 /// Return package/dependency names declared in workspace-level manifests
 /// for `language`.
@@ -144,28 +181,43 @@ pub(crate) fn workspace_dependency_packages_for_language(
     root: &Path,
     language: &str,
 ) -> WorkspaceDependencyPackages {
-    let root_key = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .to_string_lossy()
-        .into_owned();
-    if let Some(context) = WORKSPACE_DEPENDENCY_PACKAGE_CACHE.read().get(&root_key).cloned() {
-        return WorkspaceDependencyPackages {
-            fingerprint: context.fingerprint,
-            packages: context
-                .by_language
-                .get(language)
-                .cloned()
-                .unwrap_or_else(|| Arc::new(AHashSet::new())),
-        };
+    let root_key = workspace_dependency_root_key(root);
+    if let Some(context) = WORKSPACE_DEPENDENCY_PACKAGE_CACHE
+        .read()
+        .get(&root_key)
+        .and_then(std::sync::Weak::upgrade)
+    {
+        return workspace_dependency_packages_from_context(&context, language);
     }
 
     let context = Arc::new(build_workspace_dependency_package_context(root));
     let mut cache = WORKSPACE_DEPENDENCY_PACKAGE_CACHE.write();
-    if cache.len() >= 64 {
-        cache.clear();
+    cache.retain(|_, context| context.strong_count() != 0);
+    let context = if let Some(existing) = cache.get(&root_key).and_then(std::sync::Weak::upgrade) {
+        existing
+    } else {
+        cache.insert(root_key, Arc::downgrade(&context));
+        context
+    };
+    workspace_dependency_packages_from_context(&context, language)
+}
+
+pub(crate) fn workspace_dependency_packages_for_language_in_workspace(
+    root: &Path,
+    language: &str,
+    workspace_id: u64,
+) -> WorkspaceDependencyPackages {
+    let root_key = workspace_dependency_root_key(root);
+    if let Some(context) = active_workspace_dependency_package_context(workspace_id, &root_key) {
+        return workspace_dependency_packages_from_context(&context, language);
     }
-    let context = cache.entry(root_key).or_insert_with(|| context.clone()).clone();
+    workspace_dependency_packages_for_language(root, language)
+}
+
+fn workspace_dependency_packages_from_context(
+    context: &WorkspaceDependencyPackageContext,
+    language: &str,
+) -> WorkspaceDependencyPackages {
     WorkspaceDependencyPackages {
         fingerprint: context.fingerprint,
         packages: context
@@ -174,6 +226,90 @@ pub(crate) fn workspace_dependency_packages_for_language(
             .cloned()
             .unwrap_or_else(|| Arc::new(AHashSet::new())),
     }
+}
+
+/// Refresh manifest-derived package facts at a broad matcher boundary.
+///
+/// Dependency manifests are not necessarily compiler source inputs
+/// (`requirements.txt` is the common example), so the VFS source revision
+/// cannot invalidate this cache reliably. Rebuilding once before a broad
+/// match keeps long-lived SDK/watch processes coherent with saved manifest
+/// edits. Per-file workers then reuse this immutable snapshot.
+pub(crate) fn refresh_workspace_dependency_package_context(
+    root: &Path,
+) -> Arc<WorkspaceDependencyPackageContext> {
+    let root_key = workspace_dependency_root_key(root);
+    let context = Arc::new(build_workspace_dependency_package_context(root));
+    let mut cache = WORKSPACE_DEPENDENCY_PACKAGE_CACHE.write();
+    cache.retain(|_, context| context.strong_count() != 0);
+    cache.insert(root_key, Arc::downgrade(&context));
+    context
+}
+
+pub(crate) fn begin_workspace_dependency_package_snapshot(
+    root: &Path,
+    workspace_id: u64,
+) -> WorkspaceDependencyPackageSnapshot {
+    let root_key = workspace_dependency_root_key(root);
+    let context = Arc::new(build_workspace_dependency_package_context(root));
+    let mut active = ACTIVE_WORKSPACE_DEPENDENCY_PACKAGES.write();
+    active.retain(|_, roots| {
+        roots.retain(|_, context| context.strong_count() != 0);
+        !roots.is_empty()
+    });
+    active
+        .entry(workspace_id)
+        .or_default()
+        .insert(root_key.clone(), Arc::downgrade(&context));
+    WorkspaceDependencyPackageSnapshot {
+        workspace_id,
+        root_key,
+        context,
+    }
+}
+
+pub(crate) fn workspace_dependency_package_context_for_scan(
+    root: &Path,
+    workspace_id: u64,
+) -> Arc<WorkspaceDependencyPackageContext> {
+    let root_key = workspace_dependency_root_key(root);
+    active_workspace_dependency_package_context(workspace_id, &root_key)
+        .unwrap_or_else(|| refresh_workspace_dependency_package_context(root))
+}
+
+fn active_workspace_dependency_package_context(
+    workspace_id: u64,
+    root_key: &str,
+) -> Option<Arc<WorkspaceDependencyPackageContext>> {
+    ACTIVE_WORKSPACE_DEPENDENCY_PACKAGES
+        .read()
+        .get(&workspace_id)
+        .and_then(|workspace| workspace.get(root_key))
+        .and_then(std::sync::Weak::upgrade)
+}
+
+/// Return per-root ownership for one immutable broad-match manifest snapshot.
+///
+/// Weak entries avoid retaining every workspace path ever opened by a
+/// long-lived service. Callers hold the returned `Arc` and its mutex guard
+/// across matching; a concurrent scan of another root remains independent.
+pub(crate) fn workspace_dependency_package_scan_lock(root: &Path) -> Arc<parking_lot::Mutex<()>> {
+    let root_key = workspace_dependency_root_key(root);
+    let mut locks = WORKSPACE_DEPENDENCY_PACKAGE_SCAN_LOCKS.lock();
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    if let Some(lock) = locks.get(&root_key).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(parking_lot::Mutex::new(()));
+    locks.insert(root_key, Arc::downgrade(&lock));
+    lock
+}
+
+fn workspace_dependency_root_key(root: &Path) -> String {
+    root.canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn build_workspace_dependency_package_context(root: &Path) -> WorkspaceDependencyPackageContext {
@@ -473,27 +609,7 @@ fn is_dependency_manifest_file(path: &str) -> bool {
 }
 
 fn is_dependency_manifest_basename(basename: &str) -> bool {
-    matches!(
-        basename,
-        "Cargo.toml"
-            | "Cargo.lock"
-            | "composer.json"
-            | "composer.lock"
-            | "Gemfile"
-            | "Gemfile.lock"
-            | "go.mod"
-            | "go.sum"
-            | "package.json"
-            | "package-lock.json"
-            | "pnpm-lock.yaml"
-            | "pom.xml"
-            | "pyproject.toml"
-            | "requirements.txt"
-            | "settings.gradle"
-            | "build.gradle"
-            | "build.gradle.kts"
-            | "yarn.lock"
-    )
+    !dependency_manifest_languages(Path::new(basename)).is_empty()
 }
 
 fn collect_manifest_package_evidence(
@@ -572,43 +688,55 @@ fn manifest_target_names(pack: &Rulepack) -> AHashSet<String> {
     target_names
 }
 
-/// Recursive directory walker. Skips known vendored / build / cache
+/// Explicit-stack directory walker. Skips known vendored / build / cache
 /// directory names so dependency inventory doesn't pick up evidence from
 /// `node_modules/`, `target/`, `.venv/`, etc. — these would mistake
 /// third-party manifests for first-party project evidence.
-fn walk_dir(dir: &Path, target_names: &AHashSet<String>, out: &mut Vec<String>) {
-    let rd = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            tracing::debug!(
-                path = %dir.display(),
-                "dependency inventory directory disappeared during scan"
-            );
-            return;
-        }
-        Err(error) => {
-            tracing::warn!(
-                path = %dir.display(),
-                error_kind = ?error.kind(),
-                error = %error,
-                "failed to read dependency inventory directory"
-            );
-            return;
-        }
-    };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
+///
+/// Directory symlinks are not followed. Besides keeping evidence inside the
+/// selected workspace, this prevents cycles without imposing a semantic
+/// depth cap.
+fn walk_dir(root: &Path, target_names: &AHashSet<String>, out: &mut Vec<String>) {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!(
+                    path = %dir.display(),
+                    "dependency inventory directory disappeared while scanning"
+                );
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %dir.display(),
+                    error_kind = ?error.kind(),
+                    error = %error,
+                    "failed to read dependency inventory directory"
+                );
+                continue;
+            }
         };
-        if dependency_metadata_dir_skipped(&name) {
-            continue;
-        }
-        if path.is_dir() {
-            walk_dir(&path, target_names, out);
-        } else if path.is_file() && (target_names.contains(&name) || is_dependency_manifest_basename(&name)) {
-            out.push(path.display().to_string());
+        for entry in rd.flatten() {
+            let name = match entry.file_name().to_str() {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            if dependency_metadata_dir_skipped(&name) {
+                continue;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file()
+                && (target_names.contains(&name) || is_dependency_manifest_basename(&name))
+            {
+                out.push(path.display().to_string());
+            }
         }
     }
 }

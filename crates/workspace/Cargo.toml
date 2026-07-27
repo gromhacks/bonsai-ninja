@@ -30,9 +30,10 @@ parking_lot = { workspace = true }
 tracing = { workspace = true }
 ignore = { workspace = true }
 fs2 = { workspace = true }
+lru = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 bonsai_trace = { workspace = true }
 bonsai_lang_c = { workspace = true }
 bonsai_lang_cpp = { workspace = true }

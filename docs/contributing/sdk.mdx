@@ -400,7 +400,7 @@ fingerprints; raw `*_exists` fields only mean an artifact is present on disk.
 Retrieval is candidate lookup only: exact indexes decide candidates;
 canonical facts and semantic graph verification decide truth. Vector
 similarity is never evidence. CLI and SDK query paths can validate warmed
-retrieval sidecars from source/dependency/build fingerprints before selecting
+retrieval sidecars from source/dependency/schema fingerprints before selecting
 candidate files for search and literal-filtered browse hydration; inspect uses
 that path only as a pre-open large-workspace scope and does not treat retrieval
 as a post-open truth filter. Cache stats applies the same retrieval pipeline
@@ -432,7 +432,6 @@ let flow_ids = ws.flow_ids();             // per-FuncId browse-row F-IDs
 let inter_caches = ws.inter_taint_caches(); // engine resolver memo + alias maps
 let resolved = ws.cached_resolved_call_graph(); // Arc<ResolvedCallGraph>
 let taint_idx = ws.taint_index();         // (source_func, seed_key) → EntryTaintGraph
-let callers_idx = ws.transitive_callers(); // explicitly scoped caller-frontier cache
 let class_idx = ws.class_members();       // (class_sym, method) → FuncId
 let enclosing = ws.enclosing_index();     // per-file binary-searchable enclosing-decl
 let decl_names = ws.decl_name_index();    // lowercased decl-name table for inspect query

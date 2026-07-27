@@ -222,10 +222,10 @@
   - name: tainted mirror symbol
     code: |
       import 'dart:mirrors';
-      void test(String input) { invoke(Symbol(input), []); }
+      void test(String args) { invoke(Symbol(args), []); }
   - name: literal mirror symbol negative
     code: |
       import 'dart:mirrors';
-      void test(String input) { invoke(Symbol("run"), [input]); }
+      void test(String args) { invoke(Symbol("run"), [args]); }
     expect_no_match: true
   description: "reflect(obj).invoke(Symbol(name), args) - dart:mirrors reflective dispatch with tainted method name = arbitrary method invocation (CWE-470 / CWE-94). Narrowed by `Symbol(...)` arg-0 shape."

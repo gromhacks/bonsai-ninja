@@ -13,6 +13,10 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    parameterized_query:
+      query_arg_index: 0
+      bindings_arg_index: 1
   match_examples:
   - name: sqli cursor execute
     code: |
@@ -98,6 +102,10 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    parameterized_query:
+      query_arg_index: 0
+      bindings_arg_index: 1
   match_examples:
   - name: abbreviated cursor execute
     code: |
@@ -288,6 +296,10 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    parameterized_query:
+      query_arg_index: 0
+      bindings_arg_index: 1
   match_examples:
   - name: sqli psycopg2 cursor execute
     code: |
@@ -1157,6 +1169,8 @@
   packages: [graphene, ariadne]
   imports: [graphene, ariadne]
   cwe: [CWE-943, CWE-89]
+  analysis_semantics:
+    sink_terminal_priority: 100
   match:
     kind: call
     callee:

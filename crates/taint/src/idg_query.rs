@@ -87,6 +87,7 @@ pub struct IdgTaintTargets<'a> {
     pub nodes: Option<&'a [bonsai_idg::WsNodeId]>,
     pub funcs: Option<&'a AHashSet<FuncId>>,
     pub lineage_funcs: Option<&'a AHashSet<FuncId>>,
+    pub relevance: Option<&'a bonsai_idg::IdgTargetRelevance>,
 }
 
 impl IdgTaintTargets<'_> {
@@ -96,6 +97,7 @@ impl IdgTaintTargets<'_> {
             nodes: None,
             funcs: None,
             lineage_funcs: None,
+            relevance: None,
         }
     }
 }

@@ -46,6 +46,7 @@ struct RecordingPythonAdapter {
 
 struct CountingPythonAdapter {
     declaration_calls: Arc<std::sync::atomic::AtomicUsize>,
+    import_calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 struct ConcurrentPythonAdapter {
@@ -86,6 +87,8 @@ impl LanguageAdapter for CountingPythonAdapter {
     }
 
     fn extract_imports(&self, file: FileId, _ctx: &AdapterContext<'_>) -> ImportIndex {
+        self.import_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         ImportIndex {
             file,
             imports: Vec::new(),
@@ -309,9 +312,11 @@ fn compiler_object_generation_replays_typed_adapter_ir_without_reparsing() {
         "def exact():\n    return 1\n",
     );
     let declaration_calls = Arc::new(AtomicUsize::new(0));
+    let import_calls = Arc::new(AtomicUsize::new(0));
     let registry = Arc::new(LanguageRegistry::new());
     registry.register(Arc::new(CountingPythonAdapter {
         declaration_calls: Arc::clone(&declaration_calls),
+        import_calls: Arc::clone(&import_calls),
     }));
     let db = AnalyzerDb::new(Arc::clone(&vfs), Arc::clone(&registry));
     db.set_workspace_root(root.path().to_path_buf());
@@ -340,10 +345,16 @@ fn compiler_object_generation_replays_typed_adapter_ir_without_reparsing() {
         .expect("replay compiler object");
     assert_eq!(object.language.as_deref(), Some("python"));
     assert!(object.declarations.is_some());
+    assert!(reopened.import_index_uncached(file).is_some());
     assert_eq!(
         declaration_calls.load(Ordering::SeqCst),
         1,
         "an exact compiler-object hit must not invoke the language adapter again"
+    );
+    assert_eq!(
+        import_calls.load(Ordering::SeqCst),
+        1,
+        "streaming imports must reuse exact compiler-object IR without invoking the adapter again"
     );
 
     vfs.write(
@@ -360,6 +371,70 @@ fn compiler_object_generation_replays_typed_adapter_ir_without_reparsing() {
         declaration_calls.load(Ordering::SeqCst),
         2,
         "a changed digest must lower exactly that compiler object again"
+    );
+}
+
+#[test]
+fn scoped_compiler_object_session_reuses_ir_without_publishing_a_partial_sidecar() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let first_path = root.path().join("first.py");
+    let second_path = root.path().join("second.py");
+    let vfs = Arc::new(Vfs::new());
+    let first = vfs.write(
+        first_path.to_string_lossy().into_owned(),
+        "def first():\n    return 1\n",
+    );
+    let second = vfs.write(
+        second_path.to_string_lossy().into_owned(),
+        "def second():\n    return 2\n",
+    );
+    let declaration_calls = Arc::new(AtomicUsize::new(0));
+    let import_calls = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(CountingPythonAdapter {
+        declaration_calls: Arc::clone(&declaration_calls),
+        import_calls: Arc::clone(&import_calls),
+    }));
+    let db = AnalyzerDb::new(Arc::clone(&vfs), registry);
+    db.set_workspace_root(root.path().to_path_buf());
+
+    assert_eq!(
+        db.ensure_compiler_object_session(&[second, first, second])
+            .expect("build scoped compiler session"),
+        2
+    );
+    assert_eq!(declaration_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(import_calls.load(Ordering::SeqCst), 2);
+    assert!(
+        !compiler_object_sidecar_path(root.path()).exists(),
+        "a scoped query must not publish a partial compiler generation under the workspace"
+    );
+
+    assert_eq!(
+        db.ensure_compiler_object_session(&[first, second])
+            .expect("reuse scoped compiler session"),
+        0
+    );
+    assert!(db.compiler_file_object_uncached(first).is_some());
+    assert!(db.compiler_file_object_uncached(second).is_some());
+    assert_eq!(
+        declaration_calls.load(Ordering::SeqCst),
+        2,
+        "repeated compiler phases must stream exact scoped objects without reparsing"
+    );
+
+    vfs.write(
+        second_path.to_string_lossy().into_owned(),
+        "def changed():\n    return 3\n",
+    );
+    db.ensure_compiler_object_session(&[first, second])
+        .expect("replace changed scoped object");
+    assert_eq!(
+        declaration_calls.load(Ordering::SeqCst),
+        3,
+        "only the compiler object whose strong source digest changed may be lowered again"
     );
 }
 
@@ -428,9 +503,11 @@ fn global_index_concurrent_callers_lower_each_file_once() {
     let vfs = Arc::new(Vfs::new());
     vfs.write("fixture.py", "def shared():\n    return 1\n");
     let declaration_calls = Arc::new(AtomicUsize::new(0));
+    let import_calls = Arc::new(AtomicUsize::new(0));
     let registry = Arc::new(LanguageRegistry::new());
     registry.register(Arc::new(CountingPythonAdapter {
         declaration_calls: Arc::clone(&declaration_calls),
+        import_calls,
     }));
     let db = AnalyzerDb::new(vfs, registry);
     let start = Arc::new(Barrier::new(3));
@@ -494,9 +571,11 @@ fn global_index_single_flight_is_safe_from_parallel_rayon_callers() {
     let vfs = Arc::new(Vfs::new());
     vfs.write("fixture.py", "def shared():\n    return 1\n");
     let declaration_calls = Arc::new(AtomicUsize::new(0));
+    let import_calls = Arc::new(AtomicUsize::new(0));
     let registry = Arc::new(LanguageRegistry::new());
     registry.register(Arc::new(CountingPythonAdapter {
         declaration_calls: Arc::clone(&declaration_calls),
+        import_calls,
     }));
     let db = AnalyzerDb::new(vfs, registry);
     let start = Barrier::new(2);

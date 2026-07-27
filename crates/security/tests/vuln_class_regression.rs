@@ -313,8 +313,9 @@ function helper(args, other) {
 }
 
 #[test]
-fn javascript_express_controller_req_params_reports_without_local_express_import() {
+fn javascript_express_controller_req_params_reports_with_package_evidence() {
     let src = r#"
+const _express = require("express");
 const { exec } = require("child_process");
 function get_sysinfo(req, res) {
     return exec(req.params.command + " -a");
@@ -327,7 +328,7 @@ function get_sysinfo(req, res) {
     assert_tag_reported(
         &outcome,
         "command-injection",
-        "Express routed controller req.params should be a remote source without importing express locally",
+        "Express routed controller req.params should be a remote source with compiler package evidence",
     );
 }
 
@@ -352,6 +353,7 @@ app.get("/health", function(req, res) {
 #[test]
 fn sqli_js_express_req_params_multiline_template_sink_reports_without_inferred_sources() {
     let src = r#"
+const _express = require("express");
 const sequelize = require("sequelize");
 function get(req, res) {
     const result = sequelize.query(
@@ -372,8 +374,9 @@ function get(req, res) {
 }
 
 #[test]
-fn path_js_express_res_download_reports_without_local_express_import() {
+fn path_js_express_res_download_reports_with_package_evidence() {
     let src = r#"
+const _express = require("express");
 const path = require("path");
 function fetch(req, res) {
     const filename = path.resolve("/srv/uploads/" + req.body.filename);
@@ -387,7 +390,7 @@ function fetch(req, res) {
     assert_tag_reported(
         &outcome,
         "path-traversal",
-        "Express res.download should be a sink in routed controllers without importing express locally",
+        "Express res.download should be a sink with compiler package evidence",
     );
 }
 
@@ -443,8 +446,9 @@ function updateUserUploadFile(parent, args, context, info) {
 }
 
 #[test]
-fn upload_js_req_files_mv_reports_without_local_fileupload_import() {
+fn upload_js_req_files_mv_reports_with_package_evidence() {
     let src = r#"
+const _fileupload = require("express-fileupload");
 function post(req, res) {
     const sampleFile = req.files.file;
     const filePath = "/srv/uploads/" + sampleFile.name;
@@ -458,7 +462,7 @@ function post(req, res) {
     assert_tag_reported(
         &outcome,
         "file-upload",
-        "express-fileupload mv destination should be a sink when the controller uses req.files",
+        "express-fileupload mv destination should be a sink with compiler package evidence",
     );
 }
 

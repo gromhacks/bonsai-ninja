@@ -77,7 +77,7 @@ sidecars are candidate lookup:
 exact indexes decide candidates; canonical facts and semantic graph
 verification decide truth. Vector similarity is never evidence. Search,
 inspect, and literal-filtered browse commands validate a fresh retrieval
-sidecar from source/dependency/build fingerprints before large-repo candidate
+sidecar from source/dependency/schema fingerprints before large-repo candidate
 lookup, then hydrate the selected candidate files/facts through canonical
 APIs. Large or scoped queries that are not prewarmed fall back to canonical
 syntax-backed facts instead of writing partial retrieval cache state.
@@ -91,6 +91,19 @@ machine/container budget. A 3 GiB budget serializes exact compiler units
 without reducing analysis scope. The parent validates one coherent workspace
 generation after
 all phases and restarts them if a source changed between workers.
+
+Security, inspect, and export may revisit the same exact file body after that
+streaming phase. Those consumers share a byte-weighted hot cache sized from
+the effective memory budget instead of repeatedly lowering the file. On a
+smaller machine the cache evicts sooner and exact work may be recomputed; an
+individual body that does not fit is still analyzed. Memory therefore affects
+parallelism, retention, and wall time, never semantic coverage.
+
+The workspace-wide linker retains only compact declaration, type, module,
+inheritance, import, and stable-symbol headers. Exact body facts are streamed
+from the same compiler objects and remapped to those symbols as consumers need
+them, so large projects do not require every function body and the IDG to be
+resident at the same time.
 
 Each adapter parses its own language with Tree-sitter and lowers syntax into
 typed compiler facts. Shared resolver, callgraph, IDG, security, and export

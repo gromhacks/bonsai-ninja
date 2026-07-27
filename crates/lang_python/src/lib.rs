@@ -8,7 +8,7 @@ use bonsai_lang_api::{
     },
     AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, DeclIndex, FlowEvent,
     GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    TypeAliasBinding, Visibility,
+    StaticScalarValue, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -286,6 +286,13 @@ impl LanguageAdapter for PythonAdapter {
                 rewrite_python_generator_send(&mut decl.flow_events);
                 augment_python_asyncio_to_thread_calls(&mut decl.flow_events);
             }
+            bonsai_lang_api::kit::populate_call_argument_static_values(
+                &mut idx,
+                &tree,
+                file,
+                src,
+                python_static_scalar,
+            );
         }
         // Append `FlowEvent::Lifecycle` for recognised Python
         // resource transitions (`f.close()`, `task.cancel()`,
@@ -305,6 +312,44 @@ impl LanguageAdapter for PythonAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+fn python_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
+    match node.kind() {
+        "true" => Some(StaticScalarValue::Boolean(true)),
+        "false" => Some(StaticScalarValue::Boolean(false)),
+        "none" => Some(StaticScalarValue::Null),
+        "string" => Some(StaticScalarValue::String(python_static_string(node, src)?)),
+        _ => None,
+    }
+}
+
+fn python_static_string(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let text = node_text(&node, src).trim();
+    let quote_start = text.find(['\'', '"'])?;
+    let prefix = text.get(..quote_start)?.to_ascii_lowercase();
+    if prefix.contains('f') || prefix.contains('b') || prefix.chars().any(|ch| !matches!(ch, 'r' | 'u')) {
+        return None;
+    }
+    let quoted = text.get(quote_start..)?;
+    let delimiter = if quoted.starts_with("'''") {
+        "'''"
+    } else if quoted.starts_with("\"\"\"") {
+        "\"\"\""
+    } else if quoted.starts_with('\'') {
+        "'"
+    } else if quoted.starts_with('"') {
+        "\""
+    } else {
+        return None;
+    };
+    let inner = quoted.strip_prefix(delimiter)?.strip_suffix(delimiter)?;
+    if prefix.contains('r') {
+        return Some(inner.to_string());
+    }
+    // Exact comparison fails closed for escaped strings until the Python
+    // adapter owns a complete escape decoder.
+    (!inner.contains('\\')).then(|| inner.to_string())
 }
 
 /// FastAPI / Starlette parameter-binder markers. When a parameter's

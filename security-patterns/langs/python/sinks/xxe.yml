@@ -14,6 +14,20 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    configured_argument_factory_guard:
+      sink_argument_index: 1
+      factory:
+        attribute: [etree, XMLParser]
+      required_named_arguments:
+      - name: resolve_entities
+        value:
+          kind: boolean
+          value: false
+      - name: no_network
+        value:
+          kind: boolean
+          value: true
   match_examples:
   - name: xxe lxml parse
     code: |
@@ -44,6 +58,20 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    configured_argument_factory_guard:
+      sink_argument_index: 1
+      factory:
+        attribute: [etree, XMLParser]
+      required_named_arguments:
+      - name: resolve_entities
+        value:
+          kind: boolean
+          value: false
+      - name: no_network
+        value:
+          kind: boolean
+          value: true
   match_examples:
   - name: xxe lxml fromstring
     code: |

@@ -639,7 +639,11 @@ fn collect_decl_hits(
         return Vec::new();
     }
 
-    let global = ws.db().global_index();
+    let global = if options.graph_flows_enabled {
+        ws.db().global_index()
+    } else {
+        ws.compiler_header_index()
+    };
     let mut matched_decls = Vec::new();
     for file in options.files_in_path_order.iter().copied() {
         for decl in global.decls_in(file) {
@@ -1110,7 +1114,7 @@ fn scan_occurrence_facts(
         truncated_by_output_cap: hits_truncated_by_output_cap,
         truncated_by_attempt_cap: hits_truncated_by_attempt_cap,
     } = options;
-    let global = ws.db().global_index();
+    let resident_global = (!syntax_fast_path).then(|| ws.db().global_index());
     if !occurrence_scan_skipped_for_id_lookup {
         let hit_phase = if partial_workspace {
             "hydrating verified facts"
@@ -1128,8 +1132,19 @@ fn scan_occurrence_facts(
                 break;
             }
             hit_bar.inc(1);
-            let Some(idx) = global.file_index(file) else {
-                continue;
+            let streamed_index = syntax_fast_path
+                .then(|| ws.exact_decl_index_shared(file))
+                .flatten();
+            let idx = if let Some(index) = streamed_index.as_deref() {
+                index
+            } else {
+                let Some(index) = resident_global
+                    .as_ref()
+                    .and_then(|global| global.file_index(file))
+                else {
+                    continue;
+                };
+                index
             };
             // Preload decls in this file for enclosing-function lookup.
             let decls_in_file: Vec<&bonsai_lang_api::Decl> = idx.defs.iter().collect();
@@ -2069,7 +2084,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     };
     let prepare_stage = progress::ScopedSpinner::new("preparing inspect query");
     let ws = project.workspace();
-    let global = ws.db().global_index();
+    let global = ws.compiler_header_index();
     let full_source_for_large_bodies =
         paging_cfg.all || render.flow_id_filter.is_some() || render.group_id_filter.is_some();
     // One cache per `inspect` run. `inspect --query system` in Redis
@@ -2280,6 +2295,22 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         },
         &mut taint_candidates,
     );
+    drop(edge_resolver);
+    drop(chain_cache);
+    drop(global);
+    if taint_flow {
+        // Syntax navigation has already been rendered into owned rows and
+        // stable FuncIds. End that compiler phase before the scoped semantic
+        // graph opens so whole-body/chain working sets do not overlap the
+        // exact IDG. Every released cache is reproducible from the immutable
+        // VFS/compiler objects; this changes allocation lifetime, never
+        // analysis scope.
+        ws.db().release_global_index();
+        ws.release_resolved_call_graph_cache();
+        ws.release_compiler_linkage_cache();
+        ws.release_exact_body_cache();
+        ws.release_decl_name_index_cache();
+    }
     finish_inspect(
         root,
         ws,
@@ -2398,6 +2429,13 @@ fn inspect_taint_flows(
     } else {
         None
     };
+    let session = if prefer_warmed_idg {
+        target_funcs
+            .as_ref()
+            .and_then(|targets| ws.syntax_flow_session(&entries, targets))
+    } else {
+        None
+    };
     let mut flows = Vec::new();
     let mut truncated = false;
     let mut semantic_flow_stats = InspectSemanticFlowStats::default();
@@ -2408,7 +2446,8 @@ fn inspect_taint_flows(
         }
         let query = SyntaxFlowQuery::new(entry)
             .target_funcs(target_funcs.as_ref())
-            .prefer_warmed_idg(prefer_warmed_idg);
+            .prefer_warmed_idg(prefer_warmed_idg)
+            .session(session.as_ref());
         let graph = ws.syntax_flow_graph(query);
         semantic_flow_stats.record_plan(&graph.plan);
         let entry_truncated =
@@ -2613,8 +2652,7 @@ fn build_inspect_taint_flow(
     let func_ids: Vec<u32> = funcs.iter().map(|func| func.raw()).collect();
     let chain_display = disambiguated_func_names_for_output(ws, &funcs);
     let entry_kind = ws
-        .db()
-        .global_index()
+        .compiler_header_index()
         .decl_of(bonsai_common::SymbolId::new(entry.raw()))
         .map(|decl| decl.kind);
     Some(InspectTaintFlow {
@@ -5692,7 +5730,7 @@ fn disambiguate_func_display_names(
 }
 
 fn func_disambiguated_display_name(ws: &Workspace, func: bonsai_common::FuncId, fallback: &str) -> String {
-    let global = ws.db().global_index();
+    let global = ws.compiler_header_index();
     let symbol = bonsai_common::SymbolId::new(func.raw());
     let Some(decl) = global.decl_of(symbol) else {
         return fallback.to_string();
@@ -5708,7 +5746,7 @@ fn func_disambiguated_display_name(ws: &Workspace, func: bonsai_common::FuncId, 
 }
 
 fn owner_qualified_decl_name(ws: &Workspace, decl: &bonsai_lang_api::Decl) -> Option<String> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_header_index();
     let mut owner_names: Vec<String> = Vec::new();
     let mut parent = decl.parent;
     while let Some(parent_symbol) = parent {

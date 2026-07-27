@@ -6,7 +6,29 @@
   cwe:
   - CWE-918
   analysis_semantics:
-    guard_profile: java-url-ssrf-guard
+    url_network_guard:
+      root:
+        kind: sink-assignment-target
+      parser: {name: URL}
+      scheme:
+        component:
+          accessor: {name: getProtocol}
+        comparison_predicate: {name: equalsIgnoreCase}
+        allowed_values: [https]
+      host_allowlist:
+        component:
+          accessor: {name: getHost}
+        membership_predicate: {name: contains}
+        static_collection_factories:
+        - {name: of}
+      dns:
+        resolver: {name: getByName}
+        private_address_predicates:
+        - {name: isLoopbackAddress}
+        - {name: isSiteLocalAddress}
+        - {name: isLinkLocalAddress}
+        - {name: isAnyLocalAddress}
+        - {name: isMulticastAddress}
   match:
     kind: new
     callee:
@@ -34,7 +56,29 @@
   cwe:
   - CWE-918
   analysis_semantics:
-    guard_profile: java-url-ssrf-guard
+    url_network_guard:
+      root:
+        kind: sink-assignment-target
+      parser: {name: URI}
+      scheme:
+        component:
+          accessor: {name: getScheme}
+        comparison_predicate: {name: equalsIgnoreCase}
+        allowed_values: [https]
+      host_allowlist:
+        component:
+          accessor: {name: getHost}
+        membership_predicate: {name: contains}
+        static_collection_factories:
+        - {name: of}
+      dns:
+        resolver: {name: getByName}
+        private_address_predicates:
+        - {name: isLoopbackAddress}
+        - {name: isSiteLocalAddress}
+        - {name: isLinkLocalAddress}
+        - {name: isAnyLocalAddress}
+        - {name: isMulticastAddress}
   match:
     kind: new
     callee:
@@ -55,32 +99,86 @@
     expect_no_match: true
   description: "new URI(tainted) - construction only; open when passed to a client."
 - id: java.ssrf.urlconnection_openconnection
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: java
   tag: ssrf
   severity: high
+  packages:
+  - java.net
   cwe:
   - CWE-918
+  analysis_semantics:
+    url_network_guard:
+      root:
+        kind: sink-receiver
+      parser: {name: URL}
+      scheme:
+        component:
+          accessor: {name: getProtocol}
+        comparison_predicate: {name: equalsIgnoreCase}
+        allowed_values: [https]
+      host_allowlist:
+        component:
+          accessor: {name: getHost}
+        membership_predicate: {name: contains}
+        static_collection_factories:
+        - {name: of}
+      dns:
+        resolver: {name: getByName}
+        private_address_predicates:
+        - {name: isLoopbackAddress}
+        - {name: isSiteLocalAddress}
+        - {name: isLinkLocalAddress}
+        - {name: isAnyLocalAddress}
+        - {name: isMulticastAddress}
+      redirect:
+        kind: post-sink-call
+        call: {name: setInstanceFollowRedirects}
+        argument_index: 0
+        required_value:
+          kind: boolean
+          value: false
   match:
     kind: call
     callee:
-      regex: ^URL\.openConnection$
+      name: openConnection
+      receiver_type_in:
+      - URL
+      - java.net.URL
+  constraints:
+  - receiver_tainted: true
   match_examples:
-  - name: generated shape example
+  - name: tainted inline URL receiver
     code: |
-      import java.net.*;
+      import java.net.URL;
       class App {
         void handle(String input) throws Exception {
-          URL.openConnection(input);
+          new URL(input).openConnection();
         }
       }
-  description: 'Disabled - URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument. Merged collision aliases: java.ssrf.httpurlconnection_openconnection.'
+    expect_match_text: [openConnection]
+  - name: tainted local URL receiver
+    code: |
+      import java.net.URL;
+      class App {
+        void handle(String input) throws Exception {
+          URL url = new URL(input);
+          url.openConnection();
+        }
+      }
+    expect_match_text: [url.openConnection]
+  - name: literal URL receiver negative
+    code: |
+      import java.net.URL;
+      class App {
+        void handle() throws Exception {
+          new URL("https://example.test/").openConnection();
+        }
+      }
+    expect_no_match: true
+  description: 'URL.openConnection() on a receiver constructed from tainted URL text performs the outbound request. Receiver-taint and semantic URL type evidence keep unrelated openConnection methods quiet. Merged collision aliases: java.ssrf.httpurlconnection_openconnection.'
   aliases:
   - java.ssrf.httpurlconnection_openconnection
-  packages:
-  - java.net
 - id: java.ssrf.httpurlconnection_connect
   enabled: false
   disabled_reason:

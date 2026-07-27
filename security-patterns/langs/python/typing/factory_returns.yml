@@ -5,6 +5,44 @@
 # engine owning any method-name list. These NEVER produce findings; they
 # feed `build_factory_returns`. The match_example MUST construct the
 # receiver so a paired receiver-typed sink replays.
+- id: python.typing.httpx_async_client
+  enabled: true
+  language: python
+  packages: [httpx]
+  returns_type: AsyncClient
+  match:
+    kind: call
+    callee:
+      attribute: [httpx, AsyncClient]
+  match_examples:
+  - name: httpx async context manager returns AsyncClient
+    code: |
+      import httpx
+      async def example(user_input):
+          async with httpx.AsyncClient() as client:
+              return await client.get(user_input)
+    expect_match_text: [httpx.AsyncClient]
+  description: "httpx.AsyncClient(...) returns an AsyncClient; type normal assignments and syntax-bound async context-manager aliases so receiver-typed HTTP sinks remain package-derived."
+
+- id: python.typing.jinja2_sandboxed_environment
+  enabled: true
+  language: python
+  packages: [jinja2]
+  returns_type: SandboxedEnvironment
+  match:
+    kind: call
+    callee:
+      name: SandboxedEnvironment
+  match_examples:
+  - name: sandbox constructor returns SandboxedEnvironment
+    code: |
+      from jinja2.sandbox import SandboxedEnvironment
+      def example(user_input):
+          env = SandboxedEnvironment(autoescape=True)
+          return env.from_string(user_input)
+    expect_match_text: [SandboxedEnvironment]
+  description: "jinja2.sandbox.SandboxedEnvironment(...) returns a SandboxedEnvironment; type assigned instances so the sandbox sanitizer matches instance calls without engine-owned constructor names."
+
 - id: python.typing.dbapi_cursor
   enabled: true
   language: python

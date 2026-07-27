@@ -35,6 +35,58 @@ fn arrow_expression_records_implicit_return() {
 }
 
 #[test]
+fn denylist_constructor_and_condition_emit_exact_compiler_facts() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "merge.js",
+            "const BLOCKED = new Set([\"__proto__\", \"constructor\", \"prototype\"]);\n\
+             function merge(target, source) {\n\
+               for (const key of Object.keys(source)) {\n\
+                 if (BLOCKED.has(key)) continue;\n\
+                 target[key] = source[key];\n\
+               }\n\
+             }\n",
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+
+    let constructor = index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.direct_call_name.as_deref() == Some("Set"))
+        .expect("adapter-declared constructor assignment");
+    assert_eq!(constructor.target.as_deref(), Some("BLOCKED"));
+    let values = index
+        .call_argument_values
+        .iter()
+        .find(|fact| {
+            fact.argument_index == 0
+                && fact.call_span.start >= constructor.value_span.start
+                && fact.call_span.end <= constructor.value_span.end
+        })
+        .expect("constructor argument value fact");
+    assert_eq!(values.value_flow.tuple_items.len(), 3);
+
+    let decoded: Vec<_> = index
+        .strings
+        .iter()
+        .filter_map(|literal| literal.static_value.as_deref())
+        .collect();
+    assert!(decoded.contains(&"__proto__"));
+    assert!(decoded.contains(&"constructor"));
+    assert!(decoded.contains(&"prototype"));
+    assert!(index
+        .branch_conditions
+        .iter()
+        .any(|fact| fact.expression.is_some()));
+}
+
+#[test]
 fn commonjs_named_function_export_has_single_semantic_decl() {
     use bonsai_lang_api::LanguageAdapter;
 

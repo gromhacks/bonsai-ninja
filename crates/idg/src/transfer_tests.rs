@@ -1186,6 +1186,20 @@ fn configured_call_result_passthrough_is_materialized_for_call_event() {
 }
 
 #[test]
+fn compiled_transfer_matchers_preserve_exact_tail_regex_order_and_invalid_regex_behavior() {
+    let index = ConfiguredNameIndex::new([
+        "decode",
+        "project.codec.decode",
+        r"regex:(?:^|\.)decode$",
+        "regex:[",
+        "other",
+    ]);
+    let observed = ObservedCallee::new("project.codec.decode");
+
+    assert_eq!(index.matching_indices(&observed).as_slice(), &[0, 1, 2]);
+}
+
+#[test]
 fn decode_call_result_is_not_hardcoded_passthrough_by_default() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["input".to_string()];
@@ -1414,10 +1428,13 @@ fn compound_assignment_binds_ast_indexed_rhs_call_result() {
     ];
     let facts = [AssignmentValueFact {
         assignment_span: assign_span,
+        target: Some("buf".to_string()),
         target_span: Some(span(50, 53)),
         value_span: span(55, 88),
         call_sites: vec![call_expression_span],
         value_flow: ExpressionFlow::default(),
+        exact_callable_return: None,
+        exact_static_call_args: None,
         direct_call_name: None,
         direct_call_receiver: None,
     }];
@@ -1459,6 +1476,7 @@ fn indexed_object_initializer_is_field_precise_without_duplicate_flow_event() {
     }];
     let facts = [AssignmentValueFact {
         assignment_span: assign_span,
+        target: Some("cmd".to_string()),
         target_span: Some(span(20, 23)),
         value_span: span(26, 60),
         call_sites: Vec::new(),
@@ -1475,6 +1493,8 @@ fn indexed_object_initializer_is_field_precise_without_duplicate_flow_event() {
             ],
             ..ExpressionFlow::default()
         },
+        exact_callable_return: None,
+        exact_static_call_args: None,
         direct_call_name: None,
         direct_call_receiver: None,
     }];
@@ -3085,7 +3105,9 @@ fn structured_receiver_fact_drives_receiver_flow() {
     }];
     let receiver_facts = vec![bonsai_lang_api::CallReceiverFact {
         call_span,
+        receiver_span: call_span,
         value_flow: bonsai_lang_api::ExpressionFlow::from_place("state.client"),
+        static_value: None,
     }];
     let out = transfer_function_for_with_options_and_syntax_facts(
         &decl,
@@ -3121,7 +3143,9 @@ fn structured_implicit_receiver_fact_defers_storage_identity_to_stitching() {
     }];
     let receiver_facts = vec![bonsai_lang_api::CallReceiverFact {
         call_span,
+        receiver_span: call_span,
         value_flow: bonsai_lang_api::ExpressionFlow::from_place("$this"),
+        static_value: None,
     }];
     let out = transfer_function_for_with_options_and_syntax_facts(
         &decl,

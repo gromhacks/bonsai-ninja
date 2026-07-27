@@ -60,6 +60,12 @@ pub enum IdgError {
         /// Table id this layer expected.
         expected: u32,
     },
+
+    /// An internally generated compiler schedule or typed replay object was
+    /// inconsistent. Continuing would silently omit or misaddress graph facts,
+    /// so the build is rejected as a typed error.
+    #[error("compiler invariant: {0}")]
+    Invariant(String),
 }
 
 /// Convenience alias used throughout the crate.

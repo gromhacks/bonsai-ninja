@@ -19,8 +19,10 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use crate::edge::{IdgEdge, IdgEdgeKind};
+use crate::external_relation::merge_page_rows;
 use crate::node::{NodeId, PlaceId};
 use crate::place::Place;
+use crate::positioned_io::read_exact_at;
 use crate::query::ReachabilityIndex;
 use crate::segment::IdgSegment;
 use crate::symbolic::{structured_storage_parts, SymbolicFieldTransformKind};
@@ -191,29 +193,28 @@ impl BoundaryPairSpool {
 
     fn finish(mut self) -> BoundaryRunMerger {
         self.flush();
-        BoundaryRunMerger::new(&self.file, &self.runs)
+        let file = self.file;
+        let runs = self.runs;
+        BoundaryRunMerger::new(file, &runs)
     }
 }
 
 struct BoundaryRunReader {
-    file: std::fs::File,
+    file: Arc<std::fs::File>,
     offset: u64,
     remaining: u32,
     buffer: Vec<u8>,
     position: usize,
+    page_rows: usize,
 }
 
 impl BoundaryRunReader {
     fn refill(&mut self) {
         let records = usize::try_from(self.remaining)
             .expect("boundary run length fits usize")
-            .min(BOUNDARY_READ_ROWS);
+            .min(self.page_rows);
         self.buffer.resize(records.saturating_mul(BOUNDARY_PAIR_BYTES), 0);
-        self.file
-            .seek(SeekFrom::Start(self.offset))
-            .expect("seek sorted call-boundary run");
-        self.file
-            .read_exact(&mut self.buffer)
+        read_exact_at(self.file.as_ref(), self.offset, &mut self.buffer)
             .expect("read sorted call-boundary run page");
         self.offset = self
             .offset
@@ -252,15 +253,18 @@ struct BoundaryRunMerger {
 }
 
 impl BoundaryRunMerger {
-    fn new(file: &std::fs::File, runs: &[BoundaryRunEntry]) -> Self {
+    fn new(file: std::fs::File, runs: &[BoundaryRunEntry]) -> Self {
+        let file = Arc::new(file);
+        let page_rows = merge_page_rows(runs.len(), BOUNDARY_PAIR_BYTES, BOUNDARY_READ_ROWS);
         let mut readers = Vec::with_capacity(runs.len());
         for run in runs {
             readers.push(BoundaryRunReader {
-                file: file.try_clone().expect("clone call-boundary run spool"),
+                file: Arc::clone(&file),
                 offset: run.offset,
                 remaining: run.count,
                 buffer: Vec::new(),
                 position: 0,
+                page_rows,
             });
         }
         let mut pending = BinaryHeap::new();

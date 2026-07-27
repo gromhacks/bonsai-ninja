@@ -37,6 +37,16 @@ fn set_and_contains_roundtrip() {
 }
 
 #[test]
+fn insert_reports_only_new_in_range_bits() {
+    let mut set = NodeBitSet::zeros(64);
+    assert!(set.insert(nid(17)));
+    assert!(!set.insert(nid(17)));
+    assert!(!set.insert(nid(64)));
+    assert!(set.contains(nid(17)));
+    assert_eq!(set.popcount(), 1);
+}
+
+#[test]
 fn clear_removes_bit() {
     let mut s = NodeBitSet::zeros(100);
     s.set(nid(7));

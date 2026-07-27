@@ -270,6 +270,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - keyword_arg_equals:
+      name: content_type
+      value: '"text/html"'
   match_examples:
   - name: aiohttp web response html text
     code: "from aiohttp import web\n\ndef example(user_input):\n    return web.Response(text=\"<p>\" + user_input + \"</p>\", content_type=\"text/html\")\n"
@@ -281,6 +284,13 @@
 
       def example(user_input):
           return web.Response(text='safe', content_type='text/html')
+    expect_no_match: true
+  - name: aiohttp binary response tainted body negative
+    code: |
+      from aiohttp import web
+
+      def example(user_input):
+          return web.Response(body=user_input, content_type="application/octet-stream")
     expect_no_match: true
   description: aiohttp web.Response(text=..., content_type='text/html') - tainted HTML text is returned directly.
 - id: python.xss.sanic_response_html_concat

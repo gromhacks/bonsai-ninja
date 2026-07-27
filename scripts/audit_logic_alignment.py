@@ -125,12 +125,11 @@ def is_name_only(rule: dict) -> bool:
     return True
 
 
-def audit_logic_alignment() -> dict[str, list[dict]]:
-    rules = load_rules()
+def group_rules_by_shape(
+    rules: list[tuple[dict, Path, str]],
+) -> dict[tuple[str, str, str, str, str], list[dict]]:
     by_shape: dict[tuple[str, str, str, str, str], list[dict]] = defaultdict(list)
     for rule, path, kind in rules:
-        if not isinstance(rule, dict):
-            continue
         rid = rule.get("id")
         if not isinstance(rid, str):
             continue
@@ -141,66 +140,84 @@ def audit_logic_alignment() -> dict[str, list[dict]]:
         if not pattern:
             continue
         key = (lang, m_kind, pattern, args_sig, kind)
-        by_shape[key].append({"id": rid, "path": str(path.relative_to(REPO)), "rule": rule})
+        by_shape[key].append(
+            {"id": rid, "path": str(path.relative_to(REPO)), "rule": rule}
+        )
+    return by_shape
 
-    same_shape_different_tag: list[dict] = []
-    same_shape_different_severity: list[dict] = []
-    same_shape_different_cwe: list[dict] = []
 
-    for key, entries in by_shape.items():
-        if len(entries) < 2:
-            continue
-        tags = {e["rule"].get("tag") for e in entries if isinstance(e["rule"].get("tag"), str)}
-        sevs = {e["rule"].get("severity") for e in entries if isinstance(e["rule"].get("severity"), str)}
-        cwes_per_rule = [
-            tuple(sorted(e["rule"].get("cwe") or []))
-            for e in entries
-        ]
-        cwes = {c for c in cwes_per_rule if c}
+def conflicting_cwes(entries: list[dict]) -> set[tuple]:
+    cwes_per_rule = [tuple(sorted(entry["rule"].get("cwe") or [])) for entry in entries]
+    cwes = {cwe for cwe in cwes_per_rule if cwe}
+    cwe_sets = [set(cwe) for cwe in cwes_per_rule]
+    hierarchical = any(
+        cwe_sets[left] <= cwe_sets[right] or cwe_sets[right] <= cwe_sets[left]
+        for left in range(len(cwe_sets))
+        for right in range(left + 1, len(cwe_sets))
+    )
+    return set() if hierarchical else cwes
 
-        # Skip the case where the rules differ in `packages`/`imports`
-        # — different gating is the whole point of duplicating a shape.
-        gates = {
-            (
-                tuple(sorted(e["rule"].get("packages") or [])),
-                tuple(sorted(e["rule"].get("imports") or [])),
-            )
-            for e in entries
-        }
-        if len(gates) > 1:
-            continue
-        # Skip when one rule's CWE list is a strict subset / superset
-        # of another's — that's a hierarchy (e.g. CWE-78 implies
-        # CWE-77 in many catalogues), not a contradiction.
-        cwe_sets = [set(c) for c in cwes_per_rule]
-        if len(cwe_sets) >= 2 and any(
-            cwe_sets[i] <= cwe_sets[j] or cwe_sets[j] <= cwe_sets[i]
-            for i in range(len(cwe_sets))
-            for j in range(i + 1, len(cwe_sets))
-        ):
-            cwes = set()  # informational, not a finding
-        ids = sorted(e["id"] for e in entries)
-        # Strip the kind suffix from the shape tuple so the report is
-        # human-readable: (lang, match_kind, callee_pattern, args_sig).
-        shape_human = list(key[:4])
-        if len(tags) > 1:
-            same_shape_different_tag.append(
-                {"shape": shape_human, "ids": ids, "tags": sorted(tags)}
-            )
-        if len(sevs) > 1:
-            same_shape_different_severity.append(
-                {"shape": shape_human, "ids": ids, "severities": sorted(sevs)}
-            )
-        if len(cwes) > 1:
-            same_shape_different_cwe.append(
-                {"shape": shape_human, "ids": ids, "cwes": [list(c) for c in cwes]}
-            )
 
-    return {
-        "same_shape_different_tag": same_shape_different_tag,
-        "same_shape_different_severity": same_shape_different_severity,
-        "same_shape_different_cwe": same_shape_different_cwe,
+def alignment_rows_for_shape(
+    key: tuple[str, str, str, str, str], entries: list[dict]
+) -> dict[str, dict]:
+    if len(entries) < 2:
+        return {}
+    gates = {
+        (
+            tuple(sorted(entry["rule"].get("packages") or [])),
+            tuple(sorted(entry["rule"].get("imports") or [])),
+        )
+        for entry in entries
     }
+    if len(gates) > 1:
+        return {}
+
+    ids = sorted(entry["id"] for entry in entries)
+    shape = list(key[:4])
+    tags = {
+        entry["rule"].get("tag")
+        for entry in entries
+        if isinstance(entry["rule"].get("tag"), str)
+    }
+    severities = {
+        entry["rule"].get("severity")
+        for entry in entries
+        if isinstance(entry["rule"].get("severity"), str)
+    }
+    cwes = conflicting_cwes(entries)
+    rows: dict[str, dict] = {}
+    if len(tags) > 1:
+        rows["same_shape_different_tag"] = {
+            "shape": shape,
+            "ids": ids,
+            "tags": sorted(tags),
+        }
+    if len(severities) > 1:
+        rows["same_shape_different_severity"] = {
+            "shape": shape,
+            "ids": ids,
+            "severities": sorted(severities),
+        }
+    if len(cwes) > 1:
+        rows["same_shape_different_cwe"] = {
+            "shape": shape,
+            "ids": ids,
+            "cwes": [list(cwe) for cwe in cwes],
+        }
+    return rows
+
+
+def audit_logic_alignment() -> dict[str, list[dict]]:
+    findings: dict[str, list[dict]] = {
+        "same_shape_different_tag": [],
+        "same_shape_different_severity": [],
+        "same_shape_different_cwe": [],
+    }
+    for key, entries in group_rules_by_shape(load_rules()).items():
+        for category, row in alignment_rows_for_shape(key, entries).items():
+            findings[category].append(row)
+    return findings
 
 
 def audit_duplication() -> dict[str, list[dict]]:
@@ -211,11 +228,13 @@ def audit_duplication() -> dict[str, list[dict]]:
     # name-only inventory.
     for rule, path, kind in rules:
         if is_name_only(rule):
-            name_only.append({
-                "id": rule.get("id"),
-                "path": str(path.relative_to(REPO)),
-                "kind": kind,
-            })
+            name_only.append(
+                {
+                    "id": rule.get("id"),
+                    "path": str(path.relative_to(REPO)),
+                    "kind": kind,
+                }
+            )
 
     # cross-family: same id stem in source/sink/sanitizer trios.
     # We flag a stem only when the rules also share an identical
@@ -240,12 +259,14 @@ def audit_duplication() -> dict[str, list[dict]]:
         shapes = {shape_key(e[3]) for e in entries}
         if len(shapes) > 1:
             continue
-        cross_family.append({
-            "lang": stem[0],
-            "stem": stem[1],
-            "ids": sorted(e[0] for e in entries),
-            "kinds": sorted(kinds),
-        })
+        cross_family.append(
+            {
+                "lang": stem[0],
+                "stem": stem[1],
+                "ids": sorted(e[0] for e in entries),
+                "kinds": sorted(kinds),
+            }
+        )
 
     return {
         "name_only_rules": name_only,
@@ -284,11 +305,13 @@ def main() -> int:
     bad = sum(len(v) for v in report.values())
 
     if args.json:
-        print(json.dumps(
-            {"findings": report, "inventory": inventory, "total": bad},
-            indent=2,
-            sort_keys=True,
-        ))
+        print(
+            json.dumps(
+                {"findings": report, "inventory": inventory, "total": bad},
+                indent=2,
+                sort_keys=True,
+            )
+        )
     else:
         for name, items in report.items():
             print(f"{name}: {len(items)}")
@@ -297,7 +320,7 @@ def main() -> int:
             if len(items) > 8:
                 print(f"  ... +{len(items) - 8} more")
         print()
-        print(f"inventory (informational, not failing):")
+        print("inventory (informational, not failing):")
         for name, items in inventory.items():
             print(f"  {name}: {len(items)}")
         print()

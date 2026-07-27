@@ -24,7 +24,10 @@ compiler objects containing typed adapter IR and diagnostics. Callgraph,
 retrieval, linkage, IDG, security, inspect, and export stream those objects.
 The persisted IDG path lowers transfer facts once and replays a compact typed
 stitch spool; it does not run a second AST/transfer pass. Changed objects are
-recompiled, while exact unchanged payloads are reused.
+recompiled, while exact unchanged payloads are reused. The workspace linker
+retains compact headers and stable symbols; exact bodies are streamed and
+released in memory-aware batches instead of all remaining resident beside the
+graph.
 
 </Accordion>
 

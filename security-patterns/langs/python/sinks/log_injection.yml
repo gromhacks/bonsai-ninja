@@ -1,8 +1,8 @@
 - id: python.log_injection.format_arg_user
   enabled: true
   language: python
-  tag: code-injection
-  severity: medium
+  tag: log-injection
+  severity: high
   cwe:
   - CWE-134
   - CWE-117
@@ -45,7 +45,7 @@
   enabled: true
   language: python
   tag: log-injection
-  severity: medium
+  severity: high
   cwe:
   - CWE-117
   packages:

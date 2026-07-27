@@ -37,9 +37,15 @@ use std::sync::{Arc, OnceLock};
 
 use crate::bitset::NodeBitSet;
 use crate::edge::{IdgEdge, IdgEdgeKind};
+use crate::external_relation::merge_page_rows;
+use crate::fact_source_index::{FactSourceIndex, FactSourceSpool};
 use crate::node::NodeId;
 use crate::place::Place;
-use crate::query::{ForwardReachabilityIndex, ReachabilityIndex};
+use crate::positioned_io::read_exact_at;
+use crate::query::ReachabilityIndex;
+use crate::reverse_scalar_index::{ReverseScalarTransformIndex, ReverseScalarTransformSpool};
+use crate::reverse_symbolic_index::{ReverseSymbolicTransformIndex, ReverseSymbolicTransformSpool};
+use crate::spill_set::{SpillSet, SpillStack};
 use crate::symbolic::{structured_storage_parts, SymbolicFieldTransformKind, NO_SYMBOLIC_STRING};
 use crate::workspace::{IdgWorkspace, SegmentId};
 
@@ -185,6 +191,7 @@ struct UnifiedAddressSpace {
     node_boundaries: Box<[u8]>,
     projected_storage: Box<[u8]>,
     nodes_by_func: NodesByFunc,
+    call_args: CallArgIdentityIndex,
     unfiltered_reach: RwLock<Option<Arc<ReachabilityIndex>>>,
     precision_reach: RwLock<AHashMap<Precision, Arc<ReachabilityIndex>>>,
     contextual_summaries: RwLock<AHashMap<Option<Precision>, Arc<ContextualSummaryRuntime>>>,
@@ -211,6 +218,24 @@ impl NodesByFunc {
         let start = *self.offsets.get(index)? as usize;
         let end = *self.offsets.get(index + 1)? as usize;
         Some(&self.nodes[start..end])
+    }
+}
+
+/// Compact compiler identity for the sparse subset of workspace nodes that
+/// represent call arguments. Nodes are appended in workspace-address order
+/// while the unified address space is built, so lookups stay logarithmic
+/// without reopening the segment that owns the node.
+#[derive(Default)]
+struct CallArgIdentityIndex {
+    nodes: Box<[WsNodeId]>,
+    sites: Box<[Span]>,
+    indices: Box<[u32]>,
+}
+
+impl CallArgIdentityIndex {
+    fn get(&self, node: WsNodeId) -> Option<(Span, u32)> {
+        let index = self.nodes.binary_search(&node).ok()?;
+        Some((*self.sites.get(index)?, *self.indices.get(index)?))
     }
 }
 
@@ -278,9 +303,113 @@ struct SegmentCallArgEvidence {
 struct SymbolicNodeFact {
     base: u32,
     field: u32,
-    span: Option<Span>,
-    interprocedural: bool,
+    /// Low 31 bits store a one-based [`SymbolicFactSpan`] id; the high bit
+    /// records whether this fact crossed a call boundary. Interprocedural
+    /// facts deliberately carry no local ordering span because the transfer
+    /// predicate never consults one after a call. Canonicalizing that unused
+    /// field prevents equivalent facts reached through many call sites from
+    /// multiplying in the fixed point.
+    provenance: u32,
     context: u32,
+}
+
+const SYMBOLIC_FACT_INTERPROCEDURAL: u32 = 1 << 31;
+const SYMBOLIC_FACT_SPAN_MASK: u32 = SYMBOLIC_FACT_INTERPROCEDURAL - 1;
+
+impl SymbolicNodeFact {
+    fn new(base: u32, field: u32, span: Option<u32>, interprocedural: bool, context: u32) -> Self {
+        let encoded_span = if interprocedural {
+            0
+        } else {
+            span.map_or(0, |span| {
+                let one_based = span.checked_add(1).expect("symbolic fact span id exceeds u32");
+                assert!(
+                    one_based <= SYMBOLIC_FACT_SPAN_MASK,
+                    "symbolic fact span count exceeds compact representation"
+                );
+                one_based
+            })
+        };
+        Self {
+            base,
+            field,
+            provenance: encoded_span | (u32::from(interprocedural) * SYMBOLIC_FACT_INTERPROCEDURAL),
+            context,
+        }
+    }
+
+    fn span_id(self) -> Option<u32> {
+        (self.provenance & SYMBOLIC_FACT_SPAN_MASK).checked_sub(1)
+    }
+
+    fn is_interprocedural(self) -> bool {
+        self.provenance & SYMBOLIC_FACT_INTERPROCEDURAL != 0
+    }
+
+    fn identity(self) -> SymbolicFactIdentity {
+        SymbolicFactIdentity {
+            base: self.base,
+            field: self.field,
+            provenance: self.provenance,
+        }
+    }
+
+    fn from_identity(identity: SymbolicFactIdentity, context: u32) -> Self {
+        Self {
+            base: identity.base,
+            field: identity.field,
+            provenance: identity.provenance,
+            context,
+        }
+    }
+
+    fn state_key(self) -> u128 {
+        self.identity().key() | (u128::from(self.context) << 96)
+    }
+
+    fn from_state_key(key: u128) -> Self {
+        Self::from_identity(SymbolicFactIdentity::from_key(key), (key >> 96) as u32)
+    }
+}
+
+/// Context-independent identity for one compiler-derived symbolic fact.
+///
+/// The identity occupies the low 96 bits of an external-memory relation key;
+/// the high 32 bits carry its realizable call context.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct SymbolicFactIdentity {
+    base: u32,
+    field: u32,
+    provenance: u32,
+}
+
+impl SymbolicFactIdentity {
+    fn key(self) -> u128 {
+        u128::from(self.base) | (u128::from(self.field) << 32) | (u128::from(self.provenance) << 64)
+    }
+
+    fn from_key(key: u128) -> Self {
+        Self {
+            base: key as u32,
+            field: (key >> 32) as u32,
+            provenance: (key >> 64) as u32,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct SymbolicFactSpan {
+    file: FileId,
+    start: u64,
+}
+
+impl From<Span> for SymbolicFactSpan {
+    fn from(span: Span) -> Self {
+        Self {
+            file: span.file,
+            start: span.start,
+        }
+    }
 }
 
 struct SymbolicRuntimeIndex {
@@ -288,9 +417,22 @@ struct SymbolicRuntimeIndex {
     /// the query phase and replaces no compiler fact; numeric ids keep the
     /// hot closure relation compact.
     fields: PackedStringTable,
+    /// Sorted unique source positions used by local symbolic ordering.
+    spans: Box<[SymbolicFactSpan]>,
+    /// Bases whose outgoing transfer relation consults local write order.
+    ///
+    /// A fact's source span is semantically irrelevant everywhere else. The
+    /// closure canonicalizes that unused component to zero so equivalent
+    /// field facts reached through many local writes do not multiply in the
+    /// exact fixed point.
+    ordering_sensitive_bases: Box<[u64]>,
     exact_reads: GroupedNodeIndex<u64>,
     bare_reads: GroupedNodeIndex<u32>,
     scalar_writes: GroupedNodeIndex<(u32, Span)>,
+    fact_sources: FactSourceIndex,
+    aggregate_inputs: GroupedNodeIndex<NodeId>,
+    reverse_transforms: ReverseSymbolicTransformIndex,
+    reverse_scalar_transforms: ReverseScalarTransformIndex,
     fact_pages: Mutex<SymbolicFactPager>,
     transforms: Mutex<SymbolicTransformPager>,
 }
@@ -299,12 +441,99 @@ impl Default for SymbolicRuntimeIndex {
     fn default() -> Self {
         Self {
             fields: PackedStringTable::default(),
+            spans: Box::new([]),
+            ordering_sensitive_bases: Box::new([]),
             exact_reads: GroupedNodeIndex::default(),
             bare_reads: GroupedNodeIndex::default(),
             scalar_writes: GroupedNodeIndex::default(),
+            fact_sources: FactSourceIndex::empty(),
+            aggregate_inputs: GroupedNodeIndex::default(),
+            reverse_transforms: ReverseSymbolicTransformIndex::empty(),
+            reverse_scalar_transforms: ReverseScalarTransformIndex::empty(),
             fact_pages: Mutex::new(SymbolicFactPager::new(0)),
             transforms: Mutex::new(SymbolicTransformPager::empty()),
         }
+    }
+}
+
+/// Opaque backward relevance proof for one target set.
+///
+/// The proof is context-insensitive and therefore conservative: it may admit
+/// extra states, but it never excludes a realizable contextual path. Exact
+/// forward solvers use it only as a demand predicate and still run their
+/// admitted relations to fixed point.
+pub struct IdgTargetRelevance {
+    nodes: NodeBitSet,
+    facts: SpillSet,
+    wildcard_bases: SpillSet,
+}
+
+impl IdgTargetRelevance {
+    fn contains_node(&self, node: NodeId) -> bool {
+        self.nodes.contains(node)
+    }
+
+    fn contains_fact(&self, base: u32, field: u32) -> bool {
+        self.wildcard_bases.contains(u128::from(base))
+            || self.facts.contains(u128::from(symbolic_fact_key(base, field)))
+    }
+
+    /// Whether at least one seed belongs to the conservative backward target
+    /// relation. `false` is an exact proof that no contextual target path can
+    /// start from these seeds.
+    #[must_use]
+    pub fn admits_any(&self, seeds: &[WsNodeId]) -> bool {
+        seeds.iter().any(|node| self.contains_node(NodeId(node.0)))
+    }
+}
+
+struct TargetRelevanceWorklist {
+    relevance: IdgTargetRelevance,
+    pending_nodes: SpillStack,
+    pending_facts: SpillStack,
+    pending_wildcard_bases: SpillStack,
+}
+
+impl TargetRelevanceWorklist {
+    fn new(node_count: usize) -> Self {
+        Self {
+            relevance: IdgTargetRelevance {
+                nodes: NodeBitSet::zeros(node_count),
+                facts: target_relevance_fact_store(),
+                wildcard_bases: target_relevance_wildcard_store(),
+            },
+            pending_nodes: target_relevance_frontier_store(),
+            pending_facts: target_relevance_frontier_store(),
+            pending_wildcard_bases: target_relevance_frontier_store(),
+        }
+    }
+
+    fn enqueue_node(&mut self, node: NodeId) {
+        if self.relevance.nodes.insert(node) {
+            self.pending_nodes.push(u128::from(node.0));
+        }
+    }
+
+    fn enqueue_fact(&mut self, base: u32, field: u32) {
+        if self.relevance.wildcard_bases.contains(u128::from(base)) {
+            return;
+        }
+        let key = symbolic_fact_key(base, field);
+        if self.relevance.facts.insert(u128::from(key)) {
+            self.pending_facts.push(u128::from(key));
+        }
+    }
+
+    fn enqueue_wildcard_base(&mut self, base: u32) {
+        if self.relevance.wildcard_bases.insert(u128::from(base)) {
+            self.pending_wildcard_bases.push(u128::from(base));
+        }
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.pending_nodes.is_empty()
+            || !self.pending_facts.is_empty()
+            || !self.pending_wildcard_bases.is_empty()
     }
 }
 
@@ -315,6 +544,30 @@ impl SymbolicRuntimeIndex {
 
     fn field_id(&self, field: &str) -> Option<u32> {
         self.fields.find(field)
+    }
+
+    fn span_id(&self, span: Span) -> Option<u32> {
+        self.spans
+            .binary_search(&SymbolicFactSpan::from(span))
+            .ok()
+            .and_then(|index| u32::try_from(index).ok())
+    }
+
+    fn span(&self, id: u32) -> Option<SymbolicFactSpan> {
+        self.spans.get(id as usize).copied()
+    }
+
+    fn retains_local_provenance(&self, base: u32) -> bool {
+        let base = base as usize;
+        self.ordering_sensitive_bases
+            .get(base / u64::BITS as usize)
+            .is_some_and(|word| word & (1_u64 << (base % u64::BITS as usize)) != 0)
+    }
+
+    fn local_provenance_id(&self, base: u32, span: Span) -> Option<u32> {
+        self.retains_local_provenance(base)
+            .then(|| self.span_id(span))
+            .flatten()
     }
 }
 
@@ -374,7 +627,7 @@ impl PackedStringTable {
 struct SymbolicFactTemplate {
     base: u32,
     field: u32,
-    span: Option<Span>,
+    span: u32,
 }
 
 struct SymbolicFactPage {
@@ -402,7 +655,8 @@ struct SymbolicFactPageEntry {
     fact_count: u32,
 }
 
-const SYMBOLIC_FACT_BYTES: usize = 29;
+const NO_SYMBOLIC_FACT_SPAN: u32 = u32::MAX;
+const SYMBOLIC_FACT_BYTES: usize = 12;
 
 struct SymbolicFactPager {
     file: std::fs::File,
@@ -443,17 +697,7 @@ impl SymbolicFactPager {
         for fact in &page.facts {
             payload.extend_from_slice(&fact.base.to_le_bytes());
             payload.extend_from_slice(&fact.field.to_le_bytes());
-            if let Some(span) = fact.span {
-                payload.push(1);
-                payload.extend_from_slice(&span.file.raw().to_le_bytes());
-                payload.extend_from_slice(&span.start.to_le_bytes());
-                payload.extend_from_slice(&span.end.to_le_bytes());
-            } else {
-                payload.push(0);
-                payload.extend_from_slice(&0_u32.to_le_bytes());
-                payload.extend_from_slice(&0_u64.to_le_bytes());
-                payload.extend_from_slice(&0_u64.to_le_bytes());
-            }
+            payload.extend_from_slice(&fact.span.to_le_bytes());
         }
         self.file
             .seek(SeekFrom::Start(self.write_offset))
@@ -492,12 +736,10 @@ impl SymbolicFactPager {
         let mut facts = Vec::with_capacity(fact_count);
         for record in payload[offset_count * 4..].chunks_exact(SYMBOLIC_FACT_BYTES) {
             let word = |start| u32::from_le_bytes(record[start..start + 4].try_into().expect("fact word"));
-            let wide = |start| u64::from_le_bytes(record[start..start + 8].try_into().expect("fact wide"));
             facts.push(SymbolicFactTemplate {
                 base: word(0),
                 field: word(4),
-                span: (record[8] != 0)
-                    .then(|| Span::new(bonsai_common::FileId::new(word(9)), wide(13), wide(21))),
+                span: word(8),
             });
         }
         let page = Arc::new(SymbolicFactPage {
@@ -706,30 +948,29 @@ impl SymbolicTransformSpool {
 
     fn finish(mut self) -> SymbolicTransformRunMerger {
         self.flush();
-        SymbolicTransformRunMerger::new(&self.file, &self.runs)
+        let file = self.file;
+        let runs = self.runs;
+        SymbolicTransformRunMerger::new(file, &runs)
     }
 }
 
 struct SymbolicTransformRunReader {
-    file: std::fs::File,
+    file: Arc<std::fs::File>,
     offset: u64,
     remaining: u32,
     buffer: Vec<u8>,
     position: usize,
+    page_rows: usize,
 }
 
 impl SymbolicTransformRunReader {
     fn refill(&mut self) {
         let records = usize::try_from(self.remaining)
             .expect("symbolic transform run length fits usize")
-            .min(SYMBOLIC_TRANSFORM_READ_ROWS);
+            .min(self.page_rows);
         self.buffer
             .resize(records.saturating_mul(SYMBOLIC_TRANSFORM_RUN_BYTES), 0);
-        self.file
-            .seek(SeekFrom::Start(self.offset))
-            .expect("seek sorted symbolic transform run");
-        self.file
-            .read_exact(&mut self.buffer)
+        read_exact_at(self.file.as_ref(), self.offset, &mut self.buffer)
             .expect("read sorted symbolic transform run page");
         self.offset = self
             .offset
@@ -764,15 +1005,22 @@ struct SymbolicTransformRunMerger {
 }
 
 impl SymbolicTransformRunMerger {
-    fn new(file: &std::fs::File, runs: &[SymbolicTransformRunEntry]) -> Self {
+    fn new(file: std::fs::File, runs: &[SymbolicTransformRunEntry]) -> Self {
+        let file = Arc::new(file);
+        let page_rows = merge_page_rows(
+            runs.len(),
+            SYMBOLIC_TRANSFORM_RUN_BYTES,
+            SYMBOLIC_TRANSFORM_READ_ROWS,
+        );
         let mut readers = Vec::with_capacity(runs.len());
         for run in runs {
             readers.push(SymbolicTransformRunReader {
-                file: file.try_clone().expect("clone symbolic transform run spool"),
+                file: Arc::clone(&file),
                 offset: run.offset,
                 remaining: run.count,
                 buffer: Vec::new(),
                 position: 0,
+                page_rows,
             });
         }
         let mut pending = BinaryHeap::new();
@@ -819,11 +1067,48 @@ impl SymbolicTransformPager {
         }
     }
 
-    fn build(workspace: &IdgWorkspace, base_count: usize) -> Self {
+    fn build(
+        workspace: &IdgWorkspace,
+        base_count: usize,
+        fact_spans: &mut AHashSet<SymbolicFactSpan>,
+    ) -> (
+        Self,
+        ReverseSymbolicTransformIndex,
+        ReverseScalarTransformIndex,
+        Box<[u64]>,
+    ) {
         let mut spool = SymbolicTransformSpool::new();
+        let mut reverse = ReverseSymbolicTransformSpool::new();
+        let mut reverse_scalar = ReverseScalarTransformSpool::new();
+        let mut ordering_sensitive_bases = vec![0_u64; base_count.div_ceil(u64::BITS as usize)];
         workspace
             .visit_symbolic_transforms(|transforms| {
                 for &transform in transforms {
+                    let source = transform.source as usize;
+                    assert!(
+                        source < base_count,
+                        "symbolic transform source exceeds base dictionary"
+                    );
+                    if !transform.allow_out_of_order_source {
+                        ordering_sensitive_bases[source / u64::BITS as usize] |=
+                            1_u64 << (source % u64::BITS as usize);
+                    }
+                    fact_spans.insert(SymbolicFactSpan::from(transform.write_span));
+                    if transform.kind == SymbolicFieldTransformKind::ScalarReturn {
+                        reverse_scalar.push(
+                            transform.target,
+                            transform.write_span,
+                            transform.source,
+                            transform.exact_field,
+                            transform.precision,
+                        );
+                    } else {
+                        assert!(
+                            (transform.target as usize) < base_count,
+                            "reverse symbolic transform target exceeds base dictionary"
+                        );
+                        reverse.push(transform.target, transform.source, transform.precision);
+                    }
                     spool.push(transform);
                 }
                 Ok(())
@@ -862,13 +1147,18 @@ impl SymbolicTransformPager {
             next_base += 1;
         }
         let workers = bonsai_common::compiler_worker_count(rayon::current_num_threads());
-        Self {
-            file,
-            offsets: offsets.into_boxed_slice(),
-            pages: AHashMap::default(),
-            order: VecDeque::new(),
-            capacity: workers.saturating_mul(2).max(2),
-        }
+        (
+            Self {
+                file,
+                offsets: offsets.into_boxed_slice(),
+                pages: AHashMap::default(),
+                order: VecDeque::new(),
+                capacity: workers.saturating_mul(2).max(2),
+            },
+            reverse.finish(),
+            reverse_scalar.finish(),
+            ordering_sensitive_bases.into_boxed_slice(),
+        )
     }
 
     fn outgoing(&mut self, source: u32) -> Arc<Vec<crate::symbolic::SymbolicFieldTransform>> {
@@ -1057,15 +1347,23 @@ impl SparseContextEdges {
 }
 
 struct ContextualSummaryRuntime {
-    reach: ForwardReachabilityIndex,
+    reach: ReachabilityIndex,
     heap_by_from: GroupedNodeIndex<NodeId>,
     calls_by_from: SparseContextEdges,
     returns_by_from: SparseContextEdges,
+    reverse_contextual: GroupedNodeIndex<NodeId>,
 }
 
 #[derive(Copy, Clone)]
 struct SymbolicClosurePolicy<'a> {
     max_precision: Option<Precision>,
+    /// Exact compiler-derived function scope for a targeted query. `None`
+    /// retains the ordinary whole-graph closure. Unlike a work budget, this
+    /// is a semantic graph predicate: every admitted function runs to fixed
+    /// point, while nodes outside the proven source-to-target corridor are
+    /// not part of the query.
+    allowed_funcs: Option<&'a AHashSet<FuncId>>,
+    target_relevance: Option<&'a IdgTargetRelevance>,
     /// Direct return-relevant call dependencies for batch function-summary
     /// compilation. `None` is the unrestricted interactive-query mode.
     ///
@@ -1103,13 +1401,7 @@ impl RootClosureVisited {
 
     fn insert(&mut self, node: NodeId) -> bool {
         match self {
-            Self::Dense(reached) => {
-                if node.0 as usize >= reached.len() || reached.contains(node) {
-                    return false;
-                }
-                reached.set(node);
-                true
-            }
+            Self::Dense(reached) => reached.insert(node),
             Self::Sparse { reached, node_count } => {
                 if node.0 as usize >= *node_count || !reached.insert(node.0) {
                     return false;
@@ -1128,6 +1420,13 @@ impl RootClosureVisited {
         }
     }
 
+    fn len(&self) -> usize {
+        match self {
+            Self::Dense(reached) => reached.popcount(),
+            Self::Sparse { reached, .. } => reached.len(),
+        }
+    }
+
     fn append_nodes(&self, nodes: &mut Vec<NodeId>) {
         match self {
             Self::Dense(reached) => nodes.extend(reached.iter()),
@@ -1140,14 +1439,53 @@ impl RootClosureVisited {
 
 struct ClosureVisited {
     root: RootClosureVisited,
-    contextual: AHashSet<u64>,
+    contextual: ContextualClosureVisited,
+}
+
+struct ContextualClosureVisited {
+    /// Exact `(context, node)` compiler states. The relation can be much
+    /// larger than the source graph on highly connected workspaces, so it
+    /// uses the same external-memory representation as symbolic facts.
+    states: SpillSet,
+    /// The public closure result is context-erased. One dense node bitset
+    /// avoids replaying the external relation merely to construct that result.
+    nodes: NodeBitSet,
+}
+
+impl ContextualClosureVisited {
+    fn new(node_count: usize) -> Self {
+        Self {
+            states: contextual_node_store(),
+            nodes: NodeBitSet::zeros(node_count),
+        }
+    }
+
+    fn insert(&mut self, context: u32, node: NodeId) -> bool {
+        if node.0 as usize >= self.nodes.len() {
+            return false;
+        }
+        let key = (u128::from(context) << 32) | u128::from(node.0);
+        if !self.states.insert(key) {
+            return false;
+        }
+        self.nodes.set(node);
+        true
+    }
+
+    fn append_nodes(&self, nodes: &mut Vec<NodeId>) {
+        nodes.extend(self.nodes.iter());
+    }
+
+    fn len(&self) -> u64 {
+        self.states.len()
+    }
 }
 
 impl ClosureVisited {
     fn new(node_count: usize, seed_count: usize) -> Self {
         Self {
             root: RootClosureVisited::new(node_count, seed_count),
-            contextual: AHashSet::default(),
+            contextual: ContextualClosureVisited::new(node_count),
         }
     }
 
@@ -1155,19 +1493,14 @@ impl ClosureVisited {
         if context == 0 {
             self.root.insert(node)
         } else {
-            self.contextual
-                .insert((u64::from(context) << 32) | u64::from(node.0))
+            self.contextual.insert(context, node)
         }
     }
 
     fn nodes(&self) -> Vec<NodeId> {
         let mut nodes = Vec::new();
         self.root.append_nodes(&mut nodes);
-        nodes.extend(
-            self.contextual
-                .iter()
-                .map(|state| NodeId((*state & u64::from(u32::MAX)) as u32)),
-        );
+        self.contextual.append_nodes(&mut nodes);
         nodes.sort_unstable_by_key(|node| node.0);
         nodes.dedup();
         nodes
@@ -1178,6 +1511,19 @@ impl ClosureVisited {
 struct ClosureNodeState {
     node: NodeId,
     context: u32,
+}
+
+impl ClosureNodeState {
+    fn key(self) -> u128 {
+        (u128::from(self.context) << 32) | u128::from(self.node.0)
+    }
+
+    fn from_key(key: u128) -> Self {
+        Self {
+            node: NodeId(key as u32),
+            context: (key >> 32) as u32,
+        }
+    }
 }
 
 /// Finite pushdown tabulation for realizable call/return flow.
@@ -1227,6 +1573,116 @@ impl<T: Copy + Eq + Hash> CompactSet<T> {
     }
 }
 
+const MIB: u64 = 1024 * 1024;
+const CONTEXT_REPLAY_BATCH_ENTRIES: usize = 16_384;
+
+fn bounded_relation_bytes(divisor: u64, maximum_mib: u64, default_mib: u64) -> usize {
+    const MINIMUM_ALLOCATION_BYTES: u64 = 64 * 1024;
+    let fallback_mib = default_mib.min(maximum_mib);
+    let bytes = bonsai_common::effective_memory_limit_bytes().map_or(fallback_mib * MIB, |limit| {
+        (limit / divisor).clamp(MINIMUM_ALLOCATION_BYTES, maximum_mib * MIB)
+    });
+    usize::try_from(bytes).unwrap_or(usize::MAX)
+}
+
+/// Size the exact-positive hot set from the relation's detected-memory
+/// allocation. This is cache policy, not semantic scope: a smaller machine
+/// evicts sooner and performs more exact run reads, while every fact remains
+/// in the external relation.
+fn recent_positive_bytes(resident_bytes: usize) -> usize {
+    // The resident delta is an open-addressed hash set budgeted at roughly
+    // 40 bytes per key. Four resident budgets let the compact 17-byte cache
+    // retain about nine flushed deltas without duplicating keys in a map.
+    resident_bytes.saturating_mul(4)
+}
+
+/// Construct the exact closure relation's external-memory store.
+///
+/// The byte profile affects only how frequently the resident delta flushes.
+/// Every fact remains present in either memory or a sorted temporary run and
+/// participates in the same fixed point.
+fn closure_fact_store() -> SpillSet {
+    let resident_bytes = bounded_relation_bytes(256, 64, 64);
+    // One relation-wide Bloom index eliminates nearly all random probes into
+    // the external relation. This budget is reclaimable acceleration state
+    // only; every possible positive is still checked against an exact sorted
+    // run.
+    let bloom_bytes = bounded_relation_bytes(32, 96, 64);
+    // A hash-table slot plus control/allocation slack costs more than the
+    // 16-byte key. The conservative divisor keeps actual resident use below
+    // the scheduling allocation.
+    SpillSet::new(
+        resident_bytes / 40,
+        bloom_bytes,
+        recent_positive_bytes(resident_bytes),
+        false,
+    )
+}
+
+fn contextual_node_store() -> SpillSet {
+    let resident_bytes = bounded_relation_bytes(384, 32, 32);
+    let bloom_bytes = bounded_relation_bytes(256, 16, 16);
+    SpillSet::new(
+        resident_bytes / 40,
+        bloom_bytes,
+        recent_positive_bytes(resident_bytes),
+        false,
+    )
+}
+
+fn pending_node_store() -> SpillStack {
+    let resident_bytes = bounded_relation_bytes(768, 8, 8);
+    SpillStack::new(resident_bytes / std::mem::size_of::<u128>())
+}
+
+fn pending_fact_store() -> SpillStack {
+    let resident_bytes = bounded_relation_bytes(512, 16, 16);
+    SpillStack::new(resident_bytes / std::mem::size_of::<u128>())
+}
+
+/// Backward target demand is a compiler fixed point in its own right. Keep
+/// its symbolic relation external-memory just like the forward closure:
+/// target count and access-path fan-out must never determine peak heap use.
+fn target_relevance_fact_store() -> SpillSet {
+    let resident_bytes = bounded_relation_bytes(256, 32, 32);
+    let bloom_bytes = bounded_relation_bytes(64, 64, 32);
+    SpillSet::new(
+        resident_bytes / 40,
+        bloom_bytes,
+        recent_positive_bytes(resident_bytes),
+        false,
+    )
+}
+
+fn target_relevance_wildcard_store() -> SpillSet {
+    let resident_bytes = bounded_relation_bytes(1024, 8, 8);
+    let bloom_bytes = bounded_relation_bytes(512, 8, 8);
+    SpillSet::new(
+        resident_bytes / 40,
+        bloom_bytes,
+        recent_positive_bytes(resident_bytes),
+        false,
+    )
+}
+
+fn target_relevance_frontier_store() -> SpillStack {
+    let resident_bytes = bounded_relation_bytes(1024, 8, 8);
+    SpillStack::new(resident_bytes / std::mem::size_of::<u128>())
+}
+
+/// Return summaries need prefix replay as new caller contexts are discovered.
+/// They share the same exact spill design with a smaller resident delta.
+fn returned_fact_store() -> SpillSet {
+    let resident_bytes = bounded_relation_bytes(512, 16, 16);
+    let bloom_bytes = bounded_relation_bytes(384, 8, 8);
+    SpillSet::new(
+        resident_bytes / 56,
+        bloom_bytes,
+        recent_positive_bytes(resident_bytes),
+        true,
+    )
+}
+
 struct CallContexts {
     ids: AHashMap<ContextBoundaryKey, u32>,
     boundaries: Vec<Option<ContextBoundaryKey>>,
@@ -1234,7 +1690,7 @@ struct CallContexts {
     /// Most call contexts never complete a distinct return fact. Sparse maps
     /// avoid retaining two empty set headers for every boundary.
     returned_nodes: AHashMap<u32, AHashSet<NodeId>>,
-    returned_facts: AHashMap<u32, AHashSet<SymbolicNodeFact>>,
+    returned_facts: SpillSet,
 }
 
 impl CallContexts {
@@ -1244,7 +1700,7 @@ impl CallContexts {
             ids: AHashMap::default(),
             callers: vec![CompactSet::default()],
             returned_nodes: AHashMap::default(),
-            returned_facts: AHashMap::default(),
+            returned_facts: returned_fact_store(),
         }
     }
 
@@ -1259,29 +1715,30 @@ impl CallContexts {
         context
     }
 
-    fn register_call(
-        &mut self,
-        caller_context: u32,
-        boundary: ContextBoundaryKey,
-    ) -> (u32, Vec<NodeId>, Vec<SymbolicNodeFact>) {
+    fn register_call(&mut self, caller_context: u32, boundary: ContextBoundaryKey) -> (u32, bool) {
         let context = self.context_for(boundary);
         let Some(callers) = self.callers.get_mut(context as usize) else {
-            return (context, Vec::new(), Vec::new());
+            return (context, false);
         };
         if !callers.insert(caller_context) {
-            return (context, Vec::new(), Vec::new());
+            return (context, false);
         }
-        let nodes = self
-            .returned_nodes
+        (context, true)
+    }
+
+    fn returned_nodes_for(&self, context: u32) -> Vec<NodeId> {
+        self.returned_nodes
             .get(&context)
             .map(|values| values.iter().copied().collect())
-            .unwrap_or_default();
-        let facts = self
-            .returned_facts
-            .get(&context)
-            .map(|values| values.iter().copied().collect())
-            .unwrap_or_default();
-        (context, nodes, facts)
+            .unwrap_or_default()
+    }
+
+    fn returned_fact_batch(&mut self, context: u32, after: Option<u128>) -> Vec<SymbolicFactIdentity> {
+        self.returned_facts
+            .keys_with_prefix_batch(context, after, CONTEXT_REPLAY_BATCH_ENTRIES)
+            .into_iter()
+            .map(SymbolicFactIdentity::from_key)
+            .collect()
     }
 
     fn matches(&self, context: u32, boundary: ContextBoundaryKey) -> bool {
@@ -1302,13 +1759,12 @@ impl CallContexts {
             .unwrap_or_default()
     }
 
-    fn complete_fact_return(&mut self, context: u32, mut fact: SymbolicNodeFact) -> Vec<u32> {
-        fact.context = 0;
+    fn complete_fact_return(&mut self, context: u32, identity: SymbolicFactIdentity) -> Vec<u32> {
         if self.boundaries.get(context as usize).is_none() {
             return Vec::new();
         }
-        let returned = self.returned_facts.entry(context).or_default();
-        if !returned.insert(fact) {
+        let key = identity.key() | (u128::from(context) << 96);
+        if !self.returned_facts.insert(key) {
             return Vec::new();
         }
         self.callers
@@ -1324,63 +1780,108 @@ impl CallContexts {
 /// relation may discover work in the other. Both relations deduplicate on
 /// insertion, so recursive call components converge without a depth or
 /// iteration cap.
-struct SymbolicClosureWorklist {
-    pending_nodes: VecDeque<ClosureNodeState>,
+struct SymbolicClosureWorklist<'a> {
+    pending_nodes: SpillStack,
     reached: ClosureVisited,
-    facts: AHashSet<SymbolicNodeFact>,
-    pending_facts: VecDeque<SymbolicNodeFact>,
+    /// Node/context states whose compiler place has already introduced its
+    /// symbolic access-path facts. A field fact that is *consumed* by a
+    /// projected read reaches that scalar read, but must not reintroduce the
+    /// same field as a spanless source: doing so would erase write ordering
+    /// and allow a later write to flow through an earlier aggregate copy.
+    fact_source_states: SpillSet,
+    /// Exact reached relation packed as the complete 128-bit
+    /// `(context, base, field, provenance)` compiler state. Its resident delta
+    /// spills to sorted temporary runs; no state is capped or approximated.
+    facts: SpillSet,
+    pending_facts: SpillStack,
     contexts: CallContexts,
     /// Functions entered through a proven call boundary in summary mode.
     /// Interactive queries are unrestricted and leave this set empty.
     active_summary_funcs: AHashSet<FuncId>,
     summary_restricted: bool,
+    allowed_funcs: Option<&'a AHashSet<FuncId>>,
+    target_relevance: Option<&'a IdgTargetRelevance>,
 }
 
-impl SymbolicClosureWorklist {
-    fn new(node_count: usize, seed_count: usize, summary_root: Option<FuncId>) -> Self {
+impl<'a> SymbolicClosureWorklist<'a> {
+    fn new(
+        node_count: usize,
+        seed_count: usize,
+        summary_root: Option<FuncId>,
+        allowed_funcs: Option<&'a AHashSet<FuncId>>,
+        target_relevance: Option<&'a IdgTargetRelevance>,
+    ) -> Self {
         let mut active_summary_funcs = AHashSet::default();
         if let Some(root) = summary_root {
             active_summary_funcs.insert(root);
         }
         Self {
-            pending_nodes: VecDeque::with_capacity(seed_count),
+            pending_nodes: pending_node_store(),
             reached: ClosureVisited::new(node_count, seed_count),
-            facts: AHashSet::default(),
-            pending_facts: VecDeque::new(),
+            fact_source_states: contextual_node_store(),
+            facts: closure_fact_store(),
+            pending_facts: pending_fact_store(),
             contexts: CallContexts::new(),
             active_summary_funcs,
             summary_restricted: summary_root.is_some(),
+            allowed_funcs,
+            target_relevance,
         }
     }
 
-    fn activate_summary_func(&mut self, func: FuncId) {
+    fn func_is_allowed(&self, func: FuncId) -> bool {
+        self.allowed_funcs.is_none_or(|allowed| allowed.contains(&func))
+    }
+
+    fn activate_summary_func(&mut self, func: FuncId) -> bool {
+        if !self.func_is_allowed(func) {
+            return false;
+        }
         if self.summary_restricted {
             self.active_summary_funcs.insert(func);
         }
+        true
     }
 
     fn summary_func_is_active(&self, func: FuncId) -> bool {
-        !self.summary_restricted || self.active_summary_funcs.contains(&func)
+        self.func_is_allowed(func) && (!self.summary_restricted || self.active_summary_funcs.contains(&func))
+    }
+
+    fn node_is_relevant(&self, node: NodeId) -> bool {
+        self.target_relevance
+            .is_none_or(|relevance| relevance.contains_node(node))
     }
 
     fn enqueue_node(&mut self, node: NodeId, context: u32) {
         if self.reached.insert(node, context) {
-            self.pending_nodes.push_back(ClosureNodeState { node, context });
+            self.pending_nodes.push(ClosureNodeState { node, context }.key());
         }
     }
 
-    fn enqueue_fact(&mut self, fact: SymbolicNodeFact) {
-        if self.facts.insert(fact) {
-            self.pending_facts.push_back(fact);
+    fn activate_fact_source(&mut self, node: NodeId, context: u32) -> bool {
+        self.fact_source_states
+            .insert(ClosureNodeState { node, context }.key())
+    }
+
+    fn enqueue_fact_state(&mut self, fact: SymbolicNodeFact) {
+        if self
+            .target_relevance
+            .is_some_and(|relevance| !relevance.contains_fact(fact.base, fact.field))
+        {
+            return;
+        }
+        let key = fact.state_key();
+        if self.facts.insert(key) {
+            self.pending_facts.push(key);
         }
     }
 
     fn next_node(&mut self) -> Option<ClosureNodeState> {
-        self.pending_nodes.pop_front()
+        self.pending_nodes.pop().map(ClosureNodeState::from_key)
     }
 
     fn next_fact(&mut self) -> Option<SymbolicNodeFact> {
-        self.pending_facts.pop_front()
+        self.pending_facts.pop().map(SymbolicNodeFact::from_state_key)
     }
 
     fn has_pending(&self) -> bool {
@@ -1395,10 +1896,12 @@ struct SymbolicTransformContexts {
 
 fn symbolic_node_allowed(
     unified: &UnifiedAddressSpace,
-    worklist: &SymbolicClosureWorklist,
+    worklist: &SymbolicClosureWorklist<'_>,
     node: NodeId,
 ) -> bool {
-    IdgQueryService::ws_node_func(unified, node).is_some_and(|func| worklist.summary_func_is_active(func))
+    worklist.node_is_relevant(node)
+        && IdgQueryService::ws_node_func(unified, node)
+            .is_some_and(|func| worklist.summary_func_is_active(func))
 }
 
 fn summary_dependency_is_permitted(
@@ -1418,15 +1921,14 @@ fn summary_dependency_is_permitted(
 fn activate_summary_call(
     summary_callees: Option<&AHashMap<FuncId, Vec<FuncId>>>,
     boundary: ContextBoundaryKey,
-    worklist: &mut SymbolicClosureWorklist,
+    worklist: &mut SymbolicClosureWorklist<'_>,
 ) -> bool {
     if !worklist.summary_func_is_active(boundary.caller)
         || !summary_dependency_is_permitted(summary_callees, boundary.caller, boundary.callee)
     {
         return false;
     }
-    worklist.activate_summary_func(boundary.callee);
-    true
+    worklist.activate_summary_func(boundary.callee)
 }
 
 fn activate_summary_transition(
@@ -1434,8 +1936,11 @@ fn activate_summary_transition(
     summary_callees: Option<&AHashMap<FuncId, Vec<FuncId>>>,
     source: NodeId,
     target: NodeId,
-    worklist: &mut SymbolicClosureWorklist,
+    worklist: &mut SymbolicClosureWorklist<'_>,
 ) -> bool {
+    if !worklist.node_is_relevant(target) {
+        return false;
+    }
     let Some(source_func) = IdgQueryService::ws_node_func(unified, source) else {
         return false;
     };
@@ -1450,8 +1955,7 @@ fn activate_summary_transition(
     {
         return false;
     }
-    worklist.activate_summary_func(target_func);
-    true
+    worklist.activate_summary_func(target_func)
 }
 
 fn symbolic_fact_key(base: u32, field: u32) -> u64 {
@@ -1488,7 +1992,7 @@ fn symbolic_transform_boundary(
 fn record_symbolic_cross_call(
     graph: &crate::symbolic::SymbolicFieldGraph,
     transform: &crate::symbolic::SymbolicFieldTransform,
-    out: Option<&mut Vec<CrossCallEdge>>,
+    out: Option<&mut AHashSet<CrossCallEdge>>,
 ) {
     let Some(out) = out else {
         return;
@@ -1506,7 +2010,7 @@ fn record_symbolic_cross_call(
         return;
     };
     let (arg_idx, param_idx) = symbolic_cross_call_slots(transform);
-    out.push(CrossCallEdge {
+    out.insert(CrossCallEdge {
         caller: source.func,
         callee: target.func,
         call_span: transform.call_span,
@@ -1547,6 +2051,13 @@ pub struct IdgQueryService {
     workspace: Arc<IdgWorkspace>,
     global: Arc<GlobalIndex>,
     unified: RwLock<Option<Arc<UnifiedAddressSpace>>>,
+    return_summaries: Mutex<AHashMap<Option<Precision>, ReturnSummaryCache>>,
+}
+
+#[derive(Default)]
+struct ReturnSummaryCache {
+    covered: AHashSet<FuncId>,
+    values: AHashMap<FuncId, Vec<u32>>,
 }
 
 impl IdgQueryService {
@@ -1576,6 +2087,7 @@ impl IdgQueryService {
             workspace,
             global,
             unified: RwLock::new(None),
+            return_summaries: Mutex::new(AHashMap::new()),
         }
     }
 
@@ -1626,6 +2138,58 @@ impl IdgQueryService {
     /// so recursion reaches a complete least fixed point without allocating a
     /// workspace-sized closure per function or applying an iteration cap.
     pub fn return_taint_param_indices_for_funcs_with_max_precision(
+        &self,
+        funcs: &[FuncId],
+        max_precision: Option<Precision>,
+    ) -> AHashMap<FuncId, Vec<u32>> {
+        self.ensure_return_taint_summaries(funcs, max_precision);
+        let summaries = self.return_summaries.lock();
+        let Some(cache) = summaries.get(&max_precision) else {
+            return AHashMap::new();
+        };
+        funcs
+            .iter()
+            .copied()
+            .map(|func| (func, cache.values.get(&func).cloned().unwrap_or_default()))
+            .collect()
+    }
+
+    /// Compile and retain parameter-to-return summaries for `funcs`.
+    ///
+    /// Broad semantic consumers call this once for their exact compiler scope.
+    /// Later single-function queries reuse the same immutable facts rather
+    /// than rebuilding the workspace summary fixed point per source.
+    pub fn prewarm_return_taint_param_indices_for_funcs_with_max_precision(
+        &self,
+        funcs: &[FuncId],
+        max_precision: Option<Precision>,
+    ) {
+        self.ensure_return_taint_summaries(funcs, max_precision);
+    }
+
+    fn ensure_return_taint_summaries(&self, funcs: &[FuncId], max_precision: Option<Precision>) {
+        let mut caches = self.return_summaries.lock();
+        let cache = caches.entry(max_precision).or_default();
+        let mut missing: Vec<FuncId> = funcs
+            .iter()
+            .copied()
+            .filter(|func| !cache.covered.contains(func))
+            .collect();
+        missing.sort_unstable_by_key(|func| func.raw());
+        missing.dedup();
+        if missing.is_empty() {
+            return;
+        }
+        let mut compiled = self.compile_return_taint_param_indices(&missing, max_precision);
+        for func in missing {
+            cache
+                .values
+                .insert(func, compiled.remove(&func).unwrap_or_default());
+            cache.covered.insert(func);
+        }
+    }
+
+    fn compile_return_taint_param_indices(
         &self,
         funcs: &[FuncId],
         max_precision: Option<Precision>,
@@ -1786,6 +2350,8 @@ impl IdgQueryService {
             &seed_nodes,
             SymbolicClosurePolicy {
                 max_precision,
+                allowed_funcs: None,
+                target_relevance: None,
                 summary_callees: Some(summary_callees),
                 summary_root: Some(root),
                 contextual: Some(contextual),
@@ -1849,13 +2415,9 @@ impl IdgQueryService {
     #[must_use]
     pub fn call_arg_identity(&self, ws_node: WsNodeId) -> Option<(FuncId, Span, u32)> {
         let unified = self.ensure_unified();
-        let (seg_id, local_node) = Self::ws_address(&unified, ws_node)?;
-        let segment = self.workspace.segment_view(seg_id)?;
-        let node = segment.nodes.get(local_node)?;
-        let Place::CallArg { site, idx } = segment.places.get(node.place)? else {
-            return None;
-        };
-        Some((node.func, site.0, *idx))
+        let func = *unified.node_funcs.get(ws_node.0 as usize)?;
+        let (site, idx) = unified.call_args.get(ws_node)?;
+        Some((func, site, idx))
     }
 
     /// Owning compiler function for one workspace-global IDG node.
@@ -1887,6 +2449,8 @@ impl IdgQueryService {
             &seed_nodes,
             SymbolicClosurePolicy {
                 max_precision: None,
+                allowed_funcs: None,
+                target_relevance: None,
                 summary_callees: None,
                 summary_root: None,
                 contextual: Some(contextual.as_ref()),
@@ -1924,6 +2488,8 @@ impl IdgQueryService {
             &seed_nodes,
             SymbolicClosurePolicy {
                 max_precision: Some(max_precision),
+                allowed_funcs: None,
+                target_relevance: None,
                 summary_callees: None,
                 summary_root: None,
                 contextual: Some(contextual.as_ref()),
@@ -1933,6 +2499,66 @@ impl IdgQueryService {
         )
         .into_iter()
         .map(|n| WsNodeId(n.0))
+        .collect()
+    }
+
+    /// Exact forward closure inside a compiler-proven function set.
+    ///
+    /// This is a semantic restriction, not a traversal budget: all nodes,
+    /// call contexts, heap transitions, and symbolic field facts owned by an
+    /// admitted function run to fixed point. Security uses it after deriving
+    /// a complete source-to-sink corridor from the resolved call graph.
+    pub fn forward_closure_within_funcs_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        allowed_funcs: &AHashSet<FuncId>,
+        max_precision: Option<Precision>,
+    ) -> Vec<WsNodeId> {
+        self.forward_closure_within_func_scope(seeds, allowed_funcs, None, max_precision)
+    }
+
+    /// Exact function-scoped closure additionally restricted by a reusable
+    /// target relevance proof.
+    pub fn forward_closure_within_funcs_and_relevance_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        allowed_funcs: &AHashSet<FuncId>,
+        target_relevance: &IdgTargetRelevance,
+        max_precision: Option<Precision>,
+    ) -> Vec<WsNodeId> {
+        self.forward_closure_within_func_scope(seeds, allowed_funcs, Some(target_relevance), max_precision)
+    }
+
+    fn forward_closure_within_func_scope(
+        &self,
+        seeds: &[WsNodeId],
+        allowed_funcs: &AHashSet<FuncId>,
+        target_relevance: Option<&IdgTargetRelevance>,
+        max_precision: Option<Precision>,
+    ) -> Vec<WsNodeId> {
+        if seeds.is_empty() || allowed_funcs.is_empty() {
+            return Vec::new();
+        }
+        let unified = self.ensure_unified();
+        let contextual = self.ensure_contextual_summary_runtime(&unified, max_precision);
+        let seed_nodes: Vec<NodeId> = seeds.iter().map(|node| NodeId(node.0)).collect();
+        self.symbolic_forward_closure_nodes(
+            &unified,
+            &contextual.reach,
+            &seed_nodes,
+            SymbolicClosurePolicy {
+                max_precision,
+                allowed_funcs: Some(allowed_funcs),
+                target_relevance,
+                summary_callees: None,
+                summary_root: None,
+                contextual: Some(contextual.as_ref()),
+                activate_seed_callers: true,
+            },
+            None,
+        )
+        .into_iter()
+        .map(|node| WsNodeId(node.0))
         .collect()
     }
 
@@ -1948,10 +2574,64 @@ impl IdgQueryService {
         seeds: &[WsNodeId],
         max_precision: Option<Precision>,
     ) -> IdgClosureEvidence {
+        self.forward_closure_evidence_in_func_scope(seeds, max_precision, None, None)
+    }
+
+    /// Provenance-preserving counterpart to
+    /// [`Self::forward_closure_within_funcs_with_max_precision`].
+    pub fn forward_closure_evidence_within_funcs_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        allowed_funcs: &AHashSet<FuncId>,
+        max_precision: Option<Precision>,
+    ) -> IdgClosureEvidence {
+        if seeds.is_empty() || allowed_funcs.is_empty() {
+            return IdgClosureEvidence {
+                nodes: Vec::new(),
+                symbolic_cross_calls: Vec::new(),
+            };
+        }
+        self.forward_closure_evidence_in_func_scope(seeds, max_precision, Some(allowed_funcs), None)
+    }
+
+    /// Provenance-preserving exact closure using both a compiler function
+    /// corridor and a reusable target relevance proof.
+    pub fn forward_closure_evidence_within_funcs_and_relevance_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        allowed_funcs: &AHashSet<FuncId>,
+        target_relevance: &IdgTargetRelevance,
+        max_precision: Option<Precision>,
+    ) -> IdgClosureEvidence {
+        if seeds.is_empty() || allowed_funcs.is_empty() {
+            return IdgClosureEvidence {
+                nodes: Vec::new(),
+                symbolic_cross_calls: Vec::new(),
+            };
+        }
+        self.forward_closure_evidence_in_func_scope(
+            seeds,
+            max_precision,
+            Some(allowed_funcs),
+            Some(target_relevance),
+        )
+    }
+
+    fn forward_closure_evidence_in_func_scope(
+        &self,
+        seeds: &[WsNodeId],
+        max_precision: Option<Precision>,
+        allowed_funcs: Option<&AHashSet<FuncId>>,
+        target_relevance: Option<&IdgTargetRelevance>,
+    ) -> IdgClosureEvidence {
         let unified = self.ensure_unified();
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|node| NodeId(node.0)).collect();
         let contextual = self.ensure_contextual_summary_runtime(&unified, max_precision);
-        let mut symbolic_cross_calls = Vec::new();
+        // One transform can fire for every access-path field and caller
+        // context. Cross-call evidence is transform identity, not fixed-point
+        // multiplicity, so deduplicate at insertion instead of retaining
+        // millions of duplicate rows until the closure finishes.
+        let mut symbolic_cross_calls = AHashSet::new();
         let nodes = self
             .symbolic_forward_closure_nodes(
                 &unified,
@@ -1959,6 +2639,8 @@ impl IdgQueryService {
                 &seed_nodes,
                 SymbolicClosurePolicy {
                     max_precision,
+                    allowed_funcs,
+                    target_relevance,
                     summary_callees: None,
                     summary_root: None,
                     contextual: Some(contextual.as_ref()),
@@ -1969,6 +2651,7 @@ impl IdgQueryService {
             .into_iter()
             .map(|node| WsNodeId(node.0))
             .collect();
+        let mut symbolic_cross_calls: Vec<_> = symbolic_cross_calls.into_iter().collect();
         symbolic_cross_calls.sort_unstable_by_key(|edge| {
             (
                 edge.caller.raw(),
@@ -1980,7 +2663,6 @@ impl IdgQueryService {
                 edge.relation,
             )
         });
-        symbolic_cross_calls.dedup();
         IdgClosureEvidence {
             nodes,
             symbolic_cross_calls,
@@ -2061,6 +2743,230 @@ impl IdgQueryService {
         } else {
             Vec::new()
         }
+    }
+
+    /// Exact target-presence query inside a compiler-proven function set.
+    ///
+    /// The returned closure is complete for `allowed_funcs`; an empty result
+    /// means no requested scalar or aggregate-consumption target was reached.
+    pub fn forward_target_nodes_cut_within_funcs_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        target_nodes: &[WsNodeId],
+        allowed_funcs: &AHashSet<FuncId>,
+        max_precision: Option<Precision>,
+    ) -> Vec<WsNodeId> {
+        if seeds.is_empty() || target_nodes.is_empty() || allowed_funcs.is_empty() {
+            return Vec::new();
+        }
+        let targets: AHashSet<WsNodeId> = target_nodes.iter().copied().collect();
+        let closure =
+            self.forward_closure_within_funcs_with_max_precision(seeds, allowed_funcs, max_precision);
+        if self.closure_reaches_target_nodes(&closure, &targets) {
+            closure
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Compile one reusable backward demand relation for target nodes and
+    /// fallback target functions.
+    ///
+    /// The relation follows ordinary IDG edges in reverse and composes the
+    /// reverse of the symbolic access-path algebra. Call contexts and source
+    /// ordering are intentionally ignored, making this a conservative
+    /// superset suitable for pruning exact forward closures. No language
+    /// names, API inventories, depth limits, or result caps participate.
+    pub fn target_relevance_with_max_precision(
+        &self,
+        target_nodes: &[WsNodeId],
+        target_funcs: Option<&AHashSet<FuncId>>,
+        max_precision: Option<Precision>,
+    ) -> IdgTargetRelevance {
+        self.target_relevance_in_func_scope(target_nodes, target_funcs, None, max_precision)
+    }
+
+    /// Compile a backward demand relation inside an exact compiler function
+    /// corridor.
+    ///
+    /// This is the demand-analysis counterpart to
+    /// [`Self::forward_closure_within_funcs_and_relevance_with_max_precision`].
+    /// It is useful when one workspace graph serves many independent source
+    /// queries: each query receives only the target facts in its proven
+    /// callgraph corridor instead of inheriting demand from unrelated sinks.
+    /// The function set is a semantic graph slice, not a work budget; every
+    /// admitted node and symbolic fact runs to the same least fixed point.
+    pub fn target_relevance_within_funcs_with_max_precision(
+        &self,
+        target_nodes: &[WsNodeId],
+        target_funcs: Option<&AHashSet<FuncId>>,
+        allowed_funcs: &AHashSet<FuncId>,
+        max_precision: Option<Precision>,
+    ) -> IdgTargetRelevance {
+        self.target_relevance_in_func_scope(target_nodes, target_funcs, Some(allowed_funcs), max_precision)
+    }
+
+    fn target_relevance_in_func_scope(
+        &self,
+        target_nodes: &[WsNodeId],
+        target_funcs: Option<&AHashSet<FuncId>>,
+        allowed_funcs: Option<&AHashSet<FuncId>>,
+        max_precision: Option<Precision>,
+    ) -> IdgTargetRelevance {
+        let unified = self.ensure_unified();
+        let runtime = unified
+            .symbolic_runtime
+            .get_or_init(|| Arc::new(self.build_symbolic_runtime_index(&unified)));
+        let symbolic = self.workspace.symbolic_field();
+        let contextual = self.ensure_contextual_summary_runtime(&unified, max_precision);
+        let mut worklist = TargetRelevanceWorklist::new(Self::unified_node_count(&unified));
+        let node_is_allowed = |node: NodeId| {
+            allowed_funcs.is_none_or(|allowed| {
+                Self::ws_node_func(&unified, node).is_some_and(|func| allowed.contains(&func))
+            })
+        };
+        let base_is_allowed = |base: u32| {
+            allowed_funcs.is_none_or(|allowed| {
+                symbolic
+                    .bases()
+                    .get(base as usize)
+                    .is_some_and(|base| allowed.contains(&base.func))
+            })
+        };
+        for target in target_nodes {
+            let target = NodeId(target.0);
+            if node_is_allowed(target) {
+                worklist.enqueue_node(target);
+            }
+        }
+        for func in target_funcs.into_iter().flatten() {
+            if allowed_funcs.is_some_and(|allowed| !allowed.contains(func)) {
+                continue;
+            }
+            if let Some(nodes) = unified.nodes_by_func.get(*func) {
+                for node in nodes {
+                    worklist.enqueue_node(*node);
+                }
+            }
+        }
+
+        while worklist.has_pending() {
+            if let Some(node) = worklist.pending_nodes.pop() {
+                let node = NodeId(node as u32);
+                for predecessor in contextual.reach.backward_neighbours(node) {
+                    let predecessor = NodeId(*predecessor);
+                    if node_is_allowed(predecessor) {
+                        worklist.enqueue_node(predecessor);
+                    }
+                }
+                if let Some(predecessors) = contextual.reverse_contextual.get(&node) {
+                    for predecessor in predecessors {
+                        let predecessor = NodeId(predecessor.0);
+                        if node_is_allowed(predecessor) {
+                            worklist.enqueue_node(predecessor);
+                        }
+                    }
+                }
+                if let Some(inputs) = runtime.aggregate_inputs.get(&node) {
+                    for input in inputs {
+                        let input = NodeId(input.0);
+                        if node_is_allowed(input) {
+                            worklist.enqueue_node(input);
+                        }
+                    }
+                }
+
+                let Some((segment_id, local_node)) = Self::ws_address(&unified, WsNodeId(node.0)) else {
+                    continue;
+                };
+                let Some(segment) = self.workspace.segment_view(segment_id) else {
+                    continue;
+                };
+                let Some(idg_node) = segment.nodes.get(local_node) else {
+                    continue;
+                };
+                let Some(place) = segment.places.get(idg_node.place) else {
+                    continue;
+                };
+                let Some((parts, write_span, is_read)) = structured_storage_parts(&segment, place) else {
+                    continue;
+                };
+                if is_read {
+                    for fact in Self::symbolic_facts_for_node(&unified, runtime, node) {
+                        worklist.enqueue_fact(fact.base, fact.field);
+                    }
+                    let full = parts.join(".");
+                    if let Some(base) = symbolic.base_id(segment_id, idg_node.func, &full) {
+                        worklist.enqueue_wildcard_base(base);
+                    }
+                }
+                if let Some(write_span) = write_span {
+                    let full = parts.join(".");
+                    if let Some(target) = symbolic.base_id(segment_id, idg_node.func, &full) {
+                        runtime
+                            .reverse_scalar_transforms
+                            .visit_incoming(target, write_span, |row| {
+                                if max_precision.is_some_and(|max| row.precision > max) {
+                                    return;
+                                }
+                                let Some(field) = symbolic
+                                    .string(row.exact_field)
+                                    .and_then(|field| runtime.field_id(field))
+                                else {
+                                    return;
+                                };
+                                if base_is_allowed(row.source) {
+                                    worklist.enqueue_fact(row.source, field);
+                                }
+                            });
+                    }
+                }
+            }
+
+            if let Some(key) = worklist.pending_facts.pop() {
+                let key = key as u64;
+                let base = (key >> 32) as u32;
+                let field = key as u32;
+                runtime.fact_sources.visit_key(key, |source| {
+                    let source = NodeId(source);
+                    if node_is_allowed(source) {
+                        worklist.enqueue_node(source);
+                    }
+                });
+                runtime.reverse_transforms.visit_incoming(base, |row| {
+                    if max_precision.is_none_or(|max| row.precision <= max) && base_is_allowed(row.source) {
+                        worklist.enqueue_fact(row.source, field);
+                    }
+                });
+            }
+
+            if let Some(base) = worklist.pending_wildcard_bases.pop() {
+                let base = base as u32;
+                runtime.fact_sources.visit_base(base, |source| {
+                    let source = NodeId(source);
+                    if node_is_allowed(source) {
+                        worklist.enqueue_node(source);
+                    }
+                });
+                runtime.reverse_transforms.visit_incoming(base, |row| {
+                    if max_precision.is_none_or(|max| row.precision <= max) && base_is_allowed(row.source) {
+                        worklist.enqueue_wildcard_base(row.source);
+                    }
+                });
+            }
+        }
+
+        bonsai_diagnostics::debug_log!(
+            "idg-target",
+            "backward relevance targets={} fallback_funcs={} allowed_funcs={} nodes={} facts={} wildcard_bases={}",
+            target_nodes.len(),
+            target_funcs.map_or(0, |funcs| funcs.len()),
+            allowed_funcs.map_or(0, |funcs| funcs.len()),
+            worklist.relevance.nodes.iter().count(),
+            worklist.relevance.facts.len(),
+            worklist.relevance.wildcard_bases.len()
+        );
+        worklist.relevance
     }
 
     /// Context-matched forward closure when a concrete target node or fallback
@@ -3285,6 +4191,10 @@ impl IdgQueryService {
         let mut projected_storage = Vec::new();
         let mut segment_bases = Vec::with_capacity(self.workspace.segment_count() + 1);
         let mut func_segment_pairs = Vec::new();
+        let mut func_node_rows = Vec::new();
+        let mut call_arg_nodes = Vec::new();
+        let mut call_arg_sites = Vec::new();
+        let mut call_arg_indices = Vec::new();
         // 1. Allocate a workspace-global id for every segment-local
         // node. Stable order: iterate segments by SegmentId, then
         // local node id ascending. That guarantees deterministic ws
@@ -3293,8 +4203,16 @@ impl IdgQueryService {
             segment_bases.push(u32::try_from(node_funcs.len()).expect("unified IDG node count exceeds u32"));
             func_segment_pairs.extend(segment.funcs.iter().copied().map(|func| (func, seg_id)));
             for node in &segment.nodes.nodes {
+                let ws_node =
+                    WsNodeId(u32::try_from(node_funcs.len()).expect("unified IDG node count exceeds u32"));
                 node_funcs.push(node.func);
                 let place = segment.places.get(node.place);
+                func_node_rows.push((node.func, node.place, NodeId(ws_node.0)));
+                if let Some(Place::CallArg { site, idx }) = place {
+                    call_arg_nodes.push(ws_node);
+                    call_arg_sites.push(site.0);
+                    call_arg_indices.push(*idx);
+                }
                 node_boundaries.push(match place {
                     Some(Place::Param { .. }) => NODE_BOUNDARY_PARAM,
                     Some(Place::Return) => NODE_BOUNDARY_RETURN,
@@ -3317,44 +4235,16 @@ impl IdgQueryService {
         for index in 1..offsets.len() {
             offsets[index] = offsets[index].saturating_add(offsets[index - 1]);
         }
-        let mut cursors = offsets[..offsets.len().saturating_sub(1)].to_vec();
-        let mut func_nodes = vec![NodeId(0); node_funcs.len()];
-        for (node, func) in node_funcs.iter().enumerate() {
-            let func_index = func.raw() as usize;
-            let destination = cursors[func_index] as usize;
-            func_nodes[destination] =
-                NodeId(u32::try_from(node).expect("unified IDG node count exceeds u32"));
-            cursors[func_index] = cursors[func_index].saturating_add(1);
-        }
-        drop(cursors);
+        func_node_rows.sort_unstable_by_key(|(func, place, node)| (func.raw(), place.0, node.0));
+        let func_nodes = func_node_rows
+            .into_iter()
+            .map(|(_, _, node)| node)
+            .collect::<Vec<_>>();
         let mut func_segments = vec![u32::MAX; offsets.len().saturating_sub(1)];
         for (func, segment) in func_segment_pairs {
             if let Some(slot) = func_segments.get_mut(func as usize) {
                 *slot = segment.0;
             }
-        }
-        for func_index in 0..offsets.len().saturating_sub(1) {
-            let start = offsets[func_index] as usize;
-            let end = offsets[func_index + 1] as usize;
-            let segment_id = func_segments
-                .get(func_index)
-                .copied()
-                .filter(|segment| *segment != u32::MAX)
-                .map(SegmentId);
-            let segment = segment_id.and_then(|segment| self.workspace.segment_view(segment));
-            func_nodes[start..end].sort_unstable_by_key(|ws_node| {
-                let local_node = segment_id
-                    .and_then(|segment| {
-                        segment_bases
-                            .get(segment.0 as usize)
-                            .map(|base| NodeId(ws_node.0.saturating_sub(*base)))
-                    })
-                    .unwrap_or(NodeId::SENTINEL);
-                segment
-                    .as_ref()
-                    .and_then(|segment| segment.nodes.get(local_node))
-                    .map_or(crate::node::PlaceId::SENTINEL, |node| node.place)
-            });
         }
         let nodes_by_func = NodesByFunc {
             offsets: offsets.into_boxed_slice(),
@@ -3367,6 +4257,11 @@ impl IdgQueryService {
             node_boundaries: node_boundaries.into_boxed_slice(),
             projected_storage: projected_storage.into_boxed_slice(),
             nodes_by_func,
+            call_args: CallArgIdentityIndex {
+                nodes: call_arg_nodes.into_boxed_slice(),
+                sites: call_arg_sites.into_boxed_slice(),
+                indices: call_arg_indices.into_boxed_slice(),
+            },
             unfiltered_reach: RwLock::new(None),
             precision_reach: RwLock::new(AHashMap::new()),
             contextual_summaries: RwLock::new(AHashMap::new()),
@@ -3512,6 +4407,10 @@ impl IdgQueryService {
                 })
                 .expect("validated IDG cross-file relation remains readable");
         }
+        let mut reverse_contextual_rows = heap_rows
+            .iter()
+            .map(|(source, target)| (NodeId(target.0), WsNodeId(source.0)))
+            .collect::<Vec<_>>();
         let heap_by_from = GroupedNodeIndex::from_rows(heap_rows);
 
         // Eager compatibility field edges can point at a canonical type-field
@@ -3661,53 +4560,56 @@ impl IdgQueryService {
                 .expect("validated IDG cross-file relation remains readable");
         }
         drop(structural_boundaries);
+        reverse_contextual_rows.extend(
+            call_rows
+                .iter()
+                .chain(&return_rows)
+                .map(|(source, edge)| (edge.target, WsNodeId(source.0))),
+        );
         let calls_by_from = SparseContextEdges::from_rows(call_rows);
         let returns_by_from = SparseContextEdges::from_rows(return_rows);
-        let reach =
-            ForwardReachabilityIndex::from_pair_visitor(Self::unified_node_count(&unified), |visit| {
-                for edge in summary_edges {
-                    let Some(from) = Self::ws_node_for(&unified, edge.segment, edge.from) else {
-                        continue;
-                    };
-                    let Some(to) = Self::ws_node_for(&unified, edge.segment, edge.to) else {
-                        continue;
-                    };
-                    visit(from.0, to.0);
+        let reverse_contextual = GroupedNodeIndex::from_rows(reverse_contextual_rows);
+        let reach = ReachabilityIndex::from_pair_visitor(Self::unified_node_count(&unified), |visit| {
+            for edge in summary_edges {
+                let Some(from) = Self::ws_node_for(&unified, edge.segment, edge.from) else {
+                    continue;
+                };
+                let Some(to) = Self::ws_node_for(&unified, edge.segment, edge.to) else {
+                    continue;
+                };
+                visit(from.0, to.0);
+            }
+            for (segment_id, segment) in self.workspace.segment_views() {
+                for edge in &segment.edges {
+                    if let Some((from, to)) =
+                        Self::contextual_ordinary_pair(&unified, segment_id, segment_id, edge, max_precision)
+                    {
+                        visit(from, to);
+                    }
                 }
-                for (segment_id, segment) in self.workspace.segment_views() {
-                    for edge in &segment.edges {
+            }
+            self.workspace
+                .visit_cross_file_edges(|edges| {
+                    for edge in edges {
                         if let Some((from, to)) = Self::contextual_ordinary_pair(
                             &unified,
-                            segment_id,
-                            segment_id,
-                            edge,
+                            edge.from_segment,
+                            edge.to_segment,
+                            &edge.edge,
                             max_precision,
                         ) {
                             visit(from, to);
                         }
                     }
-                }
-                self.workspace
-                    .visit_cross_file_edges(|edges| {
-                        for edge in edges {
-                            if let Some((from, to)) = Self::contextual_ordinary_pair(
-                                &unified,
-                                edge.from_segment,
-                                edge.to_segment,
-                                &edge.edge,
-                                max_precision,
-                            ) {
-                                visit(from, to);
-                            }
-                        }
-                    })
-                    .expect("validated IDG cross-file relation remains readable");
-            });
+                })
+                .expect("validated IDG cross-file relation remains readable");
+        });
         ContextualSummaryRuntime {
             reach,
             heap_by_from,
             calls_by_from,
             returns_by_from,
+            reverse_contextual,
         }
     }
 
@@ -3734,34 +4636,50 @@ impl IdgQueryService {
     fn symbolic_forward_closure_nodes(
         &self,
         unified: &Arc<UnifiedAddressSpace>,
-        reach: &ForwardReachabilityIndex,
+        reach: &ReachabilityIndex,
         seeds: &[NodeId],
         policy: SymbolicClosurePolicy<'_>,
-        mut symbolic_cross_calls: Option<&mut Vec<CrossCallEdge>>,
+        mut symbolic_cross_calls: Option<&mut AHashSet<CrossCallEdge>>,
     ) -> Vec<NodeId> {
         let SymbolicClosurePolicy {
             max_precision,
+            allowed_funcs,
+            target_relevance,
             summary_callees,
             summary_root,
             contextual,
             activate_seed_callers,
         } = policy;
         let symbolic = self.workspace.symbolic_field();
-        if !self.workspace.has_symbolic_transforms() && contextual.is_none() {
+        if !self.workspace.has_symbolic_transforms()
+            && contextual.is_none()
+            && allowed_funcs.is_none()
+            && target_relevance.is_none()
+            && summary_root.is_none()
+        {
             return reach.forward_closure_nodes(seeds);
         }
         let runtime = unified
             .symbolic_runtime
             .get_or_init(|| Arc::new(self.build_symbolic_runtime_index(unified)));
         let node_count = Self::unified_node_count(unified);
-        let mut worklist = SymbolicClosureWorklist::new(node_count, seeds.len(), summary_root);
+        let mut worklist = SymbolicClosureWorklist::new(
+            node_count,
+            seeds.len(),
+            summary_root,
+            allowed_funcs,
+            target_relevance,
+        );
         for seed in seeds.iter().copied() {
             if (seed.0 as usize) < node_count && symbolic_node_allowed(unified, &worklist, seed) {
-                worklist.enqueue_node(seed, 0);
+                Self::enqueue_symbolic_node_source(unified, runtime, seed, 0, &mut worklist);
             }
         }
+        let mut processed_nodes = 0usize;
+        let mut processed_facts = 0usize;
+        let mut next_progress = 1_000_000usize;
         while worklist.has_pending() {
-            while let Some(state) = worklist.next_node() {
+            if let Some(state) = worklist.next_node() {
                 Self::propagate_symbolic_closure_node(
                     unified,
                     reach,
@@ -3772,8 +4690,9 @@ impl IdgQueryService {
                     state,
                     &mut worklist,
                 );
+                processed_nodes = processed_nodes.saturating_add(1);
             }
-            while let Some(fact) = worklist.next_fact() {
+            if let Some(fact) = worklist.next_fact() {
                 Self::propagate_symbolic_closure_fact(
                     unified,
                     runtime,
@@ -3786,6 +4705,28 @@ impl IdgQueryService {
                     symbolic_cross_calls.as_deref_mut(),
                     &mut worklist,
                 );
+                processed_facts = processed_facts.saturating_add(1);
+            }
+            let processed = processed_nodes.saturating_add(processed_facts);
+            if processed >= next_progress {
+                bonsai_diagnostics::debug_log!(
+                    "idg-closure",
+                    "symbolic closure progress processed_nodes={} processed_facts={} root_context_states={} contextual_states={} facts={} resident_facts={} cached_positive_facts={} fact_runs={} fact_run_bytes={} fact_filter_bytes={} pending_nodes={} pending_facts={} call_contexts={}",
+                    processed_nodes,
+                    processed_facts,
+                    worklist.reached.root.len(),
+                    worklist.reached.contextual.len(),
+                    worklist.facts.len(),
+                    worklist.facts.resident_len(),
+                    worklist.facts.recent_positive_len(),
+                    worklist.facts.run_count(),
+                    worklist.facts.disk_bytes(),
+                    worklist.facts.bloom_filter_bytes(),
+                    worklist.pending_nodes.len(),
+                    worklist.pending_facts.len(),
+                    worklist.contexts.ids.len()
+                );
+                next_progress = next_progress.saturating_add(1_000_000);
             }
         }
         let nodes = worklist.reached.nodes();
@@ -3802,22 +4743,18 @@ impl IdgQueryService {
     #[allow(clippy::too_many_arguments)]
     fn propagate_symbolic_closure_node(
         unified: &UnifiedAddressSpace,
-        reach: &ForwardReachabilityIndex,
+        reach: &ReachabilityIndex,
         runtime: &SymbolicRuntimeIndex,
         contextual: Option<&ContextualSummaryRuntime>,
         summary_callees: Option<&AHashMap<FuncId, Vec<FuncId>>>,
         activate_seed_callers: bool,
         state: ClosureNodeState,
-        worklist: &mut SymbolicClosureWorklist,
+        worklist: &mut SymbolicClosureWorklist<'_>,
     ) {
-        for mut fact in Self::symbolic_facts_for_node(unified, runtime, state.node) {
-            fact.context = state.context;
-            worklist.enqueue_fact(fact);
-        }
         for target in reach.forward_neighbours(state.node) {
             let target = NodeId(*target);
             if activate_summary_transition(unified, summary_callees, state.node, target, worklist) {
-                worklist.enqueue_node(target, state.context);
+                Self::enqueue_symbolic_node_source(unified, runtime, target, state.context, worklist);
             }
         }
         let Some(contextual) = contextual else {
@@ -3827,18 +4764,18 @@ impl IdgQueryService {
             for &target in targets {
                 let target = NodeId(target.0);
                 if activate_summary_transition(unified, summary_callees, state.node, target, worklist) {
-                    worklist.enqueue_node(target, 0);
+                    Self::enqueue_symbolic_node_source(unified, runtime, target, 0, worklist);
                 }
             }
         }
         for call in contextual.calls_by_from.get(state.node) {
-            if !activate_summary_call(summary_callees, call.key, worklist) {
+            if !worklist.node_is_relevant(call.target)
+                || !activate_summary_call(summary_callees, call.key, worklist)
+            {
                 continue;
             }
-            let (context, returned_nodes, returned_facts) =
-                worklist.contexts.register_call(state.context, call.key);
-            Self::replay_context_outputs(unified, state.context, returned_nodes, returned_facts, worklist);
-            worklist.enqueue_node(call.target, context);
+            let context = Self::register_context_call(unified, runtime, state.context, call.key, worklist);
+            Self::enqueue_symbolic_node_source(unified, runtime, call.target, context, worklist);
         }
         for returned in contextual.returns_by_from.get(state.node) {
             if !symbolic_node_allowed(unified, worklist, returned.target) {
@@ -3849,11 +4786,37 @@ impl IdgQueryService {
                     .contexts
                     .complete_node_return(state.context, returned.target);
                 for context in caller_contexts {
-                    worklist.enqueue_node(returned.target, context);
+                    Self::enqueue_symbolic_node_source(unified, runtime, returned.target, context, worklist);
                 }
             } else if activate_seed_callers && state.context == 0 {
-                worklist.enqueue_node(returned.target, 0);
+                Self::enqueue_symbolic_node_source(unified, runtime, returned.target, 0, worklist);
             }
+        }
+    }
+
+    /// Reach one scalar compiler node and, when this reach came from an
+    /// ordinary value-flow relation, introduce the node's projected storage
+    /// facts exactly once for this realizable call context.
+    ///
+    /// Symbolic fact consumers deliberately call `enqueue_node` directly:
+    /// the consumed fact already carries the precise write provenance.
+    fn enqueue_symbolic_node_source(
+        unified: &UnifiedAddressSpace,
+        runtime: &SymbolicRuntimeIndex,
+        node: NodeId,
+        context: u32,
+        worklist: &mut SymbolicClosureWorklist<'_>,
+    ) {
+        if !symbolic_node_allowed(unified, worklist, node) {
+            return;
+        }
+        worklist.enqueue_node(node, context);
+        if !worklist.activate_fact_source(node, context) {
+            return;
+        }
+        for mut fact in Self::symbolic_facts_for_node(unified, runtime, node) {
+            fact.context = context;
+            worklist.enqueue_fact_state(fact);
         }
     }
 
@@ -3886,7 +4849,9 @@ impl IdgQueryService {
                             facts.push(SymbolicFactTemplate {
                                 base,
                                 field,
-                                span: write_span,
+                                span: write_span
+                                    .and_then(|span| runtime.local_provenance_id(base, span))
+                                    .unwrap_or(NO_SYMBOLIC_FACT_SPAN),
                             });
                         }
                     }
@@ -3913,33 +4878,71 @@ impl IdgQueryService {
             return facts;
         };
         for template in page.get(local_node) {
-            facts.push(SymbolicNodeFact {
-                base: template.base,
-                field: template.field,
-                span: template.span,
-                interprocedural: false,
-                context: 0,
-            });
+            facts.push(SymbolicNodeFact::new(
+                template.base,
+                template.field,
+                (template.span != NO_SYMBOLIC_FACT_SPAN).then_some(template.span),
+                false,
+                0,
+            ));
         }
         facts
     }
 
     fn replay_context_outputs(
         unified: &UnifiedAddressSpace,
+        runtime: &SymbolicRuntimeIndex,
         caller_context: u32,
         returned_nodes: Vec<NodeId>,
-        returned_facts: Vec<SymbolicNodeFact>,
-        worklist: &mut SymbolicClosureWorklist,
+        returned_facts: Vec<SymbolicFactIdentity>,
+        worklist: &mut SymbolicClosureWorklist<'_>,
     ) {
         for node in returned_nodes {
-            if symbolic_node_allowed(unified, worklist, node) {
-                worklist.enqueue_node(node, caller_context);
-            }
+            Self::enqueue_symbolic_node_source(unified, runtime, node, caller_context, worklist);
         }
-        for mut fact in returned_facts {
-            fact.context = caller_context;
-            worklist.enqueue_fact(fact);
+        for identity in returned_facts {
+            worklist.enqueue_fact_state(SymbolicNodeFact::from_identity(identity, caller_context));
         }
+    }
+
+    fn register_context_call(
+        unified: &UnifiedAddressSpace,
+        runtime: &SymbolicRuntimeIndex,
+        caller_context: u32,
+        boundary: ContextBoundaryKey,
+        worklist: &mut SymbolicClosureWorklist<'_>,
+    ) -> u32 {
+        let (context, newly_registered) = worklist.contexts.register_call(caller_context, boundary);
+        if !newly_registered {
+            return context;
+        }
+        let returned_nodes = worklist.contexts.returned_nodes_for(context);
+        Self::replay_context_outputs(
+            unified,
+            runtime,
+            caller_context,
+            returned_nodes,
+            Vec::new(),
+            worklist,
+        );
+
+        let mut after = None;
+        loop {
+            let returned_facts = worklist.contexts.returned_fact_batch(context, after);
+            let Some(last) = returned_facts.last().copied() else {
+                break;
+            };
+            after = Some(last.key() | (u128::from(context) << 96));
+            Self::replay_context_outputs(
+                unified,
+                runtime,
+                caller_context,
+                Vec::new(),
+                returned_facts,
+                worklist,
+            );
+        }
+        context
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3952,23 +4955,30 @@ impl IdgQueryService {
         contextual: bool,
         activate_seed_callers: bool,
         fact: SymbolicNodeFact,
-        mut symbolic_cross_calls: Option<&mut Vec<CrossCallEdge>>,
-        worklist: &mut SymbolicClosureWorklist,
+        mut symbolic_cross_calls: Option<&mut AHashSet<CrossCallEdge>>,
+        worklist: &mut SymbolicClosureWorklist<'_>,
     ) {
         Self::seed_symbolic_fact_consumers(unified, runtime, fact, worklist);
         let transforms = runtime.transforms.lock().outgoing(fact.base);
         for transform in transforms.iter().copied() {
+            debug_assert!(
+                transform.allow_out_of_order_source || runtime.retains_local_provenance(transform.source)
+            );
             if max_precision.is_some_and(|max| transform.precision > max)
                 || (!transform.allow_out_of_order_source
-                    && !fact.interprocedural
-                    && fact.span.is_some_and(|span| {
-                        span.file == transform.call_span.file && span.start > transform.call_span.start
-                    }))
+                    && !fact.is_interprocedural()
+                    && fact
+                        .span_id()
+                        .and_then(|span| runtime.span(span))
+                        .is_some_and(|span| {
+                            span.file == transform.call_span.file && span.start > transform.call_span.start
+                        }))
             {
                 continue;
             }
             let Some(contexts) = Self::symbolic_transform_contexts(
                 unified,
+                runtime,
                 symbolic,
                 &transform,
                 fact,
@@ -4000,25 +5010,25 @@ impl IdgQueryService {
                 continue;
             }
             record_symbolic_cross_call(symbolic, &transform, symbolic_cross_calls.as_deref_mut());
-            let next = SymbolicNodeFact {
-                base: transform.target,
-                field: fact.field,
-                span: Some(transform.write_span),
-                interprocedural: transform.kind != SymbolicFieldTransformKind::Copy,
-                context: 0,
-            };
+            let interprocedural = transform.kind != SymbolicFieldTransformKind::Copy;
+            let span = (!interprocedural)
+                .then(|| runtime.local_provenance_id(transform.target, transform.write_span))
+                .flatten();
+            debug_assert!(
+                interprocedural || !runtime.retains_local_provenance(transform.target) || span.is_some()
+            );
+            let next = SymbolicNodeFact::new(transform.target, fact.field, span, interprocedural, 0);
             if let Some(context) = contexts.completed {
-                let caller_contexts = worklist.contexts.complete_fact_return(context, next);
+                let identity = next.identity();
+                let caller_contexts = worklist.contexts.complete_fact_return(context, identity);
                 for caller_context in caller_contexts {
-                    let mut returned = next;
-                    returned.context = caller_context;
-                    worklist.enqueue_fact(returned);
+                    worklist.enqueue_fact_state(SymbolicNodeFact::from_identity(identity, caller_context));
                 }
             } else {
                 for &context in &contexts.next {
                     let mut next = next;
                     next.context = context;
-                    worklist.enqueue_fact(next);
+                    worklist.enqueue_fact_state(next);
                 }
             }
         }
@@ -4027,13 +5037,14 @@ impl IdgQueryService {
     #[allow(clippy::too_many_arguments)]
     fn symbolic_transform_contexts(
         unified: &UnifiedAddressSpace,
+        runtime: &SymbolicRuntimeIndex,
         symbolic: &crate::symbolic::SymbolicFieldGraph,
         transform: &crate::symbolic::SymbolicFieldTransform,
         fact: SymbolicNodeFact,
         summary_callees: Option<&AHashMap<FuncId, Vec<FuncId>>>,
         contextual: bool,
         activate_seed_callers: bool,
-        worklist: &mut SymbolicClosureWorklist,
+        worklist: &mut SymbolicClosureWorklist<'_>,
     ) -> Option<SymbolicTransformContexts> {
         if !contextual {
             return Some(SymbolicTransformContexts {
@@ -4051,9 +5062,7 @@ impl IdgQueryService {
             if !activate_summary_call(summary_callees, boundary, worklist) {
                 return None;
             }
-            let (context, returned_nodes, returned_facts) =
-                worklist.contexts.register_call(fact.context, boundary);
-            Self::replay_context_outputs(unified, fact.context, returned_nodes, returned_facts, worklist);
+            let context = Self::register_context_call(unified, runtime, fact.context, boundary, worklist);
             Some(SymbolicTransformContexts {
                 next: vec![context],
                 completed: None,
@@ -4081,8 +5090,8 @@ impl IdgQueryService {
         transform: &crate::symbolic::SymbolicFieldTransform,
         fact: SymbolicNodeFact,
         contexts: &SymbolicTransformContexts,
-        symbolic_cross_calls: Option<&mut Vec<CrossCallEdge>>,
-        worklist: &mut SymbolicClosureWorklist,
+        symbolic_cross_calls: Option<&mut AHashSet<CrossCallEdge>>,
+        worklist: &mut SymbolicClosureWorklist<'_>,
     ) {
         let exact_matches = transform.exact_field != NO_SYMBOLIC_STRING
             && symbolic
@@ -4109,11 +5118,11 @@ impl IdgQueryService {
             if let Some(context) = contexts.completed {
                 let caller_contexts = worklist.contexts.complete_node_return(context, node);
                 for caller_context in caller_contexts {
-                    worklist.enqueue_node(node, caller_context);
+                    Self::enqueue_symbolic_node_source(unified, runtime, node, caller_context, worklist);
                 }
             } else {
                 for &context in &contexts.next {
-                    worklist.enqueue_node(node, context);
+                    Self::enqueue_symbolic_node_source(unified, runtime, node, context, worklist);
                 }
             }
         }
@@ -4123,7 +5132,7 @@ impl IdgQueryService {
         unified: &UnifiedAddressSpace,
         runtime: &SymbolicRuntimeIndex,
         fact: SymbolicNodeFact,
-        worklist: &mut SymbolicClosureWorklist,
+        worklist: &mut SymbolicClosureWorklist<'_>,
     ) {
         let exact_nodes = runtime.exact_reads.get(&symbolic_fact_key(fact.base, fact.field));
         if let Some(nodes) = exact_nodes {
@@ -4169,21 +5178,34 @@ impl IdgQueryService {
     fn build_symbolic_runtime_index(&self, unified: &UnifiedAddressSpace) -> SymbolicRuntimeIndex {
         let symbolic = self.workspace.symbolic_field();
         let mut field_names = AHashSet::default();
-        self.visit_structured_storage_nodes(unified, |_, _, _, parts, _, _| {
+        let mut fact_spans = AHashSet::default();
+        self.visit_structured_storage_nodes(unified, |_, _, _, parts, write_span, _| {
             for split in 1..parts.len() {
                 field_names.insert(parts[split..].join("."));
+            }
+            if let Some(span) = write_span {
+                fact_spans.insert(SymbolicFactSpan::from(span));
             }
         });
         let mut fields: Vec<String> = field_names.into_iter().collect();
         fields.sort_unstable();
+        let (transforms, reverse_transforms, reverse_scalar_transforms, ordering_sensitive_bases) =
+            SymbolicTransformPager::build(&self.workspace, symbolic.bases().len(), &mut fact_spans);
+        let mut spans: Vec<SymbolicFactSpan> = fact_spans.into_iter().collect();
+        spans.sort_unstable();
+        assert!(
+            spans.len() < SYMBOLIC_FACT_SPAN_MASK as usize,
+            "symbolic fact span count exceeds compact representation"
+        );
         let mut out = SymbolicRuntimeIndex {
             fields: PackedStringTable::from_sorted(fields),
+            spans: spans.into_boxed_slice(),
+            ordering_sensitive_bases,
             ..SymbolicRuntimeIndex::default()
         };
-        out.transforms = Mutex::new(SymbolicTransformPager::build(
-            &self.workspace,
-            symbolic.bases().len(),
-        ));
+        out.transforms = Mutex::new(transforms);
+        out.reverse_transforms = reverse_transforms;
+        out.reverse_scalar_transforms = reverse_scalar_transforms;
 
         // Compile every source segment's AST-derived access-path facts once
         // into a fixed-width temporary sidecar. Broad closures then page this
@@ -4191,24 +5213,41 @@ impl IdgQueryService {
         // MessagePack IDG segment and rebuilding dotted paths.
         let mut fact_pages = SymbolicFactPager::new(self.workspace.segment_count());
         let mut exact_read_rows = Vec::new();
+        let mut fact_sources = FactSourceSpool::new();
+        let mut aggregate_input_rows = Vec::new();
         for (segment_id, segment) in self.workspace.segment_views() {
             let page = Self::build_symbolic_fact_page(segment_id, &segment, &out, symbolic);
             for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
-                if !matches!(segment.places.get(node.place), Some(Place::Read { .. })) {
-                    continue;
-                }
                 let local = NodeId(u32::try_from(node_index).expect("segment-local node count exceeds u32"));
                 let Some(ws_node) = Self::ws_node_for(unified, segment_id, local) else {
                     continue;
                 };
                 for fact in page.get(local) {
-                    exact_read_rows.push((symbolic_fact_key(fact.base, fact.field), ws_node));
+                    let key = symbolic_fact_key(fact.base, fact.field);
+                    fact_sources.push(key, ws_node.0);
+                    if matches!(segment.places.get(node.place), Some(Place::Read { .. })) {
+                        exact_read_rows.push((key, ws_node));
+                    }
                 }
+            }
+            for edge in &segment.edges {
+                if edge.meta.kind != IdgEdgeKind::IntraAggregateConsume {
+                    continue;
+                }
+                let Some(from) = Self::ws_node_for(unified, segment_id, edge.from) else {
+                    continue;
+                };
+                let Some(to) = Self::ws_node_for(unified, segment_id, edge.to) else {
+                    continue;
+                };
+                aggregate_input_rows.push((NodeId(to.0), from));
             }
             fact_pages.write_page(segment_id, &page);
         }
         out.fact_pages = Mutex::new(fact_pages);
         out.exact_reads = GroupedNodeIndex::from_rows(exact_read_rows);
+        out.fact_sources = fact_sources.finish();
+        out.aggregate_inputs = GroupedNodeIndex::from_rows(aggregate_input_rows);
 
         let mut bare_read_rows = Vec::new();
         self.visit_structured_storage_nodes(unified, |segment_id, func, ws_node, parts, _, is_read| {

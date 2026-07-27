@@ -41,19 +41,64 @@ PACK = REPO / "security-patterns" / "langs"
 # helpers. A bare `name:` or `attribute: [_, <verb>]` rule on these
 # is FP-prone unless there are package / arg constraints.
 GENERIC_VERBS = {
-    "query", "execute", "exec", "run", "send", "post", "get", "put",
-    "delete", "patch", "fetch", "call", "invoke", "spawn",
-    "render", "compile", "parse", "load", "open", "read", "write",
-    "save", "update", "create", "find", "search", "process", "handle",
-    "do", "perform", "submit", "dispatch", "emit", "trigger",
-    "redirect", "forward", "include", "require",
+    "query",
+    "execute",
+    "exec",
+    "run",
+    "send",
+    "post",
+    "get",
+    "put",
+    "delete",
+    "patch",
+    "fetch",
+    "call",
+    "invoke",
+    "spawn",
+    "render",
+    "compile",
+    "parse",
+    "load",
+    "open",
+    "read",
+    "write",
+    "save",
+    "update",
+    "create",
+    "find",
+    "search",
+    "process",
+    "handle",
+    "do",
+    "perform",
+    "submit",
+    "dispatch",
+    "emit",
+    "trigger",
+    "redirect",
+    "forward",
+    "include",
+    "require",
 }
 
 # Receiver names that are heavily aliased and not unique to a driver.
 GENERIC_RECEIVERS = {
-    "db", "client", "connection", "conn", "user", "model", "data",
-    "self", "this", "obj", "instance",
-    "session", "service", "manager", "controller", "handler",
+    "db",
+    "client",
+    "connection",
+    "conn",
+    "user",
+    "model",
+    "data",
+    "self",
+    "this",
+    "obj",
+    "instance",
+    "session",
+    "service",
+    "manager",
+    "controller",
+    "handler",
 }
 
 # Sink categories where a specific argument is usually the dangerous value.
@@ -61,8 +106,17 @@ GENERIC_RECEIVERS = {
 # constraint such as arg_tainted, arg_count, or format_arg_index, it is
 # FP-prone.
 SHAPE_EXPECTED = {
-    "sqli", "cmdi", "ssrf", "path", "template", "ldap", "ssti", "redos",
-    "open_redirect", "xss", "header_injection",
+    "sqli",
+    "cmdi",
+    "ssrf",
+    "path",
+    "template",
+    "ldap",
+    "ssti",
+    "redos",
+    "open_redirect",
+    "xss",
+    "header_injection",
 }
 
 
@@ -78,7 +132,59 @@ def has_constraint_kind(rule: dict, kinds: tuple[str, ...]) -> bool:
     return False
 
 
-def score_rule(rule: dict, family: str, kind: str) -> tuple[int, list[str]]:
+def generic_name_risk(
+    name: object, has_package: bool, has_arg_constraint: bool
+) -> tuple[int, list[str]]:
+    if not isinstance(name, str) or name.lower() not in GENERIC_VERBS:
+        return 0, []
+    if not has_package and not has_arg_constraint:
+        return 5, [f"bare generic verb name `{name}` with no scoping"]
+    if not has_arg_constraint:
+        return 2, [f"bare generic verb name `{name}` (has package, no arg)"]
+    return 0, []
+
+
+def generic_receiver_risk(
+    attribute: object, has_arg_constraint: bool
+) -> tuple[int, list[str]]:
+    if (
+        not isinstance(attribute, list)
+        or len(attribute) != 2
+        or not all(isinstance(value, str) for value in attribute)
+    ):
+        return 0, []
+    receiver, method = attribute
+    if receiver.lower() not in GENERIC_RECEIVERS or has_arg_constraint:
+        return 0, []
+    return 3, [
+        f"generic receiver `{receiver}.{method}` with no argument-boundary constraint"
+    ]
+
+
+def expected_shape_risk(
+    family: str,
+    name: object,
+    attribute: object,
+    has_arg_constraint: bool,
+) -> tuple[int, list[str]]:
+    if family not in SHAPE_EXPECTED or has_arg_constraint:
+        return 0, []
+    if isinstance(name, str) and name.lower() in GENERIC_VERBS:
+        return 2, [f"{family} family expects argument-boundary constraint"]
+    if (
+        isinstance(attribute, list)
+        and len(attribute) == 2
+        and isinstance(attribute[1], str)
+        and attribute[1].lower() in GENERIC_VERBS
+    ):
+        return 1, [
+            f"{family} family + generic method `{attribute[1]}` "
+            "no argument-boundary constraint"
+        ]
+    return 0, []
+
+
+def score_rule(rule: dict, family: str, _kind: str) -> tuple[int, list[str]]:
     """Return (fp_risk_score, reasons[]). Higher = more FP-prone."""
     reasons: list[str] = []
     score = 0
@@ -114,40 +220,94 @@ def score_rule(rule: dict, family: str, kind: str) -> tuple[int, list[str]]:
     if not isinstance(callee, dict):
         return 0, ["no callee"]
 
-    # Bare-verb-name rules.
     name = callee.get("name")
-    if isinstance(name, str) and name.lower() in GENERIC_VERBS:
-        if not has_pkg and not has_arg_constraint:
-            score += 5
-            reasons.append(f"bare generic verb name `{name}` with no scoping")
-        elif not has_arg_constraint:
-            score += 2
-            reasons.append(f"bare generic verb name `{name}` (has package, no arg)")
-
-    # Attribute-chain with a generic receiver name.
     attr = callee.get("attribute")
-    if isinstance(attr, list) and len(attr) == 2:
-        recv, method = attr
-        if (
-            isinstance(recv, str)
-            and isinstance(method, str)
-            and recv.lower() in GENERIC_RECEIVERS
-        ):
-            if not has_arg_constraint:
-                score += 3
-            reasons.append(f"generic receiver `{recv}.{method}` with no argument-boundary constraint")
-
-    # Shape-expected family without an arg constraint.
-    if family in SHAPE_EXPECTED and not has_arg_constraint:
-        # Lower the noise: only flag if the callee shape is a generic verb.
-        if isinstance(name, str) and name.lower() in GENERIC_VERBS:
-            score += 2
-            reasons.append(f"{family} family expects argument-boundary constraint")
-        elif isinstance(attr, list) and len(attr) == 2 and attr[1].lower() in GENERIC_VERBS:
-            score += 1
-            reasons.append(f"{family} family + generic method `{attr[1]}` no argument-boundary constraint")
+    for component_score, component_reasons in (
+        generic_name_risk(name, has_pkg, has_arg_constraint),
+        generic_receiver_risk(attr, has_arg_constraint),
+        expected_shape_risk(family, name, attr, has_arg_constraint),
+    ):
+        score += component_score
+        reasons.extend(component_reasons)
 
     return score, reasons
+
+
+def selected_rule_files(selected_language: str | None):
+    for lang_dir in sorted(PACK.iterdir()):
+        if not lang_dir.is_dir():
+            continue
+        if selected_language and lang_dir.name != selected_language:
+            continue
+        for cat_dir in (
+            lang_dir / "sinks",
+            lang_dir / "sanitizers",
+            lang_dir / "sources",
+        ):
+            if not cat_dir.exists():
+                continue
+            for f in sorted(cat_dir.glob("*.yml")):
+                yield f, cat_dir.name
+
+
+def load_rule_file(path: Path) -> list[dict]:
+    try:
+        rules = yaml.safe_load(path.read_text()) or []
+    except yaml.YAMLError as exc:
+        print(f"PARSE ERR {path}: {exc}", file=sys.stderr)
+        return []
+    if not isinstance(rules, list):
+        return []
+    return [rule for rule in rules if isinstance(rule, dict) and "id" in rule]
+
+
+def collect_findings(
+    selected_language: str | None,
+) -> list[tuple[int, str, str, str, list[str]]]:
+    findings: list[tuple[int, str, str, str, list[str]]] = []
+    for path, kind in selected_rule_files(selected_language):
+        for rule in load_rule_file(path):
+            rule_id = rule["id"]
+            family = rule_id.split(".")[1] if "." in rule_id else "?"
+            score, reasons = score_rule(rule, family, kind)
+            if score > 0:
+                findings.append(
+                    (score, rule_id, kind, str(path.relative_to(REPO)), reasons)
+                )
+    findings.sort(key=lambda finding: -finding[0])
+    return findings
+
+
+def risk_totals(
+    findings: list[tuple[int, str, str, str, list[str]]],
+) -> tuple[Counter[str], Counter[str]]:
+    by_lang: Counter[str] = Counter()
+    by_family: Counter[str] = Counter()
+    for score, rule_id, _kind, _path, _reasons in findings:
+        by_lang[rule_id.split(".")[0]] += score
+        by_family[rule_id.split(".")[1] if "." in rule_id else "?"] += score
+    return by_lang, by_family
+
+
+def render_findings(
+    findings: list[tuple[int, str, str, str, list[str]]], top: int
+) -> None:
+    by_lang, by_family = risk_totals(findings)
+    print(f"Total scored rules: {len(findings)}")
+    print(f"Top {top} FP-prone rules:")
+    for score, rule_id, kind, path, reasons in findings[:top]:
+        print(f"  [{score:>2}] {rule_id}  ({kind})")
+        for reason in reasons:
+            print(f"          - {reason}")
+        print(f"          @ {path}")
+    print()
+    print("By language (sum of FP risk):")
+    for language, score in by_lang.most_common():
+        print(f"  {language:<12} {score}")
+    print()
+    print("By family (sum of FP risk):")
+    for family, score in by_family.most_common():
+        print(f"  {family:<20} {score}")
 
 
 def main() -> int:
@@ -155,57 +315,7 @@ def main() -> int:
     ap.add_argument("--lang")
     ap.add_argument("--top", type=int, default=40)
     args = ap.parse_args()
-
-    findings: list[tuple[int, str, str, str, list[str]]] = []
-    for lang_dir in sorted(PACK.iterdir()):
-        if not lang_dir.is_dir():
-            continue
-        if args.lang and lang_dir.name != args.lang:
-            continue
-        for cat_dir in (lang_dir / "sinks", lang_dir / "sanitizers", lang_dir / "sources"):
-            if not cat_dir.exists():
-                continue
-            for f in sorted(cat_dir.glob("*.yml")):
-                try:
-                    rules = yaml.safe_load(f.read_text()) or []
-                except yaml.YAMLError as exc:
-                    print(f"PARSE ERR {f}: {exc}", file=sys.stderr)
-                    continue
-                if not isinstance(rules, list):
-                    continue
-                for r in rules:
-                    if not isinstance(r, dict) or "id" not in r:
-                        continue
-                    rid = r["id"]
-                    family = rid.split(".")[1] if "." in rid else "?"
-                    kind = cat_dir.name
-                    score, reasons = score_rule(r, family, kind)
-                    if score > 0:
-                        findings.append((score, rid, kind, str(f.relative_to(REPO)), reasons))
-
-    findings.sort(key=lambda x: -x[0])
-
-    by_lang: Counter[str] = Counter()
-    by_family: Counter[str] = Counter()
-    for s, rid, _kind, _f, _r in findings:
-        by_lang[rid.split(".")[0]] += s
-        by_family[rid.split(".")[1] if "." in rid else "?"] += s
-
-    print(f"Total scored rules: {len(findings)}")
-    print(f"Top {args.top} FP-prone rules:")
-    for s, rid, kind, fpath, reasons in findings[: args.top]:
-        print(f"  [{s:>2}] {rid}  ({kind})")
-        for r in reasons:
-            print(f"          - {r}")
-        print(f"          @ {fpath}")
-    print()
-    print("By language (sum of FP risk):")
-    for lang, n in by_lang.most_common():
-        print(f"  {lang:<12} {n}")
-    print()
-    print("By family (sum of FP risk):")
-    for fam, n in by_family.most_common():
-        print(f"  {fam:<20} {n}")
+    render_findings(collect_findings(args.lang), args.top)
     return 0
 
 

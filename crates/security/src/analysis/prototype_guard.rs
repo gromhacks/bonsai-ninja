@@ -1,27 +1,27 @@
-//! Compiler-fact validation for prototype-pollution guards.
+//! Compiler-fact validation for dynamic-key denylist guards.
 //!
-//! The matcher deliberately treats dynamic writes and recursive merge calls
-//! broadly.  This module suppresses a sink only when the enclosing structured
-//! flow proves that every path reaching it passed a denylist barrier (or a
-//! preceding `Object.freeze(Object.prototype)` call).  Source lines and
-//! enclosing text are never scanned.
+//! Rulepacks declare constructor, membership, and rejected-value roles.
+//! Language adapters decode literals and boolean syntax into typed facts.
+//! This module proves only generic control flow; it never parses source text
+//! or carries a language/API/value inventory.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
-
-const DANGEROUS_KEYS: &[&str] = &["__proto__", "constructor", "prototype"];
+use crate::rule::DynamicKeyDenylistGuardSemantics;
 
 pub(super) fn prototype_pollution_sink_is_guarded(
     ws: &Workspace,
     sink_rule: &Rule,
     sink: &RuleMatch,
 ) -> bool {
-    if sink_rule.tag.as_deref() != Some("prototype-pollution")
-        || !matches!(sink.language.as_str(), "javascript" | "typescript")
-    {
+    let Some(semantics) = sink_rule
+        .analysis_semantics
+        .as_ref()
+        .and_then(|analysis| analysis.dynamic_key_denylist_guard.as_ref())
+    else {
         return false;
-    }
-    let Some(file_index) = ws.exact_decl_index(sink.span.file) else {
+    };
+    let Some(file_index) = ws.exact_decl_index_shared(sink.span.file) else {
         return false;
     };
     let Some(decl) = file_index
@@ -38,15 +38,21 @@ pub(super) fn prototype_pollution_sink_is_guarded(
     let FlowEvent::Call { span: call_span, .. } = call else {
         return false;
     };
-    let key_variables = prototype_sink_key_variables(call);
+    let key_variables = dynamic_sink_key_variables(call);
     if key_variables.is_empty() {
         return false;
     }
+    let context = DynamicKeyGuardContext {
+        file_index: file_index.as_ref(),
+        root_events: &decl.flow_events,
+        semantics,
+        key_variables: &key_variables,
+    };
     let mut guarded = false;
-    flow_guard_state_at_sink(&decl.flow_events, *call_span, &key_variables, &mut guarded) && guarded
+    flow_guard_state_at_sink(&decl.flow_events, *call_span, &context, &mut guarded) && guarded
 }
 
-fn prototype_sink_key_variables(call: &FlowEvent) -> AHashSet<String> {
+fn dynamic_sink_key_variables(call: &FlowEvent) -> AHashSet<String> {
     let FlowEvent::Call { name, args, .. } = call else {
         return AHashSet::new();
     };
@@ -59,19 +65,24 @@ fn prototype_sink_key_variables(call: &FlowEvent) -> AHashSet<String> {
             .collect();
     }
 
-    // Recursive merge rules require two indexed arguments.  The adapters
+    // Recursive merge rules require two indexed arguments. The adapters
     // expose the index operand as the one simple source name shared by both
-    // argument expressions; bases and normalized projections are excluded.
+    // expressions; bases and normalized projections are excluded.
     let mut occurrences: AHashMap<String, usize> = AHashMap::new();
     for arg in args {
-        let place = arg.place.as_deref().and_then(clean_overwrite_target_key);
-        let base = place.as_deref().and_then(|place| place.split('.').next());
+        let Some(place) = arg.place.as_deref() else {
+            continue;
+        };
+        let Some((base, _projection)) = place.split_once('.') else {
+            continue;
+        };
+        let base = simple_place_key(base);
         let mut seen = AHashSet::new();
         for source in &arg.source_names {
             let Some(source) = simple_place_key(source) else {
                 continue;
             };
-            if Some(source.as_str()) == base || !seen.insert(source.clone()) {
+            if Some(source.as_str()) == base.as_deref() || !seen.insert(source.clone()) {
                 continue;
             }
             *occurrences.entry(source).or_default() += 1;
@@ -79,7 +90,7 @@ fn prototype_sink_key_variables(call: &FlowEvent) -> AHashSet<String> {
     }
     occurrences
         .into_iter()
-        .filter_map(|(name, count)| (count >= 2).then_some(name))
+        .filter_map(|(name, count)| (count >= 1).then_some(name))
         .collect()
 }
 
@@ -88,10 +99,17 @@ fn simple_place_key(text: &str) -> Option<String> {
     (!key.contains('.')).then_some(key)
 }
 
+struct DynamicKeyGuardContext<'a> {
+    file_index: &'a bonsai_lang_api::DeclIndex,
+    root_events: &'a [FlowEvent],
+    semantics: &'a DynamicKeyDenylistGuardSemantics,
+    key_variables: &'a AHashSet<String>,
+}
+
 fn flow_guard_state_at_sink(
     events: &[FlowEvent],
     sink_span: Span,
-    key_variables: &AHashSet<String>,
+    context: &DynamicKeyGuardContext<'_>,
     guarded: &mut bool,
 ) -> bool {
     for event in events {
@@ -100,23 +118,30 @@ fn flow_guard_state_at_sink(
         }
         match event {
             FlowEvent::Branch {
+                span,
                 then_events,
                 else_events,
                 ..
             } if flow_events_have_exact_span(then_events, sink_span)
                 || flow_events_have_exact_span(else_events, sink_span) =>
             {
-                let target_events = if flow_events_have_exact_span(then_events, sink_span) {
-                    then_events
-                } else {
-                    else_events
-                };
-                return flow_guard_state_at_sink(target_events, sink_span, key_variables, guarded);
+                let in_then = flow_events_have_exact_span(then_events, sink_span);
+                let target_events = if in_then { then_events } else { else_events };
+                if branch_safe_arms(*span, context).is_some_and(|safe| {
+                    if in_then {
+                        safe.then_safe
+                    } else {
+                        safe.else_safe
+                    }
+                }) {
+                    *guarded = true;
+                }
+                return flow_guard_state_at_sink(target_events, sink_span, context, guarded);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. }
                 if flow_events_have_exact_span(body, sink_span) =>
             {
-                return flow_guard_state_at_sink(body, sink_span, key_variables, guarded);
+                return flow_guard_state_at_sink(body, sink_span, context, guarded);
             }
             FlowEvent::Try {
                 body,
@@ -130,16 +155,15 @@ fn flow_guard_state_at_sink(
                     finally_events.as_slice(),
                 ] {
                     if flow_events_have_exact_span(nested, sink_span) {
-                        return flow_guard_state_at_sink(nested, sink_span, key_variables, guarded);
+                        return flow_guard_state_at_sink(nested, sink_span, context, guarded);
                     }
                 }
             }
             _ => {}
         }
-        if event.span().start >= sink_span.start {
-            continue;
+        if event.span().start < sink_span.start {
+            apply_guard_event(event, context, guarded);
         }
-        apply_guard_event(event, key_variables, guarded);
     }
     false
 }
@@ -174,46 +198,32 @@ fn flow_events_have_exact_span(events: &[FlowEvent], target: Span) -> bool {
     })
 }
 
-fn apply_guard_events(events: &[FlowEvent], key_variables: &AHashSet<String>, guarded: &mut bool) {
+fn apply_guard_events(events: &[FlowEvent], context: &DynamicKeyGuardContext<'_>, guarded: &mut bool) {
     for event in events {
-        apply_guard_event(event, key_variables, guarded);
+        apply_guard_event(event, context, guarded);
     }
 }
 
-fn apply_guard_event(event: &FlowEvent, key_variables: &AHashSet<String>, guarded: &mut bool) {
+fn apply_guard_event(event: &FlowEvent, context: &DynamicKeyGuardContext<'_>, guarded: &mut bool) {
     match event {
-        FlowEvent::Call {
-            name, receiver, args, ..
-        } if clean_overwrite_callee_tail(name) == "freeze"
-            && receiver.as_deref() == Some("Object")
-            && args.len() == 1
-            && args[0].place.as_deref() == Some("Object.prototype") =>
-        {
-            *guarded = true;
-        }
         FlowEvent::Branch {
-            condition,
+            span,
             then_events,
             else_events,
             ..
         } => {
-            if condition
-                .as_deref()
-                .is_some_and(|condition| branch_rejects_dangerous_key(condition, then_events, key_variables))
-            {
-                *guarded = true;
-                return;
-            }
-            let mut then_guarded = *guarded;
-            apply_guard_events(then_events, key_variables, &mut then_guarded);
-            let mut else_guarded = *guarded;
-            apply_guard_events(else_events, key_variables, &mut else_guarded);
-            *guarded = then_guarded && else_guarded;
+            let safe = branch_safe_arms(*span, context).unwrap_or_default();
+            let mut then_guarded = *guarded || safe.then_safe;
+            apply_guard_events(then_events, context, &mut then_guarded);
+            let mut else_guarded = *guarded || safe.else_safe;
+            apply_guard_events(else_events, context, &mut else_guarded);
+            *guarded = (events_guarantee_abrupt_exit(then_events) || then_guarded)
+                && (events_guarantee_abrupt_exit(else_events) || else_guarded);
         }
         FlowEvent::Loop { .. } | FlowEvent::Defer { .. } => {
             // These regions are not guaranteed to execute before a later sink.
         }
-        FlowEvent::Using { body, .. } => apply_guard_events(body, key_variables, guarded),
+        FlowEvent::Using { body, .. } => apply_guard_events(body, context, guarded),
         FlowEvent::Try {
             body,
             catch_events,
@@ -221,173 +231,434 @@ fn apply_guard_event(event: &FlowEvent, key_variables: &AHashSet<String>, guarde
             ..
         } => {
             let mut body_guarded = *guarded;
-            apply_guard_events(body, key_variables, &mut body_guarded);
+            apply_guard_events(body, context, &mut body_guarded);
             let mut catch_guarded = *guarded;
-            apply_guard_events(catch_events, key_variables, &mut catch_guarded);
-            *guarded = body_guarded && catch_guarded;
-            apply_guard_events(finally_events, key_variables, guarded);
+            apply_guard_events(catch_events, context, &mut catch_guarded);
+            *guarded = (events_guarantee_abrupt_exit(body) || body_guarded)
+                && (events_guarantee_abrupt_exit(catch_events) || catch_guarded);
+            apply_guard_events(finally_events, context, guarded);
         }
         _ => {}
     }
 }
 
-fn branch_rejects_dangerous_key(
-    condition: &str,
-    then_events: &[FlowEvent],
-    key_variables: &AHashSet<String>,
+fn events_guarantee_abrupt_exit(events: &[FlowEvent]) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Continue { .. } | FlowEvent::Return { .. } | FlowEvent::Throw { .. } => true,
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            !else_events.is_empty()
+                && events_guarantee_abrupt_exit(then_events)
+                && events_guarantee_abrupt_exit(else_events)
+        }
+        FlowEvent::Using { body, .. } => events_guarantee_abrupt_exit(body),
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            events_guarantee_abrupt_exit(finally_events)
+                || (events_guarantee_abrupt_exit(body) && events_guarantee_abrupt_exit(catch_events))
+        }
+        _ => false,
+    })
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct SafeArms {
+    then_safe: bool,
+    else_safe: bool,
+}
+
+fn branch_safe_arms(branch_span: Span, context: &DynamicKeyGuardContext<'_>) -> Option<SafeArms> {
+    let fact = branch_condition_fact_for_span(&context.file_index.branch_conditions, branch_span)?;
+    let expression = fact.expression.as_ref()?;
+    let membership_atoms = exact_membership_atom_spans(fact, expression, context);
+    let rejected = &context.semantics.rejected_exact_values;
+    if rejected.is_empty() {
+        return None;
+    }
+    let evaluations: Vec<_> = rejected
+        .iter()
+        .map(|value| evaluate_condition(expression, value, context.key_variables, &membership_atoms))
+        .collect();
+    Some(SafeArms {
+        then_safe: evaluations.iter().all(|value| *value == TruthValue::False),
+        else_safe: evaluations.iter().all(|value| *value == TruthValue::True),
+    })
+}
+
+fn exact_membership_atom_spans(
+    fact: &BranchConditionFact,
+    expression: &ConditionExpressionFact,
+    context: &DynamicKeyGuardContext<'_>,
+) -> AHashSet<Span> {
+    let mut calls = Vec::new();
+    collect_calls_in_span(context.root_events, fact.condition_span, &mut calls);
+    calls
+        .into_iter()
+        .filter_map(|call| {
+            let FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                receiver_types,
+                args,
+                ..
+            } = call
+            else {
+                return None;
+            };
+            if !rule_target_matches_call(name, receiver_types, &context.semantics.membership_check) {
+                return None;
+            }
+            let subject = args.get(context.semantics.membership_subject_arg_index)?;
+            if !call_arg_mentions_key(subject, context.key_variables) {
+                return None;
+            }
+            let collection = receiver.as_deref().and_then(clean_overwrite_target_key)?;
+            if !collection_is_exact_denylist(&collection, fact.branch_span, context) {
+                return None;
+            }
+            condition_atom_containing(expression, *span)
+        })
+        .collect()
+}
+
+fn collect_calls_in_span<'a>(events: &'a [FlowEvent], wanted: Span, out: &mut Vec<&'a FlowEvent>) {
+    for event in events {
+        if let FlowEvent::Call { span, .. } = event {
+            if span_contains(wanted, *span) {
+                out.push(event);
+            }
+        }
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_calls_in_span(then_events, wanted, out);
+                collect_calls_in_span(else_events, wanted, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_calls_in_span(body, wanted, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_calls_in_span(body, wanted, out);
+                collect_calls_in_span(catch_events, wanted, out);
+                collect_calls_in_span(finally_events, wanted, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn call_arg_mentions_key(arg: &bonsai_lang_api::CallArg, key_variables: &AHashSet<String>) -> bool {
+    arg.place
+        .iter()
+        .chain(arg.source_names.iter())
+        .filter_map(|name| simple_place_key(name))
+        .any(|name| key_variables.contains(&name))
+}
+
+fn collection_is_exact_denylist(
+    collection: &str,
+    before: Span,
+    context: &DynamicKeyGuardContext<'_>,
 ) -> bool {
-    if !then_events.iter().any(|event| {
-        matches!(
-            event,
-            FlowEvent::Continue { .. } | FlowEvent::Return { .. } | FlowEvent::Throw { .. }
-        )
-    }) {
+    context
+        .file_index
+        .assignment_values
+        .iter()
+        .filter(|fact| {
+            fact.assignment_span.start < before.start
+                && fact
+                    .target
+                    .as_deref()
+                    .and_then(clean_overwrite_target_key)
+                    .as_deref()
+                    == Some(collection)
+        })
+        .next_back()
+        .is_some_and(|assignment| {
+            assignment.direct_call_name.as_deref().is_some_and(|callee| {
+                rule_target_matches_call(callee, &[], &context.semantics.collection_constructor)
+            }) && context.file_index.call_argument_values.iter().any(|argument| {
+                argument.argument_index == context.semantics.collection_values_arg_index
+                    && span_contains(assignment.value_span, argument.call_span)
+                    && exact_literal_values_for_argument(context.file_index, argument).is_some_and(|values| {
+                        exact_string_sets_equal(&values, &context.semantics.rejected_exact_values)
+                    })
+            })
+        })
+}
+
+fn exact_literal_values_for_argument(
+    file_index: &bonsai_lang_api::DeclIndex,
+    argument: &bonsai_lang_api::CallArgumentValueFact,
+) -> Option<Vec<String>> {
+    let flow = &argument.value_flow;
+    if flow.tuple_items.is_empty()
+        || !flow.aggregate_fields.is_empty()
+        || !flow.spreads.is_empty()
+        || !flow.tuple_items.iter().all(expression_flow_is_literal)
+    {
+        return None;
+    }
+    let values: Vec<_> = file_index
+        .strings
+        .iter()
+        .filter(|literal| span_contains(argument.argument_span, literal.span))
+        .filter_map(|literal| literal.static_value.clone())
+        .collect();
+    (values.len() == flow.tuple_items.len()).then_some(values)
+}
+
+fn expression_flow_is_literal(flow: &bonsai_lang_api::ExpressionFlow) -> bool {
+    flow.place.is_none()
+        && flow.projection.is_none()
+        && flow.source_names.is_empty()
+        && flow.call_sites.is_empty()
+        && flow.spreads.is_empty()
+        && flow.tuple_items.iter().all(expression_flow_is_literal)
+        && flow
+            .aggregate_fields
+            .iter()
+            .all(|field| expression_flow_is_literal(&field.value))
+}
+
+fn exact_string_sets_equal(left: &[String], right: &[String]) -> bool {
+    if left.len() != right.len() {
         return false;
     }
-    let compact: String = condition.chars().filter(|ch| !ch.is_whitespace()).collect();
-    key_variables
-        .iter()
-        .any(|key| prototype_key_denylist_condition(&compact, key))
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort();
+    right.sort();
+    left == right
 }
 
-fn prototype_key_denylist_condition(compact: &str, key: &str) -> bool {
-    let compares_all = DANGEROUS_KEYS
-        .iter()
-        .all(|dangerous| prototype_key_compare_present(compact, key, dangerous));
-    if compares_all {
-        return true;
+fn condition_atom_containing(expression: &ConditionExpressionFact, target: Span) -> Option<Span> {
+    match expression {
+        ConditionExpressionFact::Atom { span } => span_contains(*span, target).then_some(*span),
+        ConditionExpressionFact::Not { operand, .. } => condition_atom_containing(operand, target),
+        ConditionExpressionFact::All { operands, .. } | ConditionExpressionFact::Any { operands, .. } => {
+            operands
+                .iter()
+                .filter_map(|operand| condition_atom_containing(operand, target))
+                .min_by_key(|span| span.len())
+        }
+        ConditionExpressionFact::Equality { .. } | ConditionExpressionFact::Membership { .. } => None,
     }
-    DANGEROUS_KEYS.iter().all(|dangerous| {
-        compact.contains(&format!(r#""{dangerous}""#)) || compact.contains(&format!("'{dangerous}'"))
-    }) && (compact.contains(&format!(".includes({key})")) || compact.contains(&format!(".has({key})")))
 }
 
-fn prototype_key_compare_present(compact: &str, key: &str, dangerous: &str) -> bool {
-    [
-        format!(r#"{key}==="{dangerous}""#),
-        format!(r#"{key}=="{dangerous}""#),
-        format!(r#""{dangerous}"==={key}"#),
-        format!(r#""{dangerous}"=={key}"#),
-        format!("{key}==='{dangerous}'"),
-        format!("{key}=='{dangerous}'"),
-        format!("'{dangerous}'==={key}"),
-        format!("'{dangerous}'=={key}"),
-    ]
-    .iter()
-    .any(|needle| compact.contains(needle))
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TruthValue {
+    True,
+    False,
+    Unknown,
+}
+
+fn evaluate_condition(
+    expression: &ConditionExpressionFact,
+    rejected_value: &str,
+    key_variables: &AHashSet<String>,
+    membership_atoms: &AHashSet<Span>,
+) -> TruthValue {
+    match expression {
+        ConditionExpressionFact::Atom { span } => {
+            if membership_atoms.contains(span) {
+                TruthValue::True
+            } else {
+                TruthValue::Unknown
+            }
+        }
+        ConditionExpressionFact::Not { operand, .. } => invert_truth(evaluate_condition(
+            operand,
+            rejected_value,
+            key_variables,
+            membership_atoms,
+        )),
+        ConditionExpressionFact::All { operands, .. } => {
+            let mut saw_unknown = false;
+            for operand in operands {
+                match evaluate_condition(operand, rejected_value, key_variables, membership_atoms) {
+                    TruthValue::False => return TruthValue::False,
+                    TruthValue::Unknown => saw_unknown = true,
+                    TruthValue::True => {}
+                }
+            }
+            if saw_unknown {
+                TruthValue::Unknown
+            } else {
+                TruthValue::True
+            }
+        }
+        ConditionExpressionFact::Any { operands, .. } => {
+            let mut saw_unknown = false;
+            for operand in operands {
+                match evaluate_condition(operand, rejected_value, key_variables, membership_atoms) {
+                    TruthValue::True => return TruthValue::True,
+                    TruthValue::Unknown => saw_unknown = true,
+                    TruthValue::False => {}
+                }
+            }
+            if saw_unknown {
+                TruthValue::Unknown
+            } else {
+                TruthValue::False
+            }
+        }
+        ConditionExpressionFact::Equality {
+            relation,
+            left,
+            right,
+            ..
+        } => evaluate_key_literal_equality(*relation, left, right, rejected_value, key_variables)
+            .or_else(|| evaluate_key_literal_equality(*relation, right, left, rejected_value, key_variables))
+            .unwrap_or(TruthValue::Unknown),
+        ConditionExpressionFact::Membership { .. } => TruthValue::Unknown,
+    }
+}
+
+fn evaluate_key_literal_equality(
+    relation: ConditionEquality,
+    key: &ConditionOperandFact,
+    literal: &ConditionOperandFact,
+    rejected_value: &str,
+    key_variables: &AHashSet<String>,
+) -> Option<TruthValue> {
+    if !condition_operand_mentions_key(key, key_variables) {
+        return None;
+    }
+    let literal = literal.static_string.as_deref()?;
+    let equal = literal == rejected_value;
+    Some(match (relation, equal) {
+        (ConditionEquality::Equal, true) | (ConditionEquality::NotEqual, false) => TruthValue::True,
+        (ConditionEquality::Equal, false) | (ConditionEquality::NotEqual, true) => TruthValue::False,
+    })
+}
+
+fn condition_operand_mentions_key(operand: &ConditionOperandFact, key_variables: &AHashSet<String>) -> bool {
+    operand
+        .value_flow
+        .place
+        .iter()
+        .chain(operand.value_flow.source_names.iter())
+        .filter_map(|name| simple_place_key(name))
+        .any(|name| key_variables.contains(&name))
+}
+
+fn invert_truth(value: TruthValue) -> TruthValue {
+    match value {
+        TruthValue::True => TruthValue::False,
+        TruthValue::False => TruthValue::True,
+        TruthValue::Unknown => TruthValue::Unknown,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bonsai_lang_api::{ArgumentPassingMode, CallArg, CallKind, LoopKind};
+    use bonsai_lang_api::CallArg;
 
     fn span(start: u64, end: u64) -> Span {
         Span::new(FileId::new(0), start, end)
     }
 
-    fn arg(arg_span: Span, value: &str, place: Option<&str>, sources: &[&str]) -> CallArg {
+    fn operand(name: Option<&str>, literal: Option<&str>) -> ConditionOperandFact {
+        ConditionOperandFact {
+            span: span(0, 1),
+            value_flow: name
+                .map(bonsai_lang_api::ExpressionFlow::from_place)
+                .unwrap_or_default(),
+            static_string: literal.map(str::to_string),
+        }
+    }
+
+    fn recursive_call_arg(place: &str, source_names: &[&str]) -> CallArg {
         CallArg {
-            span: arg_span,
-            passing_mode: ArgumentPassingMode::Value,
+            span: span(0, 1),
+            passing_mode: bonsai_lang_api::ArgumentPassingMode::Value,
             name: None,
-            value_text: value.to_string(),
-            place: place.map(str::to_string),
-            source_names: sources.iter().map(|source| (*source).to_string()).collect(),
+            value_text: String::new(),
+            place: Some(place.to_string()),
+            source_names: source_names.iter().map(|name| (*name).to_string()).collect(),
         }
     }
 
-    fn call(call_span: Span, name: &str, receiver: Option<&str>, args: Vec<CallArg>) -> FlowEvent {
-        FlowEvent::Call {
-            span: call_span,
-            name: name.to_string(),
-            receiver: receiver.map(str::to_string),
+    #[test]
+    fn recursive_call_uses_projected_argument_index_as_dynamic_key() {
+        let call = FlowEvent::Call {
+            span: span(0, 1),
+            name: "merge".to_string(),
+            receiver: None,
             receiver_types: Vec::new(),
-            call_kind: CallKind::Method,
-            args,
-        }
-    }
-
-    fn dynamic_write(call_span: Span) -> FlowEvent {
-        call(
-            call_span,
-            "target.__setitem__",
-            Some("target"),
-            vec![
-                arg(
-                    span(call_span.start + 1, call_span.start + 2),
-                    "key",
-                    Some("key"),
-                    &["key"],
-                ),
-                arg(
-                    span(call_span.start + 3, call_span.end),
-                    "source[key]",
-                    Some("source.key"),
-                    &["source", "key", "source.key"],
-                ),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![
+                recursive_call_arg("target.key", &["target", "key", "target.key"]),
+                recursive_call_arg("source.key", &["source", "key", "source.key"]),
             ],
-        )
-    }
+        };
 
-    #[test]
-    fn denylist_branch_guards_only_its_structured_index_variable() {
-        let sink_span = span(80, 100);
-        let sink = dynamic_write(sink_span);
-        let keys = prototype_sink_key_variables(&sink);
-        assert_eq!(keys, AHashSet::from_iter(["key".to_string()]));
-        let events = vec![FlowEvent::Loop {
-            span: span(0, 110),
-            loop_kind: LoopKind::ForEach,
-            body: vec![
-                FlowEvent::Branch {
-                    span: span(10, 70),
-                    condition: Some(
-                        r#"key === "__proto__" || key === "constructor" || key === "prototype""#.to_string(),
-                    ),
-                    then_events: vec![FlowEvent::Continue {
-                        span: span(60, 68),
-                        label: None,
-                    }],
-                    else_events: Vec::new(),
-                },
-                sink,
-            ],
-        }];
-        let mut guarded = false;
-
-        assert!(flow_guard_state_at_sink(&events, sink_span, &keys, &mut guarded));
-        assert!(guarded);
-    }
-
-    #[test]
-    fn conditional_freeze_does_not_guard_all_paths() {
-        let sink_span = span(80, 100);
-        let sink = dynamic_write(sink_span);
-        let keys = prototype_sink_key_variables(&sink);
-        let freeze = call(
-            span(20, 40),
-            "Object.freeze",
-            Some("Object"),
-            vec![arg(
-                span(30, 39),
-                "Object.prototype",
-                Some("Object.prototype"),
-                &[],
-            )],
+        assert_eq!(
+            dynamic_sink_key_variables(&call),
+            AHashSet::from_iter(["key".to_string()])
         );
-        let events = vec![
-            FlowEvent::Branch {
-                span: span(10, 60),
-                condition: Some("flag".to_string()),
-                then_events: vec![freeze],
-                else_events: Vec::new(),
-            },
-            sink,
-        ];
-        let mut guarded = false;
+    }
 
-        assert!(flow_guard_state_at_sink(&events, sink_span, &keys, &mut guarded));
-        assert!(!guarded);
+    #[test]
+    fn typed_disjunction_excludes_every_declared_rejected_value() {
+        let rejected = ["__proto__", "constructor", "prototype"];
+        let expression = ConditionExpressionFact::Any {
+            span: span(0, 30),
+            operands: rejected
+                .iter()
+                .enumerate()
+                .map(|(index, value)| ConditionExpressionFact::Equality {
+                    span: span(index as u64, index as u64 + 1),
+                    relation: ConditionEquality::Equal,
+                    left: operand(Some("key"), None),
+                    right: operand(None, Some(value)),
+                })
+                .collect(),
+        };
+        let keys = AHashSet::from_iter(["key".to_string()]);
+        let atoms = AHashSet::new();
+
+        assert!(rejected
+            .iter()
+            .all(|value| { evaluate_condition(&expression, value, &keys, &atoms) == TruthValue::True }));
+    }
+
+    #[test]
+    fn unknown_conjunct_does_not_claim_a_safe_false_arm() {
+        let membership_span = span(1, 2);
+        let expression = ConditionExpressionFact::All {
+            span: span(0, 4),
+            operands: vec![
+                ConditionExpressionFact::Atom {
+                    span: membership_span,
+                },
+                ConditionExpressionFact::Atom { span: span(3, 4) },
+            ],
+        };
+        let keys = AHashSet::from_iter(["key".to_string()]);
+        let atoms = AHashSet::from_iter([membership_span]);
+
+        assert_eq!(
+            evaluate_condition(&expression, "__proto__", &keys, &atoms),
+            TruthValue::Unknown
+        );
     }
 }

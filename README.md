@@ -57,6 +57,13 @@ IDG path also lowers transfer facts once: it spools the compact typed stitch
 record and canonical node map, then replays them one file segment at a time
 without reparsing or a second transfer pass.
 
+Large workspaces do not retain every function body beside the graph. The
+workspace linker keeps declaration, type, module, inheritance, and import
+headers; exact consumers hydrate one adapter-lowered body at a time and remap
+it to those stable symbols. A byte-weighted hot cache may retain recently used
+bodies, but eviction changes only recomputation and wall time—not facts or
+coverage.
+
 ## Open Source On Purpose
 
 Enterprise-grade code intelligence should not be locked behind paywalls.
@@ -100,15 +107,25 @@ coverage includes the immutable compiler-object generation; an edit rebuilds
 only mismatched objects while unchanged compressed payloads are copied into
 the next atomic generation. Compiler concurrency is weighted by actual source
 unit size, the process's current resident set, safety headroom, and the detected
-host/container memory budget. A 3 GiB budget serializes exact compiler units;
+host/container memory budget. Linux detection follows the process's active
+nested cgroup v1/v2 path as well as root controller files. A 3 GiB budget
+serializes exact compiler units;
 resource scheduling can reduce parallelism but never files, graph closure, or
-facts. Cache stats validate sidecar payloads, not just path/size metadata, so a corrupt
-same-size factstore is reported stale instead of silently treated as warm.
+facts. Revisited exact file bodies share a byte-weighted hot cache sized from
+that same budget. Eviction or an undersized body cache only causes exact
+Tree-sitter lowering to be replayed; an oversize body is still analyzed and is
+simply not retained. Cache stats validate sidecar payloads, not just path/size
+metadata, so a corrupt same-size factstore is reported stale instead of
+silently treated as warm. IDG publication is single-flight in process and
+target-locked across processes: waiters reuse a peer's validated immutable
+generation, and only lock-proven staging files from terminated writers are
+cleaned. Saved-file edits take generation ownership before VFS mutation, so
+analysis never mixes old compiler indexes with new source text.
 The retrieval sidecar is a deterministic candidate index over persisted
 facts. Exact indexes decide candidates; canonical facts and semantic graph
 verification decide truth. Vector similarity is never evidence. Search and
 literal-filtered browse commands can validate a fresh retrieval sidecar from
-source/dependency/build fingerprints before candidate lookup; large-workspace
+source/dependency/schema fingerprints before candidate lookup; large-workspace
 inspect can use that warmed sidecar only to select a pre-open file scope. All
 displayed rows and chains are then hydrated through canonical APIs. Missing or
 stale sidecars fall back to exact syntax facts. Search may build retrieval on
@@ -363,6 +380,7 @@ pages, and `--format json --no-color --no-progress` for scripts.
 
 - `BONSAI_RULES_DIR` - alternative rulepack location
 - `BONSAI_PARSE_TIMEOUT_MS` - optional per-file parse timeout; unset or `0` is uncapped
+- `BONSAI_MEMORY_BUDGET_MB` - lower the detected memory budget; this changes concurrency and cache retention, never analyzed facts
 - `BONSAI_NO_DATAFLOW=1` - skip explicit dataflow prewarm and trace eager hydration
 - `BONSAI_THEME` - terminal theme
 - `BONSAI_WORKSPACE_DIR` - per-workspace state directory

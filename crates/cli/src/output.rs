@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 #[derive(Default)]
 struct OutputState {
@@ -24,8 +24,12 @@ fn state() -> &'static Mutex<OutputState> {
     OUTPUT.get_or_init(|| Mutex::new(OutputState::default()))
 }
 
+fn lock_state() -> MutexGuard<'static, OutputState> {
+    state().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub(crate) fn init(path: Option<&Path>) -> Result<()> {
-    let mut state = state().lock().expect("output sink lock");
+    let mut state = lock_state();
     state.error = None;
     state.writer = match path {
         Some(path) => {
@@ -36,10 +40,6 @@ pub(crate) fn init(path: Option<&Path>) -> Result<()> {
         None => None,
     };
     Ok(())
-}
-
-pub(crate) fn is_enabled() -> bool {
-    state().lock().expect("output sink lock").writer.is_some()
 }
 
 pub(crate) fn write_line(s: &str) -> bool {
@@ -55,7 +55,7 @@ pub(crate) fn write_raw_counted(s: &str) -> bool {
 }
 
 fn write_parts(bytes: &[u8], suffix: Option<&[u8]>, visible: &str, trailing_newline: bool) -> bool {
-    let mut state = state().lock().expect("output sink lock");
+    let mut state = lock_state();
     let Some(writer) = state.writer.as_mut() else {
         return false;
     };
@@ -73,19 +73,16 @@ pub(crate) fn with_writer<T, F>(f: F) -> Result<T>
 where
     F: FnOnce(&mut dyn Write) -> Result<T>,
 {
-    if is_enabled() {
-        let mut state = state().lock().expect("output sink lock");
-        if let Some(error) = state.error.take() {
-            anyhow::bail!("writing output file failed: {error}");
-        }
-        let writer = state
-            .writer
-            .as_mut()
-            .expect("output sink enabled but writer missing");
+    let mut state = lock_state();
+    if let Some(error) = state.error.take() {
+        anyhow::bail!("writing output file failed: {error}");
+    }
+    if let Some(writer) = state.writer.as_mut() {
         let result = f(writer)?;
         writer.flush().context("flushing output file")?;
         Ok(result)
     } else {
+        drop(state);
         let stdout = std::io::stdout();
         let mut writer = BufWriter::with_capacity(1024 * 1024, stdout.lock());
         let result = f(&mut writer)?;
@@ -95,7 +92,7 @@ where
 }
 
 pub(crate) fn finish() -> Result<()> {
-    let mut state = state().lock().expect("output sink lock");
+    let mut state = lock_state();
     if let Some(error) = state.error.take() {
         anyhow::bail!("writing output file failed: {error}");
     }

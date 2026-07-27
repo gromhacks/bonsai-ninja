@@ -38,7 +38,7 @@ const TYPESCRIPT_VOCAB: ModifierVocabulary = ModifierVocabulary {
 use bonsai_lang_javascript::{
     apply_javascript_getter_property_sources, apply_js_ts_commonjs_named_export_aliases,
     apply_js_ts_default_export_aliases, js_ts_imports, js_ts_module_segments, js_ts_require_calls,
-    JS_TS_MODULE_RESOLUTION_EXTENSIONS,
+    populate_ecmascript_compiler_facts, JS_TS_MODULE_RESOLUTION_EXTENSIONS,
 };
 use tree_sitter::{Language, Tree};
 
@@ -114,7 +114,9 @@ impl LanguageAdapter for TypeScriptAdapter {
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-            apply_js_ts_commonjs_named_export_aliases(&mut decl_index, &tree, snapshot.text.as_bytes(), file);
+            let src = snapshot.text.as_bytes();
+            populate_ecmascript_compiler_facts(&mut decl_index, &tree, file, src);
+            apply_js_ts_commonjs_named_export_aliases(&mut decl_index, &tree, src, file);
         }
         // TS/JS module = workspace-relative file path with `.ts`/`.tsx` (etc.) stripped.
         let module_segments = ctx

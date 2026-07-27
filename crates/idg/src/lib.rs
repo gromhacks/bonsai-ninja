@@ -73,12 +73,18 @@ pub mod csr;
 pub mod dict;
 pub mod edge;
 pub mod error;
+mod external_relation;
+mod fact_source_index;
 mod function_summary;
 pub mod node;
 pub mod place;
+mod positioned_io;
 pub mod query;
+mod reverse_scalar_index;
+mod reverse_symbolic_index;
 pub mod segment;
 pub mod service;
+mod spill_set;
 pub mod symbolic;
 pub mod transfer;
 pub mod workspace;
@@ -90,7 +96,7 @@ pub use csr::EdgeCsr;
 pub use query::ReachabilityIndex;
 pub use service::{
     expand_bare_seed_names_with_descendants, CallRetAssignmentTarget, CrossCallEdge, CrossCallRelation,
-    IdgClosureEvidence, IdgQueryService, PointKind, PointRef, WsNodeId,
+    IdgClosureEvidence, IdgQueryService, IdgTargetRelevance, PointKind, PointRef, WsNodeId,
 };
 pub use symbolic::{
     SymbolicFieldBase, SymbolicFieldGraph, SymbolicFieldTransform, SymbolicFieldTransformKind,

@@ -61,11 +61,21 @@ impl NodeBitSet {
 
     /// Set the bit for `node`. Out-of-range ids are a no-op.
     pub fn set(&mut self, node: NodeId) {
+        let _ = self.insert(node);
+    }
+
+    /// Set `node`, returning whether an in-range bit changed from zero to one.
+    #[must_use]
+    pub fn insert(&mut self, node: NodeId) -> bool {
         let i = node.0 as usize;
         if i >= self.len {
-            return;
+            return false;
         }
-        self.bits[i >> 6] |= 1u64 << (i & 63);
+        let mask = 1u64 << (i & 63);
+        let word = &mut self.bits[i >> 6];
+        let changed = *word & mask == 0;
+        *word |= mask;
+        changed
     }
 
     /// Clear the bit for `node`. Out-of-range ids are a no-op.

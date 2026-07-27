@@ -121,8 +121,9 @@ fn paths_enumerates_unique_paths_in_cut() {
     // Diamond.
     let edges = vec![edge(0, 1), edge(0, 2), edge(1, 3), edge(2, 3)];
     let rix = ReachabilityIndex::new(4, &edges);
-    let paths = rix.paths(NodeId(0), NodeId(3), 10, 5);
+    let (paths, truncation) = rix.paths_with_truncation(NodeId(0), NodeId(3), 10, 5);
     assert_eq!(paths.len(), 2);
+    assert_eq!(truncation, bonsai_callgraph::PathTruncation::None);
     for p in &paths {
         assert_eq!(p.first(), Some(&NodeId(0)));
         assert_eq!(p.last(), Some(&NodeId(3)));
@@ -131,11 +132,13 @@ fn paths_enumerates_unique_paths_in_cut() {
 
 #[test]
 fn paths_respects_max_paths_budget() {
-    // Linear chain of length 4.
-    let edges = vec![edge(0, 1), edge(1, 2), edge(2, 3)];
+    // Diamond contains two complete paths; retaining one must report that the
+    // diagnostic result is a prefix.
+    let edges = vec![edge(0, 1), edge(0, 2), edge(1, 3), edge(2, 3)];
     let rix = ReachabilityIndex::new(4, &edges);
-    let paths = rix.paths(NodeId(0), NodeId(3), 1, 10);
+    let (paths, truncation) = rix.paths_with_truncation(NodeId(0), NodeId(3), 1, 10);
     assert_eq!(paths.len(), 1);
+    assert_eq!(truncation, bonsai_callgraph::PathTruncation::MaxPaths);
 }
 
 #[test]
@@ -143,17 +146,58 @@ fn paths_respects_max_len_budget() {
     // Chain 0 → 1 → 2 → 3 (length 4 nodes).
     let edges = vec![edge(0, 1), edge(1, 2), edge(2, 3)];
     let rix = ReachabilityIndex::new(4, &edges);
-    let paths = rix.paths(NodeId(0), NodeId(3), 10, 3);
+    let (paths, truncation) = rix.paths_with_truncation(NodeId(0), NodeId(3), 10, 3);
     // Only path is length 4; max_len=3 cuts it.
     assert_eq!(paths.len(), 0);
+    assert_eq!(truncation, bonsai_callgraph::PathTruncation::MaxDepth);
+}
+
+#[test]
+fn zero_path_and_length_budgets_report_the_applied_bound() {
+    let edges = vec![edge(0, 1)];
+    let rix = ReachabilityIndex::new(2, &edges);
+
+    let (paths, truncation) = rix.paths_with_truncation(NodeId(0), NodeId(1), 0, 2);
+    assert!(paths.is_empty());
+    assert_eq!(truncation, bonsai_callgraph::PathTruncation::MaxPaths);
+
+    let (paths, truncation) = rix.paths_with_truncation(NodeId(0), NodeId(1), 1, 0);
+    assert!(paths.is_empty());
+    assert_eq!(truncation, bonsai_callgraph::PathTruncation::MaxDepth);
+}
+
+#[test]
+fn unbounded_diagnostic_options_do_not_preallocate_option_sized_buffers() {
+    let edges = vec![edge(0, 1)];
+    let rix = ReachabilityIndex::new(2, &edges);
+
+    let (paths, truncation) = rix.paths_with_truncation(NodeId(0), NodeId(1), usize::MAX, usize::MAX);
+    assert_eq!(paths, vec![vec![NodeId(0), NodeId(1)]]);
+    assert_eq!(truncation, bonsai_callgraph::PathTruncation::None);
+}
+
+#[test]
+fn deep_diagnostic_path_enumeration_uses_an_explicit_stack() {
+    const NODE_COUNT: u32 = 25_000;
+    let edges = (0..NODE_COUNT - 1)
+        .map(|node| edge(node, node + 1))
+        .collect::<Vec<_>>();
+    let rix = ReachabilityIndex::new(NODE_COUNT as usize, &edges);
+
+    let (paths, truncation) =
+        rix.paths_with_truncation(NodeId(0), NodeId(NODE_COUNT - 1), 1, NODE_COUNT as usize);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].len(), NODE_COUNT as usize);
+    assert_eq!(truncation, bonsai_callgraph::PathTruncation::None);
 }
 
 #[test]
 fn paths_skips_when_no_reachability() {
     let edges = vec![edge(0, 1), edge(2, 3)];
     let rix = ReachabilityIndex::new(4, &edges);
-    let paths = rix.paths(NodeId(0), NodeId(3), 10, 10);
+    let (paths, truncation) = rix.paths_with_truncation(NodeId(0), NodeId(3), 10, 10);
     assert!(paths.is_empty());
+    assert_eq!(truncation, bonsai_callgraph::PathTruncation::None);
 }
 
 #[test]
@@ -161,9 +205,10 @@ fn paths_handles_self_target() {
     // src == sink edge case: the path is [src].
     let edges = vec![edge(0, 1)];
     let rix = ReachabilityIndex::new(2, &edges);
-    let paths = rix.paths(NodeId(0), NodeId(0), 10, 10);
+    let (paths, truncation) = rix.paths_with_truncation(NodeId(0), NodeId(0), 10, 10);
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0], vec![NodeId(0)]);
+    assert_eq!(truncation, bonsai_callgraph::PathTruncation::None);
 }
 
 #[test]
@@ -172,10 +217,11 @@ fn paths_avoids_cycle_revisits() {
     // tracking should prevent re-entering 1.
     let edges = vec![edge(0, 1), edge(1, 1), edge(1, 2)];
     let rix = ReachabilityIndex::new(3, &edges);
-    let paths = rix.paths(NodeId(0), NodeId(2), 10, 10);
+    let (paths, truncation) = rix.paths_with_truncation(NodeId(0), NodeId(2), 10, 10);
     // Single non-cyclic path: 0 → 1 → 2.
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0], vec![NodeId(0), NodeId(1), NodeId(2)]);
+    assert_eq!(truncation, bonsai_callgraph::PathTruncation::None);
 }
 
 #[test]
@@ -223,8 +269,9 @@ fn paths_in_cut_uses_precomputed_cut() {
     let edges = vec![edge(0, 1), edge(0, 2), edge(1, 3), edge(2, 3)];
     let rix = ReachabilityIndex::new(4, &edges);
     let cut = rix.cut(&[NodeId(0)], &[NodeId(3)]);
-    let paths = rix.paths_in_cut(NodeId(0), NodeId(3), &cut, 10, 5);
+    let (paths, truncation) = rix.paths_in_cut_with_truncation(NodeId(0), NodeId(3), &cut, 10, 5);
     assert_eq!(paths.len(), 2);
+    assert_eq!(truncation, bonsai_callgraph::PathTruncation::None);
 }
 
 #[test]
