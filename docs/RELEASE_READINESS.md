@@ -25,20 +25,23 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated on 2026-07-25:
+Validated on 2026-07-27:
 
-- `cargo clippy --workspace --all-targets --release --locked -- -D warnings` passed;
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` passed;
   this strict gate compiled the complete workspace and every test target.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --release --locked` passed.
 - `cargo fmt --all -- --check` and `git diff --check` passed.
-- `cargo test --workspace --release --locked -- --skip elasticsearch_` passed
-  across all crates, integration binaries, and doc tests. The four
-  Elasticsearch tests were run separately under the 3 GiB budget (4/4) and
-  filtered from the duplicate workspace invocation.
-- Release suites passed for callgraph, resolver, IDG, taint, security, SDK/CLI
+- `cargo test --workspace --locked` passed in one exhaustive invocation
+  across all crates, integration binaries, adapter suites, and doc tests.
+- Behavioral suites passed for callgraph, resolver, IDG, taint, security, SDK/CLI
   parity, the 1,076-case per-language CLI matrix, the 121-case end-to-end taint
   engine suite, conformance architecture invariants, and the exhaustive
   rule-example collision validator.
+- The 1,441-case taint matrix now enforces positive and negative contracts for
+  every supported language. Valid-source conformance rejects parser/adapter
+  diagnostics, malformed-source conformance requires an explicit incomplete
+  parser scope, and the capability matrix fails on every unexplained
+  `Missing` cell.
 - Focused regressions passed for generation-scoped IDG pipeline-hash reuse,
   fixed-width symbolic fact/transform paging, external-run merge boundaries,
   and every symbolic transform algebra variant.
@@ -80,13 +83,28 @@ with:
 
 - `analysis_complete: true` and no incomplete reasons.
 - 0 findings at the production profile's severity threshold.
-- 41.54 seconds wall time.
-- 443,482,112 bytes maximum resident memory (about 422.9 MiB).
+- 41.58 seconds wall time.
+- 441,139,200 bytes maximum resident memory (about 420.7 MiB).
 - 0 swaps under `BONSAI_MEMORY_BUDGET_MB=3072`.
 
 This is a correctness smoke, not a claim that an empty finding set proves the
 absence of all defects. It proves that the current workspace parses, resolves,
 and completes the requested production analysis without hidden truncation.
+
+## Structural tree command
+
+`tree` is a filesystem navigation command by default. It does not open the
+compiler or run security analysis unless `--findings`, `--severity`, or
+`--rules-dir` explicitly opts into annotations. Scanner-owned `.bonsai`,
+`.bonsai-agent`, and transient case-probe state are excluded from the
+structural view.
+
+The release binary rendered `examples/python/mega_flow` as 8 files and one
+directory in 0.53 seconds with 9,306,112 bytes maximum RSS. The output contains
+neither a synthetic `0 findings` claim nor a severity footer. `--all` lifts
+presentation caps without enabling semantic work. The explicit annotated mode
+was also verified: it reports one `mega_flow` root, 8 files, one directory,
+zero absolute locators, and `analysis_complete: true`.
 
 ## Elasticsearch scale result
 
@@ -118,8 +136,8 @@ The 2026-07-26 run completed successfully under
 | Findings at production threshold | 0 |
 | `analysis_complete` | `true` |
 | Incomplete reasons | 0 |
-| Wall time | 170.55 s |
-| Maximum RSS | 1,661,304,832 bytes (about 1.55 GiB) |
+| Wall time | 169.71 s |
+| Maximum RSS | 1,665,384,448 bytes (about 1.55 GiB) |
 | Swaps | 0 |
 
 The result is not capped. `--all` removes output paging, while the semantic
@@ -130,9 +148,9 @@ explicit opt-in when a consumer requires every propagation record
 materialized.
 
 The same multi-file Python compiler flow was also run with 512 MiB and
-3,072 MiB scheduling budgets. Both runs completed with one finding and
-byte-identical JSON (SHA-256
-`4f15f82d48a161e517e4ddbb75ccf40d809567c5f3671e2f0139b63a26ec3cdd`).
+3,072 MiB scheduling budgets. Both runs completed with no incomplete reasons
+and byte-identical JSON (SHA-256
+`d2ac3c461569283b10855eff4bfda012a9be03c7480c2f09003703801ee8fc02`).
 This is a direct regression check that a smaller budget changes concurrency,
 cache retention, and spill frequency only—not analyzed syntax or semantic
 results.

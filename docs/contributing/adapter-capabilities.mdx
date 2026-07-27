@@ -147,7 +147,10 @@ registered adapter and writes generated docs/data to
 generated files are the machine-readable view; the table above is the
 review-oriented summary. `bonsai-ninja diagnostics <workspace>` and
 `Project::diagnostics_report()` expose the same registered adapter
-capability declarations that the engine consults.
+capability declarations that the engine consults. The test fails on every
+applicable `Missing` cell; a language that genuinely lacks the construct must
+declare the fixture cell not applicable with a language-semantic rationale.
+This prevents a generated red cell from surviving a green CI run.
 
 ```sh
 # detect drift

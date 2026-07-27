@@ -595,24 +595,29 @@ bounded prefix, not the complete label set for that row. Use
 
 ## Navigation
 
-`tree` and `read-file` combine structural facts with finding and flow marks.
-Pass `--rules-dir` when the rulepack is not auto-discovered.
+`tree` is a fast structural filesystem view by default: it neither opens the
+compiler nor runs security analysis. Pass `--findings` to opt into finding,
+flow, and cross-file call annotations; pass `--rules-dir` when the rulepack is
+not auto-discovered. `--severity` and `--rules-dir` also enable the annotated
+path. `read-file` opens only the selected file by default and enables its
+semantic overlays when their corresponding options are requested.
 
 ```bash
 bonsai-ninja tree ./src --max-depth 3 --compact
+bonsai-ninja tree ./src --findings --severity high
 bonsai-ninja read-file ./src auth/verify_token.py --lines 1:80 --from request.args --to os.system
 ```
 
 | Command | Purpose | Key flags |
 |---|---|---|
-| `tree` | Workspace tree with file-level flow, edge, finding, and security annotations. | `--max-depth`, `--file`, `--exclude-file`, `--severity`, `--limit`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
+| `tree` | Fast structural workspace tree; semantic flow, edge, finding, and security annotations are opt-in. | `--max-depth`, `--file`, `--exclude-file`, `--findings`, `--severity`, `--limit`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
 | `read-file` | Source view for one file with inline marks and cross-file caller/callee bodies. | `--symbol`, `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
 
-`tree` and `read-file` are semantic-only for flow-bearing context. JSON
-includes top-level `analysis_complete` and
-`analysis_incomplete_reasons`. `tree` marks depth, limit, id-list, and
-cross-file-edge caps incomplete; use `--all` and avoid restrictive
-`--max-depth` when you need every node and evidence id. `read-file`
+JSON includes top-level `analysis_complete` and
+`analysis_incomplete_reasons`. Structural `tree` marks depth and child limits
+incomplete. Annotated `tree` additionally marks id-list and cross-file-edge
+caps incomplete; use `--all` and avoid restrictive `--max-depth` when you need
+every node and evidence id. `read-file`
 finding digests repeat their own completion fields. If caller/callee bodies
 are omitted by the default inline-body cap, the view is marked incomplete;
 use `--all` or `--max-inlined-bodies 0` when you need every cross-file body.

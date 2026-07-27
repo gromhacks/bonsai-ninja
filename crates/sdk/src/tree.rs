@@ -13,7 +13,9 @@
 //! `docs/contributing/architecture.mdx`.
 
 use ahash::AHashMap;
-use bonsai_browse::{file_path_excluded_by_filters, file_path_matches_filter, Locator};
+use bonsai_browse::{
+    file_path_excluded_by_filters, file_path_matches_filter, workspace_relative_path, Locator,
+};
 use bonsai_callgraph::EdgeKind;
 use bonsai_common::{FuncId, Precision, SymbolId};
 use bonsai_security::rule::Severity;
@@ -248,7 +250,7 @@ pub fn tree(
     if let Some(rep) = report.as_ref() {
         for cf in &rep.findings {
             findings_by_file
-                .entry(cf.finding.sink.file.clone())
+                .entry(workspace_relative_path(ws, &cf.finding.sink.file))
                 .or_default()
                 .push(cf.finding.clone());
         }
@@ -264,13 +266,14 @@ pub fn tree(
         .into_iter()
         .filter_map(|fid| {
             let abs = ws.vfs().path(fid).ok()?;
-            let rel = abs.display().to_string();
+            let absolute = abs.display().to_string();
+            let rel = workspace_relative_path(ws, &absolute);
             if let Some(needle) = filters.file {
-                if !file_path_matches_filter(ws, &rel, needle) {
+                if !file_path_matches_filter(ws, &absolute, needle) {
                     return None;
                 }
             }
-            if file_path_excluded_by_filters(ws, &rel, filters.exclude_files) {
+            if file_path_excluded_by_filters(ws, &absolute, filters.exclude_files) {
                 return None;
             }
             Some((rel, fid))
@@ -282,11 +285,19 @@ pub fn tree(
 
     let mut tree_root = DirBuilder::default();
     let mut finding_incomplete_reasons: Vec<String> = Vec::new();
+    let root_name = ws
+        .db()
+        .workspace_root()
+        .and_then(|root| root.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| ".".to_string());
     for (rel, file_id) in &files {
-        let segments: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
-        if segments.is_empty() {
+        let relative_segments: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+        if relative_segments.is_empty() {
             continue;
         }
+        let mut segments = Vec::with_capacity(relative_segments.len() + 1);
+        segments.push(root_name.as_str());
+        segments.extend(relative_segments);
         let language = ws
             .db()
             .adapter_for(*file_id)
@@ -328,7 +339,7 @@ pub fn tree(
             .iter()
             .filter(|f| f.severity.is_some())
             .max_by_key(|f| f.severity)
-            .map(build_most_severe_flow);
+            .map(|finding| build_most_severe_flow(finding, ws));
 
         let callers_in = cross_edges
             .into_callers
@@ -509,10 +520,12 @@ fn build_cross_edges(graph: &bonsai_callgraph::ResolvedCallGraph, ws: &Workspace
     {
         let caller_file = global
             .declaring_file(SymbolId::new(edge.from.raw()))
-            .and_then(|fid| ws.vfs().path(fid).ok().map(|p| p.display().to_string()));
+            .and_then(|fid| ws.vfs().path(fid).ok().map(|p| p.display().to_string()))
+            .map(|path| workspace_relative_path(ws, &path));
         let callee_file = global
             .declaring_file(SymbolId::new(edge.to.raw()))
-            .and_then(|fid| ws.vfs().path(fid).ok().map(|p| p.display().to_string()));
+            .and_then(|fid| ws.vfs().path(fid).ok().map(|p| p.display().to_string()))
+            .map(|path| workspace_relative_path(ws, &path));
         let (Some(caller_path), Some(callee_path)) = (caller_file, callee_file) else {
             continue;
         };
@@ -571,10 +584,12 @@ fn func_to_locator(func: FuncId, ws: &Workspace) -> Locator {
     let Some(decl) = global.decl_of(symbol) else {
         return Locator::external(format!("FuncId({})", func.raw()));
     };
-    Locator::from_span(decl.span, ws)
+    let mut locator = Locator::from_span(decl.span, ws);
+    locator.file = workspace_relative_path(ws, &locator.file);
+    locator
 }
 
-fn build_most_severe_flow(f: &Finding) -> MostSevereFlowSummary {
+fn build_most_severe_flow(f: &Finding, ws: &Workspace) -> MostSevereFlowSummary {
     MostSevereFlowSummary {
         flow_id: f
             .representative_flow_id
@@ -582,16 +597,16 @@ fn build_most_severe_flow(f: &Finding) -> MostSevereFlowSummary {
             .unwrap_or_else(|| "F:0000000000000000".to_string()),
         finding_id: Some(f.finding_id.clone()),
         severity: f.severity.unwrap_or(Severity::Info),
-        enters_at: match_to_locator(&f.source),
-        exits_at: match_to_locator(&f.sink),
+        enters_at: match_to_locator(&f.source, ws),
+        exits_at: match_to_locator(&f.sink, ws),
         chain_display: f.chain_display.clone(),
         extends_beyond_workspace: false,
     }
 }
 
-fn match_to_locator(m: &FindingMatch) -> Locator {
+fn match_to_locator(m: &FindingMatch, ws: &Workspace) -> Locator {
     Locator {
-        file: m.file.clone(),
+        file: workspace_relative_path(ws, &m.file),
         line: m.line,
         column: m.column,
         decl: m.enclosing_fn.clone(),

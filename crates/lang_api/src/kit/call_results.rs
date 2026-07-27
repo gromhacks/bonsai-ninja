@@ -119,11 +119,18 @@ fn prune_call_result_source_names(
 
     source_names.retain(|name| {
         let name = name.trim();
-        if name.is_empty() || name == call || arg_texts.contains(&name) {
+        if name.is_empty()
+            || name == call
+            || arg_texts
+                .iter()
+                .any(|arg| call_result_identifier_names_match(arg, name))
+        {
             return false;
         }
         let Some((receiver, tail, receiver_is_type)) = receiver_and_tail else {
-            return !arg_identifiers.iter().any(|arg| arg == name);
+            return !arg_identifiers
+                .iter()
+                .any(|arg| call_result_identifier_names_match(arg, name));
         };
         if name == receiver {
             return true;
@@ -131,9 +138,21 @@ fn prune_call_result_source_names(
         if name == tail {
             return receiver_is_type;
         }
-        !arg_identifiers.iter().any(|arg| arg == name)
+        !arg_identifiers
+            .iter()
+            .any(|arg| call_result_identifier_names_match(arg, name))
     });
     dedup_call_result_source_names(source_names);
+}
+
+fn call_result_identifier_names_match(left: &str, right: &str) -> bool {
+    let left = left
+        .trim()
+        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION);
+    let right = right
+        .trim()
+        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION);
+    !left.is_empty() && left == right
 }
 
 fn call_result_names_match(left: &str, right: &str) -> bool {

@@ -21,9 +21,14 @@ Every variant declared "supported" by an adapter is exercised by the
 **flow-event conformance suite**
 (`crates/conformance/tests/flow_event_conformance.rs`), which runs
 canonical fixtures through every bundled adapter and asserts the
-shape contract documented below. Phase rollouts must move the
-matrix cell from ❌ to ✅ and add or refresh the cross-language
-fixture before merge.
+shape contract documented below. The suite also requires canonical valid
+fixtures to be parser/adapter-diagnostic-free for all 21 languages. Its
+malformed-source companion proves that each frontend reports a syntax error,
+and marks the parser scope incomplete. Adapters may conservatively withhold
+facts from a damaged file or retain facts outside the exact error span, but
+neither policy may claim complete analysis. Phase rollouts must move the
+matrix cell from ❌ to ✅ and add or refresh the cross-language fixture before
+merge.
 
 ## Variant catalog
 
@@ -137,13 +142,19 @@ Adapter obligations:
 - For a **direct call**  (`y = f(x)` / `y = obj.f(x)`): set
   `source_call` to the callee short name and `source_call_args` to the
   per-positional arg texts; `source_name` and `source_names` stay
-  empty.
+  empty. Identifier sigils retained by the concrete grammar (`$x`,
+  `@x`, `%x`) are canonicalized before argument-carrier pruning, so a
+  call argument cannot also appear as an independent call-result source.
 - For a **compound RHS** (`y = a + b`, `y = f"{x}"`, `y = obj.field`):
   set `source_names` to every bare identifier visited; leave
   `source_name` and `source_call` empty.
 - For a **literal RHS** (`y = "abc"`, `y = 42`, `y = true`,
   `y = None`): leave all three empty and set
   `value_kind = Some(AssignValueKind::Literal)`.
+  An adapter with `quoted_callable_literals` may additionally retain the
+  exact non-empty quoted token in `source_name` for runtime callable
+  resolution. The value remains `Literal`, so IDG overwrite semantics still
+  commit a clean writer and never treat the quoted token as value taint.
 - `declares_new_binding` is `true` when the CST kind unambiguously
   introduces a new local binding (`let`, `var`, `val`, `const`, `my`,
   `our`, `local`, Python first-assignment in scope, etc.). It is

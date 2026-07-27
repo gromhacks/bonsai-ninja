@@ -4,9 +4,10 @@
 //! or JSON. Text mode draws a `tree(1)`-style hierarchy with
 //! `├──` / `└──` / `│` connectors, themed via the global
 //! [`crate::ui::Ui`] palette so it matches every other command.
-//! The default view includes inline `←in:` / `→out:` lines for
-//! cross-file edges; compact mode drops those extras for a
-//! one-line-per-entry tree.
+//! The default view is a fast filesystem walk. Semantic finding/flow/cross-file
+//! annotations are explicit so ordinary navigation never pays for a security
+//! scan. In annotated mode, compact rendering drops the inline `←in:` / `→out:`
+//! details for a one-line-per-entry tree.
 
 use anyhow::Result;
 use bonsai_common::is_bonsai_case_probe_path;
@@ -29,6 +30,7 @@ pub(crate) struct TreeArgs<'a> {
     pub(crate) file: Option<&'a str>,
     pub(crate) exclude_file: &'a [String],
     pub(crate) severity: Option<&'a str>,
+    pub(crate) findings: bool,
     pub(crate) limit: usize,
     pub(crate) compact: bool,
     pub(crate) context: Option<&'a str>,
@@ -41,8 +43,8 @@ pub(crate) struct TreeArgs<'a> {
 pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
     let severity = parse_severity(args.severity)?;
     let filters_hash = tree_filters_hash(&args);
-    let fast_filesystem_tree = args.rules_dir.is_none() && severity.is_none() && !args.all;
-    let out = if fast_filesystem_tree {
+    let include_annotations = args.findings || args.rules_dir.is_some() || severity.is_some();
+    let out = if !include_annotations {
         let stage = progress::ScopedSpinner::new("scanning filesystem tree");
         let out = build_fast_filesystem_tree(&args)?;
         stage.finish();
@@ -75,6 +77,7 @@ pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
         _ => render_text_paged(
             &out,
             args.compact,
+            include_annotations,
             args.context,
             args.page,
             args.all,
@@ -267,7 +270,18 @@ fn fast_tree_should_skip(path: &Path, build: &FastTreeBuild) -> bool {
     }
     matches!(
         path.file_name().and_then(|n| n.to_str()),
-        Some(".git" | ".bonsai" | "target" | "node_modules" | ".gradle" | "build" | "dist" | "out" | ".idea")
+        Some(
+            ".git"
+                | ".bonsai"
+                | ".bonsai-agent"
+                | "target"
+                | "node_modules"
+                | ".gradle"
+                | "build"
+                | "dist"
+                | "out"
+                | ".idea"
+        )
     )
 }
 
@@ -312,6 +326,7 @@ fn tree_filters_hash(args: &TreeArgs<'_>) -> u64 {
     let exclude_file = args.exclude_file.join("\0");
     let limit = args.limit.to_string();
     let compact = if args.compact { "1" } else { "0" };
+    let findings = if args.findings { "1" } else { "0" };
     let rules_dir = args
         .rules_dir
         .map(|p| p.display().to_string())
@@ -323,6 +338,7 @@ fn tree_filters_hash(args: &TreeArgs<'_>) -> u64 {
         ("severity", args.severity.unwrap_or("")),
         ("limit", &limit),
         ("compact", compact),
+        ("findings", findings),
         ("rules_dir", &rules_dir),
     ])
 }
@@ -344,12 +360,13 @@ fn parse_severity(s: Option<&str>) -> Result<Option<Severity>> {
 fn render_text_paged(
     out: &TreeOut,
     compact: bool,
+    include_annotations: bool,
     context: Option<&str>,
     page: Option<&str>,
     all: bool,
     filters_hash: u64,
 ) -> Result<()> {
-    let lines = render_text_lines(out, compact);
+    let lines = render_text_lines(out, compact, include_annotations);
     let cfg =
         paging::config_from_raw(context, page, all, FormatClass::Text).map_err(|e| anyhow::anyhow!(e))?;
     let rows: Vec<usize> = (0..lines.len()).collect();
@@ -363,7 +380,7 @@ fn render_text_paged(
     Ok(())
 }
 
-fn render_text_lines(out: &TreeOut, compact: bool) -> Vec<String> {
+fn render_text_lines(out: &TreeOut, compact: bool, include_annotations: bool) -> Vec<String> {
     let u = ui();
     let mut lines = Vec::new();
     // Heading
@@ -383,14 +400,23 @@ fn render_text_lines(out: &TreeOut, compact: bool) -> Vec<String> {
     } else {
         format!("{} file{}", total, if total == 1 { "" } else { "s" })
     };
-    let header = format!(
-        "tree — {} · {} dir{} · {} finding{}",
-        file_chip,
-        out.summary.total_dirs,
-        if out.summary.total_dirs == 1 { "" } else { "s" },
-        out.summary.total_findings,
-        if out.summary.total_findings == 1 { "" } else { "s" },
-    );
+    let header = if include_annotations {
+        format!(
+            "tree — {} · {} dir{} · {} finding{}",
+            file_chip,
+            out.summary.total_dirs,
+            if out.summary.total_dirs == 1 { "" } else { "s" },
+            out.summary.total_findings,
+            if out.summary.total_findings == 1 { "" } else { "s" },
+        )
+    } else {
+        format!(
+            "tree — {} · {} dir{}",
+            file_chip,
+            out.summary.total_dirs,
+            if out.summary.total_dirs == 1 { "" } else { "s" },
+        )
+    };
     lines.push(u.heading(&header));
     if !out.analysis_complete {
         let reasons = if out.analysis_incomplete_reasons.is_empty() {
@@ -398,11 +424,7 @@ fn render_text_lines(out: &TreeOut, compact: bool) -> Vec<String> {
         } else {
             out.analysis_incomplete_reasons.join("; ")
         };
-        lines.push(format!(
-            "{} {}",
-            u.warn("semantic-only tree incomplete:"),
-            u.dim(&reasons)
-        ));
+        lines.push(format!("{} {}", u.warn("tree view incomplete:"), u.dim(&reasons)));
         lines.push(
             u.dim("rerun with --all and avoid restrictive --max-depth when you need every node/evidence id"),
         );
@@ -416,28 +438,30 @@ fn render_text_lines(out: &TreeOut, compact: bool) -> Vec<String> {
     }
 
     lines.push(String::new());
-    let sev = &out.summary.severity_counts;
-    let sev_chip = format!(
-        "{} crit · {} high · {} med · {} low · {} info",
-        sev.critical, sev.high, sev.medium, sev.low, sev.info
-    );
-    lines.push(format!(
-        "{} {}",
-        u.label("[ severity ]"),
-        if sev.critical + sev.high > 0 {
-            u.warn(&sev_chip)
-        } else {
-            u.dim(&sev_chip)
-        }
-    ));
-    if out.summary.indexed_stale > 0 || out.summary.indexed_missing > 0 {
+    if include_annotations {
+        let sev = &out.summary.severity_counts;
+        let sev_chip = format!(
+            "{} crit · {} high · {} med · {} low · {} info",
+            sev.critical, sev.high, sev.medium, sev.low, sev.info
+        );
         lines.push(format!(
-            "{} {} complete · {} stale · {} missing",
-            u.label("[ taint-index ]"),
-            out.summary.indexed_complete,
-            out.summary.indexed_stale,
-            out.summary.indexed_missing,
+            "{} {}",
+            u.label("[ severity ]"),
+            if sev.critical + sev.high > 0 {
+                u.warn(&sev_chip)
+            } else {
+                u.dim(&sev_chip)
+            }
         ));
+        if out.summary.indexed_stale > 0 || out.summary.indexed_missing > 0 {
+            lines.push(format!(
+                "{} {} complete · {} stale · {} missing",
+                u.label("[ taint-index ]"),
+                out.summary.indexed_complete,
+                out.summary.indexed_stale,
+                out.summary.indexed_missing,
+            ));
+        }
     }
     lines
 }

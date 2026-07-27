@@ -53,7 +53,7 @@ pub fn make_name_filter(needle: Option<&str>, is_regex: bool) -> Result<NameFilt
 /// accepted for callers that pass a full path.
 #[must_use]
 pub fn file_path_matches_filter(ws: &Workspace, path: &str, filter: &str) -> bool {
-    let relative = workspace_relative_filter_path(ws, path);
+    let relative = workspace_relative_path(ws, path);
     if path_filter_matches(&relative, filter) {
         return true;
     }
@@ -67,7 +67,13 @@ pub fn file_path_excluded_by_filters(ws: &Workspace, path: &str, filters: &[Stri
         .any(|filter| file_path_matches_filter(ws, path, filter))
 }
 
-fn workspace_relative_filter_path(ws: &Workspace, path: &str) -> String {
+/// Normalize a VFS or finding path relative to the selected workspace.
+///
+/// Compiler internals retain absolute paths for identity and cache safety, but
+/// browse/SDK surfaces must not leak the host's ancestor directories into
+/// locators or hierarchical views.
+#[must_use]
+pub fn workspace_relative_path(ws: &Workspace, path: &str) -> String {
     let normalized_path = normalize_path_for_filter(path);
     let Some(root) = ws.db().workspace_root() else {
         return normalized_path;
