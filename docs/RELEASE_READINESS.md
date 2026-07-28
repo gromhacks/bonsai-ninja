@@ -93,18 +93,20 @@ and completes the requested production analysis without hidden truncation.
 
 ## Structural tree command
 
-`tree` is a filesystem navigation command by default. It does not open the
-compiler or run security analysis unless `--findings`, `--severity`, or
-`--rules-dir` explicitly opts into annotations. Scanner-owned `.bonsai`,
-`.bonsai-agent`, and transient case-probe state are excluded from the
-structural view.
+`tree` is a filesystem-only navigation command. It never opens the compiler,
+builds semantic graphs, loads a rulepack, or runs security analysis.
+Scanner-owned `.bonsai`, `.bonsai-agent`, and transient case-probe state are
+excluded from the structural view.
 
 The release binary rendered `examples/python/mega_flow` as 8 files and one
-directory in 0.53 seconds with 9,306,112 bytes maximum RSS. The output contains
+directory in 0.02 seconds with 9,273,344 bytes maximum RSS. The output contains
 neither a synthetic `0 findings` claim nor a severity footer. `--all` lifts
-presentation caps without enabling semantic work. The explicit annotated mode
-was also verified: it reports one `mega_flow` root, 8 files, one directory,
-zero absolute locators, and `analysis_complete: true`.
+presentation caps without enabling semantic work.
+
+On the local Elasticsearch checkout, `tree --max-depth 3 --compact` completed
+in 0.09 seconds with 9,895,936 bytes maximum RSS. An intentional uncapped
+`tree --all --compact` covered 43,108 files and 13,350 directories in 0.96
+seconds with 35,110,912 bytes maximum RSS.
 
 ## Elasticsearch scale result
 

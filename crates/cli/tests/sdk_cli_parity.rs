@@ -1248,35 +1248,9 @@ fn browse_fact_commands_cli_json_match_sdk_for_every_language() {
 }
 
 #[test]
-fn navigation_cli_json_matches_sdk_facade() {
+fn read_file_cli_json_matches_sdk_facade() {
     let project = security_project();
     let workspace = "examples/python/micro";
-
-    assert_json_eq(
-        "python semantic tree",
-        run_cli(&[
-            "tree",
-            workspace,
-            "--rules-dir",
-            "security-patterns",
-            "--all",
-            "--format",
-            "json",
-        ]),
-        serde_json::to_value(
-            project
-                .browse()
-                .tree(bonsai_sdk::TreeFilters {
-                    limit: 0,
-                    max_finding_ids_per_file: Some(0),
-                    max_flow_ids_per_file: Some(0),
-                    max_cross_file_edges_per_file: Some(0),
-                    ..Default::default()
-                })
-                .expect("sdk tree"),
-        )
-        .expect("tree json"),
-    );
 
     assert_json_eq(
         "python read-file",

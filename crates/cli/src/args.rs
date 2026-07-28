@@ -2470,46 +2470,23 @@ pub(crate) enum Cmd {
         action: SecurityAction,
     },
 
-    /// Fast structural workspace tree with optional semantic annotations.
+    /// Fast structural workspace tree.
     #[command(
         display_order = 23,
         long_about = themed_subcommand_long_about(
             "Fast hierarchical filesystem view for workspace navigation. \
-             The default path does not open the compiler or run security \
-             analysis. Pass `--findings`, `--severity`, or `--rules-dir` \
-             when you explicitly want semantic annotations.\n\
-             \n\
-             The annotated view can carry finding ids \
-             (`S:<16-hex>`), flow ids (`F:<16-hex>`), the most-severe \
-             flow's entry/exit, and the cross-file caller / callee \
-             edges that thread into and out of the file. Directory \
-             rows roll up severity counts.\n\
-             \n\
-             Every connection field carries a full locator \
-             (`module=… class=… fn=… file:line:col`) so renderers \
-             compose decl headers the same way `dump-edges` and \
-             `inspect` already do. The default view includes inline \
-             `←in:` / `→out:` rows when a file has cross-file edges; \
-             `--compact` drops those rows for a one-line-per-entry \
-             tree.\n\
-             \n\
-             `--findings` auto-discovers a rulepack using the ordinary \
-             workspace lookup. `--rules-dir` selects one explicitly, and \
-             `--severity` both enables annotations and filters the result."
+             It walks directory entries directly and never opens the compiler, \
+             builds semantic graphs, loads a rulepack, or runs security \
+             analysis. Use `security <workspace> taint-analysis` when you need \
+             findings."
         ),
         after_help = themed_subcommand_after_help(
             "EXAMPLES\n\n  \
              # Fast structural workspace navigation\n  \
              $ bonsai-ninja tree ./src\n  \
              \n  \
-             # Opt into security and cross-file annotations\n  \
-             $ bonsai-ninja tree ./src --findings\n  \
-             \n  \
              # Cap depth and use the compact one-line tree\n  \
              $ bonsai-ninja tree ./src --max-depth 3 --compact\n  \
-             \n  \
-             # Only files with a critical-severity finding\n  \
-             $ bonsai-ninja tree ./src --severity critical\n  \
              \n  \
              # Machine-readable shape for tooling\n  \
              $ bonsai-ninja tree ./src --format json | jq '.summary'"
@@ -2528,17 +2505,19 @@ pub(crate) enum Cmd {
         /// Exclude files whose paths contain this substring.
         #[arg(long = "exclude-file")]
         exclude_file: Vec<String>,
-        /// Only files whose findings reach at least this severity.
-        #[arg(long)]
-        severity: Option<String>,
-        /// Opt into security findings and cross-file semantic annotations.
-        /// The default tree is filesystem-only and does not open the compiler.
-        #[arg(long, default_value_t = false)]
+        /// Removed: findings belong to `security taint-analysis`.
+        #[arg(long, hide = true)]
         findings: bool,
+        /// Removed: severity filtering belongs to `security taint-analysis`.
+        #[arg(long, hide = true)]
+        severity: Option<String>,
+        /// Removed: rulepack selection belongs to `security taint-analysis`.
+        #[arg(long, value_name = "DIR", hide = true)]
+        rules_dir: Option<PathBuf>,
         /// Children-per-dir cap (`0` = uncapped).
         #[arg(long, default_value_t = 200)]
         limit: usize,
-        /// Drop the inline annotation rows; emit a one-liner per file.
+        /// Compatibility flag; the structural tree is already one line per entry.
         #[arg(long, default_value_t = false)]
         compact: bool,
         /// Token-budget ceiling for rendered output (e.g. `4k`, `32k`,
@@ -2556,15 +2535,6 @@ pub(crate) enum Cmd {
         format: String,
         #[command(flatten)]
         output: OutputPathArg,
-        /// Directory containing the rulepack tree. Supplying this option
-        /// enables finding / severity annotations. Lookup for `--findings`
-        /// when this option is omitted:
-        /// `BONSAI_RULES_DIR` env var, then
-        /// `<workspace>/security-patterns/`, then
-        /// `<workspace>/../security-patterns/`, then
-        /// `./security-patterns/` (cwd-relative).
-        #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
-        rules_dir: Option<PathBuf>,
     },
 
     /// Fast single-file source view with optional semantic overlays.
