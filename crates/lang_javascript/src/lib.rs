@@ -679,12 +679,9 @@ fn ecmascript_finite_literal_map_kind(mut node: Node<'_>, src: &[u8]) -> Option<
         "parenthesized_expression" | "as_expression" | "satisfies_expression" | "type_assertion"
     ) && node.named_child_count() >= 1
     {
-        let Some(inner) = node
+        let inner = node
             .child_by_field_name("expression")
-            .or_else(|| node.named_child(0))
-        else {
-            return None;
-        };
+            .or_else(|| node.named_child(0))?;
         node = inner;
     }
     if node.kind() == "object" {
@@ -708,15 +705,11 @@ fn ecmascript_finite_literal_map_kind(mut node: Node<'_>, src: &[u8]) -> Option<
     if node.kind() != "new_expression" {
         return None;
     }
-    let Some(constructor) = node.child_by_field_name("constructor") else {
-        return None;
-    };
+    let constructor = node.child_by_field_name("constructor")?;
     if constructor.kind() != "identifier" || node_text(&constructor, src).trim() != "Map" {
         return None;
     }
-    let Some(arguments) = node.child_by_field_name("arguments") else {
-        return None;
-    };
+    let arguments = node.child_by_field_name("arguments")?;
     let mut cursor = arguments.walk();
     let values: Vec<_> = arguments.named_children(&mut cursor).collect();
     (values.len() == 1 && ecmascript_is_literal_map_entries(values[0], src))

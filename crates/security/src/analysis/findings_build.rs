@@ -222,14 +222,16 @@ pub(super) fn make_finding(
                         &context.sink_tainted_args,
                     )
                     || sanitizer_guard_feeds_sink_arg(
-                        context.ws,
+                        &SanitizerGuardContext {
+                            ws: context.ws,
+                            sink_tainted_args: &context.sink_tainted_args,
+                        },
                         pack,
                         hop_func,
                         sanitizer_rule,
                         sanitizer_match,
                         sanitizer_hits,
                         snk,
-                        &context.sink_tainted_args,
                     )
                     || xxe_factory_hardening_sanitizes_sink(
                         context.ws,
