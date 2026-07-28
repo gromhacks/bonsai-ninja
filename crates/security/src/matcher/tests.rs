@@ -1359,6 +1359,47 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
 }
 
 #[test]
+fn receiver_regex_constraint_uses_the_parsed_call_receiver() {
+    let constraint = vec![ConstraintKind::ReceiverNotMatchesRegex {
+        receiver_not_matches_regex: r#"putHeader\("content-type",\s*"text/plain"\)"#.to_string(),
+    }];
+    let constraint_regexes =
+        compile_constraint_regexes("test.receiver_regex", &constraint).expect("valid receiver regex");
+    let passes = |callee| {
+        constraints_pass(ConstraintEval {
+            rule_id: "test.receiver_regex",
+            callee,
+            args: &[],
+            receiver_types: &[],
+            span: Span::new(FileId::new(0), 0, 0),
+            call_origin: None,
+            constraints: &constraint,
+            constraint_regexes: &constraint_regexes,
+            receiver_call_count: None,
+            assignment_texts: None,
+            ast_arg_values: None,
+            mode: ConstraintMode::Strict,
+            taint_view: None,
+            enclosing_decorators: None,
+            enclosing_modifiers: None,
+            alias_chains: None,
+            runtime_types: None,
+            lifecycle_transitions: None,
+            structural_context: None,
+        })
+    };
+
+    assert!(passes("response.end"));
+    assert!(!passes(
+        r#"req.response().putHeader("content-type", "text/plain").end"#
+    ));
+    assert!(
+        !passes("end"),
+        "receiver constraints must fail closed on a bare call"
+    );
+}
+
+#[test]
 fn invalid_constraint_regex_fails_closed() {
     let constraint = vec![ConstraintKind::AnyArgMatchesRegex {
         any_arg_matches_regex: "[".to_string(),

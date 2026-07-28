@@ -498,7 +498,9 @@
       - render
   description: "Disabled - Airflow Jinja templating; flag with op_kwargs source."
 - id: python.template.jinja2_environment_ctor
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: ssti
   category: source-independent
@@ -522,7 +524,7 @@
       import jinja2
       def example(user_input):
           return jinja2.Environment(user_input, "{{ user }}")
-  description: "jinja2.Environment(...) - config-shape sink; flag the call so a downstream auditor can verify autoescape=True and a non-FileSystemLoader root. Merged aliases: python.template.jinja2_environment_autoescape_off."
+  description: "Disabled - constructing jinja2.Environment is configuration, not an SSTI flow. The enabled Environment.from_string rules report attacker-controlled template compilation at the actual execution boundary."
   aliases:
   - python.template.jinja2_environment_autoescape_off
   - python.xss.jinja2_environment_autoescape_false
