@@ -4,7 +4,7 @@
 //! CLI commands feed them the already-matched / already-grouped data.
 
 use crate::deps::DependencyInventory;
-use crate::finding::Finding;
+use crate::finding::{Finding, TaintFlowRef};
 use crate::matcher::RuntimeDisabledRule;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -253,9 +253,10 @@ pub fn render_grouped_text(report: &SecurityReport) -> String {
 ///   tokens so CI scan diffs match findings across runs. (S7)
 /// - **`locations[0]`**: sink file + region with `endLine` and
 ///   `endColumn` so IDEs can highlight the exact expression. (S9)
-/// - **`codeFlows[0].threadFlows[0].locations[]`**: source → sanitizer*
-///   → sink chain. Every step carries `kinds: ["source"|"sanitizer"|"sink"]`
-///   so the IDE step-through can label nodes. (S4)
+/// - **`codeFlows[].threadFlows[0].locations[]`**: every complete source →
+///   sanitizer* → sink route for the finding. Every step carries
+///   `kinds: ["source"|"sanitizer"|"sink"]` so the IDE step-through can
+///   label nodes without duplicating the sink result. (S4)
 /// - **`properties.bonsai`**: bonsai-specific metadata that doesn't
 ///   fit the SARIF schema cleanly — `finding_id`, `flow_id`,
 ///   `group_id`, `precision`, `status`, `tainted_args`,
@@ -671,16 +672,6 @@ fn uri_for_path(path: &str) -> String {
 /// expect a unique-id list so the IDE doesn't render the rule
 /// twice in the panel. Order-preserving dedup so the first
 /// occurrence wins (matches the engine's chronological ordering).
-fn dedup_sanitizer_rule_ids(seen: &[crate::finding::FindingMatch]) -> Vec<String> {
-    let mut deduped: Vec<String> = Vec::with_capacity(seen.len());
-    for sanitizer in seen {
-        if !deduped.iter().any(|existing| existing == &sanitizer.rule_id) {
-            deduped.push(sanitizer.rule_id.clone());
-        }
-    }
-    deduped
-}
-
 fn dedup_strings(values: Vec<String>) -> Vec<String> {
     let mut deduped = Vec::with_capacity(values.len());
     for value in values {
@@ -718,7 +709,7 @@ fn finding_to_sarif_result(
         finding.sink.text,
     );
     let sink_location = match_to_sarif_location(&finding.sink, "sink", &finding.hops, workspace_root);
-    let is_pattern_finding = finding.source.category.as_deref() == Some("pattern");
+    let is_pattern_finding = finding.source.origin == crate::rule::MatchOrigin::Pattern;
     let code_flows = if is_pattern_finding {
         None
     } else {
@@ -801,6 +792,7 @@ fn finding_to_sarif_result(
             "bonsai": {
                 "finding_id": finding.finding_id,
                 "flow_id": finding.representative_flow_id,
+                "flow_ids": finding_flow_ids(finding),
                 "group_id": finding.group_id,
                 "tag": finding.tag,
                 "cwe": finding.cwe,
@@ -812,10 +804,11 @@ fn finding_to_sarif_result(
                 "language": finding.language,
                 "source_rule_id": finding.source.rule_id,
                 "sink_rule_id": finding.sink.rule_id,
-                "sanitizer_rule_ids": dedup_sanitizer_rule_ids(&finding.sanitizers_seen),
-                "tainted_args": finding.sink.tainted_args,
+                "sanitizer_rule_ids": finding_sanitizer_rule_ids(finding),
+                "tainted_args": finding_tainted_args(finding),
                 "taint_path": finding.taint_path,
                 "chain_display": finding.chain_display,
+                "alternate_flows": finding.alternate_flows,
             }
         }
     });
@@ -829,6 +822,66 @@ fn finding_to_sarif_result(
 }
 
 fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> serde_json::Value {
+    let flows = finding
+        .flows()
+        .enumerate()
+        .map(|(index, flow)| {
+            let hops = if index == 0 { finding.hops.as_slice() } else { &[] };
+            build_sarif_code_flow(flow, &finding.sink, hops, workspace_root)
+        })
+        .collect();
+    serde_json::Value::Array(flows)
+}
+
+fn finding_flow_ids(finding: &Finding) -> Vec<String> {
+    let mut ids = finding.flow_ids().map(str::to_owned).collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn finding_sanitizer_rule_ids(finding: &Finding) -> Vec<String> {
+    let mut ids = Vec::new();
+    for flow in finding.flows() {
+        for sanitizer in flow.sanitizers_seen {
+            if !ids.iter().any(|existing| existing == &sanitizer.rule_id) {
+                ids.push(sanitizer.rule_id.clone());
+            }
+        }
+    }
+    ids
+}
+
+fn finding_tainted_args(finding: &Finding) -> Vec<crate::finding::TaintedArgInfo> {
+    let mut args = Vec::new();
+    for flow in finding.flows() {
+        for item in flow.sink_tainted_args {
+            if !args.iter().any(|existing: &crate::finding::TaintedArgInfo| {
+                existing.index == item.index
+                    && existing.value_text == item.value_text
+                    && existing.place == item.place
+                    && existing.source_names == item.source_names
+            }) {
+                args.push(item.clone());
+            }
+        }
+    }
+    args.sort_by(|a, b| {
+        a.index
+            .cmp(&b.index)
+            .then_with(|| a.value_text.cmp(&b.value_text))
+            .then_with(|| a.place.cmp(&b.place))
+            .then_with(|| a.source_names.cmp(&b.source_names))
+    });
+    args
+}
+
+fn build_sarif_code_flow(
+    flow: TaintFlowRef<'_>,
+    sink: &crate::finding::FindingMatch,
+    hops: &[crate::flow_evidence::FlowFunctionBody],
+    workspace_root: Option<&str>,
+) -> serde_json::Value {
     // S4: tag every codeFlow step with `kinds` so IDE step-through
     // can render the chain semantically. The middle hops come from
     // `finding.taint_path`, which preserves the concrete call site
@@ -837,29 +890,29 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
     push_thread_flow_location(
         &mut thread_flow_locations,
         thread_flow_location(
-            match_to_sarif_location(&finding.source, "source", &finding.hops, workspace_root),
+            match_to_sarif_location(flow.source, "source", hops, workspace_root),
             &["source", "taint"],
             "essential",
         ),
     );
 
     let mut sanitizers_by_step: Vec<Vec<&crate::finding::FindingMatch>> =
-        vec![Vec::new(); finding.taint_path.len()];
+        vec![Vec::new(); flow.taint_path.len()];
     let mut unmatched_sanitizers = Vec::new();
-    for sanitizer in &finding.sanitizers_seen {
-        if let Some(idx) = sanitizer_taint_step_index(sanitizer, &finding.taint_path) {
+    for sanitizer in flow.sanitizers_seen {
+        if let Some(idx) = sanitizer_taint_step_index(sanitizer, flow.taint_path) {
             sanitizers_by_step[idx].push(sanitizer);
         } else {
             unmatched_sanitizers.push(sanitizer);
         }
     }
 
-    for (idx, step) in finding.taint_path.iter().enumerate() {
-        if !taint_step_matches_match(step, &finding.sink) {
+    for (idx, step) in flow.taint_path.iter().enumerate() {
+        if !taint_step_matches_match(step, sink) {
             push_thread_flow_location(
                 &mut thread_flow_locations,
                 thread_flow_location(
-                    taint_step_to_sarif_location(step, &finding.hops, workspace_root),
+                    taint_step_to_sarif_location(step, hops, workspace_root),
                     &["taint", "call"],
                     "important",
                 ),
@@ -869,7 +922,7 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
             push_thread_flow_location(
                 &mut thread_flow_locations,
                 thread_flow_location(
-                    match_to_sarif_location(sanitizer, "sanitizer", &finding.hops, workspace_root),
+                    match_to_sarif_location(sanitizer, "sanitizer", hops, workspace_root),
                     &["sanitizer"],
                     "important",
                 ),
@@ -887,7 +940,7 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
         push_thread_flow_location(
             &mut thread_flow_locations,
             thread_flow_location(
-                match_to_sarif_location(sanitizer, "sanitizer", &finding.hops, workspace_root),
+                match_to_sarif_location(sanitizer, "sanitizer", hops, workspace_root),
                 &["sanitizer"],
                 "important",
             ),
@@ -897,28 +950,28 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
     push_thread_flow_location(
         &mut thread_flow_locations,
         thread_flow_location(
-            match_to_sarif_location(&finding.sink, "sink", &finding.hops, workspace_root),
+            match_to_sarif_location(sink, "sink", hops, workspace_root),
             &["sink"],
             "essential",
         ),
     );
-    let flow_summary = if finding.taint_path.is_empty() {
-        format!("{} -> {}", finding.source.rule_id, finding.sink.rule_id)
+    let flow_summary = if flow.taint_path.is_empty() {
+        format!("{} -> {}", flow.source.rule_id, sink.rule_id)
     } else {
-        let chain: Vec<String> = finding
+        let chain: Vec<String> = flow
             .taint_path
             .iter()
             .map(|step| format!("{} -> {}", step.caller, step.callee))
             .collect();
         chain.join("; ")
     };
-    serde_json::json!([{
+    serde_json::json!({
         "message": { "text": flow_summary },
         "threadFlows": [{
-            "id": "primary",
+            "id": flow.flow_id.unwrap_or("primary"),
             "locations": thread_flow_locations,
         }],
-    }])
+    })
 }
 
 fn sanitizer_taint_step_index(

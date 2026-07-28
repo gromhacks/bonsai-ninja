@@ -325,7 +325,7 @@ pub fn tree(
 
         let mut flow_ids: Vec<String> = file_findings
             .iter()
-            .filter_map(|f| f.representative_flow_id.clone())
+            .flat_map(|finding| finding.flow_ids().map(str::to_owned))
             .collect();
         flow_ids.sort();
         flow_ids.dedup();

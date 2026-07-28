@@ -863,6 +863,155 @@ fn qualified_call_args_do_not_bridge_structural_base_to_arg_slot() {
 }
 
 #[test]
+fn call_result_whole_value_writer_feeds_a_later_projection() {
+    let mut decl = empty_decl(1, "f");
+    let assignment_span = span(20, 35);
+    let source_call_span = span(26, 33);
+    let sink_call_span = span(50, 60);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: assignment_span,
+            target: "header".to_string(),
+            source_name: None,
+            source_call: Some("reader.Next".to_string()),
+            source_call_args: Vec::new(),
+            source_names: vec!["__bonsai_tuple_result_0".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: source_call_span,
+            name: "reader.Next".to_string(),
+            receiver: Some("reader".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+        FlowEvent::Assign {
+            span: span(45, 65),
+            target: "destination".to_string(),
+            source_name: None,
+            source_call: Some("filepath.Join".to_string()),
+            source_call_args: vec!["base".to_string(), "header.Name".to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: sink_call_span,
+            name: "filepath.Join".to_string(),
+            receiver: Some("filepath".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: vec![
+                CallArg {
+                    passing_mode: Default::default(),
+                    span: span(52, 54),
+                    name: None,
+                    value_text: "base".to_string(),
+                    place: Some("base".to_string()),
+                    source_names: vec!["base".to_string()],
+                },
+                CallArg {
+                    passing_mode: Default::default(),
+                    span: span(55, 59),
+                    name: None,
+                    value_text: "header.Name".to_string(),
+                    place: Some("header.Name".to_string()),
+                    source_names: vec!["header".to_string(), "header.Name".to_string()],
+                },
+            ],
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "header.__bonsai_tuple_result_0"
+                && rendered_place_name(&out, edge.to).starts_with("CallArg")
+                && edge.meta.via_span == sink_call_span
+        }),
+        "a field read from a whole call result must depend on the returned object: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn exact_projection_overwrite_wins_over_whole_call_result() {
+    let mut decl = empty_decl(1, "f");
+    let assignment_span = span(20, 35);
+    let source_call_span = span(26, 33);
+    let overwrite_span = span(36, 45);
+    let sink_call_span = span(50, 60);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: assignment_span,
+            target: "header".to_string(),
+            source_name: None,
+            source_call: Some("reader.Next".to_string()),
+            source_call_args: Vec::new(),
+            source_names: vec!["__bonsai_tuple_result_0".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: source_call_span,
+            name: "reader.Next".to_string(),
+            receiver: Some("reader".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+        FlowEvent::Assign {
+            span: overwrite_span,
+            target: "header.Name".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Literal),
+        },
+        FlowEvent::Call {
+            span: sink_call_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(55, 59),
+                name: None,
+                value_text: "header.Name".to_string(),
+                place: Some("header.Name".to_string()),
+                source_names: vec!["header".to_string(), "header.Name".to_string()],
+            }],
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "header.Name"
+                && rendered_write_span(&out, edge.from) == Some(overwrite_span)
+                && rendered_place_name(&out, edge.to).starts_with("CallArg")
+                && edge.meta.via_span == sink_call_span
+        }),
+        "the exact field overwrite must feed the projected read: {:#?}",
+        out.edges
+    );
+    assert!(
+        !out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "header.__bonsai_tuple_result_0"
+                && rendered_place_name(&out, edge.to).starts_with("CallArg")
+                && edge.meta.via_span == sink_call_span
+        }),
+        "a clean exact field overwrite must block the earlier whole-result writer: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
 fn whole_container_call_arg_consumes_current_field_writers() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["input".to_string()];

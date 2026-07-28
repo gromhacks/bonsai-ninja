@@ -52,8 +52,8 @@ pub use analysis::{
 pub use compile::{compile_rule_to_inspect_args, CompiledRule};
 pub use deps::{build_inventory, DependencyInventory, DependencyRow};
 pub use finding::{
-    compute_finding_id, Finding, FindingMatch, FindingStatus, TaintPropagationArg, TaintPropagationStep,
-    TaintedArgInfo,
+    compute_finding_id, AlternateTaintFlow, Finding, FindingMatch, FindingStatus, TaintFlowRef,
+    TaintPropagationArg, TaintPropagationStep, TaintedArgInfo,
 };
 pub use flow_evidence::{build_flow_bodies, FlowFunctionBody, FlowRole, FlowSourceLine};
 pub use loader::{load_rulepack, load_workspace_local_rules, parse_severity, LoadError, Rulepack};

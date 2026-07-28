@@ -260,33 +260,53 @@ fn read_file_with_taint_options(
                 continue;
             }
             let f = &cf.finding;
-            let in_source =
-                f.source.file == raw_path && f.source.line >= line_lo && f.source.line <= actual_hi;
             let in_sink = f.sink.file == raw_path && f.sink.line >= line_lo && f.sink.line <= actual_hi;
-            if !in_source && !in_sink {
+            let source_in_view = |source: &FindingMatch| {
+                source.file == raw_path && source.line >= line_lo && source.line <= actual_hi
+            };
+            let visible_routes = f
+                .flows()
+                .filter(|flow| in_sink || source_in_view(flow.source))
+                .collect::<Vec<_>>();
+            if visible_routes.is_empty() {
                 continue;
             }
             finding_incomplete_reasons.extend(finding_analysis_incomplete_reasons(f));
             finding_ids.push(f.finding_id.clone());
-            if let Some(fid) = &f.representative_flow_id {
-                flow_ids.push(fid.clone());
-                flows_in_view.push(FlowEntryExit {
-                    flow_id: fid.clone(),
-                    finding_id: Some(f.finding_id.clone()),
-                    enters_at: match_to_locator(&f.source),
-                    exits_at: match_to_locator(&f.sink),
-                    extends_beyond_view: !(in_source && in_sink),
-                });
-            }
-            if in_source {
-                marks.push(make_mark(MarkKind::Source, f, &f.source));
-            }
-            if in_sink {
-                marks.push(make_mark(MarkKind::Sink, f, &f.sink));
-            }
-            for sm in &f.sanitizers_seen {
-                if sm.file == raw_path && sm.line >= line_lo && sm.line <= actual_hi {
-                    marks.push(make_mark(MarkKind::Sanitizer, f, sm));
+            for route in visible_routes {
+                let route_source_in_view = source_in_view(route.source);
+                if let Some(flow_id) = route.flow_id {
+                    flow_ids.push(flow_id.to_string());
+                    flows_in_view.push(FlowEntryExit {
+                        flow_id: flow_id.to_string(),
+                        finding_id: Some(f.finding_id.clone()),
+                        enters_at: match_to_locator(route.source),
+                        exits_at: match_to_locator(&f.sink),
+                        extends_beyond_view: !(route_source_in_view && in_sink),
+                    });
+                }
+                if route_source_in_view {
+                    marks.push(make_mark_for_flow(
+                        MarkKind::Source,
+                        f,
+                        route.source,
+                        route.flow_id,
+                    ));
+                }
+                if in_sink {
+                    let mut route_sink = f.sink.clone();
+                    route_sink.tainted_args = route.sink_tainted_args.to_vec();
+                    marks.push(make_mark_for_flow(MarkKind::Sink, f, &route_sink, route.flow_id));
+                }
+                for sanitizer in route.sanitizers_seen {
+                    if source_in_view(sanitizer) {
+                        marks.push(make_mark_for_flow(
+                            MarkKind::Sanitizer,
+                            f,
+                            sanitizer,
+                            route.flow_id,
+                        ));
+                    }
                 }
             }
             findings_in_view.push(build_finding_digest(f));
@@ -492,21 +512,21 @@ fn finding_source_side_matches(finding: &CombinedFindingWithChain, needle: &str)
     if needle.is_empty() {
         return true;
     }
-    match_site_matches_needle(&finding.finding.source, needle)
-        || finding
-            .additional_sources
-            .iter()
-            .any(|source| match_site_matches_needle(source, needle))
-        || finding
-            .finding
-            .chain_display
-            .first()
-            .is_some_and(|name| text_matches_needle(name, needle))
-        || finding
-            .finding
-            .taint_path
-            .iter()
-            .any(|step| text_matches_needle(&step.caller, needle))
+    finding
+        .additional_sources
+        .iter()
+        .any(|source| match_site_matches_needle(source, needle))
+        || finding.finding.flows().any(|flow| {
+            match_site_matches_needle(flow.source, needle)
+                || flow
+                    .chain_display
+                    .first()
+                    .is_some_and(|name| text_matches_needle(name, needle))
+                || flow
+                    .taint_path
+                    .iter()
+                    .any(|step| text_matches_needle(&step.caller, needle))
+        })
 }
 
 fn finding_sink_side_matches(finding: &CombinedFindingWithChain, needle: &str) -> bool {
@@ -518,16 +538,15 @@ fn finding_sink_side_matches(finding: &CombinedFindingWithChain, needle: &str) -
             .additional_sinks
             .iter()
             .any(|sink| match_site_matches_needle(sink, needle))
-        || finding
-            .finding
-            .chain_display
-            .last()
-            .is_some_and(|name| text_matches_needle(name, needle))
-        || finding
-            .finding
-            .taint_path
-            .iter()
-            .any(|step| text_matches_needle(&step.callee, needle))
+        || finding.finding.flows().any(|flow| {
+            flow.chain_display
+                .last()
+                .is_some_and(|name| text_matches_needle(name, needle))
+                || flow
+                    .taint_path
+                    .iter()
+                    .any(|step| text_matches_needle(&step.callee, needle))
+        })
 }
 
 fn match_site_matches_needle(site: &FindingMatch, needle: &str) -> bool {
@@ -617,7 +636,7 @@ fn dedupe_inlined_decls(decls: &mut Vec<InlinedDecl>) {
     });
 }
 
-fn make_mark(kind: MarkKind, f: &Finding, m: &FindingMatch) -> LineMark {
+fn make_mark_for_flow(kind: MarkKind, f: &Finding, m: &FindingMatch, flow_id: Option<&str>) -> LineMark {
     LineMark {
         line: m.line,
         kind,
@@ -630,7 +649,7 @@ fn make_mark(kind: MarkKind, f: &Finding, m: &FindingMatch) -> LineMark {
         },
         target: None,
         finding_id: Some(f.finding_id.clone()),
-        flow_id: f.representative_flow_id.clone(),
+        flow_id: flow_id.map(str::to_owned),
         edge_id: None,
         taint_id: None,
         rule_id: Some(m.rule_id.clone()),

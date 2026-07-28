@@ -1,6 +1,6 @@
 use super::*;
 use bonsai_common::Precision;
-use bonsai_security::{MatchOrigin, TaintPropagationStep, TaintedArgInfo};
+use bonsai_security::{AlternateTaintFlow, MatchOrigin, TaintPropagationStep, TaintedArgInfo};
 
 fn site(rule_id: &str, text: &str, enclosing_fn: &str) -> FindingMatch {
     FindingMatch {
@@ -50,6 +50,7 @@ fn combined() -> CombinedFindingWithChain {
                 column: 1,
                 tainted_args: Vec::new(),
             }],
+            alternate_flows: Vec::new(),
             hops: Vec::new(),
             tag: Some("command-injection".to_string()),
             severity: Some(Severity::High),
@@ -97,6 +98,35 @@ fn read_file_from_to_filters_match_source_and_sink_sides() {
         Some("cookie"),
         Some("os.system")
     ));
+}
+
+#[test]
+fn read_file_filters_match_alternate_flow_sources_and_chains() {
+    let mut finding = combined();
+    finding.finding.alternate_flows.push(AlternateTaintFlow {
+        source: site("python.flask.request_json", "request.json", "json_handler"),
+        sink_tainted_args: finding.finding.sink.tainted_args.clone(),
+        sanitizers_seen: Vec::new(),
+        flow_id: Some("F:2".to_string()),
+        chain_display: vec!["json_handler".to_string(), "run_admin_command".to_string()],
+        taint_path: vec![TaintPropagationStep {
+            caller: "json_handler".to_string(),
+            callee: "run_admin_command".to_string(),
+            file: "app.py".to_string(),
+            line: 3,
+            column: 1,
+            tainted_args: Vec::new(),
+        }],
+        status: FindingStatus::Unsanitized,
+        precision: "exact".to_string(),
+    });
+
+    assert!(combined_finding_matches_filters(
+        &finding,
+        Some("request.json"),
+        Some("run_admin_command")
+    ));
+    assert_eq!(finding.finding.flow_ids().collect::<Vec<_>>(), vec!["F:1", "F:2"]);
 }
 
 #[test]

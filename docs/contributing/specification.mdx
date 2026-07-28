@@ -80,19 +80,23 @@ Return, Throw, etc.
 
 ```
 Finding {
-  finding_id, flow_id, group_id,
+  finding_id, representative_flow_id, group_id,
   language, severity, precision, status,
   tag, cwe, owasp,
   source: FindingMatch,
   sink: FindingMatch,
   sanitizers_seen: Vec<FindingMatch>,
-  tainted_args: Vec<TaintedArgInfo>,
+  taint_path: Vec<TaintPropagationStep>,
   chain_display: Vec<String>,
+  alternate_flows: Vec<AlternateTaintFlow>,
 }
 ```
 
-Finding IDs are FNV-1a-64 over (source rule, sink rule, group, language)
-formatted as `S:xxxxxxxxxxxxxxxx`. Stable across runs.
+One concrete semantic sink is one finding. `alternate_flows` retains the
+other complete source/path/sink-argument/sanitizer/status/precision tuples
+without duplicating the finding row. Finding IDs are FNV-1a-64 over the
+combined source identities, sink identities, representative group, and
+language, formatted as `S:xxxxxxxxxxxxxxxx` and stable across runs.
 
 ### 2.3 Browse output (`*Out` types)
 

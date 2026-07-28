@@ -102,7 +102,7 @@ rule, and sink rule counts, without paged finding rows.
 
 ## SARIF
 
-SARIF 2.1.0 is available from `security taint-analysis`. Results include standard locations, code flows, rules, CWE properties, and bonsai-specific metadata under `properties.bonsai`. Security code flows are built from the same source-specific propagation used by text `TAINT FLOW` output.
+SARIF 2.1.0 is available from `security taint-analysis`. Results include standard locations, code flows, rules, CWE properties, and bonsai-specific metadata under `properties.bonsai`. One concrete vulnerability sink is one SARIF result; when several complete source-to-sink routes reach it, each route is preserved as a separate `codeFlows` entry on that result. Security code flows are built from the same source-specific propagation used by text `TAINT FLOW` output.
 
 SARIF also includes exact source-independent findings by default, such as weak crypto, weak random, JWT, TLS, cookie, CORS, and memory API misuse rules. These results intentionally omit `codeFlows` and use a synthetic `pattern:<sink-rule-id>` source id so consumers do not mistake a local API misuse for a proven source-to-sink taint path. Lifecycle-audit transition sites are excluded from SARIF/taint findings until the engine proves the later same-value use.
 

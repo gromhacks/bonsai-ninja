@@ -68,7 +68,7 @@ fn source_analysis_json_incomplete_reasons(
     reasons
 }
 
-const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v9";
+const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v10";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct TaintAnalysisRenderReport {
@@ -1514,13 +1514,11 @@ fn filter_report_to_finding_id(report: &mut TaintAnalysisReport, finding_id: &st
 }
 
 fn ensure_report_has_security_flow_id(report: &TaintAnalysisReport, flow_id: &str) -> Result<()> {
-    if report.findings.iter().any(|combined| {
-        combined
-            .finding
-            .representative_flow_id
-            .as_deref()
-            .is_some_and(|candidate| candidate == flow_id)
-    }) {
+    if report
+        .findings
+        .iter()
+        .any(|combined| combined.finding.flow_ids().any(|candidate| candidate == flow_id))
+    {
         return Ok(());
     }
     bail!(

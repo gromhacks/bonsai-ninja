@@ -1,6 +1,7 @@
 use super::*;
 use crate::finding::{
-    Finding, FindingMatch, FindingStatus, TaintPropagationArg, TaintPropagationStep, TaintedArgInfo,
+    AlternateTaintFlow, Finding, FindingMatch, FindingStatus, TaintPropagationArg, TaintPropagationStep,
+    TaintedArgInfo,
 };
 use crate::rule::Severity;
 use serde_json::Value;
@@ -45,6 +46,7 @@ fn sample_finding() -> Finding {
             "run_admin_command".to_string(),
         ],
         taint_path: Vec::new(),
+        alternate_flows: Vec::new(),
         hops: Vec::new(),
         tag: Some("command-injection".to_string()),
         severity: Some(Severity::Critical),
@@ -349,6 +351,45 @@ fn sarif_codeflows_threads_source_then_sink() {
 }
 
 #[test]
+fn sarif_emits_alternate_routes_as_codeflows_on_one_result() {
+    let mut finding = sample_finding();
+    finding.alternate_flows.push(AlternateTaintFlow {
+        source: sample_match("python.sources.flask_json", "api.py", 18),
+        sink_tainted_args: finding.sink.tainted_args.clone(),
+        sanitizers_seen: Vec::new(),
+        flow_id: Some("F:alternate".to_string()),
+        chain_display: vec!["json_handler".to_string(), "run_admin_command".to_string()],
+        taint_path: vec![TaintPropagationStep {
+            caller: "json_handler".to_string(),
+            callee: "run_admin_command".to_string(),
+            file: "api.py".to_string(),
+            line: 24,
+            column: 9,
+            tainted_args: Vec::new(),
+        }],
+        status: FindingStatus::Unsanitized,
+        precision: "exact".to_string(),
+    });
+
+    let report = SecurityReport::new(vec![finding]);
+    let value: Value = serde_json::from_str(&render_sarif_json(&report)).unwrap();
+    let result = &value["runs"][0]["results"][0];
+    assert_eq!(result["codeFlows"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        result["codeFlows"][1]["threadFlows"][0]["locations"][0]["location"]["physicalLocation"]
+            ["artifactLocation"]["uri"],
+        "api.py"
+    );
+    assert_eq!(
+        result["properties"]["bonsai"]["flow_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn sarif_codeflows_includes_sanitizer_hops_in_path_order() {
     let mut f = sample_finding();
     f.taint_path = vec![
@@ -398,6 +439,7 @@ fn sarif_codeflows_includes_sanitizer_hops_in_path_order() {
 #[test]
 fn sarif_pattern_findings_skip_codeflows() {
     let mut f = sample_finding();
+    f.source.origin = crate::rule::MatchOrigin::Pattern;
     f.source.category = Some("pattern".to_string());
     f.source.rule_id = "pattern:python.weakrand.random".to_string();
     f.source.file = f.sink.file.clone();
