@@ -14,11 +14,11 @@
 use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-use crate::clap_help_styles;
 use crate::help_theme::{
     themed_after_help, themed_cli_long_about, themed_help_template, themed_subcommand_after_help,
     themed_subcommand_long_about,
 };
+use crate::{clap_help_styles, theme::Theme};
 
 /// Internal exact-semantic compiler phase used to give workspace-scale
 /// frontends an operating-system memory reclamation boundary. This is hidden
@@ -59,34 +59,33 @@ pub(crate) enum OutputFormat {
 pub(crate) enum BrowseFormat {
     Json,
     Text,
-    /// SARIF; only for `security taint-analysis`.
-    Sarif,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SourceAnalysisFormat {
+/// Output formats for vulnerability findings. SARIF is deliberately confined
+/// to `security taint-analysis`; every other command uses [`BrowseFormat`] so
+/// clap rejects `--format sarif` instead of silently emitting native JSON.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum SecurityFormat {
     Json,
     Text,
     Sarif,
 }
 
-fn parse_source_analysis_format(raw: &str) -> Result<SourceAnalysisFormat, String> {
-    match raw {
-        "json" => Ok(SourceAnalysisFormat::Json),
-        "text" => Ok(SourceAnalysisFormat::Text),
-        "sarif" => Ok(SourceAnalysisFormat::Sarif),
-        other => Err(format!(
-            "invalid format `{other}`; expected `text` or `json` (`sarif` is only for `security taint-analysis`)"
-        )),
+impl SecurityFormat {
+    /// Paging only distinguishes human text from programmatic output.
+    pub(crate) fn paging_format(self) -> BrowseFormat {
+        match self {
+            Self::Text => BrowseFormat::Text,
+            Self::Json | Self::Sarif => BrowseFormat::Json,
+        }
     }
 }
 
-impl From<SourceAnalysisFormat> for BrowseFormat {
-    fn from(value: SourceAnalysisFormat) -> Self {
+impl From<BrowseFormat> for SecurityFormat {
+    fn from(value: BrowseFormat) -> Self {
         match value {
-            SourceAnalysisFormat::Json => Self::Json,
-            SourceAnalysisFormat::Text => Self::Text,
-            SourceAnalysisFormat::Sarif => Self::Sarif,
+            BrowseFormat::Json => Self::Json,
+            BrowseFormat::Text => Self::Text,
         }
     }
 }
@@ -174,20 +173,13 @@ impl FactKindFilter {
     }
 }
 
-/// CLI-surfaced precision classes. Mirrors `bonsai_common::Precision`.
-/// Analysis commands expose semantic classes (`exact` / `narrowed`);
-/// broad classes remain parseable for compatibility but are rejected
-/// before results render.
+/// Semantic precision classes accepted by `dump-edges`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum PrecisionFilter {
     /// `Precision::Exact` — structural facts; no approximation.
     Exact,
     /// `Precision::Narrowed` — single-candidate resolved call.
     Narrowed,
-    /// `Precision::OverApproximate` — diagnostic-only broad edges.
-    OverApproximate,
-    /// `Precision::Unknown` — diagnostic-only opaque edges.
-    Unknown,
 }
 
 // `PrecisionFilter::matches` lived here previously. Filter logic
@@ -219,8 +211,8 @@ pub(crate) struct Cli {
 
     /// Color theme preset: `moss`, `earthy-dark`, `dracula`, or `retro-amber`.
     /// Also respects `BONSAI_THEME`.
-    #[arg(long, global = true)]
-    pub(crate) theme: Option<String>,
+    #[arg(long, global = true, value_enum, env = "BONSAI_THEME")]
+    pub(crate) theme: Option<Theme>,
 
     /// Disable the in-process chain / downstream / reachable-names caches
     /// used by `inspect` and `export`. Results are identical — cached and
@@ -1110,9 +1102,8 @@ pub(crate) enum Cmd {
                       hex) derived from (caller, callee, call site, tainted \
                       params). Stable across runs; drill into a single record \
                       with `--taint T:id`. Discovered rulepacks contribute \
-                      passthrough, receiver-state, and output-argument transfer \
-                      semantics; explicit sanitizer names are accepted for \
-                      compatibility but do not change propagation.\n\
+                      passthrough, receiver-state, sanitizer, and output-argument \
+                      transfer semantics.\n\
                       \n\
                       Every taint edge threads through semantic, alias-aware \
                       call resolution — cross-module imports, `from x import y \
@@ -2161,9 +2152,6 @@ pub(crate) enum Cmd {
         /// Preferred query flag.
         #[arg(long)]
         query: Option<String>,
-        /// Legacy alias for `--query`; kept for backward-compat.
-        #[arg(long, hide = true)]
-        symbol: Option<String>,
         /// Interpret the query as a regex instead of a fuzzy substring.
         #[arg(long, default_value_t = false)]
         regex: bool,
@@ -2181,7 +2169,7 @@ pub(crate) enum Cmd {
         /// e.g. `--from-kind read` only matches `--from X` when `X`
         /// appears as a read reference, not a call-site name or an
         /// import. Precise compilation surface for security rules.
-        #[arg(long = "from-kind", value_enum)]
+        #[arg(long = "from-kind", value_enum, requires = "from")]
         from_kind: Option<FactKindFilter>,
         /// Fuzzy filter: only keep flows that reach something matching
         /// this substring anywhere in the chain or the hit text.
@@ -2192,7 +2180,7 @@ pub(crate) enum Cmd {
         to: Option<String>,
         /// Narrow `--to` matching to a single browse-fact kind —
         /// mirror of `--from-kind`.
-        #[arg(long = "to-kind", value_enum)]
+        #[arg(long = "to-kind", value_enum, requires = "to")]
         to_kind: Option<FactKindFilter>,
         /// Only keep hits whose workspace-relative file path matches this text.
         /// Explicit absolute paths are also accepted.
@@ -2485,8 +2473,8 @@ pub(crate) enum Cmd {
              # Fast structural workspace navigation\n  \
              $ bonsai-ninja tree ./src\n  \
              \n  \
-             # Cap depth and use the compact one-line tree\n  \
-             $ bonsai-ninja tree ./src --max-depth 3 --compact\n  \
+             # Cap the directory depth\n  \
+             $ bonsai-ninja tree ./src --max-depth 3\n  \
              \n  \
              # Machine-readable shape for tooling\n  \
              $ bonsai-ninja tree ./src --format json | jq '.summary'"
@@ -2505,21 +2493,9 @@ pub(crate) enum Cmd {
         /// Exclude files whose paths contain this substring.
         #[arg(long = "exclude-file")]
         exclude_file: Vec<String>,
-        /// Removed: findings belong to `security taint-analysis`.
-        #[arg(long, hide = true)]
-        findings: bool,
-        /// Removed: severity filtering belongs to `security taint-analysis`.
-        #[arg(long, hide = true)]
-        severity: Option<String>,
-        /// Removed: rulepack selection belongs to `security taint-analysis`.
-        #[arg(long, value_name = "DIR", hide = true)]
-        rules_dir: Option<PathBuf>,
         /// Children-per-dir cap (`0` = uncapped).
         #[arg(long, default_value_t = 200)]
         limit: usize,
-        /// Compatibility flag; the structural tree is already one line per entry.
-        #[arg(long, default_value_t = false)]
-        compact: bool,
         /// Token-budget ceiling for rendered output (e.g. `4k`, `32k`,
         /// `128k`, `1m`). Defaults to `BONSAI_CONTEXT` or `32k`.
         #[arg(long)]
@@ -2531,8 +2507,8 @@ pub(crate) enum Cmd {
         #[arg(long, default_value_t = false)]
         all: bool,
         /// Output shape — `text` or `json`.
-        #[arg(long, default_value = "text")]
-        format: String,
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
         #[command(flatten)]
         output: OutputPathArg,
     },
@@ -2623,8 +2599,8 @@ pub(crate) enum Cmd {
         #[arg(long, default_value_t = false)]
         all: bool,
         /// Output shape — `text` or `json`.
-        #[arg(long, default_value = "text")]
-        format: String,
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
         #[command(flatten)]
         output: OutputPathArg,
         /// Directory containing the rulepack tree (for finding /
@@ -3165,10 +3141,6 @@ pub(crate) enum SecurityAction {
         /// Show every finding unconditionally — no paging, no cap.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Compatibility flag. Security text expands flow bodies by
-        /// default and paginates when needed.
-        #[arg(long = "no-compact", default_value_t = false)]
-        no_compact: bool,
         /// Emit only a finding summary. Text renders compact tables;
         /// JSON renders a summary object for tag/severity/rule triage.
         #[arg(long = "summary", default_value_t = false)]
@@ -3181,8 +3153,8 @@ pub(crate) enum SecurityAction {
         /// `G:` / CWE / status / tainted-args metadata so consumers
         /// that understand bonsai's stable IDs can drill back into
         /// `inspect` and `dump-edges`.
-        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
-        format: BrowseFormat,
+        #[arg(long, value_enum, default_value_t = SecurityFormat::Text)]
+        format: SecurityFormat,
         /// Code-review diff mode. Point this at a previous
         /// `taint-analysis --format json --all` output file; each
         /// finding is then classified against it as `new` /
@@ -3310,22 +3282,10 @@ pub(crate) enum SecurityAction {
         /// row cap, and no source-lineage path cap.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Compatibility flag. Security text expands flow bodies by
-        /// default and paginates when needed.
-        #[arg(long = "no-compact", default_value_t = false)]
-        no_compact: bool,
         /// Output shape — `text` for the paginated source-flow report
-        /// or `json` for machine-readable output. `sarif` is reserved
-        /// for `security taint-analysis`; passing it here returns a
-        /// source-analysis-specific error instead of emitting misleading
-        /// vulnerability findings.
-        #[arg(
-            long,
-            value_name = "FORMAT",
-            value_parser = parse_source_analysis_format,
-            default_value = "text"
-        )]
-        format: SourceAnalysisFormat,
+        /// or `json` for machine-readable output.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
         #[command(flatten)]
         output: OutputPathArg,
     },

@@ -8,6 +8,8 @@ description: "Command and flag reference for security analysis, flow inspection,
 Global options accepted before the command include `--no-color`,
 `--theme`, `--no-cache`, `--no-progress`, `--contains`,
 `--not-contains`, `--parse-timeout`, `--help`, and `--version`.
+`--theme` and `BONSAI_THEME` accept exactly `moss`, `earthy-dark`,
+`dracula`, or `retro-amber`; unknown values are errors.
 
 Progress bars render to stderr only. Interactive commands show staged
 work such as workspace ingest/parse, reduced-workspace file selection,
@@ -154,7 +156,7 @@ Common inventory flags for `sources`, `sinks`, `sanitizers`, and `deps`:
 | `--context <BUDGET>` | 32k | Token budget for text and JSON output. |
 | `--page <PAGE>` | 1 | Page number, `P:xxxxxxxx` cursor, or `next`. |
 | `--all` | false | Emit all rows or findings without paging. |
-| `--format <FORMAT>` | text | `text`, `json`, or `sarif` where supported. |
+| `--format <FORMAT>` | text | `text` or `json`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 ## taint
@@ -212,7 +214,6 @@ redo work.
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every finding. |
-| `--no-compact` | false | Compatibility flag; security text expands flow bodies by default. |
 | `--summary` | false | Emit only aggregate finding counts. Text shows compact tables; JSON emits the summary object without paged rows. |
 | `--format <FORMAT>` | text | `text`, `json`, or `sarif`. SARIF is supported for `taint-analysis` findings. |
 | `--baseline <PREV_JSON>` | None | Compare against a previous `taint-analysis --format json --all` file and classify findings as `new`, `unchanged`, or `fixed`. |
@@ -258,9 +259,9 @@ bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
 | `--regex` | false | Treat query as regex. |
 | `--kind <KIND>` | All | Restrict to `decl`, `call`, `import`, `var`, `string`, `arg`, `ref`, or `decorator`. Repeatable. |
 | `--from <TEXT>` | None | Keep flows passing through this text. |
-| `--from-kind <KIND>` | None | Narrow `--from` to `decl`, `call`, `read`, `write`, `arg`, `string`, `import`, or `class`. |
+| `--from-kind <KIND>` | None | Narrow `--from` to `decl`, `call`, `read`, `write`, `arg`, `string`, `import`, or `class`. Requires `--from`. |
 | `--to <TEXT>` | None | Keep flows reaching this text. |
-| `--to-kind <KIND>` | None | Narrow `--to` to a browse-fact kind. |
+| `--to-kind <KIND>` | None | Narrow `--to` to a browse-fact kind. Requires `--to`. |
 | `--file <TEXT>` | None | Hit workspace-relative file path filter. Explicit absolute paths are also accepted. |
 | `--in-fn <TEXT>` | None | Enclosing-function filter for non-decl hits. |
 | `--max-flows <N>` | 50 | Max flows per decl hit. |
@@ -276,7 +277,7 @@ bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
 | `--syntax-only` | false | Omit the default rulepack-free taint paths and render only indexed syntax hits. Output scope only, not a lower-accuracy mode. |
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
-| `--format <FORMAT>` | text | `text` or native `json`; `sarif` is accepted by the shared parser but falls back to native JSON outside `security taint-analysis`. |
+| `--format <FORMAT>` | text | `text` or native `json`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 ## show
@@ -323,7 +324,7 @@ bonsai-ninja show ./src T:aabbccdd --taint-source update_user --taint-seed token
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Lift delegated command caps where supported. |
 | `--rules-dir <DIR>` | Auto-discovered | Rulepack directory for `S:` finding IDs and security-owned `F:` flow IDs. |
-| `--format <FORMAT>` | text | `text` or native `json`; `sarif` is accepted by the shared parser but falls back to native JSON outside `security taint-analysis`. |
+| `--format <FORMAT>` | text | `text` or native `json`. |
 | `--output-path <PATH>` | stdout | Write the delegated output to a file. |
 
 ## trace
@@ -385,7 +386,7 @@ bonsai-ninja path ./src --from handle_request --to verify --format json
 | `--max-depth <N>` | 12 | Maximum semantic call edges in one path. |
 | `--max-probes <N>` | 4096 | Maximum graph states to inspect before marking incomplete. |
 | `--context`, `--page`, `--all` | 32k / 1 / false | Standard paging controls. |
-| `--format <FORMAT>` | text | `text` or `json`; `sarif` uses native JSON. |
+| `--format <FORMAT>` | text | `text` or `json`. |
 | `--output-path <PATH>` | stdout | Write the selected format to a file. |
 
 If `--to` does not match a callable declaration but does match an indexed
@@ -427,7 +428,7 @@ bonsai-ninja slice ./src --symbol cmd --line 47 --file ml_pipeline.py --format j
 | `--file <TEXT>` | None | Optional workspace-relative file path filter to disambiguate same-line callables. Explicit absolute paths are also accepted. |
 | `--max-steps <N>` | 64 | Maximum slice steps to emit. Use `0` for uncapped. |
 | `--context`, `--page`, `--all` | 32k / 1 / false | Standard paging controls. |
-| `--format <FORMAT>` | text | `text` or `json`; `sarif` uses native JSON. |
+| `--format <FORMAT>` | text | `text` or `json`. |
 | `--output-path <PATH>` | stdout | Write the selected format to a file. |
 
 JSON includes `symbol`, `line`, optional `file`, `candidate_count`,
@@ -492,7 +493,6 @@ JSON rows include `analysis_complete`, `analysis_incomplete_reasons`, and
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every source flow. |
-| `--no-compact` | false | Compatibility flag; security text expands flow bodies by default. |
 | `--format <FORMAT>` | text | `text` or `json`. Source-flow mapping is not SARIF finding output; use `security taint-analysis --format sarif` for SARIF. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
@@ -582,7 +582,7 @@ Common browse output flags:
 | `--page <PAGE>` | 1 | Page number, `next`, or a printed `P:xxxxxxxx` cursor. |
 | `--all` | false | Emit all rows with no paging/context cap. |
 | `--no-flows` | false | Hide flow-id columns on commands that include them. |
-| `--format <FORMAT>` | text | `text` or native `json`; `sarif` is accepted by the shared parser but falls back to native JSON outside `security taint-analysis`. |
+| `--format <FORMAT>` | text | `text` or native `json`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 Flow columns are semantic-only navigation labels: exact/narrowed facts only,
@@ -602,14 +602,14 @@ only the selected file by default and enables its semantic overlays when their
 corresponding options are requested.
 
 ```bash
-bonsai-ninja tree ./src --max-depth 3 --compact
+bonsai-ninja tree ./src --max-depth 3
 bonsai-ninja security ./src taint-analysis --severity high
 bonsai-ninja read-file ./src auth/verify_token.py --lines 1:80 --from request.args --to os.system
 ```
 
 | Command | Purpose | Key flags |
 |---|---|---|
-| `tree` | Fast structural workspace tree with no compiler or security work. | `--max-depth`, `--file`, `--exclude-file`, `--limit`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
+| `tree` | Fast structural workspace tree with no compiler or security work. | `--max-depth`, `--file`, `--exclude-file`, `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `read-file` | Source view for one file with inline marks and cross-file caller/callee bodies. | `--symbol`, `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
 
 JSON includes top-level `analysis_complete` and

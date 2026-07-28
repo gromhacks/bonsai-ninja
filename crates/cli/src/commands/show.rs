@@ -237,7 +237,7 @@ fn show_sdk_structural_group(workspace: &Path, id: &str, format: BrowseFormat) -
 
 fn emit_sdk_inspect_flow(flow: &bonsai_sdk::InspectFlowShow, format: BrowseFormat) -> Result<()> {
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             cli_println!("{}", serde_json::to_string_pretty(flow)?);
         }
         BrowseFormat::Text => {
@@ -257,7 +257,7 @@ fn emit_sdk_inspect_flow(flow: &bonsai_sdk::InspectFlowShow, format: BrowseForma
 
 fn emit_sdk_inspect_group(group: &bonsai_sdk::InspectFlowGroupShow, format: BrowseFormat) -> Result<()> {
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             cli_println!("{}", serde_json::to_string_pretty(group)?);
         }
         BrowseFormat::Text => {
@@ -351,9 +351,8 @@ fn show_security_finding(args: ShowArgs<'_>, id: &str) -> Result<()> {
             context: args.context.map(str::to_string),
             page: args.page.map(str::to_string),
             all: args.all,
-            no_compact: !args.compact,
             summary: false,
-            format: args.format,
+            format: args.format.into(),
             baseline: None,
             explain: false,
             output: OutputPathArg {
@@ -387,9 +386,8 @@ fn show_security_flow(args: &ShowArgs<'_>, id: &str) -> Result<()> {
             context: args.context.map(str::to_string),
             page: args.page.map(str::to_string),
             all: args.all,
-            no_compact: !args.compact,
             summary: false,
-            format: args.format,
+            format: args.format.into(),
             baseline: None,
             explain: false,
             output: OutputPathArg {
@@ -423,9 +421,8 @@ fn show_security_group(args: &ShowArgs<'_>, id: &str) -> Result<()> {
             context: args.context.map(str::to_string),
             page: args.page.map(str::to_string),
             all: args.all,
-            no_compact: !args.compact,
             summary: false,
-            format: args.format,
+            format: args.format.into(),
             baseline: None,
             explain: false,
             output: OutputPathArg {

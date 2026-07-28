@@ -239,33 +239,42 @@ pub(crate) static PARSE_TIMEOUT_MS: std::sync::OnceLock<Option<u64>> = std::sync
 
 /// Read `--theme` / `BONSAI_THEME` from argv + env *before* clap parses, so
 /// clap's own help renderer can use the chosen palette. Falls back to
-/// `moss` (the bonsai-ninja house theme) when no theme is requested
-/// or the name is unknown.
+/// `moss` (the bonsai-ninja house theme) when no theme is requested.
 ///
 /// Parsing is best-effort: we walk argv looking for `--theme X`,
 /// `--theme=X`, or an environment variable. We don't validate any other
 /// flags — that's clap's job on the real pass.
 pub(crate) fn resolve_theme_early() -> Theme {
-    let args: Vec<String> = std::env::args().collect();
-    let mut iter = args.iter().skip(1);
-    while let Some(arg) = iter.next() {
-        if arg == "--theme" {
-            if let Some(v) = iter.next() {
-                if let Some(t) = Theme::parse(v) {
-                    return t;
-                }
-            }
-        } else if let Some(v) = arg.strip_prefix("--theme=") {
-            if let Some(t) = Theme::parse(v) {
-                return t;
-            }
-        }
-    }
-    std::env::var("BONSAI_THEME")
-        .ok()
+    requested_theme_early()
         .as_deref()
         .and_then(Theme::parse)
         .unwrap_or(Theme::Moss)
+}
+
+/// Return the raw early theme request. Unknown names intentionally remain
+/// visible so [`real_main`] can leave them to clap's strict `ValueEnum`
+/// validation instead of rendering help with a silent fallback.
+fn requested_theme_early() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--theme" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--theme=") {
+            return Some(value.to_string());
+        }
+    }
+    std::env::var("BONSAI_THEME").ok()
+}
+
+fn requested_theme_is_valid_early() -> bool {
+    requested_theme_early()
+        .as_deref()
+        .is_none_or(|name| Theme::parse(name).is_some())
 }
 
 /// Clap styles used by `--help` rendering. Wires the active theme into
@@ -322,8 +331,10 @@ fn real_main() -> Result<()> {
     // descriptions come from `///` doc comments and have no style
     // slot. We render clap's help to a buffer and post-process it
     // to colorize description body text in the active palette.
-    if let Some(ec) = try_themed_help() {
-        std::process::exit(ec);
+    if requested_theme_is_valid_early() {
+        if let Some(ec) = try_themed_help() {
+            std::process::exit(ec);
+        }
     }
 
     let cli = Cli::parse();
@@ -333,18 +344,7 @@ fn real_main() -> Result<()> {
     if let Some(memory_budget_mb) = cli.memory_budget_mb {
         std::env::set_var("BONSAI_MEMORY_BUDGET_MB", memory_budget_mb.to_string());
     }
-    let theme = cli
-        .theme
-        .as_deref()
-        .or(option_env!("BONSAI_THEME"))
-        .and_then(Theme::parse)
-        .or_else(|| {
-            std::env::var("BONSAI_THEME")
-                .ok()
-                .as_deref()
-                .and_then(Theme::parse)
-        })
-        .unwrap_or(Theme::Moss);
+    let theme = cli.theme.unwrap_or(Theme::Moss);
     let _ = UI_CELL.set(Ui::new(cli.no_color, theme));
     // Semantic compiler phases may run in child processes so the operating
     // system can reclaim allocator arenas between workspace-scale phases.
@@ -1023,7 +1023,6 @@ fn real_main() -> Result<()> {
             workspace,
             symbol_pos,
             query,
-            symbol,
             regex,
             kind,
             from,
@@ -1048,7 +1047,7 @@ fn real_main() -> Result<()> {
             format,
             output: _,
         } => {
-            // Precedence: positional → --query → --symbol (legacy alias).
+            // Precedence: positional query, then `--query`.
             // Query is OPTIONAL: when omitted, `--from` / `--to` /
             // `--file` / `--in-fn` / `--kind` can act as standalone
             // filters that enumerate every decl + hit and narrow from
@@ -1056,7 +1055,7 @@ fn real_main() -> Result<()> {
             // <id>` alone also satisfies the "some signal" rule — a
             // flow id pins a specific chain independently of the
             // query that originally produced it.
-            let q = symbol_pos.or(query).or(symbol);
+            let q = symbol_pos.or(query);
             let filters = InspectFilters {
                 from: from.as_deref(),
                 from_kind,
@@ -1138,11 +1137,7 @@ fn real_main() -> Result<()> {
             max_depth,
             file,
             exclude_file,
-            findings,
-            severity,
-            rules_dir,
             limit,
-            compact,
             context,
             page,
             all,
@@ -1153,13 +1148,11 @@ fn real_main() -> Result<()> {
             max_depth,
             file: file.as_deref(),
             exclude_file: &exclude_file,
-            legacy_security_option: findings || severity.is_some() || rules_dir.is_some(),
             limit,
-            compact,
             context: context.as_deref(),
             page: page.as_deref(),
             all,
-            format: &format,
+            format,
         }),
         Cmd::ReadFile {
             workspace,
@@ -1188,7 +1181,7 @@ fn real_main() -> Result<()> {
             context: context.as_deref(),
             page: page.as_deref(),
             all,
-            format: &format,
+            format,
             rules_dir: rules_dir.as_deref(),
         }),
     };

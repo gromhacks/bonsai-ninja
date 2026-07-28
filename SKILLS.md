@@ -68,7 +68,7 @@ Start with shape, then follow one concrete behavior.
 # Optional during active editing:
 ./target/release/bonsai-ninja index <workspace> --watch --no-progress
 ./target/release/bonsai-ninja context <workspace> --no-color --no-progress
-./target/release/bonsai-ninja tree <workspace> --max-depth 3 --compact --context 16k --no-color --no-progress
+./target/release/bonsai-ninja tree <workspace> --max-depth 3 --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja imports <workspace> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja defs <workspace> --kind function --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja entrypoints <workspace> --context 16k --no-color --no-progress

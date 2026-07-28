@@ -1839,13 +1839,8 @@ fn finish_inspect(
     // symbol (trace, dump-hir, refs) should treat it as usage error.
     //
     // JSON output stays machine-parseable with the same InspectReport
-    // shape used for non-empty results. SARIF still returns an empty
-    // array here because inspect does not synthesize SARIF runs.
+    // shape used for non-empty results.
     if report.decl_hits.is_empty() && report.hits.is_empty() && report.taint_flows.is_empty() {
-        if matches!(format, BrowseFormat::Sarif) {
-            cli_println!("[]");
-            return Ok(());
-        }
         if matches!(format, BrowseFormat::Json) {
             cli_println!("{}", serde_json::to_string_pretty(&report)?);
             return Ok(());
@@ -1898,7 +1893,7 @@ fn finish_inspect(
     }
 
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             // Programmatic inspect is token-budgeted by default. When
             // the full report fits the first page we keep the native
             // InspectReport shape; otherwise we page across every

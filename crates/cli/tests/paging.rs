@@ -1302,25 +1302,25 @@ fn parse_total_pages(out: &str) -> Option<u64> {
 }
 
 #[test]
-fn security_no_compact_respects_context_budget() {
+fn security_text_respects_context_budget() {
     let ws = complex_ws();
     let ws_str = ws.to_str().unwrap();
     for subcommand in ["taint-analysis", "source-analysis"] {
-        let Some(out) = run(&["security", ws_str, subcommand, "--no-compact", "--context", "4k"]) else {
+        let Some(out) = run(&["security", ws_str, subcommand, "--context", "4k"]) else {
             return;
         };
         let Some((used, budget)) = parse_context_line(&out) else {
-            panic!("security {subcommand} --no-compact: missing context footer:\n{out}");
+            panic!("security {subcommand}: missing context footer:\n{out}");
         };
         assert_eq!(budget, 4096, "budget must echo --context flag");
         assert!(
             used <= budget,
-            "security {subcommand} --no-compact exceeded context: {used}>{budget}\n{out}"
+            "security {subcommand} exceeded context: {used}>{budget}\n{out}"
         );
         assert!(
             !out.contains("single row cost exceeded --context")
                 && !out.contains("rendered output exceeded --context budget"),
-            "security {subcommand} --no-compact must split pages instead of rendering an oversized page:\n{out}"
+            "security {subcommand} must split pages instead of rendering an oversized page:\n{out}"
         );
     }
 }
@@ -1413,14 +1413,7 @@ fn security_page_turn_reuses_rendered_page_cache() {
     let cache_dir = ws.join(".bonsai/page-cache.v5");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let ws_str = ws.to_str().unwrap();
-    let Some(first) = run(&[
-        "security",
-        ws_str,
-        "taint-analysis",
-        "--context",
-        "1k",
-        "--no-compact",
-    ]) else {
+    let Some(first) = run(&["security", ws_str, "taint-analysis", "--context", "1k"]) else {
         return;
     };
     if !first.contains("page 1 of") || first.contains("page 1 of 1") {
@@ -1441,7 +1434,6 @@ fn security_page_turn_reuses_rendered_page_cache() {
         "taint-analysis",
         "--context",
         "1k",
-        "--no-compact",
         "--page",
         "2",
     ]) else {

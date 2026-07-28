@@ -242,7 +242,7 @@ pub(crate) fn cmd_defs(
             + paging::TABLE_ROW_CHROME_BYTES
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &out, &paging_cfg, "defs", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -461,7 +461,7 @@ pub(crate) fn cmd_entrypoints(
         ])
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &out, &paging_cfg, "entrypoints", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -631,7 +631,7 @@ pub(crate) fn paging_from_cli(
     };
     let format_class = match format {
         BrowseFormat::Text => paging::FormatClass::Text,
-        BrowseFormat::Json | BrowseFormat::Sarif => paging::FormatClass::Programmatic,
+        BrowseFormat::Json => paging::FormatClass::Programmatic,
     };
     let explicit_uncapped = context.is_some() && ctx.is_none();
     Ok(paging::PagingConfig::new(
@@ -961,7 +961,7 @@ pub(crate) fn cmd_calls(
             ))
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             if paging_cfg.json_wrapped() {
                 emit_json_paged_cached(root, &out, &paging_cfg, "calls", filters_hash, cost_bytes)?;
             } else {
@@ -1302,7 +1302,7 @@ pub(crate) fn cmd_imports(
         .saturating_add(flow_cost)
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &out, &paging_cfg, "imports", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -1594,7 +1594,7 @@ pub(crate) fn cmd_vars(
             ))
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &out, &paging_cfg, "vars", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -1708,7 +1708,7 @@ pub(crate) fn cmd_strings(
         ))
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &out, &paging_cfg, "strings", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -1801,7 +1801,7 @@ pub(crate) fn cmd_comments(
         (c.kind.len() + c.text.len().min(200) + c.file.len() + 16) as u64 + paging::TABLE_ROW_CHROME_BYTES
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &out, &paging_cfg, "comments", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -1911,7 +1911,7 @@ pub(crate) fn cmd_args(
         ))
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &out, &paging_cfg, "args", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -2043,7 +2043,7 @@ pub(crate) fn cmd_operations(
         ))
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &out, &paging_cfg, "operations", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -2175,7 +2175,7 @@ pub(crate) fn cmd_classes(
             + paging::TABLE_ROW_CHROME_BYTES
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &out, &paging_cfg, "classes", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -2414,7 +2414,7 @@ pub(crate) fn cmd_refs(
             + paging::TABLE_ROW_CHROME_BYTES
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &out, &paging_cfg, "refs", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -2513,7 +2513,7 @@ pub(crate) fn cmd_search(
             + paging::TABLE_ROW_CHROME_BYTES
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &hits, &paging_cfg, "search", filters_hash, cost)?;
         }
         BrowseFormat::Text => {

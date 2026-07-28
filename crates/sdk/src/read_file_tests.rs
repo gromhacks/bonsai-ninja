@@ -100,6 +100,21 @@ fn read_file_from_to_filters_match_source_and_sink_sides() {
 }
 
 #[test]
+fn finding_digest_uses_a_supported_stable_flow_drilldown() {
+    let finding = combined().finding;
+    let digest = build_finding_digest(&finding);
+    assert_eq!(digest.drilldown, "bonsai-ninja show <ws> F:1");
+}
+
+#[test]
+fn finding_digest_without_a_flow_uses_a_supported_file_drilldown() {
+    let mut finding = combined().finding;
+    finding.representative_flow_id = None;
+    let digest = build_finding_digest(&finding);
+    assert_eq!(digest.drilldown, "bonsai-ninja read-file <ws> app.py --lines 1:6");
+}
+
+#[test]
 fn read_file_path_resolution_requires_path_boundary() {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

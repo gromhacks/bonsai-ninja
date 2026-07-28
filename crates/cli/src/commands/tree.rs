@@ -12,6 +12,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use super::emit_json_value_paged_cached;
+use crate::args::BrowseFormat;
 use crate::cli_println;
 use crate::footer::render_paging_footer;
 use crate::paging::{self, FormatClass};
@@ -23,13 +24,11 @@ pub(crate) struct TreeArgs<'a> {
     pub(crate) max_depth: Option<usize>,
     pub(crate) file: Option<&'a str>,
     pub(crate) exclude_file: &'a [String],
-    pub(crate) legacy_security_option: bool,
     pub(crate) limit: usize,
-    pub(crate) compact: bool,
     pub(crate) context: Option<&'a str>,
     pub(crate) page: Option<&'a str>,
     pub(crate) all: bool,
-    pub(crate) format: &'a str,
+    pub(crate) format: BrowseFormat,
 }
 
 #[derive(Serialize)]
@@ -124,20 +123,13 @@ impl<'a> From<&'a StructuralTreeNode> for StructuralTreeNodeJson<'a> {
 }
 
 pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
-    if args.legacy_security_option {
-        anyhow::bail!(
-            "`tree` is filesystem-only and never runs taint analysis; use \
-             `bonsai-ninja security <workspace> taint-analysis` for findings, \
-             severity filters, and rulepack selection"
-        );
-    }
     let filters_hash = tree_filters_hash(&args);
     let stage = progress::ScopedSpinner::new("scanning filesystem tree");
     let out = build_fast_filesystem_tree(&args)?;
     stage.finish();
 
     match args.format {
-        "json" => {
+        BrowseFormat::Json => {
             let cfg = paging::config_from_raw(args.context, args.page, args.all, FormatClass::Programmatic)
                 .map_err(|e| anyhow::anyhow!(e))?;
             emit_json_value_paged_cached(
@@ -148,7 +140,9 @@ pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
                 filters_hash,
             )?;
         }
-        _ => render_text_paged(&out, args.context, args.page, args.all, filters_hash)?,
+        BrowseFormat::Text => {
+            render_text_paged(&out, args.context, args.page, args.all, filters_hash)?;
+        }
     }
     Ok(())
 }
@@ -418,13 +412,11 @@ fn tree_filters_hash(args: &TreeArgs<'_>) -> u64 {
     let max_depth = args.max_depth.map(|n| n.to_string()).unwrap_or_default();
     let exclude_file = args.exclude_file.join("\0");
     let limit = args.limit.to_string();
-    let compact = if args.compact { "1" } else { "0" };
     paging::hash_filters(&[
         ("max_depth", &max_depth),
         ("file", args.file.unwrap_or("")),
         ("exclude_file", &exclude_file),
         ("limit", &limit),
-        ("compact", compact),
     ])
 }
 

@@ -1531,7 +1531,6 @@ def run(cmd):
         "^python\\.test\\.user_param$",
         "--sink",
         "^python\\.test\\.os_system$",
-        "--no-compact",
         "--context",
         "all",
     ])
@@ -2037,7 +2036,7 @@ fn source_analysis_maps_python_entrypoint_paths() {
 }
 
 #[test]
-fn source_analysis_rejects_sarif_format_instead_of_emitting_json() {
+fn source_analysis_parser_rejects_sarif_format() {
     let Some(bin) = bin_path() else {
         return;
     };
@@ -2065,8 +2064,8 @@ fn source_analysis_rejects_sarif_format_instead_of_emitting_json() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("does not emit SARIF"),
-        "error should explain SARIF support boundary, got:\n{stderr}"
+        stderr.contains("invalid value") && stderr.contains("json") && stderr.contains("text"),
+        "clap should list source-analysis's complete format surface, got:\n{stderr}"
     );
 }
 
