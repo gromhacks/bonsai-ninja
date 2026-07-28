@@ -768,7 +768,12 @@ fn dump_edges_rejects_broad_precision() {
     ]) else {
         return;
     };
-    assert_contains(&stderr, "semantic-only", "dump-edges");
+    assert!(
+        stderr.contains("invalid value")
+            && stderr.contains("exact")
+            && stderr.contains("narrowed"),
+        "dump-edges should reject broad precision in clap and list the complete semantic precision surface:\n{stderr}"
+    );
 }
 
 // -------- dump-resolution --------
