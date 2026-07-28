@@ -157,6 +157,81 @@ pub(super) fn runtime_type_rejection_guard_sanitizer(
     )
 }
 
+pub(super) fn finite_literal_selection_sanitizer(
+    ws: &Workspace,
+    sink: &RuleMatch,
+    tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    if file_index.finite_literal_selections.is_empty() {
+        return None;
+    }
+    let headers = ws.compiler_linkage_index();
+    let enclosing = ws
+        .enclosing_index()
+        .enclosing_for(headers.as_ref(), sink.span.file, sink.span.start)?;
+    let decl = ws.exact_decl(enclosing.symbol)?;
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(&decl.flow_events, sink.span, &mut assignments);
+    assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+
+    let selection = tainted_args.iter().find_map(|arg| {
+        tainted_arg_target_keys(arg).into_iter().find_map(|target| {
+            finite_literal_selection_dependency(
+                &target,
+                sink.span.start,
+                &assignments,
+                &file_index.finite_literal_selections,
+                &mut AHashSet::new(),
+            )
+        })
+    })?;
+    finding_for_guard_span_in_workspace(
+        ws,
+        sink,
+        selection.selection_span,
+        "engine.sanitizer.finite_literal_selection",
+        "compiler-clean-value",
+        "compiler-proven-finite-literal-selection",
+    )
+}
+
+fn finite_literal_selection_dependency<'a>(
+    target: &str,
+    before: u64,
+    assignments: &[StructuredAssignment<'_>],
+    selections: &'a [bonsai_lang_api::FiniteLiteralSelectionFact],
+    visited: &mut AHashSet<String>,
+) -> Option<&'a bonsai_lang_api::FiniteLiteralSelectionFact> {
+    if !visited.insert(target.to_string()) {
+        return None;
+    }
+    let assignment = assignments.iter().rev().find(|assignment| {
+        assignment.span.start < before
+            && clean_overwrite_target_key(assignment.target).as_deref() == Some(target)
+    })?;
+    if let Some(selection) = selections
+        .iter()
+        .find(|selection| selection.assignment_span == assignment.span)
+    {
+        return Some(selection);
+    }
+    assignment
+        .source_name
+        .into_iter()
+        .chain(assignment.source_names.iter().map(String::as_str))
+        .filter_map(clean_overwrite_target_key)
+        .find_map(|source| {
+            finite_literal_selection_dependency(
+                &source,
+                assignment.span.start,
+                assignments,
+                selections,
+                visited,
+            )
+        })
+}
+
 fn collect_runtime_type_tests<'a>(
     expression: &'a ConditionExpressionFact,
     out: &mut Vec<(Span, &'a ConditionOperandFact, &'a str)>,

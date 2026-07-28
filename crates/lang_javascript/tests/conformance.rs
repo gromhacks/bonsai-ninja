@@ -122,6 +122,91 @@ fn denylist_constructor_and_condition_emit_exact_compiler_facts() {
 }
 
 #[test]
+fn finite_map_selection_requires_an_immutable_unshadowed_binding_and_literal_fallback() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "selection.js",
+            r#"
+const SORTABLE = new Map([["id", "id"], ["email", "email"]]);
+function safe(key) {
+  const column = SORTABLE.get(key) ?? "id";
+  return column;
+}
+function dynamicFallback(key, fallback) {
+  const dynamic = SORTABLE.get(key) ?? fallback;
+  return dynamic;
+}
+function shadowed(SORTABLE, key) {
+  const shadow = SORTABLE.get(key) ?? "id";
+  return shadow;
+}
+function mutated(key, value) {
+  const LOCAL = new Map([["id", "id"]]);
+  LOCAL.set("id", value);
+  const changed = LOCAL.get(key) ?? "id";
+  return changed;
+}
+export const PUBLIC = new Map([["id", "id"]]);
+function exported(key) {
+  const publicValue = PUBLIC.get(key) ?? "id";
+  return publicValue;
+}
+const LATE_MUTATION = new Map([["id", "id"]]);
+function selectedBeforeMutation(key) {
+  const late = LATE_MUTATION.get(key) ?? "id";
+  return late;
+}
+function mutateFromElsewhere(value) {
+  LATE_MUTATION.set("id", value);
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+
+    assert_eq!(
+        index
+            .finite_literal_selections
+            .iter()
+            .map(|fact| fact.target.as_str())
+            .collect::<Vec<_>>(),
+        ["column"]
+    );
+}
+
+#[test]
+fn finite_map_selection_rejects_a_shadowed_map_constructor() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "shadow.js",
+            r#"
+class Map {
+  constructor(entries) { this.entries = entries; }
+  get(key) { return key; }
+}
+const LOOKUP = new Map([["id", "id"]]);
+function unsafe(key) {
+  const selected = LOOKUP.get(key) ?? "id";
+  return selected;
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    assert!(index.finite_literal_selections.is_empty());
+}
+
+#[test]
 fn commonjs_named_function_export_has_single_semantic_decl() {
     use bonsai_lang_api::LanguageAdapter;
 

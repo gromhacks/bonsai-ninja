@@ -4769,6 +4769,7 @@ fn lower_transfer_segment_batch(
         };
         let assignment_values = file_index.assignment_values.as_slice();
         let call_receivers = file_index.call_receivers.as_slice();
+        let finite_literal_selections = file_index.finite_literal_selections.as_slice();
         let decls_by_func: AHashMap<FuncId, &bonsai_lang_api::Decl> = file_index
             .defs
             .iter()
@@ -4797,6 +4798,7 @@ fn lower_transfer_segment_batch(
                         transfer_matchers,
                         assignment_values,
                         call_receivers,
+                        finite_literal_selections,
                     );
                 }
                 let mut resolved = decl.clone();
@@ -4811,6 +4813,7 @@ fn lower_transfer_segment_batch(
                     transfer_matchers,
                     assignment_values,
                     call_receivers,
+                    finite_literal_selections,
                 )
             })
             .collect();

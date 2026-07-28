@@ -7,9 +7,9 @@ use bonsai_lang_api::{
         with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
-    ConditionExpressionFact, ConditionOperandFact, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, StaticStringMapEntry, StaticStringMapFact,
-    TypeAliasBinding, Visibility,
+    ConditionExpressionFact, ConditionOperandFact, DeclIndex, FiniteLiteralSelectionFact, GrammarHandler,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    StaticStringMapEntry, StaticStringMapFact, TypeAliasBinding, Visibility,
 };
 use bonsai_lang_api::{CallArg, DeclKind, FlowEvent};
 use std::collections::{HashMap, HashSet};
@@ -223,6 +223,7 @@ pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, fi
         }
     }
     index.static_string_maps = ecmascript_static_string_maps(index, tree, file, src);
+    index.finite_literal_selections = ecmascript_finite_literal_selections(index, tree, file, src);
     index.character_substitutions = ecmascript_character_substitutions(&index.defs, tree, file, src);
 }
 
@@ -265,6 +266,597 @@ fn ecmascript_static_string_maps(
     }
     maps.sort_by_key(|fact| (fact.assignment_span.start, fact.assignment_span.end));
     maps
+}
+
+fn ecmascript_finite_literal_selections(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<FiniteLiteralSelectionFact> {
+    let bindings = ecmascript_bindings(tree, src);
+    if !bindings
+        .bindings
+        .iter()
+        .any(|binding| binding.finite_map.is_some())
+    {
+        return Vec::new();
+    }
+    let mut selections = Vec::new();
+    for node in collect_kinds(tree, &["call_expression", "subscript_expression"]) {
+        let (map_target, object) = if node.kind() == "call_expression" {
+            let Some(function) = node.child_by_field_name("function") else {
+                continue;
+            };
+            if function.kind() != "member_expression" {
+                continue;
+            }
+            let Some(object) = function.child_by_field_name("object") else {
+                continue;
+            };
+            let Some(property) = function.child_by_field_name("property") else {
+                continue;
+            };
+            if object.kind() != "identifier" || node_text(&property, src).trim() != "get" {
+                continue;
+            }
+            (node_text(&object, src).trim(), object)
+        } else {
+            let Some(object) = node.child_by_field_name("object") else {
+                continue;
+            };
+            if object.kind() != "identifier" {
+                continue;
+            }
+            (node_text(&object, src).trim(), object)
+        };
+        let Some(binding) = bindings.resolve(map_target, object.start_byte(), object.end_byte()) else {
+            continue;
+        };
+        if binding.finite_map.is_none()
+            || binding.initializer.end_byte() > node.start_byte()
+            || bindings.unsafe_bindings.contains(&binding.declaration.id())
+        {
+            continue;
+        }
+        let selection_span = span_of(file, &node);
+        let Some(assignment) = index
+            .assignment_values
+            .iter()
+            .filter(|fact| {
+                fact.target.is_some()
+                    && fact.value_span.file == selection_span.file
+                    && fact.value_span.start <= selection_span.start
+                    && selection_span.end <= fact.value_span.end
+            })
+            .min_by_key(|fact| fact.value_span.end.saturating_sub(fact.value_span.start))
+        else {
+            continue;
+        };
+        let Some(value_node) =
+            bonsai_lang_api::kit::node_at_span(tree.root_node(), assignment.value_span, &[])
+        else {
+            continue;
+        };
+        if !ecmascript_expression_is_finite_selection(value_node, node, src, &bindings) {
+            continue;
+        }
+        selections.push(FiniteLiteralSelectionFact {
+            selection_span,
+            assignment_span: assignment.assignment_span,
+            target: assignment.target.clone().expect("checked target"),
+        });
+    }
+    selections.sort_by_key(|fact| {
+        (
+            fact.assignment_span.start,
+            fact.assignment_span.end,
+            fact.selection_span.start,
+            fact.selection_span.end,
+        )
+    });
+    selections.dedup();
+    selections
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum EcmascriptFiniteMapKind {
+    Object,
+    Map,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct EcmascriptBinding<'tree> {
+    name: &'tree str,
+    declaration: Node<'tree>,
+    initializer: Node<'tree>,
+    scope: Node<'tree>,
+    finite_map: Option<EcmascriptFiniteMapKind>,
+}
+
+struct EcmascriptBindings<'tree> {
+    bindings: Vec<EcmascriptBinding<'tree>>,
+    by_name: HashMap<String, Vec<usize>>,
+    unsafe_bindings: HashSet<usize>,
+    object_intrinsic_unshadowed: bool,
+}
+
+impl<'tree> EcmascriptBindings<'tree> {
+    fn resolve(&self, name: &str, use_start: usize, use_end: usize) -> Option<&EcmascriptBinding<'tree>> {
+        let candidates = self.by_name.get(name)?;
+        let smallest_scope = candidates
+            .iter()
+            .map(|index| &self.bindings[*index])
+            .filter(|binding| binding.scope.start_byte() <= use_start && use_end <= binding.scope.end_byte())
+            .map(|binding| binding.scope.end_byte() - binding.scope.start_byte())
+            .min()?;
+        let mut candidates = candidates
+            .iter()
+            .map(|index| &self.bindings[*index])
+            .filter(|binding| {
+                binding.scope.start_byte() <= use_start
+                    && use_end <= binding.scope.end_byte()
+                    && binding.scope.end_byte() - binding.scope.start_byte() == smallest_scope
+            });
+        let binding = candidates.next()?;
+        candidates.next().is_none().then_some(binding)
+    }
+}
+
+fn ecmascript_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> EcmascriptBindings<'tree> {
+    let mut bindings = Vec::new();
+    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+        let Some(target) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        if target.kind() != "identifier" {
+            continue;
+        }
+        let Some(scope) = ecmascript_binding_scope(declarator) else {
+            continue;
+        };
+        let name = node_text(&target, src).trim();
+        if name.is_empty() {
+            continue;
+        }
+        let is_const = declarator
+            .parent()
+            .filter(|parent| parent.kind() == "lexical_declaration")
+            .and_then(|declaration| declaration.child(0))
+            .is_some_and(|keyword| keyword.kind() == "const");
+        let is_exported = declarator
+            .parent()
+            .and_then(|declaration| declaration.parent())
+            .is_some_and(|parent| parent.kind() == "export_statement");
+        let value = declarator.child_by_field_name("value");
+        bindings.push(EcmascriptBinding {
+            name,
+            declaration: declarator,
+            initializer: value.unwrap_or(target),
+            scope,
+            finite_map: (is_const && !is_exported)
+                .then(|| value.and_then(|value| ecmascript_finite_literal_map_kind(value, src)))
+                .flatten(),
+        });
+    }
+
+    for parameters in collect_kinds(tree, &["formal_parameters"]) {
+        let Some(owner) = parameters.parent() else {
+            continue;
+        };
+        let Some(scope) = owner.child_by_field_name("body") else {
+            continue;
+        };
+        let mut cursor = parameters.walk();
+        for parameter in parameters.named_children(&mut cursor) {
+            let bound = match parameter.kind() {
+                "identifier" => Some(parameter),
+                "required_parameter" | "optional_parameter" | "rest_pattern" => parameter
+                    .child_by_field_name("pattern")
+                    .or_else(|| parameter.child_by_field_name("name")),
+                _ => None,
+            };
+            let Some(bound) = bound.filter(|bound| bound.kind() == "identifier") else {
+                continue;
+            };
+            let name = node_text(&bound, src).trim();
+            if name.is_empty() {
+                continue;
+            }
+            bindings.push(EcmascriptBinding {
+                name,
+                declaration: bound,
+                initializer: bound,
+                scope,
+                finite_map: None,
+            });
+        }
+    }
+    let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, binding) in bindings.iter().enumerate() {
+        by_name.entry(binding.name.to_string()).or_default().push(index);
+    }
+    let map_intrinsic_unshadowed =
+        !by_name.contains_key("Map") && !ecmascript_declares_static_name(tree, src, "Map");
+    let object_intrinsic_unshadowed =
+        !by_name.contains_key("Object") && !ecmascript_declares_static_name(tree, src, "Object");
+    if !map_intrinsic_unshadowed {
+        for binding in &mut bindings {
+            if binding.finite_map == Some(EcmascriptFiniteMapKind::Map) {
+                binding.finite_map = None;
+            }
+        }
+    }
+    let mut compiler_bindings = EcmascriptBindings {
+        bindings,
+        by_name,
+        unsafe_bindings: HashSet::new(),
+        object_intrinsic_unshadowed,
+    };
+    let declaration_identifiers: HashSet<_> = compiler_bindings
+        .bindings
+        .iter()
+        .filter_map(|binding| {
+            if binding.declaration.kind() == "variable_declarator" {
+                binding
+                    .declaration
+                    .child_by_field_name("name")
+                    .map(|name| name.id())
+            } else {
+                Some(binding.declaration.id())
+            }
+        })
+        .collect();
+    compiler_bindings.unsafe_bindings = collect_kinds(tree, &["identifier"])
+        .into_iter()
+        .filter_map(|identifier| {
+            if declaration_identifiers.contains(&identifier.id()) {
+                return None;
+            }
+            let name = node_text(&identifier, src).trim();
+            let binding = compiler_bindings.resolve(name, identifier.start_byte(), identifier.end_byte())?;
+            let kind = binding.finite_map?;
+            (!ecmascript_identifier_is_read_only_map_use(
+                identifier,
+                kind,
+                src,
+                compiler_bindings.object_intrinsic_unshadowed,
+            ))
+            .then_some(binding.declaration.id())
+        })
+        .collect();
+    compiler_bindings
+}
+
+fn ecmascript_declares_static_name(tree: &Tree, src: &[u8], wanted: &str) -> bool {
+    collect_kinds(
+        tree,
+        &[
+            "function_declaration",
+            "class_declaration",
+            "generator_function_declaration",
+        ],
+    )
+    .into_iter()
+    .any(|declaration| {
+        declaration
+            .child_by_field_name("name")
+            .is_some_and(|name| node_text(&name, src).trim() == wanted)
+    }) || collect_kinds(tree, &["import_statement"])
+        .into_iter()
+        .any(|import| {
+            let mut stack = vec![import];
+            while let Some(node) = stack.pop() {
+                if matches!(node.kind(), "identifier" | "type_identifier")
+                    && node_text(&node, src).trim() == wanted
+                {
+                    return true;
+                }
+                let mut cursor = node.walk();
+                stack.extend(node.named_children(&mut cursor));
+            }
+            false
+        })
+}
+
+fn ecmascript_binding_scope(mut node: Node<'_>) -> Option<Node<'_>> {
+    while let Some(parent) = node.parent() {
+        if matches!(
+            parent.kind(),
+            "for_statement"
+                | "for_in_statement"
+                | "for_of_statement"
+                | "statement_block"
+                | "switch_body"
+                | "program"
+        ) {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
+}
+
+fn ecmascript_finite_literal_map_kind(mut node: Node<'_>, src: &[u8]) -> Option<EcmascriptFiniteMapKind> {
+    while matches!(
+        node.kind(),
+        "parenthesized_expression" | "as_expression" | "satisfies_expression" | "type_assertion"
+    ) && node.named_child_count() >= 1
+    {
+        let Some(inner) = node
+            .child_by_field_name("expression")
+            .or_else(|| node.named_child(0))
+        else {
+            return None;
+        };
+        node = inner;
+    }
+    if node.kind() == "object" {
+        let mut cursor = node.walk();
+        return node
+            .named_children(&mut cursor)
+            .all(|child| {
+                if child.kind() != "pair" {
+                    return false;
+                }
+                child
+                    .child_by_field_name("key")
+                    .and_then(|key| ecmascript_static_property_name(key, src))
+                    .is_some()
+                    && child
+                        .child_by_field_name("value")
+                        .is_some_and(|value| ecmascript_is_literal_value(value, src))
+            })
+            .then_some(EcmascriptFiniteMapKind::Object);
+    }
+    if node.kind() != "new_expression" {
+        return None;
+    }
+    let Some(constructor) = node.child_by_field_name("constructor") else {
+        return None;
+    };
+    if constructor.kind() != "identifier" || node_text(&constructor, src).trim() != "Map" {
+        return None;
+    }
+    let Some(arguments) = node.child_by_field_name("arguments") else {
+        return None;
+    };
+    let mut cursor = arguments.walk();
+    let values: Vec<_> = arguments.named_children(&mut cursor).collect();
+    (values.len() == 1 && ecmascript_is_literal_map_entries(values[0], src))
+        .then_some(EcmascriptFiniteMapKind::Map)
+}
+
+fn ecmascript_is_literal_map_entries(node: Node<'_>, src: &[u8]) -> bool {
+    if node.kind() != "array" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let is_literal = node.named_children(&mut cursor).all(|entry| {
+        if entry.kind() != "array" {
+            return false;
+        }
+        let mut entry_cursor = entry.walk();
+        let values: Vec<_> = entry.named_children(&mut entry_cursor).collect();
+        values.len() == 2
+            && ecmascript_is_literal_value(values[0], src)
+            && ecmascript_is_literal_value(values[1], src)
+    });
+    is_literal
+}
+
+fn ecmascript_identifier_is_read_only_map_use(
+    identifier: Node<'_>,
+    kind: EcmascriptFiniteMapKind,
+    src: &[u8],
+    object_intrinsic_unshadowed: bool,
+) -> bool {
+    let Some(access) = identifier.parent() else {
+        return object_intrinsic_unshadowed
+            && ecmascript_identifier_is_safe_has_own_argument(identifier, src);
+    };
+    if access.child_by_field_name("object").map(|object| object.id()) != Some(identifier.id()) {
+        return object_intrinsic_unshadowed
+            && ecmascript_identifier_is_safe_has_own_argument(identifier, src);
+    }
+    if ecmascript_access_is_write_target(access) {
+        return false;
+    }
+    if access.kind() == "subscript_expression" {
+        return true;
+    }
+    if access.kind() != "member_expression" {
+        return false;
+    }
+    let Some(parent) = access.parent() else {
+        return true;
+    };
+    if parent.kind() != "call_expression"
+        || parent
+            .child_by_field_name("function")
+            .map(|function| function.id())
+            != Some(access.id())
+    {
+        return true;
+    }
+    let Some(property) = access.child_by_field_name("property") else {
+        return false;
+    };
+    let property = node_text(&property, src).trim();
+    match kind {
+        EcmascriptFiniteMapKind::Map => matches!(
+            property,
+            "get" | "has" | "entries" | "keys" | "values" | "forEach"
+        ),
+        EcmascriptFiniteMapKind::Object => false,
+    }
+}
+
+fn ecmascript_identifier_is_safe_has_own_argument(identifier: Node<'_>, src: &[u8]) -> bool {
+    let Some(arguments) = identifier.parent().filter(|parent| parent.kind() == "arguments") else {
+        return false;
+    };
+    let Some(first_argument) = arguments.named_child(0) else {
+        return false;
+    };
+    if first_argument.id() != identifier.id() {
+        return false;
+    }
+    let Some(call) = arguments
+        .parent()
+        .filter(|parent| parent.kind() == "call_expression")
+    else {
+        return false;
+    };
+    let Some(function) = call.child_by_field_name("function") else {
+        return false;
+    };
+    matches!(
+        ecmascript_static_member_path(function, src).as_slice(),
+        ["Object", "hasOwn"] | ["Object", "prototype", "hasOwnProperty", "call"]
+    )
+}
+
+fn ecmascript_static_member_path<'a>(node: Node<'_>, src: &'a [u8]) -> Vec<&'a str> {
+    if matches!(node.kind(), "identifier" | "property_identifier") {
+        let name = node_text(&node, src).trim();
+        return (!name.is_empty()).then_some(vec![name]).unwrap_or_default();
+    }
+    if node.kind() != "member_expression" {
+        return Vec::new();
+    }
+    let Some(object) = node.child_by_field_name("object") else {
+        return Vec::new();
+    };
+    let Some(property) = node.child_by_field_name("property") else {
+        return Vec::new();
+    };
+    let mut path = ecmascript_static_member_path(object, src);
+    let property = node_text(&property, src).trim();
+    if path.is_empty() || property.is_empty() {
+        return Vec::new();
+    }
+    path.push(property);
+    path
+}
+
+fn ecmascript_access_is_write_target(access: Node<'_>) -> bool {
+    let Some(parent) = access.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        "assignment_expression" | "augmented_assignment_expression" => parent
+            .child_by_field_name("left")
+            .is_some_and(|left| left.id() == access.id()),
+        "update_expression" => true,
+        "unary_expression" => parent
+            .child(0)
+            .is_some_and(|operator| operator.kind() == "delete"),
+        _ => false,
+    }
+}
+
+fn ecmascript_expression_is_finite_selection(
+    node: Node<'_>,
+    selection: Node<'_>,
+    src: &[u8],
+    bindings: &EcmascriptBindings<'_>,
+) -> bool {
+    if node.id() == selection.id() {
+        return true;
+    }
+    if selection.start_byte() < node.start_byte() || selection.end_byte() > node.end_byte() {
+        return false;
+    }
+    match node.kind() {
+        "parenthesized_expression" | "as_expression" | "satisfies_expression" | "type_assertion" => node
+            .named_child(0)
+            .is_some_and(|inner| ecmascript_expression_is_finite_selection(inner, selection, src, bindings)),
+        "binary_expression" => {
+            let Some(left) = node.child_by_field_name("left") else {
+                return false;
+            };
+            let Some(right) = node.child_by_field_name("right") else {
+                return false;
+            };
+            (selection.start_byte() >= left.start_byte()
+                && selection.end_byte() <= left.end_byte()
+                && ecmascript_expression_is_finite_selection(left, selection, src, bindings)
+                && ecmascript_is_literal_value_at(right, src, bindings))
+                || (selection.start_byte() >= right.start_byte()
+                    && selection.end_byte() <= right.end_byte()
+                    && ecmascript_expression_is_finite_selection(right, selection, src, bindings)
+                    && ecmascript_is_literal_value_at(left, src, bindings))
+        }
+        "ternary_expression" => {
+            let Some(consequence) = node.child_by_field_name("consequence") else {
+                return false;
+            };
+            let Some(alternative) = node.child_by_field_name("alternative") else {
+                return false;
+            };
+            (selection.start_byte() >= consequence.start_byte()
+                && selection.end_byte() <= consequence.end_byte()
+                && ecmascript_expression_is_finite_selection(consequence, selection, src, bindings)
+                && ecmascript_is_literal_value_at(alternative, src, bindings))
+                || (selection.start_byte() >= alternative.start_byte()
+                    && selection.end_byte() <= alternative.end_byte()
+                    && ecmascript_expression_is_finite_selection(alternative, selection, src, bindings)
+                    && ecmascript_is_literal_value_at(consequence, src, bindings))
+        }
+        _ => false,
+    }
+}
+
+fn ecmascript_is_literal_value_at(node: Node<'_>, src: &[u8], bindings: &EcmascriptBindings<'_>) -> bool {
+    if matches!(node.kind(), "identifier" | "undefined") && node_text(&node, src).trim() == "undefined" {
+        return bindings
+            .resolve("undefined", node.start_byte(), node.end_byte())
+            .is_none();
+    }
+    ecmascript_is_literal_value(node, src)
+}
+
+fn ecmascript_is_literal_value(mut node: Node<'_>, src: &[u8]) -> bool {
+    while matches!(
+        node.kind(),
+        "parenthesized_expression" | "as_expression" | "satisfies_expression" | "type_assertion"
+    ) && node.named_child_count() >= 1
+    {
+        let Some(inner) = node
+            .child_by_field_name("expression")
+            .or_else(|| node.named_child(0))
+        else {
+            return false;
+        };
+        node = inner;
+    }
+    match node.kind() {
+        "string" | "string_literal" => ecmascript_static_string_literal(node, src).is_some(),
+        "number" | "true" | "false" | "null" => true,
+        "array" => {
+            let mut cursor = node.walk();
+            let is_literal = node
+                .named_children(&mut cursor)
+                .all(|child| ecmascript_is_literal_value(child, src));
+            is_literal
+        }
+        "object" => {
+            let mut cursor = node.walk();
+            let is_literal = node.named_children(&mut cursor).all(|child| {
+                child.kind() == "pair"
+                    && child
+                        .child_by_field_name("key")
+                        .and_then(|key| ecmascript_static_property_name(key, src))
+                        .is_some()
+                    && child
+                        .child_by_field_name("value")
+                        .is_some_and(|value| ecmascript_is_literal_value(value, src))
+            });
+            is_literal
+        }
+        _ => false,
+    }
 }
 
 fn ecmascript_exact_string_map_entries(object: Node<'_>, src: &[u8]) -> Option<Vec<StaticStringMapEntry>> {

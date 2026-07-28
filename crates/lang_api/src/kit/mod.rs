@@ -5305,6 +5305,7 @@ pub fn decl_index_with_handler(
         call_receivers,
         call_argument_values,
         static_string_maps: Vec::new(),
+        finite_literal_selections: Vec::new(),
         character_substitutions: Vec::new(),
         runtime_type_narrowings,
         branch_conditions,

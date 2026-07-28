@@ -1476,6 +1476,20 @@ fn allowlist_and_shape_sanitizers_credit_targeted_sink_families() {
 }
 
 #[test]
+fn compiler_clean_value_credits_every_sink_context() {
+    let chain = [sanitizer(Some("compiler-clean-value"))];
+    assert_eq!(
+        compute_status(&chain, Some("code-injection")),
+        FindingStatus::Sanitized
+    );
+    assert_eq!(
+        compute_status(&chain, Some("command-injection")),
+        FindingStatus::Sanitized
+    );
+    assert_eq!(compute_status(&chain, Some("xss")), FindingStatus::Sanitized);
+}
+
+#[test]
 fn go_header_char_allowlist_condition_recognizes_printable_guard() {
     assert!(header_char_allowlist_condition(
         "ch >= 0x20 && ch != 0x7f && ch != '\"' && ch != '\\\\'",

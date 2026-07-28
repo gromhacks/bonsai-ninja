@@ -74,7 +74,8 @@ use bonsai_common::{FuncId, Precision, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
 use bonsai_lang_api::{
     call_receiver_fact_for_span, kit::SYNTHETIC_TUPLE_RESULT_PREFIX, AssignValueKind, AssignmentValueFact,
-    CallArg, CallKind, CallReceiverFact, Decl, DeclKind, ExpressionFlow, ExpressionProjection, FlowEvent,
+    CallArg, CallKind, CallReceiverFact, Decl, DeclKind, ExpressionFlow, ExpressionProjection,
+    FiniteLiteralSelectionFact, FlowEvent,
 };
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -1006,6 +1007,28 @@ pub fn transfer_function_for_with_options_and_syntax_facts(
     assignment_values: &[AssignmentValueFact],
     call_receivers: &[CallReceiverFact],
 ) -> TransferOutput {
+    transfer_function_for_with_options_and_compiler_facts(
+        decl,
+        options,
+        assignment_values,
+        call_receivers,
+        &[],
+    )
+}
+
+/// Run the transfer pass with the complete file-local compiler fact set.
+///
+/// A finite-literal selection is a clean value definition: the lookup key
+/// controls which literal is selected, but does not flow into the result.
+/// Keeping this semantic in IDG transfer makes security, inspect, dump-taint,
+/// and export observe the same graph.
+pub fn transfer_function_for_with_options_and_compiler_facts(
+    decl: &Decl,
+    options: &TransferOptions,
+    assignment_values: &[AssignmentValueFact],
+    call_receivers: &[CallReceiverFact],
+    finite_literal_selections: &[FiniteLiteralSelectionFact],
+) -> TransferOutput {
     let matchers = CompiledTransferMatchers::new(options);
     transfer_function_for_with_compiled_options_and_syntax_facts(
         decl,
@@ -1013,6 +1036,7 @@ pub fn transfer_function_for_with_options_and_syntax_facts(
         &matchers,
         assignment_values,
         call_receivers,
+        finite_literal_selections,
     )
 }
 
@@ -1022,6 +1046,7 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
     matchers: &CompiledTransferMatchers,
     assignment_values: &[AssignmentValueFact],
     call_receivers: &[CallReceiverFact],
+    finite_literal_selections: &[FiniteLiteralSelectionFact],
 ) -> TransferOutput {
     let func = FuncId::new(decl.symbol.raw());
     let mut out = TransferOutput::new(func);
@@ -1055,6 +1080,7 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
         pending_expression_calls: Vec::new(),
         assignment_values,
         call_receivers,
+        finite_literal_selections,
         in_loop_replay: false,
     };
 
@@ -1698,6 +1724,9 @@ struct TransferCtx<'a> {
     assignment_values: &'a [AssignmentValueFact],
     /// Tree-sitter receiver-expression facts keyed by semantic call span.
     call_receivers: &'a [CallReceiverFact],
+    /// Compiler-proven assignments whose dynamic key selects only among
+    /// literal values. Sorted by assignment span for logarithmic lookup.
+    finite_literal_selections: &'a [FiniteLiteralSelectionFact],
     /// Whether the walker is replaying an enclosing loop body to establish
     /// loop-carried edges. A nested loop encountered during replay gets one
     /// body visit: its own normal visit already established its local carry
@@ -3033,6 +3062,9 @@ fn walk_assign(
     if target.is_empty() {
         return;
     }
+    let rhs_is_finite_literal_selection =
+        bonsai_lang_api::finite_literal_selection_for_assignment(ctx.finite_literal_selections, span)
+            .is_some();
     let indexed_call_sites = assignment_call_sites_for_span(ctx.assignment_values, span);
     let indexed_value_flow = bonsai_lang_api::assignment_value_fact_for_span(ctx.assignment_values, span)
         .and_then(|fact| {
@@ -3118,7 +3150,10 @@ fn walk_assign(
     // this write without rebuilding expression structure from text. Callable
     // references are values, not invocations, and therefore never receive
     // this edge.
-    if source_call.is_none() && !matches!(value_kind, Some(AssignValueKind::CallableReference)) {
+    if !rhs_is_finite_literal_selection
+        && source_call.is_none()
+        && !matches!(value_kind, Some(AssignValueKind::CallableReference))
+    {
         for call_span in indexed_call_sites {
             let pending = PendingExpressionCall {
                 call_span,
@@ -3140,7 +3175,8 @@ fn walk_assign(
     // `last_writer[src]` so a stale earlier write of `src` doesn't
     // cross-pollute. The shared `Place::Read` node is used only as
     // a fallback when `src` has no recorded writer (unrooted reads).
-    let suppress_direct_rhs_inputs = suppress_broad_container_inputs
+    let suppress_direct_rhs_inputs = rhs_is_finite_literal_selection
+        || suppress_broad_container_inputs
         || (source_call.is_some()
             && !source_call_args.is_empty()
             && matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::CallResult)));
@@ -3218,11 +3254,13 @@ fn walk_assign(
                 }
             }
             let ret_node = ctx.intern_node(Place::CallRet { site });
-            ctx.emit(IdgEdge {
-                from: ret_node,
-                to: write_node,
-                meta: edge_meta,
-            });
+            if !rhs_is_finite_literal_selection {
+                ctx.emit(IdgEdge {
+                    from: ret_node,
+                    to: write_node,
+                    meta: edge_meta,
+                });
+            }
             // Assign-RHS `source_call_args` are Strings without
             // explicit per-arg spans; use the assign's span as
             // the conservative fallback.
@@ -3275,7 +3313,7 @@ fn walk_assign(
                 });
             }
         }
-    } else if !suppress_broad_container_inputs {
+    } else if !suppress_broad_container_inputs && !rhs_is_finite_literal_selection {
         if let Some(hint) = source_call_site_hint {
             let ret_node = ctx.intern_node(Place::CallRet {
                 site: CallSiteId(hint.site_span),
@@ -4462,7 +4500,14 @@ pub fn transfer_for_many_with_options<'d>(
     decls
         .into_iter()
         .map(|decl| {
-            transfer_function_for_with_compiled_options_and_syntax_facts(decl, options, &matchers, &[], &[])
+            transfer_function_for_with_compiled_options_and_syntax_facts(
+                decl,
+                options,
+                &matchers,
+                &[],
+                &[],
+                &[],
+            )
         })
         .collect()
 }

@@ -9,9 +9,9 @@ use bonsai_lang_api::{
         parse_with, span_of, with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, AssignValueKind, ConditionEquality, ConditionExpressionFact,
-    ConditionOperandFact, DeclIndex, DeclKind, FileSnapshot, FlowEvent, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ParseRecoveryEdit,
-    StaticScalarValue, SyntaxTree, TypeAliasBinding, Vfs, Visibility,
+    ConditionOperandFact, DeclIndex, DeclKind, FileSnapshot, FiniteLiteralSelectionFact, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ParseRecoveryEdit, StaticScalarValue, SyntaxTree, TypeAliasBinding, Vfs, Visibility,
 };
 use parse_recovery::java_parse_recovery_edits;
 use tree_sitter::{Language, Node, Tree};
@@ -144,6 +144,7 @@ impl LanguageAdapter for JavaAdapter {
         let src = snapshot.text.as_bytes();
         populate_java_condition_expressions(&mut index.branch_conditions, &tree, file, src);
         populate_java_static_scalar_facts(&mut index, &tree, file, src);
+        index.finite_literal_selections = java_finite_literal_selections(&index, &tree, file, src);
         // Phase-6 return-type extraction: `T method() {}` populates
         // `Decl.return_type` for `apply_assign_call_result_types`.
         bonsai_lang_api::populate_decl_return_types(&mut index, &tree, src, &HANDLER);
@@ -266,6 +267,335 @@ impl LanguageAdapter for JavaAdapter {
             file,
             imports: collect_java_imports(&tree, file, snapshot.text.as_bytes()),
         }
+    }
+}
+
+fn java_finite_literal_selections(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<FiniteLiteralSelectionFact> {
+    if !java_imports_standard_map(tree, file, src) {
+        return Vec::new();
+    }
+    let bindings = java_bindings(tree, src);
+    if !bindings.bindings.iter().any(|binding| binding.finite_map) {
+        return Vec::new();
+    }
+    let mut selections = Vec::new();
+    for call in collect_kinds(tree, &["method_invocation"]) {
+        let Some(object) = call.child_by_field_name("object") else {
+            continue;
+        };
+        let Some(name) = call.child_by_field_name("name") else {
+            continue;
+        };
+        if object.kind() != "identifier" || !matches!(node_text(&name, src).trim(), "get" | "getOrDefault") {
+            continue;
+        }
+        let map_target = node_text(&object, src).trim();
+        let Some(binding) = bindings.resolve(map_target, object.start_byte(), object.end_byte()) else {
+            continue;
+        };
+        if !binding.finite_map
+            || (!binding.is_field && binding.initializer.end_byte() > call.start_byte())
+            || !java_map_selection_has_literal_fallback(call, src)
+        {
+            continue;
+        }
+        let selection_span = span_of(file, &call);
+        let Some(assignment) = index
+            .assignment_values
+            .iter()
+            .filter(|fact| {
+                fact.target.is_some()
+                    && fact.value_span.file == selection_span.file
+                    && fact.value_span.start <= selection_span.start
+                    && selection_span.end <= fact.value_span.end
+            })
+            .min_by_key(|fact| fact.value_span.end.saturating_sub(fact.value_span.start))
+        else {
+            continue;
+        };
+        let Some(value_node) =
+            bonsai_lang_api::kit::node_at_span(tree.root_node(), assignment.value_span, &[])
+        else {
+            continue;
+        };
+        if !java_expression_is_finite_selection(value_node, call) {
+            continue;
+        }
+        selections.push(FiniteLiteralSelectionFact {
+            selection_span,
+            assignment_span: assignment.assignment_span,
+            target: assignment.target.clone().expect("checked target"),
+        });
+    }
+    selections.sort_by_key(|fact| {
+        (
+            fact.assignment_span.start,
+            fact.assignment_span.end,
+            fact.selection_span.start,
+            fact.selection_span.end,
+        )
+    });
+    selections.dedup();
+    selections
+}
+
+#[derive(Copy, Clone, Debug)]
+struct JavaBinding<'tree> {
+    name: &'tree str,
+    initializer: Node<'tree>,
+    scope: Node<'tree>,
+    finite_map: bool,
+    is_field: bool,
+}
+
+struct JavaBindings<'tree> {
+    bindings: Vec<JavaBinding<'tree>>,
+    by_name: std::collections::HashMap<String, Vec<usize>>,
+}
+
+impl<'tree> JavaBindings<'tree> {
+    fn resolve(&self, name: &str, use_start: usize, use_end: usize) -> Option<&JavaBinding<'tree>> {
+        let candidates = self.by_name.get(name)?;
+        let smallest_scope = candidates
+            .iter()
+            .map(|index| &self.bindings[*index])
+            .filter(|binding| binding.scope.start_byte() <= use_start && use_end <= binding.scope.end_byte())
+            .map(|binding| binding.scope.end_byte() - binding.scope.start_byte())
+            .min()?;
+        let mut candidates = candidates
+            .iter()
+            .map(|index| &self.bindings[*index])
+            .filter(|binding| {
+                binding.scope.start_byte() <= use_start
+                    && use_end <= binding.scope.end_byte()
+                    && binding.scope.end_byte() - binding.scope.start_byte() == smallest_scope
+            });
+        let binding = candidates.next()?;
+        candidates.next().is_none().then_some(binding)
+    }
+}
+
+fn java_imports_standard_map(tree: &Tree, file: FileId, src: &[u8]) -> bool {
+    collect_java_imports(tree, file, src)
+        .iter()
+        .any(|import| import.module == "java.util.Map" && !import.is_wildcard)
+}
+
+fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tree> {
+    let mut bindings = Vec::new();
+    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+        let Some(target) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        if target.kind() != "identifier" {
+            continue;
+        }
+        let Some((scope, declaration, is_field)) = java_binding_scope_and_declaration(declarator) else {
+            continue;
+        };
+        let name = node_text(&target, src).trim();
+        if name.is_empty() {
+            continue;
+        }
+        let value = declarator.child_by_field_name("value");
+        bindings.push(JavaBinding {
+            name,
+            initializer: value.unwrap_or(target),
+            scope,
+            finite_map: java_declaration_has_final_modifier(declaration)
+                && value.is_some_and(|value| java_is_finite_literal_map(value, src)),
+            is_field,
+        });
+    }
+
+    for parameter in collect_kinds(tree, &["formal_parameter", "spread_parameter"]) {
+        let Some(name_node) = parameter
+            .child_by_field_name("name")
+            .filter(|name| name.kind() == "identifier")
+        else {
+            continue;
+        };
+        let mut owner = parameter.parent();
+        let mut body = None;
+        while let Some(node) = owner {
+            if let Some(candidate) = node.child_by_field_name("body") {
+                body = Some(candidate);
+                break;
+            }
+            if matches!(node.kind(), "class_body" | "program") {
+                break;
+            }
+            owner = node.parent();
+        }
+        let Some(scope) = body else {
+            continue;
+        };
+        let name = node_text(&name_node, src).trim();
+        if name.is_empty() {
+            continue;
+        }
+        bindings.push(JavaBinding {
+            name,
+            initializer: name_node,
+            scope,
+            finite_map: false,
+            is_field: false,
+        });
+    }
+    let mut by_name: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    for (index, binding) in bindings.iter().enumerate() {
+        by_name.entry(binding.name.to_string()).or_default().push(index);
+    }
+    if by_name.contains_key("Map") || java_declares_type_named(tree, src, "Map") {
+        for binding in &mut bindings {
+            binding.finite_map = false;
+        }
+    }
+    JavaBindings { bindings, by_name }
+}
+
+fn java_declares_type_named(tree: &Tree, src: &[u8], wanted: &str) -> bool {
+    collect_kinds(
+        tree,
+        &[
+            "class_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "record_declaration",
+            "annotation_type_declaration",
+        ],
+    )
+    .into_iter()
+    .any(|declaration| {
+        declaration
+            .child_by_field_name("name")
+            .is_some_and(|name| node_text(&name, src).trim() == wanted)
+    })
+}
+
+fn java_binding_scope_and_declaration(mut node: Node<'_>) -> Option<(Node<'_>, Node<'_>, bool)> {
+    let mut declaration = None;
+    while let Some(parent) = node.parent() {
+        if matches!(parent.kind(), "field_declaration" | "local_variable_declaration") {
+            declaration = Some(parent);
+        }
+        if parent.kind() == "block" {
+            return Some((parent, declaration?, false));
+        }
+        if parent.kind() == "class_body" {
+            return Some((parent, declaration?, true));
+        }
+        node = parent;
+    }
+    None
+}
+
+fn java_declaration_has_final_modifier(declaration: Node<'_>) -> bool {
+    let Some(modifiers) = declaration
+        .named_children(&mut declaration.walk())
+        .find(|child| child.kind() == "modifiers")
+    else {
+        return false;
+    };
+    modifiers
+        .children(&mut modifiers.walk())
+        .any(|modifier| modifier.kind() == "final")
+}
+
+fn java_map_selection_has_literal_fallback(call: Node<'_>, src: &[u8]) -> bool {
+    let Some(name) = call.child_by_field_name("name") else {
+        return false;
+    };
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return false;
+    };
+    let mut cursor = arguments.walk();
+    let values: Vec<_> = arguments.named_children(&mut cursor).collect();
+    match node_text(&name, src).trim() {
+        "get" => values.len() == 1,
+        "getOrDefault" => values.len() == 2 && java_is_literal_value(values[1], src),
+        _ => false,
+    }
+}
+
+fn java_expression_is_finite_selection(mut node: Node<'_>, selection: Node<'_>) -> bool {
+    while matches!(node.kind(), "parenthesized_expression" | "cast_expression")
+        && node.named_child_count() >= 1
+    {
+        let Some(inner) = node
+            .child_by_field_name("value")
+            .or_else(|| node.named_child(u32::try_from(node.named_child_count() - 1).ok()?))
+        else {
+            return false;
+        };
+        node = inner;
+    }
+    node.id() == selection.id()
+}
+
+fn java_is_finite_literal_map(node: Node<'_>, src: &[u8]) -> bool {
+    if node.kind() != "method_invocation" {
+        return false;
+    }
+    let Some(object) = node.child_by_field_name("object") else {
+        return false;
+    };
+    let Some(name) = node.child_by_field_name("name") else {
+        return false;
+    };
+    if object.kind() != "identifier"
+        || node_text(&object, src).trim() != "Map"
+        || node_text(&name, src).trim() != "of"
+    {
+        return false;
+    }
+    let Some(arguments) = node.child_by_field_name("arguments") else {
+        return false;
+    };
+    let mut cursor = arguments.walk();
+    let values: Vec<_> = arguments.named_children(&mut cursor).collect();
+    !values.is_empty()
+        && values.len() % 2 == 0
+        && values.iter().all(|value| java_is_literal_value(*value, src))
+}
+
+fn java_is_literal_value(mut node: Node<'_>, src: &[u8]) -> bool {
+    while matches!(node.kind(), "parenthesized_expression" | "cast_expression")
+        && node.named_child_count() >= 1
+    {
+        let Some(inner) = node
+            .child_by_field_name("value")
+            .or_else(|| node.named_child(u32::try_from(node.named_child_count() - 1).unwrap_or(0)))
+        else {
+            return false;
+        };
+        node = inner;
+    }
+    match node.kind() {
+        "string_literal" => java_static_string_literal(node, src).is_some(),
+        "character_literal"
+        | "decimal_integer_literal"
+        | "hex_integer_literal"
+        | "octal_integer_literal"
+        | "binary_integer_literal"
+        | "decimal_floating_point_literal"
+        | "hex_floating_point_literal"
+        | "true"
+        | "false"
+        | "null_literal" => true,
+        "array_initializer" => {
+            let mut cursor = node.walk();
+            let is_literal = node
+                .named_children(&mut cursor)
+                .all(|child| java_is_literal_value(child, src));
+            is_literal
+        }
+        _ => false,
     }
 }
 

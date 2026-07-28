@@ -140,6 +140,73 @@ function htmlEscape(v: string): string {
 }
 
 #[test]
+fn finite_object_selection_uses_typed_ast_shape_and_static_branches() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "commands.ts",
+            r#"
+const COMMANDS: Record<string, string[]> = {
+  uptime: ["uptime"],
+  disk: ["df", "-h"],
+};
+function command(name: string): string[] {
+  const argv = Object.prototype.hasOwnProperty.call(COMMANDS, name)
+    ? COMMANDS[name]
+    : undefined;
+  if (argv === undefined) throw new Error("unknown command");
+  return argv;
+}
+function dynamic(name: string, fallback: string[]): string[] {
+  const argv = Object.hasOwn(COMMANDS, name) ? COMMANDS[name] : fallback;
+  return argv;
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("TypeScript declaration index");
+
+    assert_eq!(
+        index
+            .finite_literal_selections
+            .iter()
+            .map(|fact| fact.target.as_str())
+            .collect::<Vec<_>>(),
+        ["argv"]
+    );
+}
+
+#[test]
+fn finite_object_selection_rejects_shadowed_object_intrinsics() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "shadow.ts",
+            r#"
+const Object = {
+  hasOwn(_map: unknown, _key: string): boolean { return true; },
+};
+const COMMANDS: Record<string, string[]> = { uptime: ["uptime"] };
+function command(name: string): string[] | undefined {
+  const argv = Object.hasOwn(COMMANDS, name) ? COMMANDS[name] : undefined;
+  return argv;
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("TypeScript declaration index");
+    assert!(index.finite_literal_selections.is_empty());
+}
+
+#[test]
 fn inherited_getter_projection_adds_backing_field_source() {
     use bonsai_lang_api::{FlowEvent, LanguageAdapter};
 

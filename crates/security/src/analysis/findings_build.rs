@@ -289,6 +289,12 @@ pub(super) fn make_finding(
             sanitizers_seen.push(allowlist);
         }
     }
+    if let Some(selection) = finite_literal_selection_sanitizer(context.ws, snk, &context.sink_tainted_args) {
+        let dedup_key = (selection.file.clone(), selection.line, selection.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(selection);
+        }
+    }
     if let Some(type_guard) = runtime_type_rejection_guard_sanitizer(
         context.ws,
         context.sink_func,

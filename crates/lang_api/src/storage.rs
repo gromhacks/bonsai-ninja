@@ -39,6 +39,9 @@ impl DeclIndex {
             }
             fact.entries.shrink_to_fit();
         }
+        for fact in &mut self.finite_literal_selections {
+            fact.target.shrink_to_fit();
+        }
         for fact in &mut self.character_substitutions {
             fact.table.shrink_to_fit();
             if let crate::CharacterSubstitutionDomain::ExactCharacters { characters } = &mut fact.domain {
@@ -66,6 +69,7 @@ impl DeclIndex {
         self.call_receivers.shrink_to_fit();
         self.call_argument_values.shrink_to_fit();
         self.static_string_maps.shrink_to_fit();
+        self.finite_literal_selections.shrink_to_fit();
         self.character_substitutions.shrink_to_fit();
         self.runtime_type_narrowings.shrink_to_fit();
         self.branch_conditions.shrink_to_fit();
