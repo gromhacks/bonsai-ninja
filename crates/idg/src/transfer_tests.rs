@@ -1456,6 +1456,82 @@ fn compound_assignment_binds_ast_indexed_rhs_call_result() {
 }
 
 #[test]
+fn finite_literal_selection_keeps_lookup_call_but_cleans_result_write() {
+    let mut decl = empty_decl(1, "select");
+    decl.params = vec!["key".to_string()];
+    let assign_span = span(30, 70);
+    let selection_span = span(39, 61);
+    decl.flow_events = vec![FlowEvent::Assign {
+        span: assign_span,
+        target: "column".to_string(),
+        source_name: Some("key".to_string()),
+        source_call: Some("SORTABLE.get".to_string()),
+        source_call_args: vec!["key".to_string()],
+        source_names: vec!["key".to_string()],
+        declares_new_binding: true,
+        value_kind: Some(AssignValueKind::CallResult),
+    }];
+    let assignment_values = [AssignmentValueFact {
+        assignment_span: assign_span,
+        target: Some("column".to_string()),
+        target_span: Some(span(30, 36)),
+        value_span: span(39, 68),
+        call_sites: vec![selection_span],
+        value_flow: ExpressionFlow::from_place("key"),
+        exact_callable_return: None,
+        exact_static_call_args: None,
+        direct_call_name: Some("get".to_string()),
+        direct_call_receiver: Some("SORTABLE".to_string()),
+    }];
+    let selections = [FiniteLiteralSelectionFact {
+        selection_span,
+        assignment_span: assign_span,
+        target: "column".to_string(),
+    }];
+
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &TransferOptions::default(),
+        &assignment_values,
+        &[],
+        &selections,
+    );
+    let result_write = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::Write { span, .. }) if *span == assign_span
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("selection result write");
+
+    assert!(
+        out.edges.iter().all(|edge| edge.to != result_write),
+        "the dynamic lookup key/call result must not flow into the finite literal result: {:#?}",
+        out.edges
+    );
+    assert_eq!(
+        out.call_sites.len(),
+        1,
+        "lookup remains visible to callgraph/export"
+    );
+    assert!(
+        out.edges.iter().any(|edge| {
+            matches!(
+                out.places.get(out.nodes.get(edge.to).expect("node").place),
+                Some(Place::CallArg { idx: 0, .. })
+            ) && rendered_place_name(&out, edge.from) == "key"
+        }),
+        "the lookup operation must still consume its dynamic key"
+    );
+}
+
+#[test]
 fn indexed_object_initializer_is_field_precise_without_duplicate_flow_event() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["userInput".to_string()];

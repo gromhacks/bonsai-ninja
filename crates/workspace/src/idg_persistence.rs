@@ -184,15 +184,15 @@ mod tests {
     #[test]
     fn ownership_cleans_unlocked_family_targets_and_excludes_peer_writer() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = dir.path().join("idg.v12.factstore");
-        let stale = dir.path().join("idg.v12.factstore.tmp.1234.5");
-        let other_target = dir.path().join("idg.v12.transfer.aaaaaaaaaaaaaaaa.factstore");
+        let target = dir.path().join("idg.v13.factstore");
+        let stale = dir.path().join("idg.v13.factstore.tmp.1234.5");
+        let other_target = dir.path().join("idg.v13.transfer.aaaaaaaaaaaaaaaa.factstore");
         let other_stale = PathBuf::from(format!("{}.tmp.2345.6", other_target.display()));
-        let active_target = dir.path().join("idg.v12.transfer.bbbbbbbbbbbbbbbb.factstore");
+        let active_target = dir.path().join("idg.v13.transfer.bbbbbbbbbbbbbbbb.factstore");
         let active_temp = dir
             .path()
-            .join("idg.v12.transfer.bbbbbbbbbbbbbbbb.factstore.tmp.3456.7");
-        let old_version = dir.path().join("idg.v11.factstore.tmp.4567.8");
+            .join("idg.v13.transfer.bbbbbbbbbbbbbbbb.factstore.tmp.3456.7");
+        let old_version = dir.path().join("idg.v12.factstore.tmp.4567.8");
         let unrelated = dir.path().join("other.factstore.tmp.1234.5");
         for path in [&stale, &other_stale, &active_temp, &old_version, &unrelated] {
             std::fs::write(path, b"partial").expect("write stale temp");
@@ -226,15 +226,15 @@ mod tests {
 
     #[test]
     fn family_parser_rejects_malformed_or_non_idg_targets() {
-        assert_eq!(idg_sidecar_family("idg.v12.factstore"), Some("idg.v12"));
-        assert_eq!(idg_sidecar_family("idg.v12.transfer.abcd.factstore"), None);
+        assert_eq!(idg_sidecar_family("idg.v13.factstore"), Some("idg.v13"));
+        assert_eq!(idg_sidecar_family("idg.v13.transfer.abcd.factstore"), None);
         assert_eq!(
-            idg_sidecar_family("idg.v12.transfer.0123456789abcdef.factstore"),
-            Some("idg.v12")
+            idg_sidecar_family("idg.v13.transfer.0123456789abcdef.factstore"),
+            Some("idg.v13")
         );
-        assert_eq!(idg_sidecar_family("idg.v12.transfer..factstore"), None);
+        assert_eq!(idg_sidecar_family("idg.v13.transfer..factstore"), None);
         assert_eq!(idg_sidecar_family("idg.v.factstore"), None);
         assert_eq!(idg_sidecar_family("other.v12.factstore"), None);
-        assert_eq!(idg_sidecar_family("idg.v12.bin"), None);
+        assert_eq!(idg_sidecar_family("idg.v13.bin"), None);
     }
 }

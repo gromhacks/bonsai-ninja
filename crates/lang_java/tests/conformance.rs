@@ -84,6 +84,88 @@ class UrlGuard {
 }
 
 #[test]
+fn finite_map_selection_requires_java_util_map_final_binding_and_literal_default() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Selections.java",
+            r#"
+import java.util.Map;
+class Selections {
+  private static final Map<String, String> SORTABLE =
+      Map.of("id", "id", "email", "email");
+  private static Map<String, String> MUTABLE =
+      Map.of("id", "id");
+
+  String safe(String key) {
+    String column = SORTABLE.getOrDefault(key, "id");
+    return column;
+  }
+  String dynamicDefault(String key, String fallback) {
+    String dynamic = SORTABLE.getOrDefault(key, fallback);
+    return dynamic;
+  }
+  String shadowed(Map<String, String> SORTABLE, String key) {
+    String shadow = SORTABLE.getOrDefault(key, "id");
+    return shadow;
+  }
+  String nonFinal(String key) {
+    String mutable = MUTABLE.getOrDefault(key, "id");
+    return mutable;
+  }
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+
+    assert_eq!(
+        index
+            .finite_literal_selections
+            .iter()
+            .map(|fact| fact.target.as_str())
+            .collect::<Vec<_>>(),
+        ["column"]
+    );
+}
+
+#[test]
+fn finite_map_selection_rejects_a_shadowing_java_value() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Shadow.java",
+            r#"
+import java.util.Map;
+class Shadow {
+  static final FakeMap Map = new FakeMap();
+  static final java.util.Map<String, String> LOOKUP = Map.of("id", "id");
+  String unsafe(String key) {
+    String selected = LOOKUP.getOrDefault(key, "id");
+    return selected;
+  }
+}
+class FakeMap {
+  java.util.Map<String, String> of(String key, String value) {
+    return java.util.Map.of(key, key);
+  }
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+    assert!(index.finite_literal_selections.is_empty());
+}
+
+#[test]
 fn inherited_bare_member_call_has_explicit_receiver_fact() {
     use bonsai_lang_api::{CallKind, FlowEvent, LanguageAdapter};
 

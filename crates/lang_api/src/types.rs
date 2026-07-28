@@ -1543,6 +1543,20 @@ pub struct StaticStringMapFact {
     pub entries: Vec<StaticStringMapEntry>,
 }
 
+/// An assignment whose result is selected exclusively from a finite,
+/// compiler-proven literal map.
+///
+/// The dynamic key controls *which* literal is chosen but never becomes part
+/// of the selected value. Language frontends prove their own map declaration
+/// and lookup syntax; shared flow/security code consumes only this semantic
+/// fact.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FiniteLiteralSelectionFact {
+    pub selection_span: Span,
+    pub assignment_span: Span,
+    pub target: String,
+}
+
 /// Domain on which a character-substitution helper applies its static map.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -1804,6 +1818,24 @@ pub fn assignment_value_fact_for_span(
         .filter(|fact| fact.assignment_span == assignment_span)
 }
 
+/// Locate a compiler-proven finite-literal selection for one assignment.
+///
+/// Frontends sort these facts by assignment span, so graph lowering can
+/// preserve linear transfer complexity without scanning every selection for
+/// every assignment in a large function.
+#[must_use]
+pub fn finite_literal_selection_for_assignment(
+    facts: &[FiniteLiteralSelectionFact],
+    assignment_span: Span,
+) -> Option<&FiniteLiteralSelectionFact> {
+    let key = |span: Span| (span.file.raw(), span.start, span.end);
+    let wanted = key(assignment_span);
+    let index = facts.partition_point(|fact| key(fact.assignment_span) < wanted);
+    facts
+        .get(index)
+        .filter(|fact| fact.assignment_span == assignment_span)
+}
+
 /// Render the exact RHS expression for one assignment from a sorted syntax
 /// fact table without allocating a per-file lookup index.
 #[must_use]
@@ -1911,6 +1943,9 @@ pub struct DeclIndex {
     /// Complete static string maps decoded by the owning language frontend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub static_string_maps: Vec<StaticStringMapFact>,
+    /// Finite literal-map selections decoded by the owning frontend.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finite_literal_selections: Vec<FiniteLiteralSelectionFact>,
     /// Local character-substitution helper summaries decoded from syntax.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub character_substitutions: Vec<CharacterSubstitutionFact>,

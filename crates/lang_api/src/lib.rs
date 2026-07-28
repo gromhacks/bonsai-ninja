@@ -35,16 +35,16 @@ pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};
 pub use types::{
     assignment_value_fact_for_span, assignment_value_rendering, branch_condition_fact_for_span,
-    call_argument_value_fact, call_receiver_fact_for_span, operations_from_flow_events, AggregateLayout,
-    ArgumentPassingMode, AssignValueKind, AssignmentValueFact, AssignmentValueIndex, BranchConditionFact,
-    BranchConditionPolarity, CallArg, CallArgumentValueFact, CallKind, CallReceiverFact,
-    CharacterSubstitutionDomain, CharacterSubstitutionFact, Comment, CommentKind, ConditionEquality,
-    ConditionExpressionFact, ConditionOperandFact, Decl, DeclIndex, DeclKind, ExpressionField,
-    ExpressionFlow, ExpressionProjection, FieldWrite, FlowEvent, ImportIndex, ImportScope, ImportSpec,
-    LanguageId, LoopKind, MembershipConditionFact, ModulePath, Operation, OperationKind, OperationOperand,
-    OperationOperandRole, Ref, RefKind, RuntimeTypeNarrowingFact, StaticScalarValue, StaticStringMapEntry,
-    StaticStringMapFact, StringCategory, StringLiteral, TypeAliasBinding, UnsupportedConstruct, Visibility,
-    WorkspaceRoot,
+    call_argument_value_fact, call_receiver_fact_for_span, finite_literal_selection_for_assignment,
+    operations_from_flow_events, AggregateLayout, ArgumentPassingMode, AssignValueKind, AssignmentValueFact,
+    AssignmentValueIndex, BranchConditionFact, BranchConditionPolarity, CallArg, CallArgumentValueFact,
+    CallKind, CallReceiverFact, CharacterSubstitutionDomain, CharacterSubstitutionFact, Comment, CommentKind,
+    ConditionEquality, ConditionExpressionFact, ConditionOperandFact, Decl, DeclIndex, DeclKind,
+    ExpressionField, ExpressionFlow, ExpressionProjection, FieldWrite, FiniteLiteralSelectionFact, FlowEvent,
+    ImportIndex, ImportScope, ImportSpec, LanguageId, LoopKind, MembershipConditionFact, ModulePath,
+    Operation, OperationKind, OperationOperand, OperationOperandRole, Ref, RefKind, RuntimeTypeNarrowingFact,
+    StaticScalarValue, StaticStringMapEntry, StaticStringMapFact, StringCategory, StringLiteral,
+    TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
 };
 
 use bonsai_common::FileId;
