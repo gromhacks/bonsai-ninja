@@ -807,6 +807,43 @@ fn validate_callback_origin_constraints(rule: &Rule, issues: &mut Vec<PackValida
             }
         }
     }
+    for constraint in &rule.constraints.0 {
+        let ConstraintKind::UnlessPriorReceiverCall {
+            unless_prior_receiver_call: spec,
+        } = constraint
+        else {
+            continue;
+        };
+        if rule.kind != RuleKind::Sink || rule.match_spec.kind != MatchKind::Call {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-prior-receiver-call-constraint",
+                Some(rule),
+                "unless_prior_receiver_call is valid only on sink rules with match.kind=call",
+            );
+        }
+        if !callable_target(&spec.call) {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-prior-receiver-call-constraint",
+                Some(rule),
+                "unless_prior_receiver_call requires a non-empty callable target",
+            );
+        }
+        if let Some(pattern) = spec.call.regex.as_deref() {
+            if let Err(error) = Regex::new(pattern) {
+                push_validation_issue(
+                    issues,
+                    "error",
+                    "invalid-prior-receiver-call-constraint",
+                    Some(rule),
+                    &format!("unless_prior_receiver_call.call.regex is invalid: {error}"),
+                );
+            }
+        }
+    }
 }
 
 fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
@@ -1475,6 +1512,12 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                 "constraints.receiver_not_matches_regex",
                 receiver_not_matches_regex.as_str(),
             )),
+            crate::rule::ConstraintKind::UnlessPriorReceiverCall {
+                unless_prior_receiver_call,
+            } => Some((
+                "constraints.unless_prior_receiver_call.static_string_args_regex",
+                unless_prior_receiver_call.static_string_args_regex.as_str(),
+            )),
             crate::rule::ConstraintKind::ArgMatchesRegex { arg_matches_regex } => {
                 Some(("constraints.arg_matches_regex", arg_matches_regex.regex.as_str()))
             }
@@ -1505,6 +1548,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             | crate::rule::ConstraintKind::ArgCount { .. }
             | crate::rule::ConstraintKind::MinArgs { .. }
             | crate::rule::ConstraintKind::MaxArgs { .. }
+            | crate::rule::ConstraintKind::ArgValueNotAggregate { .. }
             | crate::rule::ConstraintKind::SameReceiverCallCountAtLeast { .. }
             | crate::rule::ConstraintKind::ArgLt { .. }
             | crate::rule::ConstraintKind::ArgLe { .. }

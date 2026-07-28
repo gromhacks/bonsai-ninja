@@ -420,6 +420,11 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_value_not_aggregate: 0
+  - unless_prior_receiver_call:
+      call:
+        name: set_header
+      static_string_args_regex: "(?i)^content-type\\x1f(?:application/octet-stream|application/json|text/plain)(?:\\s*;.*)?$"
   match_examples:
   - name: tornado self write html concat
     code: |
@@ -437,6 +442,23 @@
 
           def get(self, user_input):
               return self.write('safe')
+    expect_no_match: true
+  - name: tornado dictionary response is serialized as json
+    code: |
+      import tornado
+
+      class Handler:
+          def get(self, user_input):
+              return self.write({"value": user_input})
+    expect_no_match: true
+  - name: tornado explicit binary response negative
+    code: |
+      import tornado
+
+      class Handler:
+          def get(self, user_input):
+              self.set_header("Content-Type", "application/octet-stream")
+              return self.write(user_input)
     expect_no_match: true
   description: Tornado RequestHandler.write/finish with HTML content - tainted body is sent as HTML.
 - id: python.xss.bottle_httpresponse_html_concat

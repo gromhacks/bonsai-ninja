@@ -1400,6 +1400,107 @@ fn receiver_regex_constraint_uses_the_parsed_call_receiver() {
 }
 
 #[test]
+fn prior_call_collection_uses_only_calls_guaranteed_on_the_hir_path() {
+    let call = |start, end, name: &str, receiver: Option<&str>, args: Vec<CallArg>| FlowEvent::Call {
+        span: Span::new(FileId::new(0), start, end),
+        name: name.to_string(),
+        receiver: receiver.map(str::to_string),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Method,
+        args,
+    };
+    let header_args = || {
+        vec![
+            CallArg {
+                span: Span::new(FileId::new(0), 2, 3),
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "\"Content-Type\"".to_string(),
+                place: None,
+                source_names: Vec::new(),
+            },
+            CallArg {
+                span: Span::new(FileId::new(0), 4, 5),
+                passing_mode: Default::default(),
+                name: None,
+                value_text: "\"application/octet-stream\"".to_string(),
+                place: None,
+                source_names: Vec::new(),
+            },
+        ]
+    };
+    let sink_span = Span::new(FileId::new(0), 20, 25);
+    let straight_line = vec![
+        call(1, 10, "self.set_header", Some("self"), header_args()),
+        call(20, 25, "self.write", Some("self"), Vec::new()),
+    ];
+    let mut prior = Vec::new();
+    collect_guaranteed_prior_calls(&straight_line, sink_span, &mut prior);
+    assert_eq!(prior.len(), 1);
+    assert_eq!(prior[0].name, "self.set_header");
+
+    let branch_only = vec![
+        FlowEvent::Branch {
+            span: Span::new(FileId::new(0), 0, 15),
+            condition: Some("flag".to_string()),
+            then_events: vec![call(2, 10, "self.set_header", Some("self"), header_args())],
+            else_events: Vec::new(),
+        },
+        call(20, 25, "self.write", Some("self"), Vec::new()),
+    ];
+    prior.clear();
+    collect_guaranteed_prior_calls(&branch_only, sink_span, &mut prior);
+    assert!(
+        prior.is_empty(),
+        "a header set on only one branch must not suppress a sink after the merge"
+    );
+}
+
+#[test]
+fn prior_call_static_arguments_use_language_decoded_values() {
+    let call_span = Span::new(FileId::new(0), 10, 20);
+    let argument = |index, value| bonsai_lang_api::CallArgumentValueFact {
+        call_span,
+        argument_index: index,
+        argument_span: Span::new(FileId::new(0), 11 + index as u64, 12 + index as u64),
+        value_flow: Default::default(),
+        static_value: value,
+    };
+    let facts = vec![
+        argument(
+            0,
+            Some(bonsai_lang_api::StaticScalarValue::String(
+                "Content-Type".to_string(),
+            )),
+        ),
+        argument(
+            1,
+            Some(bonsai_lang_api::StaticScalarValue::String(
+                "application/octet-stream".to_string(),
+            )),
+        ),
+    ];
+    assert_eq!(
+        static_string_call_arguments(&facts, call_span, 2).as_deref(),
+        Some("Content-Type\u{1f}application/octet-stream")
+    );
+
+    let dynamic = vec![argument(0, None)];
+    assert!(
+        static_string_call_arguments(&dynamic, call_span, 1).is_none(),
+        "a dynamic argument must not satisfy a static sanitizer guard"
+    );
+    let non_string = vec![argument(
+        0,
+        Some(bonsai_lang_api::StaticScalarValue::Boolean(true)),
+    )];
+    assert!(
+        static_string_call_arguments(&non_string, call_span, 1).is_none(),
+        "language-decoded non-string values must not be rendered and compared as strings"
+    );
+}
+
+#[test]
 fn invalid_constraint_regex_fails_closed() {
     let constraint = vec![ConstraintKind::AnyArgMatchesRegex {
         any_arg_matches_regex: "[".to_string(),
