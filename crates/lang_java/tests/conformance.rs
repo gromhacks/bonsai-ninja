@@ -112,6 +112,31 @@ class Selections {
     String shadow = SORTABLE.getOrDefault(key, "id");
     return shadow;
   }
+  String lambdaShadow(String key) {
+    java.util.function.Function<Map<String, String>, String> select =
+        SORTABLE -> SORTABLE.getOrDefault(key, "id");
+    return select.apply(SORTABLE);
+  }
+  String inferredLambdaShadow(String key) {
+    java.util.function.BiFunction<Map<String, String>, String, String> select =
+        (SORTABLE, fallback) -> SORTABLE.getOrDefault(key, fallback);
+    return select.apply(SORTABLE, "id");
+  }
+  String catchShadow(String key) {
+    try {
+      throw new RuntimeException();
+    } catch (RuntimeException SORTABLE) {
+      String caught = SORTABLE.getOrDefault(key, "id");
+      return caught;
+    }
+  }
+  String enhancedForShadow(String key, Iterable<Map<String, String>> values) {
+    for (Map<String, String> SORTABLE : values) {
+      String looped = SORTABLE.getOrDefault(key, "id");
+      return looped;
+    }
+    return "id";
+  }
   String nonFinal(String key) {
     String mutable = MUTABLE.getOrDefault(key, "id");
     return mutable;

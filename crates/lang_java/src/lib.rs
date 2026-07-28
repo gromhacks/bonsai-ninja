@@ -413,7 +413,10 @@ fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tr
         });
     }
 
-    for parameter in collect_kinds(tree, &["formal_parameter", "spread_parameter"]) {
+    for parameter in collect_kinds(
+        tree,
+        &["formal_parameter", "spread_parameter", "catch_formal_parameter"],
+    ) {
         let Some(name_node) = parameter
             .child_by_field_name("name")
             .filter(|name| name.kind() == "identifier")
@@ -436,16 +439,59 @@ fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tr
             continue;
         };
         let name = node_text(&name_node, src).trim();
-        if name.is_empty() {
+        push_java_blocking_binding(&mut bindings, name_node, scope, name);
+    }
+
+    for lambda in collect_kinds(tree, &["lambda_expression"]) {
+        let Some(parameters) = lambda.child_by_field_name("parameters") else {
             continue;
+        };
+        let Some(scope) = lambda.child_by_field_name("body") else {
+            continue;
+        };
+        if parameters.kind() == "identifier" {
+            let name = node_text(&parameters, src).trim();
+            push_java_blocking_binding(&mut bindings, parameters, scope, name);
+        } else if parameters.kind() == "inferred_parameters" {
+            let mut cursor = parameters.walk();
+            for name_node in parameters
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() == "identifier")
+            {
+                let name = node_text(&name_node, src).trim();
+                push_java_blocking_binding(&mut bindings, name_node, scope, name);
+            }
         }
-        bindings.push(JavaBinding {
-            name,
-            initializer: name_node,
-            scope,
-            finite_map: false,
-            is_field: false,
-        });
+    }
+
+    for enhanced_for in collect_kinds(tree, &["enhanced_for_statement"]) {
+        let Some(name_node) = enhanced_for
+            .child_by_field_name("name")
+            .filter(|name| name.kind() == "identifier")
+        else {
+            continue;
+        };
+        let Some(scope) = enhanced_for.child_by_field_name("body") else {
+            continue;
+        };
+        let name = node_text(&name_node, src).trim();
+        push_java_blocking_binding(&mut bindings, name_node, scope, name);
+    }
+
+    for pattern in collect_kinds(tree, &["type_pattern", "record_pattern_component"]) {
+        let mut cursor = pattern.walk();
+        let Some(name_node) = pattern
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "identifier")
+            .last()
+        else {
+            continue;
+        };
+        let Some(scope) = java_enclosing_block(pattern) else {
+            continue;
+        };
+        let name = node_text(&name_node, src).trim();
+        push_java_blocking_binding(&mut bindings, name_node, scope, name);
     }
     let mut by_name: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
     for (index, binding) in bindings.iter().enumerate() {
@@ -457,6 +503,34 @@ fn java_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> JavaBindings<'tr
         }
     }
     JavaBindings { bindings, by_name }
+}
+
+fn push_java_blocking_binding<'tree>(
+    bindings: &mut Vec<JavaBinding<'tree>>,
+    name_node: Node<'tree>,
+    scope: Node<'tree>,
+    name: &'tree str,
+) {
+    if name.is_empty() {
+        return;
+    }
+    bindings.push(JavaBinding {
+        name,
+        initializer: name_node,
+        scope,
+        finite_map: false,
+        is_field: false,
+    });
+}
+
+fn java_enclosing_block(mut node: Node<'_>) -> Option<Node<'_>> {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == "block" {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
 }
 
 fn java_declares_type_named(tree: &Tree, src: &[u8], wanted: &str) -> bool {
