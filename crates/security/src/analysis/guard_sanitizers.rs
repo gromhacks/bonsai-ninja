@@ -61,6 +61,182 @@ pub(super) fn terminal_rejection_predicate_guard_span(
     })
 }
 
+pub(super) fn runtime_type_rejection_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+    tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    let semantics = sink_rule.analysis_semantics.as_ref()?.nosql_filter.as_ref()?;
+    if semantics.safe_scalar_runtime_types.is_empty() {
+        return None;
+    }
+    let sink_targets: AHashSet<String> = tainted_args
+        .iter()
+        .filter(|arg| arg.index == semantics.filter_arg_index)
+        .flat_map(tainted_arg_target_keys)
+        .filter(|target| !looks_like_clean_constant(target))
+        .collect();
+    if sink_targets.is_empty() {
+        return None;
+    }
+
+    let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let mut branches = Vec::new();
+    collect_completed_branches_on_path(&decl.flow_events, sink.span, &mut branches);
+    let mut safe_subjects = AHashMap::<String, Span>::new();
+    for branch in branches {
+        if !branch_arm_abruptly_exits(branch.then_events) {
+            continue;
+        }
+        let Some(expression) = branch_condition_fact_for_span(&file_index.branch_conditions, branch.span)
+            .and_then(|fact| fact.expression.as_ref())
+        else {
+            continue;
+        };
+        let mut tests = Vec::new();
+        collect_runtime_type_tests(expression, &mut tests);
+        for (test_span, subject, type_name) in tests {
+            if !semantics
+                .safe_scalar_runtime_types
+                .iter()
+                .any(|safe| safe == type_name)
+                || !condition_false_implies_atom_true(expression, test_span)
+            {
+                continue;
+            }
+            let Some(subject) = subject
+                .value_flow
+                .place
+                .as_deref()
+                .and_then(clean_overwrite_target_key)
+            else {
+                continue;
+            };
+            if place_is_assigned_between(&decl.flow_events, &subject, branch.span.end, sink.span.start) {
+                continue;
+            }
+            safe_subjects.entry(subject).or_insert(branch.span);
+        }
+    }
+    if safe_subjects.is_empty() {
+        return None;
+    }
+
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(&decl.flow_events, sink.span, &mut assignments);
+    assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    if !sink_targets.iter().all(|target| {
+        target_is_built_only_from_runtime_safe_values(
+            target,
+            sink.span.start,
+            &safe_subjects,
+            &assignments,
+            &calls,
+            &mut AHashSet::new(),
+        )
+    }) {
+        return None;
+    }
+
+    let guard_span = safe_subjects
+        .values()
+        .copied()
+        .min_by_key(|span| (span.start, span.end))?;
+    finding_for_guard_span_in_workspace(
+        ws,
+        sink,
+        guard_span,
+        "engine.sanitizer.runtime_type_rejection_guard",
+        "nosql-sanitize",
+        "terminal-runtime-type-guard",
+    )
+}
+
+fn collect_runtime_type_tests<'a>(
+    expression: &'a ConditionExpressionFact,
+    out: &mut Vec<(Span, &'a ConditionOperandFact, &'a str)>,
+) {
+    match expression {
+        ConditionExpressionFact::TypeTest {
+            span,
+            subject,
+            type_name,
+        } => out.push((*span, subject, type_name)),
+        ConditionExpressionFact::Not { operand, .. } => {
+            collect_runtime_type_tests(operand, out);
+        }
+        ConditionExpressionFact::All { operands, .. } | ConditionExpressionFact::Any { operands, .. } => {
+            for operand in operands {
+                collect_runtime_type_tests(operand, out);
+            }
+        }
+        ConditionExpressionFact::Atom { .. }
+        | ConditionExpressionFact::Equality { .. }
+        | ConditionExpressionFact::Membership { .. } => {}
+    }
+}
+
+fn target_is_built_only_from_runtime_safe_values(
+    target: &str,
+    before: u64,
+    safe_subjects: &AHashMap<String, Span>,
+    assignments: &[StructuredAssignment<'_>],
+    calls: &[StructuredCall<'_>],
+    visited: &mut AHashSet<String>,
+) -> bool {
+    if safe_subjects.contains_key(target) {
+        return true;
+    }
+    if !visited.insert(target.to_string()) {
+        return false;
+    }
+    let Some(assignment) = assignments.iter().rev().find(|assignment| {
+        assignment.span.start < before
+            && clean_overwrite_target_key(assignment.target).as_deref() == Some(target)
+    }) else {
+        return false;
+    };
+
+    // Prefer exact addressable call arguments nested in the RHS. This avoids
+    // treating fluent API/type/member names as values while retaining every
+    // actual dynamic operand (`email`, `password`, etc.).
+    let mut dependencies: Vec<String> = calls
+        .iter()
+        .filter(|call| span_contains(assignment.span, call.span))
+        .flat_map(|call| call.args.iter())
+        .filter_map(|arg| arg.place.as_deref().and_then(clean_overwrite_target_key))
+        .filter(|place| !looks_like_clean_constant(place))
+        .collect();
+    if dependencies.is_empty() {
+        dependencies.extend(
+            assignment
+                .source_name
+                .into_iter()
+                .chain(assignment.source_names.iter().map(String::as_str))
+                .filter_map(clean_overwrite_target_key)
+                .filter(|place| !looks_like_clean_constant(place)),
+        );
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    !dependencies.is_empty()
+        && dependencies.iter().all(|dependency| {
+            target_is_built_only_from_runtime_safe_values(
+                dependency,
+                assignment.span.start,
+                safe_subjects,
+                assignments,
+                calls,
+                visited,
+            )
+        })
+}
+
 /// Conservatively reject a guard proof when the guarded place is assigned
 /// after the rejecting branch and before the sink. The walk is over the finite
 /// structured event tree and has no arbitrary depth or work budget.
@@ -118,13 +294,17 @@ fn condition_false_implies_atom_true(expression: &ConditionExpressionFact, atom:
                     .iter()
                     .all(|operand| condition_false_implies_atom_true(operand, atom))
         }
-        ConditionExpressionFact::Equality { .. } | ConditionExpressionFact::Membership { .. } => false,
+        ConditionExpressionFact::Equality { .. }
+        | ConditionExpressionFact::TypeTest { .. }
+        | ConditionExpressionFact::Membership { .. } => false,
     }
 }
 
 fn condition_true_implies_atom_true(expression: &ConditionExpressionFact, atom: Span) -> bool {
     match expression {
-        ConditionExpressionFact::Atom { span } => span_contains(*span, atom),
+        ConditionExpressionFact::Atom { span } | ConditionExpressionFact::TypeTest { span, .. } => {
+            span_contains(*span, atom)
+        }
         ConditionExpressionFact::Not { operand, .. } => condition_false_implies_atom_true(operand, atom),
         // Every conjunct is true, so one conjunct that proves the predicate
         // is sufficient.

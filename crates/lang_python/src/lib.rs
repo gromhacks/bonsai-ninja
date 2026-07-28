@@ -424,6 +424,32 @@ fn lower_python_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -
         }
     }
 
+    if node.kind() == "call" {
+        let function = node.child_by_field_name("function");
+        let arguments = node.child_by_field_name("arguments");
+        if let (Some(function), Some(arguments)) = (function, arguments) {
+            let mut cursor = arguments.walk();
+            let values: Vec<_> = arguments.named_children(&mut cursor).collect();
+            if function.kind() == "identifier"
+                && node_text(&function, src).trim() == "isinstance"
+                && values.len() == 2
+                && matches!(
+                    values[1].kind(),
+                    "identifier" | "type" | "attribute" | "generic_type"
+                )
+            {
+                let type_name = node_text(&values[1], src).trim().to_string();
+                if !type_name.is_empty() {
+                    return ConditionExpressionFact::TypeTest {
+                        span,
+                        subject: python_condition_operand(values[0], file, src),
+                        type_name,
+                    };
+                }
+            }
+        }
+    }
+
     ConditionExpressionFact::Atom { span }
 }
 

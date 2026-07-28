@@ -13,6 +13,41 @@ fn conformance_traced() {
 }
 
 #[test]
+fn typeof_rejection_guard_is_typed_condition_ir() {
+    use bonsai_lang_api::{ConditionExpressionFact, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "auth.ts",
+            r#"
+function authenticate(email: unknown, password: unknown): void {
+  if (typeof email !== "string" || typeof password !== "string") {
+    throw new Error("strings required");
+  }
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("TypeScript declaration index");
+    assert!(index.branch_conditions.iter().any(|fact| matches!(
+        &fact.expression,
+        Some(ConditionExpressionFact::Any { operands, .. })
+            if operands.iter().all(|operand| matches!(
+                operand,
+                ConditionExpressionFact::Not { operand, .. }
+                    if matches!(
+                        operand.as_ref(),
+                        ConditionExpressionFact::TypeTest { type_name, .. }
+                            if type_name == "string"
+                    )
+            ))
+    )));
+}
+
+#[test]
 fn arrow_expression_records_implicit_return() {
     use bonsai_lang_api::{FlowEvent, LanguageAdapter};
 

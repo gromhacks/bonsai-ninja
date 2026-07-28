@@ -1658,6 +1658,16 @@ pub enum ConditionExpressionFact {
         left: ConditionOperandFact,
         right: ConditionOperandFact,
     },
+    /// Runtime type predicate lowered by the owning language frontend.
+    ///
+    /// Type spellings remain language-owned (`str`, `string`, `String`,
+    /// etc.); rulepack semantics decide which exact runtime types make a
+    /// particular sink safe.
+    TypeTest {
+        span: Span,
+        subject: ConditionOperandFact,
+        type_name: String,
+    },
     /// Compiler-proven collection membership. Method spellings, index syntax,
     /// and negation tokens remain owned by the language frontend.
     Membership {
@@ -1678,6 +1688,7 @@ impl ConditionExpressionFact {
             | Self::All { span, .. }
             | Self::Any { span, .. }
             | Self::Equality { span, .. }
+            | Self::TypeTest { span, .. }
             | Self::Membership { span, .. } => *span,
         }
     }

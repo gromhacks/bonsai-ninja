@@ -584,6 +584,23 @@ fn lower_ecmascript_condition_expression(
                     );
                 }
                 Some("==" | "===" | "!=" | "!==") => {
+                    if let Some((subject, type_name)) = ecmascript_type_test_operands(left, right, file, src)
+                        .or_else(|| ecmascript_type_test_operands(right, left, file, src))
+                    {
+                        let type_test = ConditionExpressionFact::TypeTest {
+                            span,
+                            subject,
+                            type_name,
+                        };
+                        return if matches!(operator, Some("==" | "===")) {
+                            type_test
+                        } else {
+                            ConditionExpressionFact::Not {
+                                span,
+                                operand: Box::new(type_test),
+                            }
+                        };
+                    }
                     let relation = if matches!(operator, Some("==" | "===")) {
                         ConditionEquality::Equal
                     } else {
@@ -602,6 +619,29 @@ fn lower_ecmascript_condition_expression(
     }
 
     ConditionExpressionFact::Atom { span }
+}
+
+fn ecmascript_type_test_operands(
+    type_query: Node<'_>,
+    type_literal: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) -> Option<(ConditionOperandFact, String)> {
+    if type_query.kind() != "unary_expression" {
+        return None;
+    }
+    let subject = type_query
+        .child_by_field_name("argument")
+        .or_else(|| type_query.named_child(0))?;
+    let operator = src
+        .get(type_query.start_byte()..subject.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())?
+        .trim();
+    if operator != "typeof" {
+        return None;
+    }
+    let type_name = ecmascript_static_string_literal(type_literal, src)?;
+    Some((ecmascript_condition_operand(subject, file, src), type_name))
 }
 
 fn merge_ecmascript_condition_junction(

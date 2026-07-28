@@ -289,6 +289,18 @@ pub(super) fn make_finding(
             sanitizers_seen.push(allowlist);
         }
     }
+    if let Some(type_guard) = runtime_type_rejection_guard_sanitizer(
+        context.ws,
+        context.sink_func,
+        snk,
+        skr,
+        &context.sink_tainted_args,
+    ) {
+        let dedup_key = (type_guard.file.clone(), type_guard.line, type_guard.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(type_guard);
+        }
+    }
     if let Some(parameterized_query) =
         parameterized_query_guard_sanitizer(context.ws, context.sink_func, snk, skr)
     {
