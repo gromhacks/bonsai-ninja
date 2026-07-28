@@ -164,6 +164,14 @@ function dynamic(name: string, fallback: string[]): string[] {
   const argv = Object.hasOwn(COMMANDS, name) ? COMMANDS[name] : fallback;
   return argv;
 }
+function destructured({ COMMANDS }: { COMMANDS: Map<string, string[]> }, name: string) {
+  const local = COMMANDS.get(name) ?? ["local"];
+  return local;
+}
+const shadowed = (COMMANDS: Map<string, string[]>) => {
+  const local = COMMANDS.get("uptime") ?? ["local"];
+  return local;
+};
 "#,
         )],
     );

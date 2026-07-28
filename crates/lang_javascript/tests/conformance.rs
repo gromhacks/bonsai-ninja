@@ -144,6 +144,27 @@ function shadowed(SORTABLE, key) {
   const shadow = SORTABLE.get(key) ?? "id";
   return shadow;
 }
+function destructured({ SORTABLE }, key) {
+  const destructuredValue = SORTABLE.get(key) ?? "id";
+  return destructuredValue;
+}
+const arrow = SORTABLE => {
+  const arrowValue = SORTABLE.get("id") ?? "id";
+  return arrowValue;
+};
+function catchShadow(key) {
+  try {
+    throw new Error(key);
+  } catch (SORTABLE) {
+    const caught = SORTABLE.get(key) ?? "id";
+    return caught;
+  }
+}
+function declarationShadow(key) {
+  function SORTABLE() {}
+  const declared = SORTABLE.get(key) ?? "id";
+  return declared;
+}
 function mutated(key, value) {
   const LOCAL = new Map([["id", "id"]]);
   LOCAL.set("id", value);

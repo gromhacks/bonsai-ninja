@@ -409,16 +409,9 @@ fn ecmascript_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> Ecmascript
         let Some(target) = declarator.child_by_field_name("name") else {
             continue;
         };
-        if target.kind() != "identifier" {
-            continue;
-        }
         let Some(scope) = ecmascript_binding_scope(declarator) else {
             continue;
         };
-        let name = node_text(&target, src).trim();
-        if name.is_empty() {
-            continue;
-        }
         let is_const = declarator
             .parent()
             .filter(|parent| parent.kind() == "lexical_declaration")
@@ -429,15 +422,22 @@ fn ecmascript_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> Ecmascript
             .and_then(|declaration| declaration.parent())
             .is_some_and(|parent| parent.kind() == "export_statement");
         let value = declarator.child_by_field_name("value");
-        bindings.push(EcmascriptBinding {
-            name,
-            declaration: declarator,
-            initializer: value.unwrap_or(target),
-            scope,
-            finite_map: (is_const && !is_exported)
-                .then(|| value.and_then(|value| ecmascript_finite_literal_map_kind(value, src)))
-                .flatten(),
-        });
+        for bound in ecmascript_pattern_identifiers(target) {
+            let name = node_text(&bound, src).trim();
+            if name.is_empty() {
+                continue;
+            }
+            let is_simple_target = target.kind() == "identifier" && target.id() == bound.id();
+            bindings.push(EcmascriptBinding {
+                name,
+                declaration: if is_simple_target { declarator } else { bound },
+                initializer: value.unwrap_or(target),
+                scope,
+                finite_map: (is_simple_target && is_const && !is_exported)
+                    .then(|| value.and_then(|value| ecmascript_finite_literal_map_kind(value, src)))
+                    .flatten(),
+            });
+        }
     }
 
     for parameters in collect_kinds(tree, &["formal_parameters"]) {
@@ -449,29 +449,70 @@ fn ecmascript_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> Ecmascript
         };
         let mut cursor = parameters.walk();
         for parameter in parameters.named_children(&mut cursor) {
-            let bound = match parameter.kind() {
-                "identifier" => Some(parameter),
-                "required_parameter" | "optional_parameter" | "rest_pattern" => parameter
+            let pattern = match parameter.kind() {
+                "required_parameter" | "optional_parameter" => parameter
                     .child_by_field_name("pattern")
-                    .or_else(|| parameter.child_by_field_name("name")),
-                _ => None,
+                    .or_else(|| parameter.child_by_field_name("name"))
+                    .unwrap_or(parameter),
+                _ => parameter,
             };
-            let Some(bound) = bound.filter(|bound| bound.kind() == "identifier") else {
-                continue;
-            };
-            let name = node_text(&bound, src).trim();
-            if name.is_empty() {
-                continue;
+            for bound in ecmascript_pattern_identifiers(pattern) {
+                push_ecmascript_blocking_binding(&mut bindings, bound, scope, src);
             }
-            bindings.push(EcmascriptBinding {
-                name,
-                declaration: bound,
-                initializer: bound,
-                scope,
-                finite_map: None,
-            });
         }
     }
+
+    for arrow in collect_kinds(tree, &["arrow_function"]) {
+        let Some(parameter) = arrow.child_by_field_name("parameter") else {
+            continue;
+        };
+        let Some(scope) = arrow.child_by_field_name("body") else {
+            continue;
+        };
+        for bound in ecmascript_pattern_identifiers(parameter) {
+            push_ecmascript_blocking_binding(&mut bindings, bound, scope, src);
+        }
+    }
+
+    for catch_clause in collect_kinds(tree, &["catch_clause"]) {
+        let Some(parameter) = catch_clause.child_by_field_name("parameter") else {
+            continue;
+        };
+        let Some(scope) = catch_clause.child_by_field_name("body") else {
+            continue;
+        };
+        for bound in ecmascript_pattern_identifiers(parameter) {
+            push_ecmascript_blocking_binding(&mut bindings, bound, scope, src);
+        }
+    }
+
+    for declaration in collect_kinds(
+        tree,
+        &[
+            "function_declaration",
+            "generator_function_declaration",
+            "class_declaration",
+        ],
+    ) {
+        let Some(name) = declaration.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(scope) = ecmascript_binding_scope(declaration) else {
+            continue;
+        };
+        push_ecmascript_blocking_binding(&mut bindings, name, scope, src);
+    }
+
+    for expression in collect_kinds(tree, &["function_expression", "generator_function", "class"]) {
+        let Some(name) = expression.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(scope) = expression.child_by_field_name("body") else {
+            continue;
+        };
+        push_ecmascript_blocking_binding(&mut bindings, name, scope, src);
+    }
+
     let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, binding) in bindings.iter().enumerate() {
         by_name.entry(binding.name.to_string()).or_default().push(index);
@@ -526,6 +567,61 @@ fn ecmascript_bindings<'tree>(tree: &'tree Tree, src: &'tree [u8]) -> Ecmascript
         })
         .collect();
     compiler_bindings
+}
+
+fn push_ecmascript_blocking_binding<'tree>(
+    bindings: &mut Vec<EcmascriptBinding<'tree>>,
+    bound: Node<'tree>,
+    scope: Node<'tree>,
+    src: &'tree [u8],
+) {
+    let name = node_text(&bound, src).trim();
+    if name.is_empty() {
+        return;
+    }
+    bindings.push(EcmascriptBinding {
+        name,
+        declaration: bound,
+        initializer: bound,
+        scope,
+        finite_map: None,
+    });
+}
+
+fn ecmascript_pattern_identifiers(pattern: Node<'_>) -> Vec<Node<'_>> {
+    match pattern.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => vec![pattern],
+        "required_parameter" | "optional_parameter" => pattern
+            .child_by_field_name("pattern")
+            .or_else(|| pattern.child_by_field_name("name"))
+            .map(ecmascript_pattern_identifiers)
+            .unwrap_or_default(),
+        "assignment_pattern" => pattern
+            .child_by_field_name("left")
+            .map(ecmascript_pattern_identifiers)
+            .unwrap_or_default(),
+        "pair_pattern" => pattern
+            .child_by_field_name("value")
+            .map(ecmascript_pattern_identifiers)
+            .unwrap_or_default(),
+        "rest_pattern" => pattern
+            .named_child(0)
+            .map(ecmascript_pattern_identifiers)
+            .unwrap_or_default(),
+        "object_assignment_pattern" => pattern
+            .child_by_field_name("left")
+            .or_else(|| pattern.child_by_field_name("shorthand"))
+            .map(ecmascript_pattern_identifiers)
+            .unwrap_or_default(),
+        "array_pattern" | "object_pattern" => {
+            let mut cursor = pattern.walk();
+            pattern
+                .named_children(&mut cursor)
+                .flat_map(ecmascript_pattern_identifiers)
+                .collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn ecmascript_declares_static_name(tree: &Tree, src: &[u8], wanted: &str) -> bool {
