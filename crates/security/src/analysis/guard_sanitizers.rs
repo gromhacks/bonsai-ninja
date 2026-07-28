@@ -4451,6 +4451,14 @@ fn python_constant_literal_map_get_assignment(
 /// a finite literal-map lookup. This is a compiler slice over adapter-emitted
 /// assignments, not a source-text/name search: every hop is the latest
 /// dominating definition and the finite assignment table bounds traversal.
+struct PythonMapDependencyFacts<'source, 'facts> {
+    assignments: &'facts [StructuredAssignment<'source>],
+    calls: &'facts [StructuredCall<'source>],
+    file_assignments: &'facts [StructuredAssignment<'source>],
+    assignment_values: &'facts [bonsai_lang_api::AssignmentValueFact],
+    call_argument_values: &'facts [bonsai_lang_api::CallArgumentValueFact],
+}
+
 fn python_allowlisted_map_dependency_assignment<'a>(
     target: &str,
     before: u64,
@@ -4463,26 +4471,22 @@ fn python_allowlisted_map_dependency_assignment<'a>(
     fn visit<'a>(
         target: &str,
         before: u64,
-        assignments: &[StructuredAssignment<'a>],
-        calls: &[StructuredCall<'a>],
-        file_assignments: &[StructuredAssignment<'a>],
-        assignment_values: &[bonsai_lang_api::AssignmentValueFact],
-        call_argument_values: &[bonsai_lang_api::CallArgumentValueFact],
+        facts: &PythonMapDependencyFacts<'a, '_>,
         visited: &mut AHashSet<String>,
     ) -> Option<StructuredAssignment<'a>> {
         if !visited.insert(target.to_string()) {
             return None;
         }
-        let assignment = assignments.iter().rev().copied().find(|assignment| {
+        let assignment = facts.assignments.iter().rev().copied().find(|assignment| {
             assignment.span.start < before
                 && clean_overwrite_target_key(assignment.target).as_deref() == Some(target)
         })?;
         if python_constant_literal_map_get_assignment(
             &assignment,
-            calls,
-            file_assignments,
-            assignment_values,
-            call_argument_values,
+            facts.calls,
+            facts.file_assignments,
+            facts.assignment_values,
+            facts.call_argument_values,
         ) {
             return Some(assignment);
         }
@@ -4491,30 +4495,17 @@ fn python_allowlisted_map_dependency_assignment<'a>(
             .into_iter()
             .chain(assignment.source_names.iter().map(String::as_str))
             .filter_map(clean_overwrite_target_key)
-            .find_map(|source| {
-                visit(
-                    &source,
-                    assignment.span.start,
-                    assignments,
-                    calls,
-                    file_assignments,
-                    assignment_values,
-                    call_argument_values,
-                    visited,
-                )
-            })
+            .find_map(|source| visit(&source, assignment.span.start, facts, visited))
     }
 
-    visit(
-        target,
-        before,
+    let facts = PythonMapDependencyFacts {
         assignments,
         calls,
         file_assignments,
         assignment_values,
         call_argument_values,
-        &mut AHashSet::new(),
-    )
+    };
+    visit(target, before, &facts, &mut AHashSet::new())
 }
 
 fn python_constant_literal_mapping_declared_before(

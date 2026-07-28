@@ -6005,15 +6005,19 @@ fn assignment_sources_include_any(
             .any(|source| candidates.contains(&source))
 }
 
+struct SanitizerGuardContext<'a> {
+    ws: &'a Workspace,
+    sink_tainted_args: &'a [TaintedArgInfo],
+}
+
 fn sanitizer_guard_feeds_sink_arg(
-    ws: &Workspace,
+    context: &SanitizerGuardContext<'_>,
     pack: &Rulepack,
     sanitizer_func: FuncId,
     sanitizer_rule: Option<&Rule>,
     san: &RuleMatch,
     sanitizer_hits: &[&RuleMatch],
     snk: &RuleMatch,
-    sink_tainted_args: &[TaintedArgInfo],
 ) -> bool {
     let Some(tag) = sanitizer_rule.and_then(|rule| rule.tag.as_deref()) else {
         return false;
@@ -6026,7 +6030,8 @@ fn sanitizer_guard_feeds_sink_arg(
     {
         return false;
     }
-    let target_keys: AHashSet<String> = sink_tainted_args
+    let target_keys: AHashSet<String> = context
+        .sink_tainted_args
         .iter()
         .flat_map(tainted_arg_target_keys)
         .filter(|target| !looks_like_clean_constant(target))
@@ -6034,12 +6039,12 @@ fn sanitizer_guard_feeds_sink_arg(
     if target_keys.is_empty() {
         return false;
     }
-    let Some(decl) = ws.exact_decl(SymbolId::new(sanitizer_func.raw())) else {
+    let Some(decl) = context.ws.exact_decl(SymbolId::new(sanitizer_func.raw())) else {
         return false;
     };
     if tag == "nosql-sanitize" {
         return terminal_type_guards_cover_sink_targets(
-            ws,
+            context.ws,
             &decl,
             sanitizer_rule.expect("tag came from a sanitizer rule"),
             sanitizer_hits,

@@ -810,7 +810,7 @@ pub enum ConstraintKind {
     /// argument regex. The matcher walks the HIR path; calls seen only on one
     /// branch never suppress a finding after the merge.
     UnlessPriorReceiverCall {
-        unless_prior_receiver_call: UnlessPriorReceiverCallSpec,
+        unless_prior_receiver_call: Box<UnlessPriorReceiverCallSpec>,
     },
     SecondArgEquals {
         second_arg_equals: String,
