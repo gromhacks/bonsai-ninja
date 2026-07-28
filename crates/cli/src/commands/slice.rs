@@ -43,9 +43,7 @@ pub(crate) fn cmd_slice(
         ("max_steps", max_steps_s.as_str()),
     ]);
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
-            emit_slice_json(root, &outcome, &paging_cfg, filters_hash)
-        }
+        BrowseFormat::Json => emit_slice_json(root, &outcome, &paging_cfg, filters_hash),
         BrowseFormat::Text => page_cache::emit_paged_text(
             root,
             &outcome.slices,

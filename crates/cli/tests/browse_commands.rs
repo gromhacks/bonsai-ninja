@@ -635,7 +635,7 @@ fn theme_flag_accepts_each_preset() {
     // Exercise each preset just to make sure they parse and the CLI
     // doesn't panic on theme switch.
     let ws = ws_path();
-    for preset in &["earthy-dark", "dracula", "retro-amber"] {
+    for preset in &["moss", "earthy-dark", "dracula", "retro-amber"] {
         let Some(out) = run(&["--theme", preset, "defs", ws.to_str().unwrap()]) else {
             return;
         };
@@ -647,15 +647,41 @@ fn theme_flag_accepts_each_preset() {
 }
 
 #[test]
-fn unknown_theme_falls_back_to_earthy_dark() {
-    // Unknown theme names should NOT fail — we fall back silently.
-    let ws = ws_path();
-    let Some(out) = run(&["--theme", "neon-nope", "defs", ws.to_str().unwrap()]) else {
+fn unknown_theme_is_rejected_even_when_help_is_requested() {
+    let Some(bin) = bin_path() else {
         return;
     };
+    let out = Command::new(bin)
+        .args(["--theme", "neon-nope", "--help", "--no-color"])
+        .output()
+        .expect("failed to run bonsai-ninja");
+    assert!(!out.status.success(), "unknown theme must not silently fall back");
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        out.contains("verify_token"),
-        "unknown theme broke defs table: {out}"
+        stderr.contains("invalid value") && stderr.contains("earthy-dark") && stderr.contains("moss"),
+        "theme error should list the supported values:\n{stderr}"
+    );
+}
+
+#[test]
+fn unknown_theme_from_environment_is_rejected() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = ws_path();
+    let out = Command::new(bin)
+        .args(["defs", ws.to_str().unwrap(), "--no-color"])
+        .env("BONSAI_THEME", "neon-nope")
+        .output()
+        .expect("failed to run bonsai-ninja");
+    assert!(
+        !out.status.success(),
+        "unknown BONSAI_THEME must not silently fall back"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid value") && stderr.contains("earthy-dark") && stderr.contains("moss"),
+        "environment theme error should list the supported values:\n{stderr}"
     );
 }
 
@@ -2661,16 +2687,93 @@ fn every_help_menu_renders_and_documents_core_surface() {
             !out.contains("security flows"),
             "{args:?}: help should not advertise retired security flows alias:\n{out}"
         );
-        let supports_no_compact = args.contains(&"taint-analysis") || args.contains(&"source-analysis");
-        if !supports_no_compact {
-            assert!(
-                !out.contains("--no-compact"),
-                "{args:?}: help should not advertise unsupported --no-compact flag:\n{out}"
-            );
-        }
+        assert!(
+            !out.contains("--no-compact"),
+            "{args:?}: help should not advertise unsupported --no-compact flag:\n{out}"
+        );
+        assert!(
+            !out.contains("accepted for compatibility"),
+            "{args:?}: help should not advertise compatibility-only behavior:\n{out}"
+        );
         assert!(
             !out.contains("Paging unit is one PATH"),
             "{args:?}: help should not contain stale trace paging wording:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn dump_edges_precision_only_accepts_semantic_classes() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = ws_path();
+    for unsupported in ["over-approximate", "unknown"] {
+        let out = Command::new(&bin)
+            .args([
+                "dump-edges",
+                ws.to_str().unwrap(),
+                "--precision",
+                unsupported,
+                "--no-color",
+                "--no-progress",
+            ])
+            .output()
+            .expect("failed to run bonsai-ninja");
+        assert!(
+            !out.status.success(),
+            "unsupported precision `{unsupported}` must be absent from the parser"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("invalid value") && stderr.contains("exact") && stderr.contains("narrowed"),
+            "clap should list dump-edges' complete precision surface:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn sarif_is_only_accepted_by_security_taint_analysis() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = ws_path();
+    let ws = ws.to_str().unwrap();
+    let unsupported = [
+        vec!["defs", ws, "--format", "sarif"],
+        vec!["inspect", ws, "--query", "verify_token", "--format", "sarif"],
+        vec![
+            "path",
+            ws,
+            "--from",
+            "handle_request",
+            "--to",
+            "verify_token",
+            "--format",
+            "sarif",
+        ],
+        vec![
+            "slice", ws, "--symbol", "token", "--line", "1", "--format", "sarif",
+        ],
+        vec!["tree", ws, "--format", "sarif"],
+        vec!["read-file", ws, "app.py", "--format", "sarif"],
+        vec!["security", ws, "sources", "--format", "sarif"],
+        vec!["security", ws, "source-analysis", "--format", "sarif"],
+    ];
+    for args in unsupported {
+        let out = Command::new(&bin)
+            .args(&args)
+            .args(["--no-color", "--no-progress"])
+            .output()
+            .expect("failed to run bonsai-ninja");
+        assert!(
+            !out.status.success(),
+            "{args:?} must reject unsupported SARIF output"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("invalid value") && stderr.contains("json") && stderr.contains("text"),
+            "{args:?} should receive clap's ordinary format error:\n{stderr}"
         );
     }
 }
@@ -2775,7 +2878,7 @@ fn tree_fast_mode_skips_internal_tool_state() {
     )
     .expect("write user-owned similarly prefixed source file");
 
-    let Some(out) = run(&["tree", root.to_str().unwrap(), "--compact"]) else {
+    let Some(out) = run(&["tree", root.to_str().unwrap()]) else {
         return;
     };
     assert!(
@@ -2808,7 +2911,7 @@ fn tree_renders_directory_symlinks_without_following_cycles() {
     std::fs::write(nested.join("app.py"), "def app():\n    return 1\n").expect("write source");
     symlink(&root, nested.join("loop")).expect("create directory symlink cycle");
 
-    let Some(out) = run(&["tree", root.to_str().unwrap(), "--all", "--compact"]) else {
+    let Some(out) = run(&["tree", root.to_str().unwrap(), "--all"]) else {
         return;
     };
     assert_eq!(
@@ -2828,7 +2931,7 @@ fn tree_renders_directory_symlinks_without_following_cycles() {
 fn tree_default_and_all_modes_stay_structural() {
     let ws = ws_path();
     for extra in [Vec::<&str>::new(), vec!["--all"]] {
-        let mut args = vec!["tree", ws.to_str().unwrap(), "--compact"];
+        let mut args = vec!["tree", ws.to_str().unwrap()];
         args.extend(extra);
         let Some(out) = run(&args) else {
             return;
@@ -2931,7 +3034,7 @@ fn tree_json_contains_only_structural_facts() {
 }
 
 #[test]
-fn tree_has_no_security_analysis_flags_or_rulepack_trigger() {
+fn tree_has_only_structural_options_and_ignores_ambient_rulepacks() {
     let Some(bin) = bin_path() else {
         return;
     };
@@ -2941,7 +3044,7 @@ fn tree_has_no_security_analysis_flags_or_rulepack_trigger() {
         .expect("run tree help");
     assert!(help.status.success(), "tree --help failed");
     let help = String::from_utf8_lossy(&help.stdout);
-    for removed in ["--findings", "--severity", "--rules-dir"] {
+    for removed in ["--findings", "--severity", "--rules-dir", "--compact"] {
         assert!(
             !help.contains(removed),
             "tree must not advertise a security-analysis trigger ({removed}):\n{help}"
@@ -2953,36 +3056,33 @@ fn tree_has_no_security_analysis_flags_or_rulepack_trigger() {
     );
 
     let ws = ws_path();
-    let legacy = Command::new(&bin)
-        .args([
-            "tree",
-            ws.to_str().unwrap(),
-            "--findings",
-            "--no-color",
-            "--no-progress",
-        ])
-        .output()
-        .expect("run removed tree security option");
-    assert!(
-        !legacy.status.success(),
-        "removed tree security options must not run analysis"
-    );
-    let legacy_stderr = String::from_utf8_lossy(&legacy.stderr);
-    assert!(
-        legacy_stderr.contains("tree` is filesystem-only")
-            && legacy_stderr.contains("security <workspace> taint-analysis"),
-        "removed tree security options must point to the explicit command:\n{legacy_stderr}"
-    );
+    for removed_args in [
+        vec!["--findings"],
+        vec!["--severity", "high"],
+        vec!["--rules-dir", "security-patterns"],
+        vec!["--compact"],
+    ] {
+        let mut args = vec!["tree", ws.to_str().unwrap()];
+        args.extend(removed_args.iter().copied());
+        args.extend(["--no-color", "--no-progress"]);
+        let removed = Command::new(&bin)
+            .args(args)
+            .output()
+            .expect("run unsupported tree option");
+        assert!(
+            !removed.status.success(),
+            "unsupported tree option must be absent from the parser: {removed_args:?}"
+        );
+        let stderr = String::from_utf8_lossy(&removed.stderr);
+        assert!(
+            stderr.contains("unexpected argument"),
+            "unsupported tree option must receive clap's ordinary error ({removed_args:?}):\n{stderr}"
+        );
+    }
 
     let rules = repo_root().join("security-patterns");
     let output = Command::new(&bin)
-        .args([
-            "tree",
-            ws.to_str().unwrap(),
-            "--compact",
-            "--no-color",
-            "--no-progress",
-        ])
+        .args(["tree", ws.to_str().unwrap(), "--no-color", "--no-progress"])
         .env("BONSAI_RULES_DIR", rules)
         .output()
         .expect("run tree with ambient rulepack");
@@ -3001,9 +3101,9 @@ fn tree_has_no_security_analysis_flags_or_rulepack_trigger() {
 }
 
 #[test]
-fn tree_compact_text_marks_depth_limited_view_incomplete() {
+fn tree_text_marks_depth_limited_view_incomplete() {
     let ws = ws_path();
-    let Some(out) = run(&["tree", ws.to_str().unwrap(), "--max-depth", "0", "--compact"]) else {
+    let Some(out) = run(&["tree", ws.to_str().unwrap(), "--max-depth", "0"]) else {
         return;
     };
     assert!(
@@ -7405,26 +7505,32 @@ fn inspect_from_to_match_via_interproc_param_name() {
 }
 
 #[test]
-fn inspect_from_kind_without_from_is_a_no_op() {
-    // --from-kind alone (no --from needle) doesn't change anything
-    // — the filter path only consults kind when a needle is also
-    // present. Runs clean for every language.
-    for c in canonical_chains() {
-        let ws = lang_ws(c.lang);
-        let Some(out) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--from-kind",
-            "read",
-        ]) else {
-            return;
-        };
+fn inspect_kind_narrowers_require_their_needle() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = ws_path();
+    for (kind_flag, needle_flag) in [("--from-kind", "--from"), ("--to-kind", "--to")] {
+        let out = Command::new(&bin)
+            .args([
+                "inspect",
+                ws.to_str().unwrap(),
+                "--query",
+                "run_admin_command",
+                kind_flag,
+                "read",
+                "--no-color",
+            ])
+            .output()
+            .expect("failed to run bonsai-ninja");
         assert!(
-            !out.contains("no matches"),
-            "{}: --from-kind with no --from must not filter anything; got:\n{out}",
-            c.lang,
+            !out.status.success(),
+            "{kind_flag} without {needle_flag} must be rejected"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(needle_flag),
+            "{kind_flag} error should name required {needle_flag}:\n{stderr}"
         );
     }
 }

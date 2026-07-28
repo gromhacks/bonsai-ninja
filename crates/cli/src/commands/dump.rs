@@ -34,7 +34,7 @@ pub(crate) fn cmd_dump_callgraph(
     let filters_hash = 0;
     let cost = |r: &bonsai_sdk::CallgraphRow| (r.function.len() + 8) as u64 + paging::TABLE_ROW_CHROME_BYTES;
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &rows, &paging_cfg, "dump-callgraph", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -81,12 +81,6 @@ pub(crate) fn cmd_dump_edges(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    if matches!(
-        precision_filter,
-        Some(PrecisionFilter::OverApproximate | PrecisionFilter::Unknown)
-    ) {
-        anyhow::bail!("`dump-edges` is semantic-only; use `--precision exact` or `--precision narrowed`");
-    }
     let (project, _footer) = open_project(root)?;
     let filters = bonsai_sdk::EdgesFilters {
         from: from_filter,
@@ -94,8 +88,6 @@ pub(crate) fn cmd_dump_edges(
         precision: precision_filter.map(|p| match p {
             PrecisionFilter::Exact => bonsai_sdk::PrecisionClass::Exact,
             PrecisionFilter::Narrowed => bonsai_sdk::PrecisionClass::Narrowed,
-            PrecisionFilter::OverApproximate => bonsai_sdk::PrecisionClass::OverApproximate,
-            PrecisionFilter::Unknown => bonsai_sdk::PrecisionClass::Unknown,
         }),
         edge_id: edge_id_filter,
     };
@@ -133,7 +125,7 @@ pub(crate) fn cmd_dump_edges(
             + paging::TABLE_ROW_CHROME_BYTES
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &records, &paging_cfg, "dump-edges", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -181,7 +173,7 @@ pub(crate) fn cmd_dump_resolution(
         (row.file.len() + row.decls.len().saturating_mul(48) + 96) as u64 + paging::TABLE_ROW_CHROME_BYTES
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(root, &rows, &paging_cfg, "dump-resolution", filters_hash, cost)?;
         }
         BrowseFormat::Text => {
@@ -405,7 +397,7 @@ pub(crate) fn cmd_dump_ast(
     }
     let cost = |d: &bonsai_sdk::AstFileDump| (d.path.len() + node_count(&d.root) * 180) as u64;
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             if paging_cfg.json_wrapped() {
                 emit_json_value_paged_cached(root_dir, &file_dumps, &paging_cfg, "dump-ast", filters_hash)?;
             } else {
@@ -542,7 +534,7 @@ pub(crate) fn cmd_dump_resolve(
     stage.finish();
 
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => cli_println!("{}", serde_json::to_string_pretty(&trace)?),
+        BrowseFormat::Json => cli_println!("{}", serde_json::to_string_pretty(&trace)?),
         BrowseFormat::Text => render_resolve_trace_text(&trace, compact),
     }
 
@@ -815,7 +807,7 @@ pub(crate) fn cmd_dump_taint(
             taint_id_filter.unwrap_or("")
         ),
         bonsai_sdk::TaintOutcome::Report(report) => match format {
-            BrowseFormat::Json | BrowseFormat::Sarif => {
+            BrowseFormat::Json => {
                 render_taint_report_json_paged(root, &report, &paging_cfg, filters_hash)?;
             }
             BrowseFormat::Text => {

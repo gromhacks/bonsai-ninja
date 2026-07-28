@@ -53,7 +53,7 @@ fn cache_stats(workspace: Option<std::path::PathBuf>, format: BrowseFormat) -> R
     let stage = progress::ScopedSpinner::new("reading cache metadata");
     let stats = cache.stats()?;
     stage.finish();
-    if matches!(format, BrowseFormat::Json | BrowseFormat::Sarif) {
+    if matches!(format, BrowseFormat::Json) {
         cli_println!("{}", serde_json::to_string_pretty(&stats)?);
         return Ok(());
     }

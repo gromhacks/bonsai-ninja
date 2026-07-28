@@ -714,19 +714,6 @@ fn inspect_accepts_query_flag() {
 }
 
 #[test]
-fn inspect_symbol_flag_still_works_as_alias() {
-    if require_binary_built().is_none() {
-        return;
-    }
-    let ws = ws_path();
-    let out = run(&["inspect", ws.to_str().unwrap(), "--symbol", "run_admin"]);
-    assert!(
-        out.contains("run_admin_command"),
-        "legacy --symbol alias broken: {out}"
-    );
-}
-
-#[test]
 fn inspect_kind_filter_restricts_output() {
     if require_binary_built().is_none() {
         return;

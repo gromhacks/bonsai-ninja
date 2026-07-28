@@ -51,9 +51,7 @@ pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) 
         ("max_probes", max_probes_s.as_str()),
     ]);
     match options.format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
-            emit_path_json(root, &outcome, &options.paging_cfg, filters_hash)
-        }
+        BrowseFormat::Json => emit_path_json(root, &outcome, &options.paging_cfg, filters_hash),
         BrowseFormat::Text => page_cache::emit_paged_text(
             root,
             &outcome.paths,

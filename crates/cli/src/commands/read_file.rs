@@ -15,6 +15,7 @@ use super::{
     emit_json_value_paged_cached, open_project_index_matching_path, open_project_index_only,
     open_project_index_only_with_rulepack,
 };
+use crate::args::BrowseFormat;
 use crate::cli_println;
 use crate::footer::render_paging_footer;
 use crate::page_cache;
@@ -35,7 +36,7 @@ pub(crate) struct ReadFileArgs<'a> {
     pub(crate) context: Option<&'a str>,
     pub(crate) page: Option<&'a str>,
     pub(crate) all: bool,
-    pub(crate) format: &'a str,
+    pub(crate) format: BrowseFormat,
     pub(crate) rules_dir: Option<&'a Path>,
 }
 
@@ -71,13 +72,13 @@ pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
     stage.finish();
 
     match args.format {
-        "json" => {
+        BrowseFormat::Json => {
             let filters_hash = read_file_filters_hash(&args);
             let cfg = paging::config_from_raw(args.context, args.page, args.all, FormatClass::Programmatic)
                 .map_err(|e| anyhow::anyhow!(e))?;
             emit_json_value_paged_cached(args.workspace, &out, &cfg, "read-file", filters_hash)?;
         }
-        _ => {
+        BrowseFormat::Text => {
             let filters_hash = read_file_filters_hash(&args);
             render_text_paged(
                 args.workspace,

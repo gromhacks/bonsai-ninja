@@ -196,7 +196,7 @@ fn elasticsearch_navigation_commands_do_not_regress() {
         return;
     };
     let commands: &[&[&str]] = &[
-        &["tree", "{es}", "--max-depth", "1", "--compact", "--context", "4k"],
+        &["tree", "{es}", "--max-depth", "1", "--context", "4k"],
         &["search", "{es}", "execute", "--context", "4k"],
         &["defs", "{es}", "--kind", "function", "--context", "4k"],
         &["imports", "{es}", "--context", "4k"],

@@ -8,31 +8,21 @@
 use clap::builder::styling::{AnsiColor, Color, RgbColor, Style as ClapStyle, Styles as ClapStyles};
 use owo_colors::{Rgb, Style};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Theme {
-    /// Muted brown-olive-amber; the default. Borders dim, accents warm.
+    // Muted brown-olive-amber. Borders dim, accents warm.
     EarthyDark,
-    /// Popular purple/teal Dracula palette.
+    // Popular purple/teal Dracula palette.
     Dracula,
-    /// Amber-on-near-black phosphor look. Four colors only.
+    // Amber-on-near-black phosphor look. Four colors only.
     RetroAmber,
-    /// Dark-forest palette. Pine-ink borders, misted-pine headers,
-    /// evergreen body, spruce-teal accent — the bonsai house colors.
-    /// Tranquil but means business: deep greens and slate, no warm
-    /// bark tones, one cold-teal pop and a muted amber warn so
-    /// attention markers still land.
+    // Dark-forest bonsai house palette and the CLI default.
     Moss,
 }
 
 impl Theme {
     pub(crate) fn parse(name: &str) -> Option<Self> {
-        match name.to_ascii_lowercase().as_str() {
-            "earthy" | "earthy-dark" | "earth" => Some(Self::EarthyDark),
-            "dracula" => Some(Self::Dracula),
-            "retro" | "retro-amber" | "amber" => Some(Self::RetroAmber),
-            "moss" | "bonsai" | "forest" => Some(Self::Moss),
-            _ => None,
-        }
+        <Self as clap::ValueEnum>::from_str(name, false).ok()
     }
 
     pub(crate) fn palette(self) -> ChromePalette {

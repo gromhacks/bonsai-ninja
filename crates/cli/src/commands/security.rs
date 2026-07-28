@@ -14,7 +14,7 @@
 mod progress_ui;
 
 use self::progress_ui::{ScopedProgress, SecurityAnalysisProgress};
-use crate::args::{BrowseFormat, SecurityAction, SourceAnalysisFormat};
+use crate::args::{BrowseFormat, SecurityAction, SecurityFormat};
 use crate::commands::{
     emit_json_paged_cached, emit_json_value_paged_cached, open_project_index_filtered_paths,
     open_project_index_matching_literal, open_project_index_only, page_info_to_json,
@@ -432,7 +432,6 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             mut context,
             page,
             all,
-            no_compact,
             summary,
             format,
             baseline,
@@ -448,7 +447,8 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 &mut context,
                 /* set_severity = */ true,
             )?;
-            let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
+            let paging_cfg =
+                paging_from_cli(context.as_deref(), page.as_deref(), all, format.paging_format())?;
             cmd_flows(
                 workspace,
                 &pack,
@@ -469,7 +469,6 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 exclude_tests,
                 show_sanitized,
                 paging_cfg,
-                no_compact,
                 summary,
                 format,
                 baseline.as_deref(),
@@ -489,7 +488,6 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             mut context,
             page,
             all,
-            no_compact,
             format,
             output: _,
         } => {
@@ -504,7 +502,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 &mut context,
                 /* set_severity = */ false,
             )?;
-            let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format.into())?;
+            let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_source_analysis(
                 workspace,
                 &pack,
@@ -518,7 +516,6 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 exclude_tests,
                 inferred_sources,
                 paging_cfg,
-                no_compact,
                 format,
             )
         }
@@ -1048,7 +1045,7 @@ fn cmd_deps(
     let cost = |r: &DependencyRow| dep_block_cost_bytes(r, pack);
 
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_paged_cached(
                 workspace,
                 &inv.rows,
@@ -1118,19 +1115,21 @@ fn cmd_flows(
     exclude_tests: bool,
     show_sanitized: bool,
     paging_cfg: paging::PagingConfig,
-    no_compact: bool,
     summary_only: bool,
-    format: BrowseFormat,
+    format: SecurityFormat,
     baseline: Option<&Path>,
     explain: bool,
 ) -> Result<()> {
     let sev_floor = parse_severity_flag(severity.as_deref())?;
     let max_precision = Some(Precision::Narrowed);
-    if summary_only && matches!(format, BrowseFormat::Sarif) {
+    if summary_only && matches!(format, SecurityFormat::Sarif) {
         bail!("`security taint-analysis --summary` supports text or json output, not sarif");
     }
-    if baseline.is_some() && matches!(format, BrowseFormat::Sarif) {
+    if baseline.is_some() && matches!(format, SecurityFormat::Sarif) {
         bail!("`security taint-analysis --baseline` supports text or json output, not sarif");
+    }
+    if explain && matches!(format, SecurityFormat::Sarif) {
+        bail!("`security taint-analysis --explain` supports text or json output, not sarif");
     }
     if finding.is_some() && explain {
         bail!("`security taint-analysis --finding` cannot be combined with --explain");
@@ -1140,7 +1139,7 @@ fn cmd_flows(
     }
     // Render-time diff input — does NOT enter the analysis cache key.
     let baseline_ids = baseline.map(load_baseline_finding_ids).transpose()?;
-    let include_pattern_only = include_pattern_only || matches!(format, BrowseFormat::Sarif);
+    let include_pattern_only = include_pattern_only || matches!(format, SecurityFormat::Sarif);
     // SEMANTIC analysis key: every input that changes the FINDING SET,
     // and nothing else. Output-shaping flags (format, paging, the
     // secondary `--contains` / `--not-contains` filters) are
@@ -1182,9 +1181,9 @@ fn cmd_flows(
     // lazily; JSON `--all` needs a payload saved with bulk flow
     // evidence.
     let needs_bulk_flow_evidence_cache =
-        !summary_only && matches!(format, BrowseFormat::Json) && paging_cfg.all;
+        !summary_only && matches!(format, SecurityFormat::Json) && paging_cfg.all;
     if !explain
-        && !matches!(format, BrowseFormat::Sarif)
+        && !matches!(format, SecurityFormat::Sarif)
         && finding.is_none()
         && flow.is_none()
         && group.is_none()
@@ -1205,7 +1204,7 @@ fn cmd_flows(
                     "ignoring compact taint render cache payload for JSON --all bulk flow evidence"
                 );
             } else {
-                let cached_render_project = if matches!(format, BrowseFormat::Text) && !summary_only {
+                let cached_render_project = if matches!(format, SecurityFormat::Text) && !summary_only {
                     Some(if !files.is_empty() || !exclude_files.is_empty() {
                         open_security_project_filtered_paths(
                             workspace,
@@ -1230,7 +1229,6 @@ fn cmd_flows(
                     pack,
                     &cached_report,
                     &paging_cfg,
-                    no_compact,
                     summary_only,
                     format,
                     filters_hash,
@@ -1281,7 +1279,7 @@ fn cmd_flows(
         filter_report_to_security_group_id(&mut report, group_id)?;
     }
     let bulk_flow_evidence_attached = !summary_only
-        && (matches!(format, BrowseFormat::Sarif)
+        && (matches!(format, SecurityFormat::Sarif)
             || paging_cfg.all
             || finding.is_some()
             || flow.is_some()
@@ -1307,7 +1305,7 @@ fn cmd_flows(
     }
 
     match format {
-        BrowseFormat::Sarif => {
+        SecurityFormat::Sarif => {
             let render_progress = ScopedProgress::new("rendering SARIF");
             // SARIF 2.1.0 — direct serialization, no pagination.
             // Standardised SAST output expected by IDE integrations,
@@ -1329,7 +1327,7 @@ fn cmd_flows(
             render_progress.finish();
             return Ok(());
         }
-        BrowseFormat::Json | BrowseFormat::Text => {}
+        SecurityFormat::Json | SecurityFormat::Text => {}
     }
 
     let render_report = build_taint_render_report(
@@ -1339,14 +1337,14 @@ fn cmd_flows(
     );
     let render_progress = ScopedProgress::new(if summary_only {
         "rendering taint summary"
-    } else if matches!(format, BrowseFormat::Json) {
+    } else if matches!(format, SecurityFormat::Json) {
         "rendering taint JSON"
     } else {
         "rendering taint page"
     });
     emit_taint_render_report(
         workspace,
-        if matches!(format, BrowseFormat::Text) && !summary_only {
+        if matches!(format, SecurityFormat::Text) && !summary_only {
             Some(project.workspace())
         } else {
             None
@@ -1354,7 +1352,6 @@ fn cmd_flows(
         pack,
         &render_report,
         &paging_cfg,
-        no_compact,
         summary_only,
         format,
         filters_hash,
@@ -1372,9 +1369,8 @@ fn emit_taint_render_report(
     pack: &Rulepack,
     report: &TaintAnalysisRenderReport,
     paging_cfg: &paging::PagingConfig,
-    no_compact: bool,
     summary_only: bool,
-    format: BrowseFormat,
+    format: SecurityFormat,
     filters_hash: u64,
     cache_payload: Option<&TaintAnalysisRenderReport>,
     baseline_ids: Option<&std::collections::BTreeSet<String>>,
@@ -1399,7 +1395,6 @@ fn emit_taint_render_report(
         pack,
         report,
         paging_cfg,
-        no_compact,
         summary_only,
         format,
         filters_hash,
@@ -1418,18 +1413,17 @@ fn emit_taint_render_report_inner(
     pack: &Rulepack,
     report: &TaintAnalysisRenderReport,
     paging_cfg: &paging::PagingConfig,
-    no_compact: bool,
     summary_only: bool,
-    format: BrowseFormat,
+    format: SecurityFormat,
     filters_hash: u64,
     cache_payload: Option<&TaintAnalysisRenderReport>,
 ) -> Result<()> {
     match format {
-        BrowseFormat::Json if summary_only => {
+        SecurityFormat::Json if summary_only => {
             cli_println!("{}", serde_json::to_string_pretty(&report.summary)?);
             save_taint_payload_if_requested(workspace, filters_hash, Vec::new(), None);
         }
-        BrowseFormat::Text if summary_only => {
+        SecurityFormat::Text if summary_only => {
             let text = page_cache::capture(|| {
                 render_taint_summary_text(&report.summary);
                 Ok(())
@@ -1437,24 +1431,18 @@ fn emit_taint_render_report_inner(
             save_taint_payload_if_requested(workspace, filters_hash, Vec::new(), None);
             page_cache::emit_cached_text(&text)?;
         }
-        BrowseFormat::Json => {
+        SecurityFormat::Json => {
             let (pages, current_page) = build_taint_json_pages(report, paging_cfg, filters_hash)?;
             save_taint_payload_if_requested(workspace, filters_hash, pages.clone(), cache_payload);
             emit_cached_page(&pages, current_page)?;
         }
-        BrowseFormat::Text => {
-            let (pages, current_page) = build_taint_text_pages(
-                render_workspace,
-                pack,
-                report,
-                paging_cfg,
-                no_compact,
-                filters_hash,
-            )?;
+        SecurityFormat::Text => {
+            let (pages, current_page) =
+                build_taint_text_pages(render_workspace, pack, report, paging_cfg, filters_hash)?;
             save_taint_payload_if_requested(workspace, filters_hash, pages.clone(), cache_payload);
             emit_cached_page(&pages, current_page)?;
         }
-        BrowseFormat::Sarif => {
+        SecurityFormat::Sarif => {
             anyhow::bail!("internal format error: SARIF must be rendered before the cached taint report path")
         }
     }
@@ -1693,7 +1681,6 @@ fn build_taint_text_pages(
     pack: &Rulepack,
     report: &TaintAnalysisRenderReport,
     paging_cfg: &paging::PagingConfig,
-    _no_compact: bool,
     filters_hash: u64,
 ) -> Result<(Vec<page_cache::CachedPage>, u64)> {
     let budget = paging_cfg.effective_budget();
@@ -2222,7 +2209,7 @@ fn emit_taint_explain(
     files: &[String],
     exclude_files: &[String],
     report: &TaintAnalysisReport,
-    format: BrowseFormat,
+    format: SecurityFormat,
 ) -> Result<()> {
     let source_sites = project.security().sources(SecurityInventoryOptions {
         rule_regex: source.map(str::to_string),
@@ -2279,7 +2266,7 @@ fn emit_taint_explain(
         )
     };
 
-    if matches!(format, BrowseFormat::Json) {
+    if matches!(format, SecurityFormat::Json) {
         let preview = |sites: &[RuleMatch]| {
             sites
                 .iter()
@@ -2342,8 +2329,8 @@ fn emit_taint_explain(
 /// `baseline_status` carries the machine-readable signal, so the summary
 /// goes to stderr to keep stdout a clean findings document; in text mode
 /// it joins the rendered report on stdout.
-fn print_baseline_summary(diff: &BaselineDiff, format: BrowseFormat) {
-    if matches!(format, BrowseFormat::Json) {
+fn print_baseline_summary(diff: &BaselineDiff, format: SecurityFormat) {
+    if matches!(format, SecurityFormat::Json) {
         eprintln!(
             "baseline diff — {} new · {} fixed · {} unchanged",
             diff.new, diff.fixed, diff.unchanged
@@ -2729,14 +2716,8 @@ fn cmd_source_analysis(
     exclude_tests: bool,
     inferred_sources: bool,
     paging_cfg: paging::PagingConfig,
-    no_compact: bool,
-    format: SourceAnalysisFormat,
+    format: BrowseFormat,
 ) -> Result<()> {
-    if matches!(format, SourceAnalysisFormat::Sarif) {
-        bail!(
-            "security source-analysis does not emit SARIF; use `security taint-analysis --format sarif` for SARIF 2.1.0 output"
-        );
-    }
     let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
         open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
     } else {
@@ -2795,7 +2776,7 @@ fn cmd_source_analysis(
     };
 
     match format {
-        SourceAnalysisFormat::Json => {
+        BrowseFormat::Json => {
             // Security JSON always carries scan completeness, including
             // `--all`; an empty bare array would be ambiguous to automation.
             page_cache::emit_paged_text(
@@ -2832,7 +2813,7 @@ fn cmd_source_analysis(
             )?;
             Ok(())
         }
-        SourceAnalysisFormat::Text => {
+        BrowseFormat::Text => {
             let cost_progress = ScopedProgress::new("estimating source page costs");
             let function_costs =
                 function_costs_for_paths(ws, candidates.iter().flat_map(|c| c.path.iter().copied()), true);
@@ -2869,7 +2850,6 @@ fn cmd_source_analysis(
                         pack,
                         &paged,
                         &info,
-                        no_compact,
                         candidates.len(),
                         source_rule_count,
                         lineage_summary,
@@ -2907,9 +2887,6 @@ fn cmd_source_analysis(
             }
             Ok(())
         }
-        SourceAnalysisFormat::Sarif => anyhow::bail!(
-            "source-analysis does not support SARIF; use JSON or text, or run taint-analysis for SARIF findings"
-        ),
     }
 }
 
@@ -2919,7 +2896,6 @@ fn render_source_analysis_text_page(
     pack: &Rulepack,
     candidates: &[CombinedSourceAnalysisCandidate],
     info: &paging::PageInfo,
-    _no_compact: bool,
     total_candidates: usize,
     source_rule_count: usize,
     lineage_summary: SourceLineageSummary,
@@ -3964,7 +3940,7 @@ fn render_match_table(
     };
 
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             let rows = security_match_rows(pack, matches);
             let cost_row = |_: &SecurityMatchRow| 512u64;
             let command = format!("security/{label}");
@@ -4298,7 +4274,7 @@ fn cmd_pack(
             + paging::TABLE_ROW_CHROME_BYTES
     };
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             page_cache::emit_paged_text(
                 workspace,
                 &rows,
@@ -4421,7 +4397,7 @@ fn render_pack_validation(
 ) -> Result<()> {
     let report = bonsai_sdk::SecurityPack::new(pack).validate(options.clone())?;
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Json => {
             emit_json_value_paged_cached(
                 workspace,
                 &report,

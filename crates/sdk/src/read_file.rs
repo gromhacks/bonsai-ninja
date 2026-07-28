@@ -289,7 +289,7 @@ fn read_file_with_taint_options(
                     marks.push(make_mark(MarkKind::Sanitizer, f, sm));
                 }
             }
-            findings_in_view.push(build_finding_digest(f, &raw_path, line_lo, actual_hi));
+            findings_in_view.push(build_finding_digest(f));
         }
     }
     finding_ids.sort();
@@ -643,17 +643,17 @@ fn make_mark(kind: MarkKind, f: &Finding, m: &FindingMatch) -> LineMark {
     }
 }
 
-fn build_finding_digest(f: &Finding, file: &str, line_lo: u32, line_hi: u32) -> FindingDigest {
-    let _ = (file, line_lo, line_hi);
-    let drill = format!(
-        "bonsai-ninja read-file <ws> {} --lines {}:{} --no-compact{}",
-        f.sink.file,
-        f.sink.line.saturating_sub(2).max(1),
-        f.sink.line.saturating_add(5),
-        f.representative_flow_id
-            .as_deref()
-            .map(|fid| format!(" --from {fid}"))
-            .unwrap_or_default()
+fn build_finding_digest(f: &Finding) -> FindingDigest {
+    let drill = f.representative_flow_id.as_deref().map_or_else(
+        || {
+            format!(
+                "bonsai-ninja read-file <ws> {} --lines {}:{}",
+                f.sink.file,
+                f.sink.line.saturating_sub(2).max(1),
+                f.sink.line.saturating_add(5),
+            )
+        },
+        |flow_id| format!("bonsai-ninja show <ws> {flow_id}"),
     );
     FindingDigest {
         finding_id: f.finding_id.clone(),

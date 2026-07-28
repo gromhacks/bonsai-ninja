@@ -1209,7 +1209,6 @@ class Validator:
                 "DOES_NOT_EXIST",
                 "--limit",
                 "10",
-                "--compact",
                 "--context",
                 "4k",
                 "--page",
@@ -1217,8 +1216,6 @@ class Validator:
                 "--all",
                 "--format",
                 "json",
-                "--rules-dir",
-                self.rules_dir,
             ],
             json_out=True,
         )
@@ -1262,8 +1259,6 @@ class Validator:
                 "inspect",
                 ws,
                 "--query",
-                entry,
-                "--symbol",
                 entry,
                 "--regex",
                 "--from",
@@ -1516,7 +1511,6 @@ class Validator:
                 "--page",
                 "1",
                 "--all",
-                "--no-compact",
                 "--format",
                 "json",
             ],
@@ -1546,7 +1540,6 @@ class Validator:
                 "--page",
                 "1",
                 "--all",
-                "--no-compact",
                 "--format",
                 "json",
             ],
@@ -1625,15 +1618,7 @@ class Validator:
             ("security sanitizers", ["security", ws, "sanitizers"]),
             ("security deps", ["security", ws, "deps"]),
             ("security taint-analysis", ["security", ws, "taint-analysis"]),
-            (
-                "security taint-analysis --no-compact",
-                ["security", ws, "taint-analysis", "--no-compact", "--context", "4k"],
-            ),
             ("security source-analysis", ["security", ws, "source-analysis"]),
-            (
-                "security source-analysis --no-compact",
-                ["security", ws, "source-analysis", "--no-compact", "--context", "4k"],
-            ),
             ("security pack", ["security", ws, "pack"]),
         ]
         for label, args in checks:

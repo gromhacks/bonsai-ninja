@@ -103,9 +103,9 @@ directory in 0.02 seconds with 9,273,344 bytes maximum RSS. The output contains
 neither a synthetic `0 findings` claim nor a severity footer. `--all` lifts
 presentation caps without enabling semantic work.
 
-On the local Elasticsearch checkout, `tree --max-depth 3 --compact` completed
+On the local Elasticsearch checkout, `tree --max-depth 3` completed
 in 0.09 seconds with 9,895,936 bytes maximum RSS. An intentional uncapped
-`tree --all --compact` covered 43,108 files and 13,350 directories in 0.96
+`tree --all` covered 43,108 files and 13,350 directories in 0.96
 seconds with 35,110,912 bytes maximum RSS.
 
 ## Elasticsearch scale result

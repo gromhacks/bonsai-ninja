@@ -587,11 +587,6 @@ fn taint_analysis_cli_flags_map_one_to_one_to_sdk_options() {
                 ..Default::default()
             },
         ),
-        (
-            "rendering no-compact does not affect JSON analysis",
-            vec!["--all", "--no-compact"],
-            TaintAnalysisOptions::default(),
-        ),
     ];
 
     for (name, cli_extra, sdk_options) in cases {
@@ -959,11 +954,6 @@ fn source_analysis_cli_flags_map_one_to_one_to_sdk_options() {
                 exclude_files: vec!["gateway.py".to_string()],
                 ..source_analysis_all_options()
             },
-        ),
-        (
-            "rendering no-compact does not affect JSON analysis",
-            vec!["--all", "--no-compact"],
-            source_analysis_all_options(),
         ),
     ];
 
