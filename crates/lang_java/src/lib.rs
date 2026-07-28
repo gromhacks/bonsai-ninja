@@ -353,6 +353,25 @@ fn lower_java_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -> 
             }
         }
     }
+    if node.kind() == "instanceof_expression" {
+        if let (Some(subject), Some(type_node)) = (
+            node.child_by_field_name("left")
+                .or_else(|| node.child_by_field_name("expression"))
+                .or_else(|| node.named_child(0)),
+            node.child_by_field_name("right")
+                .or_else(|| node.child_by_field_name("type"))
+                .or_else(|| node.named_child(1)),
+        ) {
+            let type_name = node_text(&type_node, src).trim().to_string();
+            if !type_name.is_empty() {
+                return ConditionExpressionFact::TypeTest {
+                    span,
+                    subject: java_condition_operand(subject, file, src),
+                    type_name,
+                };
+            }
+        }
+    }
     ConditionExpressionFact::Atom { span }
 }
 

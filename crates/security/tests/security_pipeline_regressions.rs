@@ -4032,6 +4032,7 @@ fn javascript_mongo_eq_filter_wrapper_is_sanitized() {
         nosql_filter: Some(NoSqlFilterSemantics {
             filter_arg_index: 0,
             literal_value_operators: vec!["$eq".to_string()],
+            safe_scalar_runtime_types: Vec::new(),
         }),
         ..AnalysisSemantics::default()
     });

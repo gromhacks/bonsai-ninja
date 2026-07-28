@@ -89,10 +89,17 @@ def authenticate(email, password):
     };
     assert_eq!(operands.len(), 2, "{expression:#?}");
     assert!(
-        operands.iter().all(
-            |operand| matches!(operand, ConditionExpressionFact::Not { operand, .. }
-                if matches!(operand.as_ref(), ConditionExpressionFact::Atom { .. }))
-        ),
+        operands.iter().all(|operand| {
+            matches!(
+                operand,
+                ConditionExpressionFact::Not { operand, .. }
+                    if matches!(
+                        operand.as_ref(),
+                        ConditionExpressionFact::TypeTest { type_name, .. }
+                            if type_name == "str"
+                    )
+            )
+        }),
         "{expression:#?}"
     );
 }

@@ -503,6 +503,11 @@ pub struct ParameterizedQuerySemantics {
 pub struct NoSqlFilterSemantics {
     pub filter_arg_index: usize,
     pub literal_value_operators: Vec<String>,
+    /// Exact frontend-owned runtime type names that cannot carry document
+    /// operators when used as filter values. The engine still requires a
+    /// dominating terminal-rejection proof for every dynamic value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_scalar_runtime_types: Vec<String>,
 }
 
 /// Rulepack-owned roles for proving that a dynamic-key sink is protected by

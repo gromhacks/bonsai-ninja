@@ -450,7 +450,9 @@ fn exact_string_sets_equal(left: &[String], right: &[String]) -> bool {
 
 fn condition_atom_containing(expression: &ConditionExpressionFact, target: Span) -> Option<Span> {
     match expression {
-        ConditionExpressionFact::Atom { span } => span_contains(*span, target).then_some(*span),
+        ConditionExpressionFact::Atom { span } | ConditionExpressionFact::TypeTest { span, .. } => {
+            span_contains(*span, target).then_some(*span)
+        }
         ConditionExpressionFact::Not { operand, .. } => condition_atom_containing(operand, target),
         ConditionExpressionFact::All { operands, .. } | ConditionExpressionFact::Any { operands, .. } => {
             operands
@@ -527,7 +529,9 @@ fn evaluate_condition(
         } => evaluate_key_literal_equality(*relation, left, right, rejected_value, key_variables)
             .or_else(|| evaluate_key_literal_equality(*relation, right, left, rejected_value, key_variables))
             .unwrap_or(TruthValue::Unknown),
-        ConditionExpressionFact::Membership { .. } => TruthValue::Unknown,
+        ConditionExpressionFact::Membership { .. } | ConditionExpressionFact::TypeTest { .. } => {
+            TruthValue::Unknown
+        }
     }
 }
 

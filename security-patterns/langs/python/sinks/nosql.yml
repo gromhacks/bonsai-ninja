@@ -21,6 +21,7 @@
     nosql_filter:
       filter_arg_index: 0
       literal_value_operators: ["$eq"]
+      safe_scalar_runtime_types: [str]
   match_examples:
   - name: nosql pymongo find
     code: |
@@ -69,6 +70,7 @@
     nosql_filter:
       filter_arg_index: 0
       literal_value_operators: ["$eq"]
+      safe_scalar_runtime_types: [str]
   match_examples:
   - name: nosql pymongo find one
     code: |

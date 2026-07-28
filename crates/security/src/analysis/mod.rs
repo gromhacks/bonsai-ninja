@@ -89,8 +89,8 @@ use guard_sanitizers::{
     parameterized_query_guard_sanitizer, path_consumer_containment_guard_sanitizer,
     path_containment_guard_sanitizer, place_is_assigned_between, python_compiled_regex_guard_sanitizer,
     python_url_ssrf_guard_sanitizer, receiver_factory_guard_sanitizer,
-    relative_path_containment_guard_sanitizer, source_sink_pair_is_low_signal,
-    terminal_rejection_predicate_guard_span, url_network_guard_sanitizer,
+    relative_path_containment_guard_sanitizer, runtime_type_rejection_guard_sanitizer,
+    source_sink_pair_is_low_signal, terminal_rejection_predicate_guard_span, url_network_guard_sanitizer,
 };
 use prototype_guard::prototype_pollution_sink_is_guarded;
 #[cfg(test)]

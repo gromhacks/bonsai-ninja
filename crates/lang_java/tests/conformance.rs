@@ -34,6 +34,11 @@ class UrlGuard {
     HttpURLConnection conn = (HttpURLConnection) parsed.openConnection();
     conn.setInstanceFollowRedirects(false);
   }
+  void authenticate(Object email, Object password) {
+    if (!(email instanceof String) || !(password instanceof String)) {
+      throw new IllegalArgumentException();
+    }
+  }
 }
 "#,
         )],
@@ -48,6 +53,19 @@ class UrlGuard {
     assert!(index.branch_conditions.iter().any(|fact| matches!(
         &fact.expression,
         Some(ConditionExpressionFact::Any { operands, .. }) if operands.len() == 2
+    )));
+    assert!(index.branch_conditions.iter().any(|fact| matches!(
+        &fact.expression,
+        Some(ConditionExpressionFact::Any { operands, .. })
+            if operands.iter().all(|operand| matches!(
+                operand,
+                ConditionExpressionFact::Not { operand, .. }
+                    if matches!(
+                        operand.as_ref(),
+                        ConditionExpressionFact::TypeTest { type_name, .. }
+                            if type_name == "String"
+                    )
+            ))
     )));
     assert!(index
         .call_receivers
