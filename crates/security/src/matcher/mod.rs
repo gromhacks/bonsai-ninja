@@ -7086,6 +7086,20 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
     let mut compiled = Vec::with_capacity(constraints.len());
     for constraint in constraints {
         let regex = match constraint {
+            ConstraintKind::ReceiverMatchesRegex {
+                receiver_matches_regex,
+            } => Some(compile_constraint_regex(
+                rule_id,
+                "constraints.receiver_matches_regex",
+                receiver_matches_regex,
+            )?),
+            ConstraintKind::ReceiverNotMatchesRegex {
+                receiver_not_matches_regex,
+            } => Some(compile_constraint_regex(
+                rule_id,
+                "constraints.receiver_not_matches_regex",
+                receiver_not_matches_regex,
+            )?),
             ConstraintKind::ArgMatchesRegex { arg_matches_regex } => Some(compile_constraint_regex(
                 rule_id,
                 "constraints.arg_matches_regex",
@@ -7221,6 +7235,8 @@ fn constraints_pass(ctx: ConstraintEval<'_, '_>) -> bool {
 /// | Arm                          | Predicate                                          |
 /// |------------------------------|----------------------------------------------------|
 /// | `ReceiverTypeIn`             | callee's receiver type matches a semantic type     |
+/// | `ReceiverMatchesRegex`        | parsed call receiver matches a rule-owned regex    |
+/// | `ReceiverNotMatchesRegex`     | parsed call receiver does not match a regex        |
 /// | `ReceiverTypeNotIn`          | callee's receiver type does not match a safe type  |
 /// | `Namespace`                  | callee's qualified prefix matches the namespace    |
 /// | `FormatArgIndex`             | the format-string arg slot matches expected index  |
@@ -7250,6 +7266,28 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
             }
             ConstraintKind::ReceiverTypeNotIn { receiver_type_not_in } => {
                 if receiver_type_matches_any(ctx.receiver_types, receiver_type_not_in) {
+                    return false;
+                }
+            }
+            ConstraintKind::ReceiverMatchesRegex { .. } => {
+                let Some(receiver) = call_receiver_text(ctx.callee) else {
+                    return false;
+                };
+                let Some(Some(re)) = ctx.constraint_regexes.get(constraint_index) else {
+                    return false;
+                };
+                if !re.is_match(receiver) {
+                    return false;
+                }
+            }
+            ConstraintKind::ReceiverNotMatchesRegex { .. } => {
+                let Some(receiver) = call_receiver_text(ctx.callee) else {
+                    return false;
+                };
+                let Some(Some(re)) = ctx.constraint_regexes.get(constraint_index) else {
+                    return false;
+                };
+                if re.is_match(receiver) {
                     return false;
                 }
             }

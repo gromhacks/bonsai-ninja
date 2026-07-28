@@ -175,7 +175,9 @@
     - ApolloServer
   description: "ApolloServer({resolvers}) - GraphQL resolver dispatch surface where args/context become attacker-controlled resolver inputs."
 - id: typescript.graphql.yoga_create_dispatch
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: typescript
   tag: graphql-injection
   category: source-independent
@@ -197,7 +199,7 @@
       }
     expect_match_text:
     - createYoga
-  description: "graphql-yoga createYoga({schema/context}) - HTTP GraphQL dispatch surface exposing resolver args and context."
+  description: "Disabled - createYoga registers an HTTP GraphQL endpoint but is not itself a GraphQL injection sink. Resolver args are modeled by the GraphQL source rules and must reach a concrete injection sink."
 
 - id: typescript.graphql.graphql_request_send
   enabled: true

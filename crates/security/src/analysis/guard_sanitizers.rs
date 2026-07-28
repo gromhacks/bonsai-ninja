@@ -555,11 +555,10 @@ pub(super) fn receiver_factory_guard_sanitizer(
     let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let mut calls = Vec::new();
     collect_structured_calls(&decl.flow_events, &mut calls);
-    let receiver = calls
-        .iter()
-        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?
-        .receiver
-        .and_then(clean_overwrite_target_key)?;
+    let receiver =
+        structured_call_at_match(&calls, sink.span, &clean_overwrite_callee_tail(&sink.match_text))?
+            .receiver
+            .and_then(clean_overwrite_target_key)?;
     let file_index = ws.exact_decl_index_shared(sink.span.file)?;
     let assignment = file_index
         .assignment_values
@@ -2785,7 +2784,14 @@ fn structured_call_at_match<'a>(
                     || span_contains(matched_span, call.span)
                     || span_contains(call.span, matched_span))
         })
-        .min_by_key(|call| call.span.start.abs_diff(matched_span.start))
+        .min_by_key(|call| {
+            (
+                call.span != matched_span,
+                call.span.start.abs_diff(matched_span.start),
+                call.span.end.abs_diff(matched_span.end),
+                call.span.end.saturating_sub(call.span.start),
+            )
+        })
 }
 
 pub(super) fn java_local_html_escape_helper_return_sanitizer(
@@ -4877,5 +4883,29 @@ mod structured_guard_tests {
         assert!(!python_dev_only_env_guard_condition(
             "os.getenv('APP_ENV') == 'production'"
         ));
+    }
+
+    #[test]
+    fn exact_nested_call_wins_over_an_overlapping_outer_call() {
+        let calls = [
+            StructuredCall {
+                span: span(10, 40),
+                name: "_env.from_string(text).render",
+                receiver: Some("_env.from_string(text)"),
+                receiver_types: &[],
+                args: &[],
+            },
+            StructuredCall {
+                span: span(10, 28),
+                name: "_env.from_string",
+                receiver: Some("_env"),
+                receiver_types: &[],
+                args: &[],
+            },
+        ];
+
+        let selected =
+            structured_call_at_match(&calls, span(10, 28), "from_string").expect("inner call must match");
+        assert_eq!(selected.receiver, Some("_env"));
     }
 }

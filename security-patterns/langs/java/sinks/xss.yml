@@ -517,6 +517,7 @@
   constraints:
   - arg_tainted:
       index: 0
+  - receiver_not_matches_regex: '(?i)\.putHeader\s*\(\s*["'']content-type["'']\s*,\s*["''](?:text/plain|application/json|application/octet-stream)(?:\s*;[^"'']*)?["'']\s*\)'
   match_examples:
   - name: vertx response end raw html
     code: |
@@ -538,6 +539,19 @@
         void handle(String input) throws Exception {
           end("safe");
         }
+      }
+    expect_no_match: true
+  - name: vertx plain text response negative
+    code: |
+      import io.vertx.*;
+      class App {
+        void handle(HttpServerResponse response, String value) {
+          response.putHeader("Content-Type", "text/plain").end(value);
+        }
+      }
+      class HttpServerResponse {
+        HttpServerResponse putHeader(Object... args) { return this; }
+        void end(Object... args) {}
       }
     expect_no_match: true
   description: "Vert.x HttpServerResponse.end(raw HTML concat) - reflected HTML response built from attacker-controlled text."

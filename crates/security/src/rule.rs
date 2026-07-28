@@ -794,6 +794,17 @@ pub enum ConstraintKind {
     ReceiverTypeNotIn {
         receiver_type_not_in: Vec<String>,
     },
+    /// Require the adapter-normalized receiver expression to match a
+    /// rulepack-owned regex. API/runtime spellings stay in rule data; the
+    /// engine evaluates the receiver emitted from the parsed call node.
+    ReceiverMatchesRegex {
+        receiver_matches_regex: String,
+    },
+    /// Reject a call when its adapter-normalized receiver expression matches
+    /// a rulepack-owned regex.
+    ReceiverNotMatchesRegex {
+        receiver_not_matches_regex: String,
+    },
     SecondArgEquals {
         second_arg_equals: String,
     },
@@ -915,6 +926,8 @@ impl ConstraintKind {
         match self {
             Self::ReceiverTypeIn { .. } => "receiver_type_in",
             Self::ReceiverTypeNotIn { .. } => "receiver_type_not_in",
+            Self::ReceiverMatchesRegex { .. } => "receiver_matches_regex",
+            Self::ReceiverNotMatchesRegex { .. } => "receiver_not_matches_regex",
             Self::SecondArgEquals { .. } => "second_arg_equals",
             Self::ArgEquals { .. } => "arg_equals",
             Self::KeywordArgEquals { .. } => "keyword_arg_equals",
@@ -957,6 +970,8 @@ impl ConstraintKind {
             Self::ArgTainted { .. }
                 | Self::ReceiverTainted { .. }
                 | Self::AnyArgTainted { .. }
+                | Self::ReceiverMatchesRegex { .. }
+                | Self::ReceiverNotMatchesRegex { .. }
                 | Self::ReceiverOriginCallbackParamReachesCall { .. }
                 | Self::SecondArgEquals { .. }
                 | Self::ArgEquals { .. }

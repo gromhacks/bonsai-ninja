@@ -127,7 +127,9 @@
       name: XMLParser
   description: "Disabled - fast-xml-parser doesn't resolve external entities."
 - id: typescript.xxe.fast_xml_parser_entities_enabled
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: typescript
   tag: xxe
   category: source-independent
@@ -162,9 +164,11 @@
         return new XMLParser({ processEntities: false });
       }
     expect_no_match: true
-  description: "fast-xml-parser constructed with processEntities/htmlEntities enabled - audit parser use for entity expansion and unsafe downstream XML interpretation. The options regex requires the entity flag set true so the safe default parser stays quiet."
+  description: "Disabled - fast-xml-parser expands supported internal/named entities but rejects external SYSTEM entities; these options do not establish an XXE file/network access boundary."
 - id: typescript.xxe.fast_xml_parser_parse
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: typescript
   tag: xxe
   severity: high
@@ -198,7 +202,7 @@
         return parser.parse("<rss/>");
       }
     expect_no_match: true
-  description: "fast-xml-parser XMLParser.parse(tainted XML) - parse attacker XML on XMLParser receiver; constructor hardening is handled by sanitizer/config rules."
+  description: "Disabled - fast-xml-parser does not resolve external SYSTEM entities, so parsing attacker-controlled XML is not an XXE file/network boundary. Internal-entity resource limits belong to a separate denial-of-service rule family."
 - id: typescript.xxe.parse_xml_resolve_entities
   enabled: true
   language: typescript

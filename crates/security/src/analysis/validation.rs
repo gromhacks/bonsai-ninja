@@ -1463,6 +1463,18 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
     }
     for constraint in &rule.constraints.0 {
         let regex = match constraint {
+            crate::rule::ConstraintKind::ReceiverMatchesRegex {
+                receiver_matches_regex,
+            } => Some((
+                "constraints.receiver_matches_regex",
+                receiver_matches_regex.as_str(),
+            )),
+            crate::rule::ConstraintKind::ReceiverNotMatchesRegex {
+                receiver_not_matches_regex,
+            } => Some((
+                "constraints.receiver_not_matches_regex",
+                receiver_not_matches_regex.as_str(),
+            )),
             crate::rule::ConstraintKind::ArgMatchesRegex { arg_matches_regex } => {
                 Some(("constraints.arg_matches_regex", arg_matches_regex.regex.as_str()))
             }
