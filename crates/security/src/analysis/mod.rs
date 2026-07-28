@@ -87,9 +87,10 @@ use guard_sanitizers::{
     java_local_html_escape_helper_return_sanitizer, js_ts_local_html_escape_helper_sanitizer,
     local_ldap_escape_helper_sanitizer, nosql_eq_filter_wrapper_sanitizer,
     parameterized_query_guard_sanitizer, path_consumer_containment_guard_sanitizer,
-    path_containment_guard_sanitizer, python_compiled_regex_guard_sanitizer, python_url_ssrf_guard_sanitizer,
-    receiver_factory_guard_sanitizer, relative_path_containment_guard_sanitizer,
-    source_sink_pair_is_low_signal, url_network_guard_sanitizer,
+    path_containment_guard_sanitizer, place_is_assigned_between, python_compiled_regex_guard_sanitizer,
+    python_url_ssrf_guard_sanitizer, receiver_factory_guard_sanitizer,
+    relative_path_containment_guard_sanitizer, source_sink_pair_is_low_signal,
+    terminal_rejection_predicate_guard_span, url_network_guard_sanitizer,
 };
 use prototype_guard::prototype_pollution_sink_is_guarded;
 #[cfg(test)]
@@ -5890,14 +5891,17 @@ fn sanitizer_guard_feeds_sink_arg(
     sanitizer_func: FuncId,
     sanitizer_rule: Option<&Rule>,
     san: &RuleMatch,
+    sanitizer_hits: &[&RuleMatch],
     snk: &RuleMatch,
     sink_tainted_args: &[TaintedArgInfo],
 ) -> bool {
     let Some(tag) = sanitizer_rule.and_then(|rule| rule.tag.as_deref()) else {
         return false;
     };
-    if !matches!(tag, "same-origin-path" | "ssrf-sanitize" | "allowlist-validate")
-        || san.span.file != snk.span.file
+    if !matches!(
+        tag,
+        "same-origin-path" | "ssrf-sanitize" | "allowlist-validate" | "nosql-sanitize"
+    ) || san.span.file != snk.span.file
         || !match_precedes_or_same(san, snk)
     {
         return false;
@@ -5913,6 +5917,16 @@ fn sanitizer_guard_feeds_sink_arg(
     let Some(decl) = ws.exact_decl(SymbolId::new(sanitizer_func.raw())) else {
         return false;
     };
+    if tag == "nosql-sanitize" {
+        return terminal_type_guards_cover_sink_targets(
+            ws,
+            &decl,
+            sanitizer_rule.expect("tag came from a sanitizer rule"),
+            sanitizer_hits,
+            snk,
+            &target_keys,
+        );
+    }
     let mut guarded = sanitizer_guard_variables_in_events(&decl.flow_events, san, tag);
     guarded.retain(|var| !looks_like_clean_constant(var));
     if guarded.is_empty() {
@@ -5937,6 +5951,38 @@ fn sanitizer_guard_feeds_sink_arg(
         &target_keys,
         receiver_mutation_targets,
     )
+}
+
+fn terminal_type_guards_cover_sink_targets(
+    ws: &Workspace,
+    decl: &bonsai_lang_api::Decl,
+    sanitizer_rule: &Rule,
+    sanitizer_hits: &[&RuleMatch],
+    sink: &RuleMatch,
+    sink_targets: &AHashSet<String>,
+) -> bool {
+    sink_targets.iter().all(|target| {
+        sanitizer_hits
+            .iter()
+            .filter(|candidate| {
+                candidate.rule_id == sanitizer_rule.id
+                    && candidate.span.file == sink.span.file
+                    && match_precedes_or_same(candidate, sink)
+            })
+            .any(|candidate| {
+                let guarded =
+                    sanitizer_guard_variables_in_events(&decl.flow_events, candidate, "nosql-sanitize");
+                if !guarded.iter().any(|place| place == target) {
+                    return false;
+                }
+                let Some(branch_span) =
+                    terminal_rejection_predicate_guard_span(ws, decl, candidate.span, sink.span)
+                else {
+                    return false;
+                };
+                !place_is_assigned_between(&decl.flow_events, target, branch_span.end, sink.span.start)
+            })
+    })
 }
 
 fn sanitizer_guard_variables_in_events(events: &[FlowEvent], san: &RuleMatch, tag: &str) -> Vec<String> {
@@ -5965,6 +6011,21 @@ fn collect_sanitizer_guard_variables(
                 }
                 if matches!(tag, "ssrf-sanitize" | "allowlist-validate") {
                     for arg in args {
+                        if let Some(place) = arg.place.as_deref().and_then(clean_overwrite_target_key) {
+                            vars.push(place);
+                        }
+                        if let Some(value) = clean_overwrite_target_key(&arg.value_text) {
+                            vars.push(value);
+                        }
+                        for source in &arg.source_names {
+                            if let Some(value) = clean_overwrite_target_key(source) {
+                                vars.push(value);
+                            }
+                        }
+                    }
+                }
+                if tag == "nosql-sanitize" {
+                    if let Some(arg) = args.first() {
                         if let Some(place) = arg.place.as_deref().and_then(clean_overwrite_target_key) {
                             vars.push(place);
                         }

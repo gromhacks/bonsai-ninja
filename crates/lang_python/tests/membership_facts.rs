@@ -1,5 +1,5 @@
 use bonsai_db::AnalyzerDb;
-use bonsai_lang_api::LanguageRegistry;
+use bonsai_lang_api::{ConditionExpressionFact, LanguageRegistry};
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
 
@@ -57,5 +57,42 @@ def check(value):
     assert!(
         set_flow.value_flow.tuple_items.iter().all(|item| item.is_empty()),
         "literal set items must carry no value dependencies: {set_flow:#?}"
+    );
+}
+
+#[test]
+fn rejection_guard_boolean_structure_is_compiler_lowered() {
+    let vfs = Arc::new(Vfs::new());
+    let file = vfs.write(
+        "types.py".to_string(),
+        Arc::<str>::from(
+            r#"
+def authenticate(email, password):
+    if not isinstance(email, str) or not isinstance(password, str):
+        raise ValueError("strings required")
+    return {"email": email, "password": password}
+"#,
+        ),
+    );
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+    let db = AnalyzerDb::new(vfs, registry);
+    let index = db.decl_index(file).expect("Python declaration index");
+
+    let expression = index
+        .branch_conditions
+        .iter()
+        .find_map(|fact| fact.expression.as_ref())
+        .expect("typed rejection-guard expression");
+    let ConditionExpressionFact::Any { operands, .. } = expression else {
+        panic!("expected disjunction, got {expression:#?}");
+    };
+    assert_eq!(operands.len(), 2, "{expression:#?}");
+    assert!(
+        operands.iter().all(
+            |operand| matches!(operand, ConditionExpressionFact::Not { operand, .. }
+                if matches!(operand.as_ref(), ConditionExpressionFact::Atom { .. }))
+        ),
+        "{expression:#?}"
     );
 }
