@@ -1333,12 +1333,11 @@ fn cli_export_command_uses_sdk_export_cache_facade() {
 }
 
 #[test]
-fn cli_read_file_and_tree_use_sdk_rulepack_attachment() {
-    // docs/contributing/review-checklist.mdx B-9: read-file/tree may accept a --rules-dir flag,
-    // but rulepack loading and attachment should be handled by the
-    // shared SDK project-opening helper.
+fn cli_read_file_uses_sdk_rulepack_attachment() {
+    // read-file may accept a --rules-dir flag, but rulepack loading and
+    // attachment should be handled by the shared SDK project-opening helper.
     let root = repo_root();
-    let files = ["read_file.rs", "tree.rs"];
+    let files = ["read_file.rs"];
     let forbidden = ["bonsai_security", "load_rulepack", "discover_rulepack_root"];
     let mut violations = Vec::new();
     for file in files {
@@ -1363,7 +1362,40 @@ fn cli_read_file_and_tree_use_sdk_rulepack_attachment() {
     }
     assert!(
         violations.is_empty(),
-        "CLI read-file/tree must use SDK rulepack attachment instead of loading packs directly:\n  {}",
+        "CLI read-file must use SDK rulepack attachment instead of loading packs directly:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+#[test]
+fn cli_tree_is_filesystem_only() {
+    let root = repo_root();
+    let path = root.join("crates/cli/src/commands/tree.rs");
+    let text = read(&path);
+    let forbidden = [
+        "open_project",
+        "TreeFilters",
+        "run_taint_analysis",
+        "cached_resolved_call_graph",
+        "bonsai_sdk",
+        "bonsai_security",
+        "bonsai_workspace",
+    ];
+    let mut violations = Vec::new();
+    for (lineno, line) in text.lines().enumerate() {
+        let live = line.split("//").next().unwrap_or("").trim();
+        if live.is_empty() {
+            continue;
+        }
+        for pattern in forbidden {
+            if live.contains(pattern) {
+                violations.push(format!("commands/tree.rs:{}: {live}", lineno + 1));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "CLI tree must remain a direct filesystem view with no compiler or security path:\n  {}",
         violations.join("\n  ")
     );
 }

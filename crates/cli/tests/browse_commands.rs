@@ -2676,7 +2676,7 @@ fn every_help_menu_renders_and_documents_core_surface() {
 }
 
 #[test]
-fn tree_json_reports_complete_semantic_view_when_unbounded() {
+fn tree_json_reports_complete_structural_view_when_unbounded() {
     let ws = ws_path();
     let Some(out) = run(&["tree", ws.to_str().unwrap(), "--all", "--format", "json"]) else {
         return;
@@ -2763,59 +2763,6 @@ fn tree_file_filter_is_workspace_relative_in_fast_mode() {
 }
 
 #[test]
-fn tree_annotated_paths_are_workspace_relative() {
-    fn assert_relative_locators(node: &serde_json::Value) {
-        let locator = node["locator"]["file"]
-            .as_str()
-            .expect("every tree node carries a file locator");
-        assert!(
-            !Path::new(locator).is_absolute(),
-            "annotated tree locator must be workspace-relative: {locator}"
-        );
-        for edge_field in ["cross_file_callers_in", "cross_file_callees_out"] {
-            for edge in node[edge_field].as_array().into_iter().flatten() {
-                for endpoint in ["caller", "callee", "call_site"] {
-                    let file = edge[endpoint]["file"]
-                        .as_str()
-                        .expect("cross-file endpoint locator");
-                    assert!(
-                        file == "external" || !Path::new(file).is_absolute(),
-                        "annotated tree edge locator must be workspace-relative: {file}"
-                    );
-                }
-            }
-        }
-        for child in node["children"].as_array().into_iter().flatten() {
-            assert_relative_locators(child);
-        }
-    }
-
-    let ws = ws_path();
-    let rules = repo_root().join("security-patterns");
-    let Some(out) = run(&[
-        "tree",
-        ws.to_str().unwrap(),
-        "--findings",
-        "--rules-dir",
-        rules.to_str().unwrap(),
-        "--all",
-        "--format",
-        "json",
-    ]) else {
-        return;
-    };
-    let parsed: serde_json::Value = serde_json::from_str(&out).expect("tree JSON must parse");
-    let roots = parsed["roots"].as_array().expect("tree roots");
-    assert_eq!(roots.len(), 1, "selected workspace must have one tree root");
-    assert_eq!(
-        roots[0]["name"].as_str(),
-        Some("micro"),
-        "annotated tree must root at the selected workspace:\n{out}"
-    );
-    assert_relative_locators(&roots[0]);
-}
-
-#[test]
 fn tree_fast_mode_skips_internal_tool_state() {
     let root = tempdir_for_test("tree-internal-probe");
     std::fs::write(root.join("app.py"), "def app_marker():\n    return 1\n").expect("write app");
@@ -2850,6 +2797,33 @@ fn tree_fast_mode_skips_internal_tool_state() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn tree_renders_directory_symlinks_without_following_cycles() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempdir_for_test("tree-symlink-cycle");
+    let nested = root.join("nested");
+    std::fs::create_dir_all(&nested).expect("create nested directory");
+    std::fs::write(nested.join("app.py"), "def app():\n    return 1\n").expect("write source");
+    symlink(&root, nested.join("loop")).expect("create directory symlink cycle");
+
+    let Some(out) = run(&["tree", root.to_str().unwrap(), "--all", "--compact"]) else {
+        return;
+    };
+    assert_eq!(
+        out.matches("loop").count(),
+        1,
+        "tree must render a directory symlink once without following it:\n{out}"
+    );
+    assert_eq!(
+        out.matches("app.py").count(),
+        1,
+        "tree must render ordinary files exactly once beside a symlink cycle:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn tree_default_and_all_modes_stay_structural() {
     let ws = ws_path();
@@ -2864,6 +2838,166 @@ fn tree_default_and_all_modes_stay_structural() {
             "structural tree must not imply that it ran security analysis:\n{out}"
         );
     }
+}
+
+#[test]
+fn tree_all_lifts_the_child_limit() {
+    let root = tempdir_for_test("tree-all-child-limit");
+    for index in 0..201 {
+        std::fs::write(root.join(format!("file_{index:03}.py")), "").expect("write tree fixture");
+    }
+
+    let Some(default_out) = run(&["tree", root.to_str().unwrap(), "--format", "json"]) else {
+        return;
+    };
+    let default_json: serde_json::Value =
+        serde_json::from_str(&default_out).expect("default tree JSON must parse");
+    assert_eq!(
+        default_json["summary"]["total_files"].as_u64(),
+        Some(200),
+        "default tree must honor its per-directory child cap"
+    );
+    assert_eq!(
+        default_json["analysis_complete"].as_bool(),
+        Some(false),
+        "a capped structural tree must report itself incomplete"
+    );
+
+    let all_out =
+        run(&["tree", root.to_str().unwrap(), "--format", "json", "--all"]).expect("tree --all output");
+    let all_json: serde_json::Value = serde_json::from_str(&all_out).expect("uncapped tree JSON must parse");
+    assert_eq!(
+        all_json["summary"]["total_files"].as_u64(),
+        Some(201),
+        "tree --all must lift the per-directory child cap"
+    );
+    assert_eq!(
+        all_json["analysis_complete"].as_bool(),
+        Some(true),
+        "an uncapped structural tree must be complete"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn tree_json_contains_only_structural_facts() {
+    fn assert_structural_node(node: &serde_json::Value) {
+        let locator = node["locator"]["file"].as_str().expect("tree node locator.file");
+        assert!(
+            !Path::new(locator).is_absolute(),
+            "tree locators must be portable workspace-relative paths: {locator}"
+        );
+        for semantic in [
+            "finding_ids",
+            "flow_ids",
+            "max_severity",
+            "finding_severity_counts",
+            "cross_file_callers_in",
+            "cross_file_callees_out",
+            "most_severe_flow",
+            "indexed",
+            "render_priority",
+        ] {
+            assert!(
+                node.get(semantic).is_none(),
+                "structural tree node must not serialize semantic field {semantic}: {node}"
+            );
+        }
+        for child in node["children"].as_array().into_iter().flatten() {
+            assert_structural_node(child);
+        }
+    }
+
+    let ws = ws_path();
+    let Some(out) = run(&["tree", ws.to_str().unwrap(), "--format", "json", "--all"]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("tree JSON must parse");
+    for semantic in [
+        "total_findings",
+        "severity_counts",
+        "indexed_complete",
+        "indexed_stale",
+        "indexed_missing",
+    ] {
+        assert!(
+            parsed["summary"].get(semantic).is_none(),
+            "structural tree summary must not serialize semantic field {semantic}:\n{out}"
+        );
+    }
+    for root in parsed["roots"].as_array().expect("tree roots") {
+        assert_structural_node(root);
+    }
+}
+
+#[test]
+fn tree_has_no_security_analysis_flags_or_rulepack_trigger() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let help = Command::new(&bin)
+        .args(["tree", "--help", "--no-color"])
+        .output()
+        .expect("run tree help");
+    assert!(help.status.success(), "tree --help failed");
+    let help = String::from_utf8_lossy(&help.stdout);
+    for removed in ["--findings", "--severity", "--rules-dir"] {
+        assert!(
+            !help.contains(removed),
+            "tree must not advertise a security-analysis trigger ({removed}):\n{help}"
+        );
+    }
+    assert!(
+        help.contains("never opens the compiler") && help.contains("security <workspace> taint-analysis"),
+        "tree help must state the lightweight command boundary:\n{help}"
+    );
+
+    let ws = ws_path();
+    let legacy = Command::new(&bin)
+        .args([
+            "tree",
+            ws.to_str().unwrap(),
+            "--findings",
+            "--no-color",
+            "--no-progress",
+        ])
+        .output()
+        .expect("run removed tree security option");
+    assert!(
+        !legacy.status.success(),
+        "removed tree security options must not run analysis"
+    );
+    let legacy_stderr = String::from_utf8_lossy(&legacy.stderr);
+    assert!(
+        legacy_stderr.contains("tree` is filesystem-only")
+            && legacy_stderr.contains("security <workspace> taint-analysis"),
+        "removed tree security options must point to the explicit command:\n{legacy_stderr}"
+    );
+
+    let rules = repo_root().join("security-patterns");
+    let output = Command::new(&bin)
+        .args([
+            "tree",
+            ws.to_str().unwrap(),
+            "--compact",
+            "--no-color",
+            "--no-progress",
+        ])
+        .env("BONSAI_RULES_DIR", rules)
+        .output()
+        .expect("run tree with ambient rulepack");
+    assert!(
+        output.status.success(),
+        "ambient rulepack must not change tree execution: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("finding")
+            && !stdout.contains("[ severity ]")
+            && !stdout.contains("[ taint-index ]"),
+        "ambient rulepack must not attach security analysis to tree:\n{stdout}"
+    );
 }
 
 #[test]
