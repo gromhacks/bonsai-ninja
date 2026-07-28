@@ -226,6 +226,7 @@ pub(super) fn make_finding(
                         hop_func,
                         sanitizer_rule,
                         sanitizer_match,
+                        sanitizer_hits,
                         snk,
                         &context.sink_tainted_args,
                     )

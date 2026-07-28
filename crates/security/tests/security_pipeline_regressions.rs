@@ -2259,6 +2259,7 @@ _SAFE_PARSER = etree.XMLParser(
 )
 _PARTIAL_PARSER = etree.XMLParser(resolve_entities=False)
 _VALID_COLUMNS = {"amount", "quantity"}
+_SORTABLE_COLUMNS = {"id": "id", "email": "email", "role": "role"}
 _BASE = "/srv/files"
 
 def source():
@@ -2332,6 +2333,31 @@ def safe_nosql(email):
 def safe_nosql_entry():
     return safe_nosql(source())
 
+def safe_nosql_type_guard(email, password):
+    if not isinstance(email, str) or not isinstance(password, str):
+        raise ValueError("credentials must be strings")
+    return pymongo.collection.find_one({"email": email, "password": password})
+
+def safe_nosql_type_guard_entry():
+    return safe_nosql_type_guard(source(), source())
+
+def unsafe_nosql_inverted_guard(email, password):
+    if isinstance(email, str) or isinstance(password, str):
+        raise ValueError("inverted guard")
+    return pymongo.collection.find_one({"email": email, "password": password})
+
+def unsafe_nosql_inverted_guard_entry():
+    return unsafe_nosql_inverted_guard(source(), source())
+
+def unsafe_nosql_guarded_then_reassigned(email, password):
+    if not isinstance(email, str) or not isinstance(password, str):
+        raise ValueError("credentials must be strings")
+    email = source()
+    return pymongo.collection.find_one({"email": email, "password": password})
+
+def unsafe_nosql_guarded_then_reassigned_entry():
+    return unsafe_nosql_guarded_then_reassigned(source(), source())
+
 def unsafe_nosql(email):
     return pymongo.collection.find_one({"email": email})
 
@@ -2347,6 +2373,14 @@ def safe_query(column, tenant):
 
 def safe_query_entry():
     return safe_query(source(), source())
+
+def safe_query_literal_map(column):
+    selected = _SORTABLE_COLUMNS.get(column, "id")
+    sql = f"SELECT * FROM reports ORDER BY {selected}"
+    return cursor.execute(sql)
+
+def safe_query_literal_map_entry():
+    return safe_query_literal_map(source())
 
 def unsafe_query(value):
     sql = "SELECT * FROM reports WHERE tenant_id = '" + value + "'"
@@ -2431,11 +2465,25 @@ def unsafe_path_entry():
             "engine.sanitizer.parameterized_query_allowlisted_fragments",
         ),
         (
+            "safe_query_literal_map",
+            "unsafe_query",
+            "python.sqli.cursor_execute",
+            "python.sqli.cursor_execute",
+            "engine.sanitizer.literal_map_value_allowlist",
+        ),
+        (
             "safe_nosql",
             "unsafe_nosql",
             "python.nosql.pymongo_find_one",
             "python.nosql.pymongo_find_one",
             "engine.sanitizer.nosql_literal_operator_filter",
+        ),
+        (
+            "safe_nosql_type_guard",
+            "unsafe_nosql_inverted_guard",
+            "python.nosql.pymongo_find_one",
+            "python.nosql.pymongo_find_one",
+            "python.sanitizer.isinstance_str_nosql_operator_guard",
         ),
         (
             "safe_path",
@@ -2488,6 +2536,16 @@ def unsafe_path_entry():
             .iter()
             .any(|sanitizer| { sanitizer.rule_id == "engine.sanitizer.configured_argument_factory_guard" }),
         "the generic configured-factory proof must reject a weaker latest overwrite: {overwritten:#?}"
+    );
+    let reassigned = &finding_for(
+        "unsafe_nosql_guarded_then_reassigned",
+        "python.nosql.pymongo_find_one",
+    )
+    .finding;
+    assert_eq!(
+        reassigned.status,
+        FindingStatus::Unsanitized,
+        "a value replaced after the terminal type guard must remain reportable: {reassigned:#?}"
     );
     drop(ws);
     std::fs::remove_dir_all(&root).expect("remove structured safety fixture");

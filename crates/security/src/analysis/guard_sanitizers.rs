@@ -33,6 +33,116 @@ pub(super) fn source_sink_pair_is_low_signal(
     })
 }
 
+/// Return the exact rejecting branch when its compiler-lowered boolean
+/// expression proves that `predicate_span` is true on the fallthrough path to
+/// `sink_span`. This is deliberately syntax/API neutral: the owning language
+/// adapter lowered boolean operators, while the caller establishes what the
+/// matched predicate means through a sanitizer rule.
+pub(super) fn terminal_rejection_predicate_guard_span(
+    ws: &Workspace,
+    decl: &bonsai_lang_api::Decl,
+    predicate_span: Span,
+    sink_span: Span,
+) -> Option<Span> {
+    if predicate_span.file != sink_span.file {
+        return None;
+    }
+    let file_index = ws.exact_decl_index_shared(sink_span.file)?;
+    let mut branches = Vec::new();
+    collect_completed_branches_on_path(&decl.flow_events, sink_span, &mut branches);
+    branches.into_iter().rev().find_map(|branch| {
+        if !branch_arm_abruptly_exits(branch.then_events) {
+            return None;
+        }
+        let expression = branch_condition_fact_for_span(&file_index.branch_conditions, branch.span)?
+            .expression
+            .as_ref()?;
+        condition_false_implies_atom_true(expression, predicate_span).then_some(branch.span)
+    })
+}
+
+/// Conservatively reject a guard proof when the guarded place is assigned
+/// after the rejecting branch and before the sink. The walk is over the finite
+/// structured event tree and has no arbitrary depth or work budget.
+pub(super) fn place_is_assigned_between(events: &[FlowEvent], place: &str, after: u64, before: u64) -> bool {
+    events.iter().any(|event| {
+        let assigned_here = matches!(
+            event,
+            FlowEvent::Assign { span, target, .. }
+                if span.start >= after
+                    && span.start < before
+                    && clean_overwrite_target_key(target).as_deref() == Some(place)
+        );
+        assigned_here
+            || match event {
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    place_is_assigned_between(then_events, place, after, before)
+                        || place_is_assigned_between(else_events, place, after, before)
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => place_is_assigned_between(body, place, after, before),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    place_is_assigned_between(body, place, after, before)
+                        || place_is_assigned_between(catch_events, place, after, before)
+                        || place_is_assigned_between(finally_events, place, after, before)
+                }
+                _ => false,
+            }
+    })
+}
+
+fn condition_false_implies_atom_true(expression: &ConditionExpressionFact, atom: Span) -> bool {
+    match expression {
+        ConditionExpressionFact::Atom { .. } => false,
+        ConditionExpressionFact::Not { operand, .. } => condition_true_implies_atom_true(operand, atom),
+        // `A || B` is false only when both terms are false. One term whose
+        // falsity proves the predicate is therefore sufficient.
+        ConditionExpressionFact::Any { operands, .. } => operands
+            .iter()
+            .any(|operand| condition_false_implies_atom_true(operand, atom)),
+        // `A && B` can be false because either term is false. Every possible
+        // failing term must prove the predicate.
+        ConditionExpressionFact::All { operands, .. } => {
+            !operands.is_empty()
+                && operands
+                    .iter()
+                    .all(|operand| condition_false_implies_atom_true(operand, atom))
+        }
+        ConditionExpressionFact::Equality { .. } | ConditionExpressionFact::Membership { .. } => false,
+    }
+}
+
+fn condition_true_implies_atom_true(expression: &ConditionExpressionFact, atom: Span) -> bool {
+    match expression {
+        ConditionExpressionFact::Atom { span } => span_contains(*span, atom),
+        ConditionExpressionFact::Not { operand, .. } => condition_false_implies_atom_true(operand, atom),
+        // Every conjunct is true, so one conjunct that proves the predicate
+        // is sufficient.
+        ConditionExpressionFact::All { operands, .. } => operands
+            .iter()
+            .any(|operand| condition_true_implies_atom_true(operand, atom)),
+        // Any disjunct may be the sole true term; all alternatives must prove
+        // the predicate.
+        ConditionExpressionFact::Any { operands, .. } => {
+            !operands.is_empty()
+                && operands
+                    .iter()
+                    .all(|operand| condition_true_implies_atom_true(operand, atom))
+        }
+        ConditionExpressionFact::Equality { .. } | ConditionExpressionFact::Membership { .. } => false,
+    }
+}
+
 pub(super) fn dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMatch) -> Option<FindingMatch> {
     if !matches!(hit.language.as_str(), "javascript" | "typescript" | "python") {
         return None;
@@ -3809,17 +3919,21 @@ pub(super) fn finite_literal_map_lookup_allowlist_sanitizer(
     collect_structured_calls(&decl.flow_events, &mut local_calls);
     let span_map = bonsai_common::cached_span_map_arc(sink.span.file, snapshot.version, &snapshot.text);
     for arg in tainted_args {
-        let target = clean_overwrite_target_key(&arg.value_text);
+        let target = arg
+            .place
+            .as_deref()
+            .and_then(clean_overwrite_target_key)
+            .or_else(|| clean_overwrite_target_key(&arg.value_text));
         if let Some(assignment) = target.as_deref().and_then(|target| {
-            local_assignments.iter().rev().find(|assignment| {
-                clean_overwrite_target_key(assignment.target).as_deref() == Some(target)
-                    && python_constant_literal_map_get_assignment(
-                        assignment,
-                        &local_calls,
-                        &file_assignments,
-                        &file_index.assignment_values,
-                    )
-            })
+            python_allowlisted_map_dependency_assignment(
+                target,
+                sink.span.start,
+                &local_assignments,
+                &local_calls,
+                &file_assignments,
+                &file_index.assignment_values,
+                &file_index.call_argument_values,
+            )
         }) {
             let location = span_map.line_col(assignment.span.start);
             let text = snapshot
@@ -4040,6 +4154,7 @@ fn python_constant_literal_map_get_assignment(
     calls: &[StructuredCall<'_>],
     file_assignments: &[StructuredAssignment<'_>],
     assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+    call_argument_values: &[bonsai_lang_api::CallArgumentValueFact],
 ) -> bool {
     let Some(source_call) = assignment.source_call else {
         return false;
@@ -4055,14 +4170,90 @@ fn python_constant_literal_map_get_assignment(
     }) else {
         return false;
     };
-    let Some(default_place) = call.args.get(1).and_then(|arg| arg.place.as_deref()) else {
-        return false;
-    };
-    let default_is_same_map_value = default_place
-        .strip_prefix(map_name)
-        .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1);
-    default_is_same_map_value
+    let default_is_same_map_value =
+        call.args
+            .get(1)
+            .and_then(|arg| arg.place.as_deref())
+            .is_some_and(|default_place| {
+                default_place
+                    .strip_prefix(map_name)
+                    .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1)
+            });
+    let default_is_static_literal =
+        bonsai_lang_api::call_argument_value_fact(call_argument_values, call.span, 1)
+            .is_some_and(|fact| fact.static_value.is_some() && expression_flow_is_literal(&fact.value_flow));
+    (default_is_same_map_value || default_is_static_literal)
         && python_constant_literal_mapping_declared_before(file_assignments, map_name, assignment_values)
+}
+
+/// Follow exact local def-use facts backwards from a tainted sink argument to
+/// a finite literal-map lookup. This is a compiler slice over adapter-emitted
+/// assignments, not a source-text/name search: every hop is the latest
+/// dominating definition and the finite assignment table bounds traversal.
+fn python_allowlisted_map_dependency_assignment<'a>(
+    target: &str,
+    before: u64,
+    assignments: &[StructuredAssignment<'a>],
+    calls: &[StructuredCall<'a>],
+    file_assignments: &[StructuredAssignment<'a>],
+    assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+    call_argument_values: &[bonsai_lang_api::CallArgumentValueFact],
+) -> Option<StructuredAssignment<'a>> {
+    fn visit<'a>(
+        target: &str,
+        before: u64,
+        assignments: &[StructuredAssignment<'a>],
+        calls: &[StructuredCall<'a>],
+        file_assignments: &[StructuredAssignment<'a>],
+        assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+        call_argument_values: &[bonsai_lang_api::CallArgumentValueFact],
+        visited: &mut AHashSet<String>,
+    ) -> Option<StructuredAssignment<'a>> {
+        if !visited.insert(target.to_string()) {
+            return None;
+        }
+        let assignment = assignments.iter().rev().copied().find(|assignment| {
+            assignment.span.start < before
+                && clean_overwrite_target_key(assignment.target).as_deref() == Some(target)
+        })?;
+        if python_constant_literal_map_get_assignment(
+            &assignment,
+            calls,
+            file_assignments,
+            assignment_values,
+            call_argument_values,
+        ) {
+            return Some(assignment);
+        }
+        assignment
+            .source_name
+            .into_iter()
+            .chain(assignment.source_names.iter().map(String::as_str))
+            .filter_map(clean_overwrite_target_key)
+            .find_map(|source| {
+                visit(
+                    &source,
+                    assignment.span.start,
+                    assignments,
+                    calls,
+                    file_assignments,
+                    assignment_values,
+                    call_argument_values,
+                    visited,
+                )
+            })
+    }
+
+    visit(
+        target,
+        before,
+        assignments,
+        calls,
+        file_assignments,
+        assignment_values,
+        call_argument_values,
+        &mut AHashSet::new(),
+    )
 }
 
 fn python_constant_literal_mapping_declared_before(

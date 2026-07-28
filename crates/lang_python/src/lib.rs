@@ -6,9 +6,10 @@ use bonsai_lang_api::{
         call_arg_from_nodes, collect_kinds, language_from_pack, node_text, normalize_call_name_whitespace,
         parse_with, span_of, GENERIC_HANDLER,
     },
-    AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, DeclIndex, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    StaticScalarValue, TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, ConditionEquality,
+    ConditionExpressionFact, ConditionOperandFact, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, StaticScalarValue,
+    TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -201,6 +202,7 @@ impl LanguageAdapter for PythonAdapter {
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            populate_python_condition_expressions(&mut idx, &tree, file, src);
             // Phase-6 return-type extraction: `def f() -> T:` populates
             // `Decl.return_type`, which `apply_assign_call_result_types`
             // then propagates onto LHS type_aliases.
@@ -311,6 +313,146 @@ impl LanguageAdapter for PythonAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+/// Lower Python's boolean-expression grammar into the shared semantic
+/// condition IR. Operator spellings are consumed here, in the language
+/// frontend; security and dataflow analyses only see `Any`/`All`/`Not`,
+/// equality, membership, and exact syntax spans.
+fn populate_python_condition_expressions(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    for branch in collect_kinds(tree, &["if_statement", "elif_clause"]) {
+        let branch_span = span_of(file, &branch);
+        let Some(condition) = branch.child_by_field_name("condition") else {
+            continue;
+        };
+        let Some(fact) = index
+            .branch_conditions
+            .iter_mut()
+            .find(|fact| fact.branch_span == branch_span)
+        else {
+            continue;
+        };
+        fact.expression = Some(lower_python_condition_expression(condition, file, src));
+    }
+}
+
+fn lower_python_condition_expression(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionExpressionFact {
+    if matches!(
+        node.kind(),
+        "parenthesized_expression" | "parenthesized_expression_list"
+    ) {
+        if let Some(inner) = node.named_child(0) {
+            return lower_python_condition_expression(inner, file, src);
+        }
+    }
+
+    let span = span_of(file, &node);
+    if node.kind() == "not_operator" {
+        if let Some(operand) = node
+            .child_by_field_name("argument")
+            .or_else(|| node.child_by_field_name("operand"))
+            .or_else(|| node.named_child(0))
+        {
+            return ConditionExpressionFact::Not {
+                span,
+                operand: Box::new(lower_python_condition_expression(operand, file, src)),
+            };
+        }
+    }
+
+    if node.kind() == "boolean_operator" {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            let operator = src
+                .get(left.end_byte()..right.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            match operator {
+                Some("or") => {
+                    return merge_python_condition_junction(
+                        span,
+                        lower_python_condition_expression(left, file, src),
+                        lower_python_condition_expression(right, file, src),
+                        false,
+                    );
+                }
+                Some("and") => {
+                    return merge_python_condition_junction(
+                        span,
+                        lower_python_condition_expression(left, file, src),
+                        lower_python_condition_expression(right, file, src),
+                        true,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if node.kind() == "comparison_operator" && node.named_child_count() == 2 {
+        if let (Some(left), Some(right)) = (node.named_child(0), node.named_child(1)) {
+            let operator = src
+                .get(left.end_byte()..right.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(str::trim);
+            match operator {
+                Some("==" | "!=") => {
+                    return ConditionExpressionFact::Equality {
+                        span,
+                        relation: if operator == Some("==") {
+                            ConditionEquality::Equal
+                        } else {
+                            ConditionEquality::NotEqual
+                        },
+                        left: python_condition_operand(left, file, src),
+                        right: python_condition_operand(right, file, src),
+                    };
+                }
+                Some("in" | "not in") => {
+                    return ConditionExpressionFact::Membership {
+                        span,
+                        subject: python_condition_operand(left, file, src),
+                        collection: python_condition_operand(right, file, src),
+                        then_contains: operator == Some("in"),
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+
+    ConditionExpressionFact::Atom { span }
+}
+
+fn merge_python_condition_junction(
+    span: Span,
+    left: ConditionExpressionFact,
+    right: ConditionExpressionFact,
+    all: bool,
+) -> ConditionExpressionFact {
+    let mut operands = Vec::new();
+    let mut push = |operand: ConditionExpressionFact| match (all, operand) {
+        (true, ConditionExpressionFact::All { operands: nested, .. })
+        | (false, ConditionExpressionFact::Any { operands: nested, .. }) => operands.extend(nested),
+        (_, operand) => operands.push(operand),
+    };
+    push(left);
+    push(right);
+    if all {
+        ConditionExpressionFact::All { span, operands }
+    } else {
+        ConditionExpressionFact::Any { span, operands }
+    }
+}
+
+fn python_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOperandFact {
+    ConditionOperandFact {
+        span: span_of(file, &node),
+        value_flow: bonsai_lang_api::kit::expression_flow_from_node(node, file, src),
+        static_string: python_static_string(node, src),
     }
 }
 
