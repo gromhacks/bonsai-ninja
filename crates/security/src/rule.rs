@@ -805,6 +805,13 @@ pub enum ConstraintKind {
     ReceiverNotMatchesRegex {
         receiver_not_matches_regex: String,
     },
+    /// Keep a rule active unless a guaranteed earlier call on the same
+    /// receiver matches the declared call target and decoded static-string
+    /// argument regex. The matcher walks the HIR path; calls seen only on one
+    /// branch never suppress a finding after the merge.
+    UnlessPriorReceiverCall {
+        unless_prior_receiver_call: UnlessPriorReceiverCallSpec,
+    },
     SecondArgEquals {
         second_arg_equals: String,
     },
@@ -857,6 +864,12 @@ pub enum ConstraintKind {
     },
     AnyArgMatchesRegex {
         any_arg_matches_regex: String,
+    },
+    /// Keep a rule active unless the parsed argument is an aggregate/object
+    /// literal. Missing compiler value-shape facts fail open (the dangerous
+    /// rule remains active).
+    ArgValueNotAggregate {
+        arg_value_not_aggregate: u32,
     },
     SameReceiverCallCountAtLeast {
         same_receiver_call_count_at_least: u32,
@@ -928,6 +941,7 @@ impl ConstraintKind {
             Self::ReceiverTypeNotIn { .. } => "receiver_type_not_in",
             Self::ReceiverMatchesRegex { .. } => "receiver_matches_regex",
             Self::ReceiverNotMatchesRegex { .. } => "receiver_not_matches_regex",
+            Self::UnlessPriorReceiverCall { .. } => "unless_prior_receiver_call",
             Self::SecondArgEquals { .. } => "second_arg_equals",
             Self::ArgEquals { .. } => "arg_equals",
             Self::KeywordArgEquals { .. } => "keyword_arg_equals",
@@ -946,6 +960,7 @@ impl ConstraintKind {
             Self::ArgMatchesRegex { .. } => "arg_matches_regex",
             Self::ArgNotMatchesRegex { .. } => "arg_not_matches_regex",
             Self::AnyArgMatchesRegex { .. } => "any_arg_matches_regex",
+            Self::ArgValueNotAggregate { .. } => "arg_value_not_aggregate",
             Self::SameReceiverCallCountAtLeast { .. } => "same_receiver_call_count_at_least",
             Self::ArgLt { .. } => "arg_lt",
             Self::ArgLe { .. } => "arg_le",
@@ -972,6 +987,7 @@ impl ConstraintKind {
                 | Self::AnyArgTainted { .. }
                 | Self::ReceiverMatchesRegex { .. }
                 | Self::ReceiverNotMatchesRegex { .. }
+                | Self::UnlessPriorReceiverCall { .. }
                 | Self::ReceiverOriginCallbackParamReachesCall { .. }
                 | Self::SecondArgEquals { .. }
                 | Self::ArgEquals { .. }
@@ -979,6 +995,7 @@ impl ConstraintKind {
                 | Self::ArgMatchesRegex { .. }
                 | Self::ArgNotMatchesRegex { .. }
                 | Self::AnyArgMatchesRegex { .. }
+                | Self::ArgValueNotAggregate { .. }
                 | Self::FormatArgIndex { .. }
                 | Self::ArgLt { .. }
                 | Self::ArgLe { .. }
@@ -989,6 +1006,21 @@ impl ConstraintKind {
                 | Self::RequiresState { .. }
         )
     }
+}
+
+/// Declarative state guard for a prior call on the same parsed receiver.
+///
+/// `static_string_args_regex` is evaluated against language-decoded static
+/// string arguments joined with the ASCII unit separator (`\x1f`). Dynamic
+/// arguments or non-string literals cannot satisfy the guard. This keeps
+/// quoting, escapes, delimiters, and argument boundaries in the owning
+/// language frontend while allowing the rulepack to own framework API and
+/// literal semantics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnlessPriorReceiverCallSpec {
+    pub call: RuleTarget,
+    pub static_string_args_regex: String,
 }
 
 /// Compiler proof for a callback extension on a factory-created receiver.

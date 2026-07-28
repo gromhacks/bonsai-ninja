@@ -940,6 +940,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
                     current_decl: decl,
                     file_decls: &file_index.defs,
                     assignment_values: &file_index.assignment_values,
+                    call_argument_values: &file_index.call_argument_values,
                 }),
             }) {
                 return true;
@@ -1021,6 +1022,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
                     current_decl: decl,
                     file_decls: &file_index.defs,
                     assignment_values: &file_index.assignment_values,
+                    call_argument_values: &file_index.call_argument_values,
                 }),
             }) {
                 return true;
@@ -3414,6 +3416,7 @@ fn scan_calls_batch(
                         current_decl: decl,
                         file_decls: &file_index.defs,
                         assignment_values: &file_index.assignment_values,
+                        call_argument_values: &file_index.call_argument_values,
                     }),
                 }) {
                     continue;
@@ -3679,6 +3682,7 @@ fn scan_missing_batch(
                     current_decl: decl,
                     file_decls: &file_index.defs,
                     assignment_values: &file_index.assignment_values,
+                    call_argument_values: &file_index.call_argument_values,
                 }),
             }) {
                 continue;
@@ -5995,6 +5999,7 @@ fn scan_writes_batch(
                         current_decl: decl,
                         file_decls: &file_index.defs,
                         assignment_values: &file_index.assignment_values,
+                        call_argument_values: &file_index.call_argument_values,
                     }),
                 }) {
                     continue;
@@ -7100,6 +7105,13 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
                 "constraints.receiver_not_matches_regex",
                 receiver_not_matches_regex,
             )?),
+            ConstraintKind::UnlessPriorReceiverCall {
+                unless_prior_receiver_call,
+            } => Some(compile_constraint_regex(
+                rule_id,
+                "constraints.unless_prior_receiver_call.static_string_args_regex",
+                &unless_prior_receiver_call.static_string_args_regex,
+            )?),
             ConstraintKind::ArgMatchesRegex { arg_matches_regex } => Some(compile_constraint_regex(
                 rule_id,
                 "constraints.arg_matches_regex",
@@ -7134,6 +7146,7 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
             | ConstraintKind::ArgCount { .. }
             | ConstraintKind::MinArgs { .. }
             | ConstraintKind::MaxArgs { .. }
+            | ConstraintKind::ArgValueNotAggregate { .. }
             | ConstraintKind::SameReceiverCallCountAtLeast { .. }
             | ConstraintKind::ArgLt { .. }
             | ConstraintKind::ArgLe { .. }
@@ -7176,6 +7189,141 @@ struct StructuralConstraintContext<'a> {
     current_decl: &'a Decl,
     file_decls: &'a [Decl],
     assignment_values: &'a [bonsai_lang_api::AssignmentValueFact],
+    call_argument_values: &'a [bonsai_lang_api::CallArgumentValueFact],
+}
+
+#[derive(Copy, Clone)]
+struct GuaranteedPriorCall<'a> {
+    span: Span,
+    name: &'a str,
+    receiver: Option<&'a str>,
+    receiver_types: &'a [String],
+    arg_count: usize,
+}
+
+fn collect_guaranteed_prior_calls<'a>(
+    events: &'a [FlowEvent],
+    target: Span,
+    out: &mut Vec<GuaranteedPriorCall<'a>>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                receiver_types,
+                args,
+                ..
+            } => {
+                if span.end <= target.start {
+                    out.push(GuaranteedPriorCall {
+                        span: *span,
+                        name,
+                        receiver: receiver.as_deref(),
+                        receiver_types,
+                        arg_count: args.len(),
+                    });
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if events_contain_call_match(then_events, target) {
+                    collect_guaranteed_prior_calls(then_events, target, out);
+                    return;
+                }
+                if events_contain_call_match(else_events, target) {
+                    collect_guaranteed_prior_calls(else_events, target, out);
+                    return;
+                }
+                // Calls made by only one completed branch are not guaranteed
+                // after the merge, so they are deliberately not accumulated.
+            }
+            FlowEvent::Loop { body, .. } => {
+                if events_contain_call_match(body, target) {
+                    collect_guaranteed_prior_calls(body, target, out);
+                    return;
+                }
+                // A loop may execute zero times.
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                for region in [
+                    body.as_slice(),
+                    catch_events.as_slice(),
+                    finally_events.as_slice(),
+                ] {
+                    if events_contain_call_match(region, target) {
+                        collect_guaranteed_prior_calls(region, target, out);
+                        return;
+                    }
+                }
+                // No call inside a completed try/catch region is assumed to
+                // dominate a later site: exceptions make that unsound.
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if events_contain_call_match(body, target) {
+                    collect_guaranteed_prior_calls(body, target, out);
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn events_contain_call_match(events: &[FlowEvent], target: Span) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Call { span, .. } => {
+            *span == target
+                || spans_overlap(*span, target)
+                || (span.start <= target.start && target.end <= span.end)
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => events_contain_call_match(then_events, target) || events_contain_call_match(else_events, target),
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            events_contain_call_match(body, target)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            events_contain_call_match(body, target)
+                || events_contain_call_match(catch_events, target)
+                || events_contain_call_match(finally_events, target)
+        }
+        _ => false,
+    })
+}
+
+fn static_string_call_arguments(
+    facts: &[bonsai_lang_api::CallArgumentValueFact],
+    call_span: Span,
+    argument_count: usize,
+) -> Option<String> {
+    let mut values = Vec::with_capacity(argument_count);
+    for argument_index in 0..argument_count {
+        let value = bonsai_lang_api::call_argument_value_fact(facts, call_span, argument_index)?
+            .static_value
+            .as_ref()?;
+        let bonsai_lang_api::StaticScalarValue::String(value) = value else {
+            return None;
+        };
+        values.push(value.as_str());
+    }
+    Some(values.join("\u{1f}"))
 }
 
 struct ConstraintEval<'a, 't> {
@@ -7225,10 +7373,9 @@ fn constraints_pass(ctx: ConstraintEval<'_, '_>) -> bool {
     verdict
 }
 
-/// Dispatch table for the 14 `ConstraintKind` variants, evaluated
-/// in declaration order. The match is exhaustive — adding a new
-/// `ConstraintKind` requires a matching arm here, and the
-/// compiler enforces coverage.
+/// Dispatch table for `ConstraintKind`, evaluated in declaration order.
+/// The match is exhaustive: adding a variant requires a matching arm here,
+/// and the compiler enforces coverage.
 ///
 /// ## Arms (in dispatch order)
 ///
@@ -7237,6 +7384,7 @@ fn constraints_pass(ctx: ConstraintEval<'_, '_>) -> bool {
 /// | `ReceiverTypeIn`             | callee's receiver type matches a semantic type     |
 /// | `ReceiverMatchesRegex`        | parsed call receiver matches a rule-owned regex    |
 /// | `ReceiverNotMatchesRegex`     | parsed call receiver does not match a regex        |
+/// | `UnlessPriorReceiverCall`     | no guaranteed matching prior receiver call         |
 /// | `ReceiverTypeNotIn`          | callee's receiver type does not match a safe type  |
 /// | `Namespace`                  | callee's qualified prefix matches the namespace    |
 /// | `FormatArgIndex`             | the format-string arg slot matches expected index  |
@@ -7252,6 +7400,7 @@ fn constraints_pass(ctx: ConstraintEval<'_, '_>) -> bool {
 /// | `ArgMatchesRegex`            | `arg[index/kw]` matches regex                      |
 /// | `ArgNotMatchesRegex`         | inverse of `ArgMatchesRegex`                       |
 /// | `AnyArgMatchesRegex`         | any arg matches regex                              |
+/// | `ArgValueNotAggregate`       | parsed argument is not an aggregate/object         |
 /// | `SameReceiverCallCountAtLeast` | same receiver has ≥N calls in this scope        |
 ///
 /// Each arm short-circuits to `false` on first failure; constraints
@@ -7288,6 +7437,43 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                     return false;
                 };
                 if re.is_match(receiver) {
+                    return false;
+                }
+            }
+            ConstraintKind::UnlessPriorReceiverCall {
+                unless_prior_receiver_call,
+            } => {
+                let Some(receiver) = call_receiver_text(ctx.callee) else {
+                    continue;
+                };
+                let Some(Some(re)) = ctx.constraint_regexes.get(constraint_index) else {
+                    return false;
+                };
+                let Some(structural) = ctx.structural_context else {
+                    continue;
+                };
+                let owner = structural
+                    .file_decls
+                    .iter()
+                    .filter(|decl| decl.span.start <= ctx.span.start && ctx.span.end <= decl.span.end)
+                    .min_by_key(|decl| decl.span.end.saturating_sub(decl.span.start))
+                    .unwrap_or(structural.current_decl);
+                let mut prior_calls = Vec::new();
+                collect_guaranteed_prior_calls(&owner.flow_events, ctx.span, &mut prior_calls);
+                if prior_calls.iter().any(|call| {
+                    call.receiver == Some(receiver)
+                        && rule_target_matches_call(
+                            call.name,
+                            call.receiver_types,
+                            &unless_prior_receiver_call.call,
+                        )
+                        && static_string_call_arguments(
+                            structural.call_argument_values,
+                            call.span,
+                            call.arg_count,
+                        )
+                        .is_some_and(|arguments| re.is_match(&arguments))
+                }) {
                     return false;
                 }
             }
@@ -7451,6 +7637,23 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                     candidates.iter().any(|value| re.is_match(value.trim()))
                 });
                 if !matched {
+                    return false;
+                }
+            }
+            ConstraintKind::ArgValueNotAggregate {
+                arg_value_not_aggregate,
+            } => {
+                let Some(structural) = ctx.structural_context else {
+                    continue;
+                };
+                if bonsai_lang_api::call_argument_value_fact(
+                    structural.call_argument_values,
+                    ctx.span,
+                    *arg_value_not_aggregate as usize,
+                )
+                .is_some_and(|fact| {
+                    !fact.value_flow.aggregate_fields.is_empty() || !fact.value_flow.spreads.is_empty()
+                }) {
                     return false;
                 }
             }
@@ -7794,6 +7997,7 @@ pub(crate) fn callback_extension_attribution_match(
             current_decl,
             file_decls: &file_index.defs,
             assignment_values: &file_index.assignment_values,
+            call_argument_values: &file_index.call_argument_values,
         },
         spec,
     )?;
