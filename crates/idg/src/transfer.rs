@@ -1069,6 +1069,7 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
         options,
         matchers,
         last_writer: ahash::AHashMap::new(),
+        whole_call_result_writer_ids: ahash::AHashSet::default(),
         descendant_writer_ids_by_base: ahash::AHashMap::new(),
         catch_projection_receivers: ahash::AHashSet::default(),
         emitted_edges: ahash::AHashSet::default(),
@@ -1672,6 +1673,13 @@ struct TransferCtx<'a> {
     /// way a clean overwrite later in the function "kills" the
     /// earlier writer's bridge into subsequent reads.
     last_writer: ahash::AHashMap<StrId, smallvec::SmallVec<[NodeId; 4]>>,
+    /// Writers that bind the complete value returned by a call. A later
+    /// compiler projection (`result.field`) may inherit one of these writers
+    /// when no exact writer for that projection exists. This is deliberately
+    /// narrower than falling back to every base writer: aggregate call
+    /// arguments can carry only one tainted field into a parameter, and must
+    /// not thereby taint all sibling fields.
+    whole_call_result_writer_ids: ahash::AHashSet<NodeId>,
     /// Monotonic index from a canonical aggregate base to compiler place ids
     /// ever written below it. Entries can outlive a clean overwrite; callers
     /// confirm presence in `last_writer` before using them. This makes whole
@@ -1784,6 +1792,9 @@ impl<'a> TransferCtx<'a> {
             }
         }
         if writers.is_empty() {
+            writers = self.whole_call_result_writers_for_projection(name);
+        }
+        if writers.is_empty() {
             // Unrooted read: route through the shared Read node so
             // any external taint that finds Read(name) still
             // propagates. Closure won't be over-approximated by
@@ -1804,6 +1815,35 @@ impl<'a> TransferCtx<'a> {
                 meta,
             });
         }
+    }
+
+    /// Resolve a compiler-normalized projection to the nearest live ancestor
+    /// whose value came directly from a call result. Exact projected writers
+    /// are checked by [`Self::bridge_read`] first and therefore retain normal
+    /// clean-overwrite and field-sensitive semantics.
+    fn whole_call_result_writers_for_projection(&mut self, name: &str) -> smallvec::SmallVec<[NodeId; 4]> {
+        let Some(projection) = ExpressionProjection::from_adapter_place(name) else {
+            return smallvec::SmallVec::new();
+        };
+        for path_len in (0..projection.path.len()).rev() {
+            let ancestor = std::iter::once(projection.base.as_str())
+                .chain(projection.path[..path_len].iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(".");
+            let ancestor_id = self.intern_name(&ancestor);
+            let Some(current) = self.last_writer.get(&ancestor_id) else {
+                continue;
+            };
+            let writers = current
+                .iter()
+                .copied()
+                .filter(|writer| self.whole_call_result_writer_ids.contains(writer))
+                .collect::<smallvec::SmallVec<[NodeId; 4]>>();
+            if !writers.is_empty() {
+                return writers;
+            }
+        }
+        smallvec::SmallVec::new()
     }
 
     /// Emit edges from the current writers of every concrete field below
@@ -3255,6 +3295,14 @@ fn walk_assign(
             }
             let ret_node = ctx.intern_node(Place::CallRet { site });
             if !rhs_is_finite_literal_selection {
+                // Only a root binding owns the complete returned value.
+                // Assigning a call result into `base.field` participates in
+                // the existing finite projection-demand closure; treating
+                // that field writer as a new whole-object root shortcuts the
+                // demanded suffix and can invent sibling/recursive fields.
+                if !is_field_write {
+                    ctx.whole_call_result_writer_ids.insert(write_node);
+                }
                 ctx.emit(IdgEdge {
                     from: ret_node,
                     to: write_node,

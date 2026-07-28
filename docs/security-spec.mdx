@@ -258,19 +258,23 @@ matched sources         matched sinks
                     │
                     ▼
         combine_findings_by_source_flow
-        (group by lang, group_id, flow_id, sink)
+        (group by evidence kind, language, vulnerability class,
+         and exact sink site; retain every route)
                     │
                     ▼
               finalize:
               finding_id = FNV-1a-64(
-                source_id, sink_id, group_id, language)
+                all source ids, all sink ids,
+                representative group id, language)
                     │
                     ▼
             TaintAnalysisReport
 ```
 
-The finding ID is stable: same source/sink/group/language -> same ID
-across runs. SARIF and JSON outputs use the same ID.
+The finding ID is stable for the complete semantic sink finding across
+runs. Different source-to-sink routes do not create duplicate findings:
+native JSON retains them in `alternate_flows`, and SARIF emits them as
+multiple `codeFlows` on one result.
 
 Security taint analysis builds an exact graph per matched source seed.
 The seed set is selected from the per-function value-flow graph and
@@ -361,8 +365,9 @@ Text output uses distinct labels for different evidence surfaces:
 | `TAINT FLOW` | `security taint-analysis` | Source-to-sink propagation with tainted args, receiver evidence, sanitizer context, and sink attribution. |
 
 JSON and SARIF expose the same underlying propagation as structured
-fields. In SARIF, the path is emitted through `codeFlows`; in native JSON,
-the corresponding steps live under the finding's taint path metadata.
+fields. In SARIF, every complete route is emitted through `codeFlows`; in
+native JSON, the representative route lives in `taint_path` and the other
+routes live in `alternate_flows`.
 
 ## Validation
 

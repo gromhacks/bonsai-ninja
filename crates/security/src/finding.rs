@@ -1,9 +1,9 @@
-//! Findings — a source→sink match with stable `S:` content-hash id.
+//! Findings — semantic sink vulnerabilities with stable `S:` content-hash ids.
 //!
-//! `S:` id construction: FNV-1a-64 low 32 bits over
-//! `[source_id, sink_id, group_id, language]`. Stable across runs, cache
-//! state, and render mode; changes only when the rule identity or the
-//! chain-group identity changes.
+//! `S:` id construction: FNV-1a-64 over normalized source identities, sink
+//! identities, the representative route group, and language. Stable across
+//! runs, cache state, and render mode; changes only when semantic finding
+//! identity changes.
 
 use crate::matcher::RuleMatch;
 use crate::rule::{MatchOrigin, Rule, Severity};
@@ -18,11 +18,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FindingStatus {
-    /// No sanitizer credited the sink tag on any chain. Full severity,
+    /// At least one retained route has no credited sanitizer. Full severity,
     /// main findings list.
     Unsanitized,
-    /// At least one sanitizer credited the sink tag. Severity floor
-    /// applied; rendered in a separate "review for bypass" section.
+    /// Every retained route has a sanitizer credited to the sink tag.
+    /// Severity floor applied; rendered in a separate "review for bypass"
+    /// section.
     Sanitized,
     /// Sanitizer fired on the chain but its tag does NOT credit the
     /// sink tag (e.g. HTML-encoded value used in URL context). Full
@@ -239,8 +240,8 @@ fn sanitised_indices_from_rule(rule: &Rule) -> Vec<u32> {
     indices
 }
 
-/// One finding — a source / sink pair observed on at least one chain
-/// through the workspace.
+/// One finding — a concrete semantic sink reached by one or more complete
+/// source-to-sink routes through the workspace.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Finding {
     pub finding_id: String,
@@ -270,6 +271,12 @@ pub struct Finding {
     pub chain_display: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub taint_path: Vec<TaintPropagationStep>,
+    /// Other complete source-to-sink routes that reach this same semantic
+    /// sink finding. A finding is a vulnerability at a concrete sink, not
+    /// one row per path; retaining the alternate routes here avoids both
+    /// duplicate results and lost provenance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternate_flows: Vec<AlternateTaintFlow>,
     /// Full source body of each function along the flow, with `step`/`role`
     /// marked on the lines that carry a flow event - the same code the text
     /// view prints. Empty for findings without a resolved multi-hop chain.
@@ -290,13 +297,91 @@ pub struct Finding {
     /// handling.
     #[serde(default)]
     pub status: FindingStatus,
-    /// True when the source OR sink file path matches a common test
-    /// convention (`test/`, `tests/`, `*_test.go`, `*Test*.java`,
-    /// `Tests/` Xcode style, `__tests__/`, `*.spec.ts`, etc.). Lets
-    /// reviewers and the CLI's `--exclude-tests` flag drop test-only
-    /// findings without re-parsing paths.
+    /// True when every retained route touches a common test-path convention
+    /// (`test/`, `tests/`, `*_test.go`, `*Test*.java`, `Tests/` Xcode style,
+    /// `__tests__/`, `*.spec.ts`, etc.). A production route reaching the same
+    /// sink keeps the combined finding production-relevant.
     #[serde(default, skip_serializing_if = "is_false")]
     pub from_test: bool,
+}
+
+impl Finding {
+    /// Iterate every complete source-to-sink route, representative first,
+    /// while keeping all route-specific evidence paired.
+    pub fn flows(&self) -> impl Iterator<Item = TaintFlowRef<'_>> {
+        std::iter::once(TaintFlowRef {
+            source: &self.source,
+            sink_tainted_args: &self.sink.tainted_args,
+            sanitizers_seen: &self.sanitizers_seen,
+            flow_id: self.representative_flow_id.as_deref(),
+            chain_display: &self.chain_display,
+            taint_path: &self.taint_path,
+            status: self.status,
+            precision: &self.precision,
+        })
+        .chain(self.alternate_flows.iter().map(|flow| TaintFlowRef {
+            source: &flow.source,
+            sink_tainted_args: &flow.sink_tainted_args,
+            sanitizers_seen: &flow.sanitizers_seen,
+            flow_id: flow.flow_id.as_deref(),
+            chain_display: &flow.chain_display,
+            taint_path: &flow.taint_path,
+            status: flow.status,
+            precision: &flow.precision,
+        }))
+    }
+
+    /// Every complete route id carried by this sink finding, representative
+    /// first. Consumers that inventory or link flows must use this iterator
+    /// instead of reading only `representative_flow_id`.
+    pub fn flow_ids(&self) -> impl Iterator<Item = &str> {
+        self.flows().filter_map(|flow| flow.flow_id)
+    }
+}
+
+/// A non-primary route retained on a combined sink finding.
+///
+/// The sink is owned by the surrounding [`Finding`]. Every alternate route
+/// therefore carries only the source and route-specific evidence. This keeps
+/// the public model acyclic and lets SARIF emit one result with multiple
+/// `codeFlows`, as intended by the schema.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlternateTaintFlow {
+    pub source: FindingMatch,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sink_tainted_args: Vec<TaintedArgInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sanitizers_seen: Vec<FindingMatch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain_display: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taint_path: Vec<TaintPropagationStep>,
+    /// Mitigation state for this route. The surrounding finding carries the
+    /// least-mitigated status across all routes.
+    #[serde(default)]
+    pub status: FindingStatus,
+    /// Static precision for this route, kept paired with its source and path.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub precision: String,
+}
+
+/// Borrowed view of one complete route on a [`Finding`].
+///
+/// Consumers use this instead of separately special-casing the
+/// representative route and `alternate_flows`, which keeps source, argument,
+/// sanitizer, status, and precision evidence aligned.
+#[derive(Copy, Clone, Debug)]
+pub struct TaintFlowRef<'a> {
+    pub source: &'a FindingMatch,
+    pub sink_tainted_args: &'a [TaintedArgInfo],
+    pub sanitizers_seen: &'a [FindingMatch],
+    pub flow_id: Option<&'a str>,
+    pub chain_display: &'a [String],
+    pub taint_path: &'a [TaintPropagationStep],
+    pub status: FindingStatus,
+    pub precision: &'a str,
 }
 
 /// Serde callback for `#[serde(skip_serializing_if = "is_false")]` —

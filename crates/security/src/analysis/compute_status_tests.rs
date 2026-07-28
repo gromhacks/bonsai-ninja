@@ -1281,6 +1281,7 @@ fn finding_with_flow_for_grouping(
             analysis_incomplete_reasons: Vec::new(),
             chain_display: vec!["handle".to_string(), "run".to_string()],
             taint_path,
+            alternate_flows: Vec::new(),
             hops: Vec::new(),
             tag: Some("command-injection".to_string()),
             severity: Some(Severity::Critical),
@@ -1380,7 +1381,7 @@ description: Downstream transport.
 }
 
 #[test]
-fn combined_findings_do_not_merge_distinct_representative_flows() {
+fn combined_finding_retains_every_distinct_representative_flow() {
     let pack = Rulepack::default();
     let groups = combine_findings_by_source_flow(
         vec![
@@ -1390,20 +1391,165 @@ fn combined_findings_do_not_merge_distinct_representative_flows() {
         &pack,
     );
 
+    assert_eq!(groups.len(), 1, "one concrete sink is one finding");
+    let group = &groups[0];
+    assert_eq!(group.finding.source.line, 11);
+    assert_eq!(
+        group.finding.taint_path[0].tainted_args[0].value_text, "token",
+        "the primary source and path must stay paired"
+    );
+    assert_eq!(group.finding.alternate_flows.len(), 1);
+    let alternate = &group.finding.alternate_flows[0];
+    assert_eq!(alternate.source.line, 12);
+    assert_eq!(
+        alternate.taint_path[0].tainted_args[0].value_text, "action",
+        "the alternate source and path must stay paired"
+    );
+    assert_eq!(group.additional_sources.len(), 1);
+    assert_eq!(group.member_finding_ids.len(), 2);
+}
+
+#[test]
+fn combined_finding_drops_only_same_route_argument_supersets() {
+    let pack = Rulepack::default();
+    let narrow = finding_with_flow_for_grouping("S:narrow", 11, "token", "F:narrow");
+    let mut broad = finding_with_flow_for_grouping("S:broad", 11, "token", "F:broad");
+    broad.finding.taint_path[0]
+        .tainted_args
+        .push(TaintPropagationArg {
+            index: 1,
+            value_text: "constant".to_string(),
+            param_name: "base".to_string(),
+        });
+
+    let groups = combine_findings_by_source_flow(vec![broad, narrow], &pack);
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        groups[0].finding.representative_flow_id.as_deref(),
+        Some("F:narrow")
+    );
+    assert!(
+        groups[0].finding.alternate_flows.is_empty(),
+        "the same source and call route must not retain a less precise argument superset"
+    );
+    assert_eq!(
+        groups[0].member_finding_ids.len(),
+        2,
+        "the suppressed proof remains addressable as a member id"
+    );
+}
+
+#[test]
+fn combined_finding_preserves_argument_supersets_from_distinct_source_sites() {
+    let pack = Rulepack::default();
+    let narrow = finding_with_flow_for_grouping("S:narrow", 11, "token", "F:narrow");
+    let mut broad = finding_with_flow_for_grouping("S:broad", 13, "token", "F:broad");
+    broad.finding.taint_path[0]
+        .tainted_args
+        .push(TaintPropagationArg {
+            index: 1,
+            value_text: "constant".to_string(),
+            param_name: "base".to_string(),
+        });
+
+    let groups = combine_findings_by_source_flow(vec![broad, narrow], &pack);
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        groups[0].finding.alternate_flows.len(),
+        1,
+        "separate source occurrences are separate provenance even when their call routes match"
+    );
+    assert_eq!(groups[0].additional_sources.len(), 1);
+}
+
+#[test]
+fn combined_finding_keeps_route_mitigation_evidence_paired() {
+    let pack = Rulepack::default();
+    let unsanitized = finding_with_flow_for_grouping("S:raw", 11, "raw", "F:raw");
+    let mut sanitized = finding_with_flow_for_grouping("S:clean", 12, "clean", "F:clean");
+    sanitized.finding.status = FindingStatus::Sanitized;
+    sanitized.finding.from_test = true;
+    sanitized.finding.sanitizers_seen.push(finding_match_for_grouping(
+        "python.sanitizer.allowlist",
+        30,
+        "allowlist",
+    ));
+
+    let groups = combine_findings_by_source_flow(vec![sanitized, unsanitized], &pack);
+
+    assert_eq!(groups.len(), 1);
+    let finding = &groups[0].finding;
+    assert_eq!(finding.status, FindingStatus::Unsanitized);
+    assert!(
+        !finding.from_test,
+        "one production route keeps the combined sink production-relevant"
+    );
+    assert_eq!(finding.representative_flow_id.as_deref(), Some("F:raw"));
+    assert!(
+        finding.sanitizers_seen.is_empty(),
+        "an alternate route's sanitizer must not be attached to the representative route"
+    );
+    assert_eq!(finding.alternate_flows.len(), 1);
+    assert_eq!(finding.alternate_flows[0].status, FindingStatus::Sanitized);
+    assert_eq!(finding.alternate_flows[0].sanitizers_seen.len(), 1);
+}
+
+#[test]
+fn combined_findings_keep_distinct_calls_on_one_source_line() {
+    let pack = Rulepack::default();
+    let first = finding_with_flow_for_grouping("S:first", 11, "token", "F:first");
+    let mut second = finding_with_flow_for_grouping("S:second", 11, "token", "F:second");
+    second.finding.sink.column += 10;
+
+    let groups = combine_findings_by_source_flow(vec![first, second], &pack);
+
     assert_eq!(
         groups.len(),
         2,
-        "distinct representative flow ids must not collapse into one mixed source/path finding"
+        "exact sink columns keep two same-line calls independently reportable"
     );
-    for group in groups {
-        let source_line = group.finding.source.line;
-        let propagated = group.finding.taint_path[0].tainted_args[0].value_text.as_str();
-        match source_line {
-            11 => assert_eq!(propagated, "token"),
-            12 => assert_eq!(propagated, "action"),
-            other => panic!("unexpected source line {other}"),
-        }
-    }
+}
+
+#[test]
+fn combined_finding_keeps_primary_sink_evidence_paired_across_alias_rules() {
+    let pack = Rulepack::default();
+    let mut primary = finding_with_flow_for_grouping("S:primary", 11, "token", "F:primary");
+    primary.finding.sink.rule_id = "python.cmdi.z_primary".to_string();
+    primary.finding.sink.tainted_args[0].value_text = "token".to_string();
+    let mut alias = finding_with_flow_for_grouping("S:alias", 12, "action", "F:alias");
+    alias.finding.sink.rule_id = "python.cmdi.a_alias".to_string();
+    alias.finding.sink.tainted_args[0].value_text = "action".to_string();
+
+    let groups = combine_findings_by_source_flow(vec![alias, primary], &pack);
+
+    assert_eq!(groups.len(), 1);
+    let group = &groups[0];
+    assert_eq!(group.finding.source.line, 11);
+    assert_eq!(group.finding.sink.rule_id, "python.cmdi.z_primary");
+    assert_eq!(group.finding.sink.tainted_args[0].value_text, "token");
+    assert_eq!(group.additional_sinks.len(), 1);
+    assert_eq!(group.additional_sinks[0].rule_id, "python.cmdi.a_alias");
+}
+
+#[test]
+fn combined_findings_keep_pattern_and_taint_evidence_separate() {
+    let pack = Rulepack::default();
+    let taint = finding_with_flow_for_grouping("S:taint", 11, "token", "F:taint");
+    let mut pattern = finding_with_flow_for_grouping("S:pattern", 11, "token", "F:pattern");
+    pattern.finding.source.origin = MatchOrigin::Pattern;
+    pattern.finding.source.category = Some("pattern".to_string());
+    pattern.finding.source.rule_id = "pattern:python.cmdi.os_system".to_string();
+    pattern.finding.taint_path.clear();
+
+    let groups = combine_findings_by_source_flow(vec![taint, pattern], &pack);
+
+    assert_eq!(
+        groups.len(),
+        2,
+        "source-independent and source-to-sink evidence have different report contracts"
+    );
 }
 
 #[test]

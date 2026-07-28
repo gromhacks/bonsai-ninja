@@ -556,6 +556,13 @@ not invent a read that the adapter failed to emit. This is what keeps
 `data.other` from inheriting `data.value` while still allowing an explicit
 whole-aggregate destructuring edge.
 
+A root binding that receives a complete call result may feed a later,
+adapter-emitted projection of that value (`header = reader.Next()` followed by
+`header.Name`). An exact writer for the projected field wins, including a clean
+overwrite. A call result assigned into an existing projection is not promoted
+to a new whole-object root; it remains governed by the finite AST projection
+closure so sibling and recursive fields are not invented.
+
 ## Branch conditions and constant facts
 
 `FlowEvent::Branch` optionally carries condition text for rendering and the

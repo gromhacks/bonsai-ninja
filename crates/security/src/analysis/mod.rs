@@ -7,8 +7,8 @@
 
 use crate::deps::{build_inventory, DependencyInventory};
 use crate::finding::{
-    compute_finding_id, Finding, FindingMatch, FindingStatus, TaintPropagationArg, TaintPropagationStep,
-    TaintedArgInfo,
+    compute_finding_id, AlternateTaintFlow, Finding, FindingMatch, FindingStatus, TaintPropagationArg,
+    TaintPropagationStep, TaintedArgInfo,
 };
 use crate::loader::Rulepack;
 use crate::matcher::{
@@ -887,31 +887,35 @@ where
             .then_with(|| af.sink.column.cmp(&bf.sink.column))
             .then_with(|| af.finding_id.cmp(&bf.finding_id))
     });
-    let mut findings = combine_findings_by_source_flow(findings_raw, pack);
+    // Select a concrete route before sink-level grouping. This preserves the
+    // longstanding `--flow F:...` contract: asking for an alternate route
+    // renders that route as the primary result instead of returning the
+    // sink's otherwise preferred representative path.
+    if let Some(flow_id) = options.flow_id.as_deref() {
+        findings_raw.retain(|item| item.finding.representative_flow_id.as_deref() == Some(flow_id));
+    }
     if let Some(max_precision) = options.max_precision {
-        findings.retain(|combined| finding_precision_within(&combined.finding.precision, max_precision));
+        findings_raw.retain(|item| finding_precision_within(&item.finding.precision, max_precision));
     }
     if !options.exclude_files.is_empty() || options.exclude_tests {
-        findings.retain(|combined| {
-            !finding_has_excluded_path(
-                ws,
-                &combined.finding,
-                &options.exclude_files,
-                options.exclude_tests,
-            )
+        findings_raw.retain(|item| {
+            !finding_has_excluded_path(ws, &item.finding, &options.exclude_files, options.exclude_tests)
         });
     }
-    if options.exclude_tests {
-        // Test-path post-filter — catches cross-file flows where one
-        // side wasn't pruned earlier (e.g. prod source → test sink).
-        findings.retain(|combined| !combined.finding.from_test);
-    }
     if !options.show_sanitized {
-        findings.retain(|combined| combined.finding.status != FindingStatus::Sanitized);
+        findings_raw.retain(|item| item.finding.status != FindingStatus::Sanitized);
     }
-    drop_rulepack_terminal_dominated_findings(&mut findings, pack);
-    drop_dominated_wrapper_findings(&mut findings);
-    drop_dominated_receiver_projection_findings(&mut findings);
+    // Semantic dominance is route-specific. Run it before presentation
+    // combines separate routes at one sink; otherwise a dominated primary
+    // could discard valid alternates, or an inferred sibling route could
+    // survive inside a concrete finding.
+    let mut route_findings = findings_raw
+        .into_iter()
+        .map(combined_from_raw_finding)
+        .collect::<Vec<_>>();
+    drop_rulepack_terminal_dominated_findings(&mut route_findings, pack);
+    drop_dominated_wrapper_findings(&mut route_findings);
+    drop_dominated_receiver_projection_findings(&mut route_findings);
     // §C cleanup pass: when `--inferred-sources` synthesizes
     // `entry-point.class_field.inherited` sources for every record/
     // case-class component, each component reaches the sink through
@@ -921,16 +925,8 @@ where
     // sibling-attributed findings when (a) a concrete source already
     // covers the same chain end-to-end, and (b) the inferred source's
     // field name doesn't appear in any of the sink's `tainted_args`.
-    findings = drop_field_mismatched_inferred_findings(findings);
-    if let Some(flow_id) = options.flow_id.as_deref() {
-        findings.retain(|combined| {
-            combined
-                .finding
-                .representative_flow_id
-                .as_deref()
-                .is_some_and(|candidate| candidate == flow_id)
-        });
-    }
+    route_findings = drop_field_mismatched_inferred_findings(route_findings);
+    let mut findings = combine_route_findings_by_sink(route_findings, pack);
     // Sort highest-severity-first, then by finding id so two runs
     // produce identical output ordering.
     findings.sort_by(|a, b| {
@@ -4150,12 +4146,6 @@ fn displayed_chain_key(chain_names: &[String]) -> String {
         .join("\0")
 }
 
-/// True when two source matches point at the same concrete source
-/// location, regardless of which alias rule matched it.
-fn same_source_location(a: &FindingMatch, b: &FindingMatch) -> bool {
-    a.file == b.file && a.line == b.line && a.column == b.column
-}
-
 /// Drop inferred-source findings whose source-side field name
 /// Identity of a finding's sink site — used to fold a dropped-but-
 /// equivalent inferred finding into the concrete finding that covers
@@ -4465,63 +4455,66 @@ fn same_sink_site(a: &FindingMatch, b: &FindingMatch) -> bool {
     a.rule_id == b.rule_id && a.file == b.file && a.line == b.line && a.column == b.column
 }
 
+#[cfg(test)]
 fn combine_findings_by_source_flow(
-    mut findings: Vec<FindingWithChain>,
+    findings: Vec<FindingWithChain>,
+    pack: &Rulepack,
+) -> Vec<CombinedFindingWithChain> {
+    combine_route_findings_by_sink(
+        findings.into_iter().map(combined_from_raw_finding).collect(),
+        pack,
+    )
+}
+
+fn combined_from_raw_finding(item: FindingWithChain) -> CombinedFindingWithChain {
+    CombinedFindingWithChain {
+        finding: item.finding,
+        chain_funcs: item.chain_funcs,
+        additional_sources: Vec::new(),
+        additional_sinks: Vec::new(),
+        member_finding_ids: Vec::new(),
+    }
+}
+
+fn combine_route_findings_by_sink(
+    mut findings: Vec<CombinedFindingWithChain>,
     pack: &Rulepack,
 ) -> Vec<CombinedFindingWithChain> {
     let mut groups: Vec<CombinedFindingWithChain> = Vec::new();
     let mut index: AHashMap<String, usize> = AHashMap::new();
 
-    // Stable-sort so that within each `(language, group_id, flow id, sink site)`
-    // bucket — which is what `combined_finding_key` collapses into one
-    // group — the most specific source becomes the primary one preserved
-    // on the merged finding. The combiner's `merge_finding_into_group`
-    // keeps the first-seen finding's source AND flow evidence
-    // (`chain_display` / `taint_path` / `representative_flow_id` /
-    // `chain_funcs`) as primary and demotes other members' sources to
-    // `additional_sources`, dropping their evidence.
+    // Stable-sort so that within each semantic sink-site bucket — which is
+    // what `combined_finding_key` collapses into one group — the preferred,
+    // broadest proven route becomes the primary. Every other complete route
+    // remains attached as an `alternate_flow`.
     //
-    // The ordering here MUST therefore agree with the source ranking
-    // `finalize_combined_finding` applies later
-    // (`source_preference_rank_for_sink`, then source location, then
-    // rule id). If the two disagree, finalize promotes a merged member's
-    // source onto a finding that kept a DIFFERENT member's flow
-    // evidence — the reported source then never appears on the reported
-    // path and the hops carry no source-role line. Within a bucket every
-    // member shares the same sink site and rule, so ranking against the
-    // member's own sink is the same as ranking against the merged
-    // group's primary sink.
+    // The first route remains the primary route throughout finalization, so
+    // this ordering owns both source preference and source/path coherence.
+    // Within a bucket every member shares the same sink site and class.
     findings.sort_by(|a, b| {
         // Sort bucket MUST match `combined_finding_key`'s grouping
-        // dimensions (language, group_id, flow id, sink class + site)
-        // so source-preference tiebreakers decide the primary source
-        // only among findings that share the same concrete evidence.
-        // Collapsing different flow ids can stitch together a source
-        // from one member with a taint_path from another.
-        let bucket_a_args = sink_tainted_args_group_key(&a.finding.sink);
-        let bucket_b_args = sink_tainted_args_group_key(&b.finding.sink);
+        // dimensions (evidence kind + language + sink class + exact site).
         let bucket_a = (
             &a.finding.language,
-            a.finding.group_id.as_deref().unwrap_or(""),
-            a.finding.representative_flow_id.as_deref().unwrap_or(""),
+            finding_is_pattern_evidence(&a.finding),
             &a.finding.sink.file,
             a.finding.sink.line,
+            a.finding.sink.column,
             sink_group_class(&a.finding.sink),
             a.finding.sink.text.as_str(),
-            bucket_a_args.as_str(),
         );
         let bucket_b = (
             &b.finding.language,
-            b.finding.group_id.as_deref().unwrap_or(""),
-            b.finding.representative_flow_id.as_deref().unwrap_or(""),
+            finding_is_pattern_evidence(&b.finding),
             &b.finding.sink.file,
             b.finding.sink.line,
+            b.finding.sink.column,
             sink_group_class(&b.finding.sink),
             b.finding.sink.text.as_str(),
-            bucket_b_args.as_str(),
         );
         bucket_a
             .cmp(&bucket_b)
+            .then_with(|| primary_status_rank(a.finding.status).cmp(&primary_status_rank(b.finding.status)))
             .then_with(|| {
                 source_preference_rank_for_sink(pack, &a.finding.source, Some(&a.finding.sink)).cmp(
                     &source_preference_rank_for_sink(pack, &b.finding.source, Some(&b.finding.sink)),
@@ -4531,6 +4524,12 @@ fn combine_findings_by_source_flow(
                 source_specificity_rank(pack, &a.finding.source)
                     .cmp(&source_specificity_rank(pack, &b.finding.source))
             })
+            .then_with(|| {
+                source_reporting_rank(pack, &a.finding.source)
+                    .cmp(&source_reporting_rank(pack, &b.finding.source))
+            })
+            .then_with(|| b.chain_funcs.len().cmp(&a.chain_funcs.len()))
+            .then_with(|| finding_route_taint_width(&a.finding).cmp(&finding_route_taint_width(&b.finding)))
             .then_with(|| {
                 (
                     a.finding.source.file.as_str(),
@@ -4553,11 +4552,10 @@ fn combine_findings_by_source_flow(
     );
     for item in findings {
         let key = combined_finding_key(&item);
-        let member_id = item.finding.finding_id.clone();
         bonsai_diagnostics::debug_log!(
             "find-group",
             "  finding {} src={} sink={}@{}:{} -> key={:?}",
-            member_id,
+            item.finding.finding_id,
             item.finding.source.rule_id,
             item.finding.sink.rule_id,
             item.finding.sink.file,
@@ -4571,18 +4569,12 @@ fn combine_findings_by_source_flow(
                 idx,
                 groups[idx].finding.finding_id
             );
-            merge_finding_into_group(&mut groups[idx], item.finding, member_id);
+            merge_combined_finding_into_group(&mut groups[idx], item);
             continue;
         }
         let idx = groups.len();
         index.insert(key, idx);
-        groups.push(CombinedFindingWithChain {
-            finding: item.finding,
-            chain_funcs: item.chain_funcs,
-            additional_sources: Vec::new(),
-            additional_sinks: Vec::new(),
-            member_finding_ids: Vec::new(),
-        });
+        groups.push(item);
     }
 
     for group in &mut groups {
@@ -4591,63 +4583,42 @@ fn combine_findings_by_source_flow(
     groups
 }
 
-fn combined_finding_key(item: &FindingWithChain) -> String {
+fn primary_status_rank(status: FindingStatus) -> u8 {
+    match status {
+        FindingStatus::Unsanitized => 0,
+        FindingStatus::WrongContext => 1,
+        FindingStatus::Sanitized => 2,
+    }
+}
+
+fn combined_finding_key(item: &CombinedFindingWithChain) -> String {
     let f = &item.finding;
-    let group = f.group_id.as_deref().unwrap_or("");
     let sink_class = sink_group_class(&f.sink);
-    let tainted_args = sink_tainted_args_group_key(&f.sink);
-    // Key on (language, group_id, flow id, SINK CLASS + SITE). Sink site =
-    // file + line + sink text + tainted-arg evidence; sink class is
+    // Key on (language, SINK CLASS + exact SITE). Sink site =
+    // file + line + column + sink text; sink class is
     // the rule tag/category, falling back to rule id for unclassified
     // rules. This keeps different vulnerability classes separate at
     // the same line while collapsing alias rules that describe the
     // same semantic edge (`cursor.execute`, abbreviated cursor, typed
     // cursor) into one finding.
     //
-    // The sink site is what distinguishes genuinely separate findings
-    // that happen to share a `group_id`: structurally identical flows
-    // in different files hash to the same group tokens, so group_id
-    // alone would wrongly collapse them into one row.
-    //
-    // Key on `representative_flow_id` even when a group id exists.
-    // `group_id` intentionally collapses shared tails for grouped
-    // presentation, but the representative taint path and source line
-    // must describe the same concrete source-to-sink evidence. Without
-    // the flow id here, two sources that reach the same sink through a
-    // shared tail can produce one mixed row whose source belongs to one
-    // member and whose `taint_path` belongs to another.
-    //
-    // Source is omitted on purpose — co-tainted sources reaching the
-    // same sink site fold into the primary's `additional_sources` (this
-    // is "combine findings by source flow").
-    if !group.is_empty() {
-        format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
-            f.language,
-            group,
-            f.representative_flow_id.as_deref().unwrap_or(""),
-            f.sink.file,
-            f.sink.line,
-            sink_class,
-            f.sink.text,
-            tainted_args
-        )
-    } else {
-        // No group id to anchor on — fall back to the chain + flow id so
-        // genuinely distinct flows don't collapse together.
-        let chain = f.chain_display.join("\0");
-        format!(
-            "{}\0\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
-            f.language,
-            chain,
-            f.representative_flow_id.as_deref().unwrap_or(""),
-            f.sink.file,
-            f.sink.line,
-            sink_class,
-            f.sink.text,
-            tainted_args
-        )
-    }
+    // Source and flow ids identify routes, not vulnerabilities. All complete
+    // routes remain available through the primary route plus
+    // `alternate_flows`.
+    format!(
+        "{}\0{}\0{}\0{}\0{}\0{}\0{}",
+        f.language,
+        finding_is_pattern_evidence(f),
+        f.sink.file,
+        f.sink.line,
+        f.sink.column,
+        sink_class,
+        f.sink.text
+    )
+}
+
+fn finding_is_pattern_evidence(finding: &Finding) -> bool {
+    finding.source.origin == MatchOrigin::Pattern
 }
 
 fn extend_implicit_context_findings(
@@ -4783,6 +4754,7 @@ fn extend_implicit_context_findings(
                     analysis_incomplete_reasons: producer_flow.finding.analysis_incomplete_reasons.clone(),
                     chain_display,
                     taint_path,
+                    alternate_flows: Vec::new(),
                     hops: Vec::new(),
                     tag: sink_rule.tag.clone(),
                     severity: sink_rule.severity,
@@ -4812,17 +4784,44 @@ fn sink_group_class(sink: &FindingMatch) -> &str {
         .unwrap_or(sink.rule_id.as_str())
 }
 
-fn sink_tainted_args_group_key(sink: &FindingMatch) -> String {
-    let mut args = sink
-        .tainted_args
-        .iter()
-        .map(|arg| format!("{}={}", arg.index, arg.value_text.trim()))
-        .collect::<Vec<_>>();
-    args.sort();
-    args.join("|")
+fn merge_combined_finding_into_group(
+    group: &mut CombinedFindingWithChain,
+    mut incoming: CombinedFindingWithChain,
+) {
+    let member_id = incoming.finding.finding_id.clone();
+    let additional_sources = std::mem::take(&mut incoming.additional_sources);
+    let additional_sinks = std::mem::take(&mut incoming.additional_sinks);
+    let member_finding_ids = std::mem::take(&mut incoming.member_finding_ids);
+    merge_finding_into_group(group, incoming.finding, member_id);
+
+    for source in additional_sources {
+        if !same_source_site(&group.finding.source, &source)
+            && !group
+                .additional_sources
+                .iter()
+                .any(|existing| same_source_site(existing, &source))
+        {
+            group.additional_sources.push(source);
+        }
+    }
+    for sink in additional_sinks {
+        if !same_sink_site(&group.finding.sink, &sink)
+            && !group
+                .additional_sinks
+                .iter()
+                .any(|existing| same_sink_site(existing, &sink))
+        {
+            group.additional_sinks.push(sink);
+        }
+    }
+    for member_id in member_finding_ids {
+        if member_id != group.finding.finding_id && !group.member_finding_ids.contains(&member_id) {
+            group.member_finding_ids.push(member_id);
+        }
+    }
 }
 
-fn merge_finding_into_group(group: &mut CombinedFindingWithChain, incoming: Finding, member_id: String) {
+fn merge_finding_into_group(group: &mut CombinedFindingWithChain, mut incoming: Finding, member_id: String) {
     if group.finding.finding_id != member_id && !group.member_finding_ids.contains(&member_id) {
         group.member_finding_ids.push(member_id);
     }
@@ -4833,6 +4832,36 @@ fn merge_finding_into_group(group: &mut CombinedFindingWithChain, incoming: Find
             .any(|source| same_source_site(source, &incoming.source))
     {
         group.additional_sources.push(incoming.source.clone());
+    }
+    let incoming_flow = AlternateTaintFlow {
+        source: incoming.source.clone(),
+        sink_tainted_args: incoming.sink.tainted_args.clone(),
+        sanitizers_seen: incoming.sanitizers_seen.clone(),
+        flow_id: incoming.representative_flow_id.clone(),
+        chain_display: incoming.chain_display.clone(),
+        taint_path: incoming.taint_path.clone(),
+        status: incoming.status,
+        precision: incoming.precision.clone(),
+    };
+    if incoming_flow.flow_id != group.finding.representative_flow_id
+        && !group
+            .finding
+            .alternate_flows
+            .iter()
+            .any(|flow| flow.flow_id == incoming_flow.flow_id)
+    {
+        group.finding.alternate_flows.push(incoming_flow);
+    }
+    for flow in std::mem::take(&mut incoming.alternate_flows) {
+        if flow.flow_id != group.finding.representative_flow_id
+            && !group
+                .finding
+                .alternate_flows
+                .iter()
+                .any(|existing| existing.flow_id == flow.flow_id)
+        {
+            group.finding.alternate_flows.push(flow);
+        }
     }
     if !same_sink_site(&group.finding.sink, &incoming.sink)
         && !group
@@ -4846,13 +4875,13 @@ fn merge_finding_into_group(group: &mut CombinedFindingWithChain, incoming: Find
     group.finding.tag = merge_tag(group.finding.tag.clone(), incoming.tag.as_deref());
     merge_unique(&mut group.finding.cwe, incoming.cwe);
     merge_unique(&mut group.finding.owasp, incoming.owasp);
-    merge_finding_matches(&mut group.finding.sanitizers_seen, incoming.sanitizers_seen);
     merge_analysis_completeness(
         &mut group.finding.analysis_complete,
         &mut group.finding.analysis_incomplete_reasons,
         incoming.analysis_complete,
         incoming.analysis_incomplete_reasons,
     );
+    group.finding.from_test &= incoming.from_test;
     // Status merge: the LEAST-mitigated chain wins. If any chain in
     // this group is unsanitized, the group is unsanitized — finding a
     // sanitizer on one path doesn't make the others safe.
@@ -4882,20 +4911,19 @@ fn finalize_combined_finding(group: &mut CombinedFindingWithChain) {
             .member_finding_ids
             .insert(0, group.finding.finding_id.clone());
     }
-    let mut sinks = Vec::with_capacity(1 + group.additional_sinks.len());
-    sinks.push(group.finding.sink.clone());
-    sinks.extend(group.additional_sinks.iter().cloned());
-    sinks.sort_by(|a, b| {
+    // Keep the primary route's sink match paired with its source, path, and
+    // tainted arguments. Alias rules at the same semantic site remain
+    // available as additional sinks and contribute severity/taxonomy during
+    // merge, but must not replace the route-specific primary match.
+    group.additional_sinks.sort_by(|a, b| {
         b.severity
             .cmp(&a.severity)
             .then_with(|| a.rule_id.cmp(&b.rule_id))
             .then_with(|| (a.file.as_str(), a.line, a.column).cmp(&(b.file.as_str(), b.line, b.column)))
     });
-    group.finding.sink = sinks[0].clone();
-    group.additional_sinks = sinks.into_iter().skip(1).collect();
 
     // The primary source stays pinned to the first-seen bucket member.
-    // `combine_findings_by_source_flow` pre-sorts findings so the preferred
+    // `combine_route_findings_by_sink` pre-sorts findings so the preferred
     // source (concrete rulepack sources rank ahead of inferred entry-point
     // placeholders via `source_preference_rank_for_sink`) is seen first, and
     // `merge_finding_into_group` retains that same member's flow evidence
@@ -4904,13 +4932,13 @@ fn finalize_combined_finding(group: &mut CombinedFindingWithChain) {
     // co-tainted source against the group's severity-max sink — can promote a
     // source whose evidence was NOT retained, so the reported source would
     // never appear on the reported taint path (the exact "mixed row" the
-    // grouping key is designed to prevent). Keep the primary and only surface
-    // co-tainted sources that alias the primary's exact call site, in a stable
-    // display order.
+    // grouping key is designed to prevent). Keep the primary and surface
+    // co-tainted sources in a stable display order. Each source's path remains
+    // paired with it in `alternate_flows`.
     let primary_source = group.finding.source.clone();
     let mut additional_sources: Vec<FindingMatch> = std::mem::take(&mut group.additional_sources)
         .into_iter()
-        .filter(|source| same_source_location(&primary_source, source))
+        .filter(|source| !same_source_site(&primary_source, source))
         .collect();
     additional_sources.sort_by(|a, b| {
         (a.file.as_str(), a.line, a.column)
@@ -4918,6 +4946,38 @@ fn finalize_combined_finding(group: &mut CombinedFindingWithChain) {
             .then_with(|| a.rule_id.cmp(&b.rule_id))
     });
     group.additional_sources = additional_sources;
+    group.finding.alternate_flows.sort_by(|a, b| {
+        alternate_route_taint_width(a)
+            .cmp(&alternate_route_taint_width(b))
+            .then_with(|| a.flow_id.cmp(&b.flow_id))
+            .then_with(|| a.source.file.cmp(&b.source.file))
+            .then_with(|| a.source.line.cmp(&b.source.line))
+            .then_with(|| a.source.column.cmp(&b.source.column))
+            .then_with(|| a.source.rule_id.cmp(&b.source.rule_id))
+    });
+    let primary_route = AlternateTaintFlow {
+        source: group.finding.source.clone(),
+        sink_tainted_args: group.finding.sink.tainted_args.clone(),
+        sanitizers_seen: group.finding.sanitizers_seen.clone(),
+        flow_id: group.finding.representative_flow_id.clone(),
+        chain_display: group.finding.chain_display.clone(),
+        taint_path: group.finding.taint_path.clone(),
+        status: group.finding.status,
+        precision: group.finding.precision.clone(),
+    };
+    let mut retained_routes: Vec<AlternateTaintFlow> = Vec::new();
+    for route in std::mem::take(&mut group.finding.alternate_flows) {
+        if route.flow_id == primary_route.flow_id
+            || route_is_argument_superset_of(&route, &primary_route)
+            || retained_routes
+                .iter()
+                .any(|kept| route_is_argument_superset_of(&route, kept))
+        {
+            continue;
+        }
+        retained_routes.push(route);
+    }
+    group.finding.alternate_flows = retained_routes;
 
     let group_id = group
         .finding
@@ -4956,6 +5016,80 @@ fn all_sink_matches(group: &CombinedFindingWithChain) -> Vec<FindingMatch> {
     sinks.push(group.finding.sink.clone());
     sinks.extend(group.additional_sinks.iter().cloned());
     sinks
+}
+
+fn finding_route_taint_width(finding: &Finding) -> usize {
+    finding
+        .taint_path
+        .iter()
+        .map(|step| step.tainted_args.len())
+        .sum::<usize>()
+        .saturating_add(finding.sink.tainted_args.len())
+}
+
+fn alternate_route_taint_width(flow: &AlternateTaintFlow) -> usize {
+    flow.taint_path
+        .iter()
+        .map(|step| step.tainted_args.len())
+        .sum::<usize>()
+        .saturating_add(flow.sink_tainted_args.len())
+}
+
+/// True when `broader` is the same source and call route as `narrower`, but
+/// carries a strict superset of tainted arguments. The compiler graph keeps
+/// both proofs; presentation retains the narrower one because the broader
+/// route adds no source/sink reachability and can only reduce precision.
+fn route_is_argument_superset_of(broader: &AlternateTaintFlow, narrower: &AlternateTaintFlow) -> bool {
+    if !same_source_site(&broader.source, &narrower.source)
+        || broader.chain_display != narrower.chain_display
+        || broader.taint_path.len() != narrower.taint_path.len()
+    {
+        return false;
+    }
+    let same_sites = broader
+        .taint_path
+        .iter()
+        .zip(&narrower.taint_path)
+        .all(|(broad, narrow)| {
+            broad.caller == narrow.caller
+                && broad.callee == narrow.callee
+                && broad.file == narrow.file
+                && broad.line == narrow.line
+                && broad.column == narrow.column
+        });
+    if !same_sites {
+        return false;
+    }
+    let path_is_superset = broader
+        .taint_path
+        .iter()
+        .zip(&narrower.taint_path)
+        .all(|(broad, narrow)| propagation_args_are_subset(&narrow.tainted_args, &broad.tainted_args));
+    let sink_is_superset =
+        tainted_arg_infos_are_subset(&narrower.sink_tainted_args, &broader.sink_tainted_args);
+    let strictly_broader = alternate_route_taint_width(broader) > alternate_route_taint_width(narrower);
+    path_is_superset && sink_is_superset && strictly_broader
+}
+
+fn propagation_args_are_subset(subset: &[TaintPropagationArg], superset: &[TaintPropagationArg]) -> bool {
+    subset.iter().all(|item| {
+        superset.iter().any(|candidate| {
+            candidate.index == item.index
+                && candidate.value_text == item.value_text
+                && candidate.param_name == item.param_name
+        })
+    })
+}
+
+fn tainted_arg_infos_are_subset(subset: &[TaintedArgInfo], superset: &[TaintedArgInfo]) -> bool {
+    subset.iter().all(|item| {
+        superset.iter().any(|candidate| {
+            candidate.index == item.index
+                && candidate.value_text == item.value_text
+                && candidate.place == item.place
+                && candidate.source_names == item.source_names
+        })
+    })
 }
 
 /// Keep the rulepack-designated security boundary when the exact same source
@@ -5209,20 +5343,6 @@ fn merge_unique(dst: &mut Vec<String>, src: Vec<String>) {
     for value in src {
         if !dst.contains(&value) {
             dst.push(value);
-        }
-    }
-}
-
-/// Append finding matches from `src` into `dst`, deduping by
-/// `(rule_id, file, line)`. Column is intentionally omitted — same
-/// rule + same line means the same logical site even when the
-/// adapter reports a slightly different column.
-fn merge_finding_matches(dst: &mut Vec<FindingMatch>, src: Vec<FindingMatch>) {
-    for item in src {
-        if !dst.iter().any(|existing| {
-            existing.rule_id == item.rule_id && existing.file == item.file && existing.line == item.line
-        }) {
-            dst.push(item);
         }
     }
 }

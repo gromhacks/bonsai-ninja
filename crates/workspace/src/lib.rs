@@ -4130,7 +4130,14 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // identifier sigils before separating argument carriers from independent
     // RHS sources. Rebuild IDG/taint sidecars so warm Perl/PHP workspaces
     // cannot retain the former spurious argument-source edges.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 49;
+    // v50 (2026-07-28): a whole call-result writer feeds later compiler
+    // projections when no exact projected writer exists. Rebuild IDG and
+    // taint sidecars so warm workspaces cannot retain the missing def-use
+    // edge or a target-relevance proof derived from it.
+    // v51 (2026-07-28): restrict that fallback to true root bindings;
+    // projected call-result assignments remain governed by the finite AST
+    // projection-demand closure. Invalidate the broader v50 sidecars.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 51;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
