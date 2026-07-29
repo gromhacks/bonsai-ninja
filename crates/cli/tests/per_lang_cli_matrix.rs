@@ -618,10 +618,12 @@ pub const LANGS: &[LangExp] = &[
         cmdi_sink: "execSync",
         sqli_sink: "db.query",
         min_findings_micro: 1,
-        // 43 after precision/dedup cleanup: command injection, upload/path,
-        // eval, SSRF, prototype pollution and template sinks remain covered
-        // without duplicated inferred-entry rows.
-        min_findings_complex: 43,
+        // 37 exact flows remain after removing six source-independent
+        // configuration/registration false positives: GraphQL Yoga endpoint
+        // construction and fast-xml-parser constructor/parse matches.
+        // Command injection, upload/path, eval, SSRF, prototype pollution,
+        // template, and header sinks remain covered.
+        min_findings_complex: 37,
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
@@ -1178,6 +1180,7 @@ fn check_security_flows(ws: &str, lang: &str, min: usize) {
         ws,
         "taint-analysis",
         "--inferred-sources",
+        "--all",
         "--format",
         "json",
     ]) else {
@@ -1185,6 +1188,12 @@ fn check_security_flows(ws: &str, lang: &str, min: usize) {
     };
     assert_eq!(code, 0, "[{lang}] security taint-analysis ec={code}");
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        parsed.get("analysis_complete").and_then(|value| value.as_bool()),
+        Some(true),
+        "[{lang}] security taint-analysis incomplete: {:?}",
+        parsed.get("incomplete_reasons")
+    );
     let rows = rows_of(&parsed);
     assert!(
         rows.len() >= min,

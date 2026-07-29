@@ -73,7 +73,7 @@ pub use rule::{
     PathContainmentGuardSemantics, PayloadType, PostSinkPolicy, RelativePathContainmentGuardSemantics,
     RequiredNamedArgumentSemantics, RequiresStateSpec, Rule, RuleConstraint, RuleKind, RuleTarget,
     RuntimeTypeSpec, Severity, TrustClass, UrlComponentSemantics, UrlDnsGuardSemantics,
-    UrlGuardRootSemantics, UrlHostAllowlistSemantics, UrlNetworkGuardSemantics, UrlRedirectGuardSemantics,
-    UrlSchemeGuardSemantics,
+    UrlGuardRootSemantics, UrlHostAllowlistSemantics, UrlNetworkGuardSemantics,
+    UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics, UrlSchemeGuardSemantics,
 };
 pub use sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};

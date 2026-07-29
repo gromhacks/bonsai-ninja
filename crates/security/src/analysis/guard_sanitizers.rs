@@ -2003,6 +2003,277 @@ pub(super) fn url_network_guard_sanitizer(
     )
 }
 
+pub(super) fn url_reconstruction_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    let guard = sink_rule
+        .analysis_semantics
+        .as_ref()?
+        .url_reconstruction_guard
+        .as_ref()?;
+    if sink_rule.tag.as_deref() != Some("ssrf") {
+        return None;
+    }
+    let helper_func = url_reconstruction_helper_for_sink(ws, sink_func, sink, guard, sink_tainted_args)?;
+    let guard_span = compiler_proven_url_reconstruction_guard(ws, helper_func, guard)?;
+    let mut finding = finding_for_guard_span_in_workspace(
+        ws,
+        sink,
+        guard_span,
+        "engine.sanitizer.url_reconstruction_guard",
+        "ssrf-sanitize",
+        "compiler-proven-url-reconstruction-guard",
+    )?;
+    finding.sanitised_arg_indices = sink_tainted_args
+        .iter()
+        .filter(|argument| argument.index == guard.sink_argument_index)
+        .filter_map(|argument| u32::try_from(argument.index).ok())
+        .collect();
+    Some(finding)
+}
+
+fn url_reconstruction_helper_for_sink(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    guard: &crate::rule::UrlReconstructionGuardSemantics,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FuncId> {
+    let sink_decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let sink_file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let mut sink_calls = Vec::new();
+    collect_structured_calls(&sink_decl.flow_events, &mut sink_calls);
+    let sink_call = sink_calls
+        .iter()
+        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let sink_argument = sink_call.args.get(guard.sink_argument_index)?;
+    if !sink_tainted_args
+        .iter()
+        .any(|argument| argument.index == guard.sink_argument_index)
+        || !required_named_call_arguments_match(
+            sink_call,
+            &guard.required_sink_named_arguments,
+            &sink_file_index,
+        )
+    {
+        return None;
+    }
+
+    let tainted_targets: AHashSet<String> = sink_tainted_args
+        .iter()
+        .filter(|argument| argument.index == guard.sink_argument_index)
+        .flat_map(tainted_arg_target_keys)
+        .collect();
+    let helper_call = sink_calls
+        .iter()
+        .filter(|call| {
+            call.span != sink_call.span
+                && span_contains(sink_argument.span, call.span)
+                && call.args.len() == 1
+                && call_arg_target_keys(&call.args[0])
+                    .iter()
+                    .any(|target| tainted_targets.contains(target))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let [helper_call] = helper_call.as_slice() else {
+        return None;
+    };
+
+    let call_graph = ws.cached_resolved_call_graph();
+    let helper_targets: AHashSet<FuncId> = call_graph
+        .callees_of(sink_func)
+        .filter(|edge| {
+            edge.precision.is_semantic()
+                && (edge.span == helper_call.span || spans_overlap(edge.span, helper_call.span))
+        })
+        .map(|edge| edge.to)
+        .collect();
+    let mut helper_targets = helper_targets.into_iter();
+    let helper_func = helper_targets.next()?;
+    if helper_targets.next().is_some() {
+        return None;
+    }
+    Some(helper_func)
+}
+
+fn compiler_proven_url_reconstruction_guard(
+    ws: &Workspace,
+    helper_func: FuncId,
+    guard: &crate::rule::UrlReconstructionGuardSemantics,
+) -> Option<Span> {
+    let helper_decl = ws.exact_decl(SymbolId::new(helper_func.raw()))?;
+    if helper_decl.params.len() != 1 {
+        return None;
+    }
+    let input = helper_decl.params.first()?;
+    let helper_file_index = ws.exact_decl_index_shared(helper_decl.span.file)?;
+    let mut helper_assignments = Vec::new();
+    collect_structured_assignments_before(
+        &helper_decl.flow_events,
+        Span::empty(helper_decl.span.file, helper_decl.span.end),
+        &mut helper_assignments,
+    );
+    helper_assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    let parser_assignment = helper_assignments.iter().rev().find(|assignment| {
+        assignment.source_call.is_some_and(|call| {
+            rule_target_matches_call(call, &[], &guard.parser)
+                && assignment
+                    .source_call_args
+                    .first()
+                    .and_then(|argument| clean_overwrite_target_key(argument))
+                    .as_deref()
+                    == Some(input.as_str())
+        })
+    })?;
+    let parsed = clean_overwrite_target_key(parser_assignment.target)?;
+
+    let mut helper_calls = Vec::new();
+    collect_structured_calls(&helper_decl.flow_events, &mut helper_calls);
+    let mut helper_file_calls = Vec::new();
+    for candidate in &helper_file_index.defs {
+        collect_structured_calls(&candidate.flow_events, &mut helper_file_calls);
+    }
+    let mut branches = Vec::new();
+    collect_all_structured_branches(&helper_decl.flow_events, &mut branches);
+    let mut returns = Vec::new();
+    collect_return_bindings(&helper_decl.flow_events, &mut returns);
+    let [(return_span, _)] = returns.as_slice() else {
+        return None;
+    };
+    let scheme_guard = branches
+        .iter()
+        .filter(|branch| {
+            parser_assignment.span.start < branch.span.start
+                && branch.span.start < return_span.start
+                && branch_arm_abruptly_exits(branch.then_events)
+        })
+        .find(|branch| {
+            branch_condition_fact_for_span(&helper_file_index.branch_conditions, branch.span)
+                .and_then(|fact| fact.expression.as_ref())
+                .is_some_and(|expression| {
+                    url_scheme_rejection_is_exact(
+                        expression,
+                        &parsed,
+                        &guard.scheme,
+                        &helper_calls,
+                        &helper_file_index,
+                    )
+                })
+        })?;
+    let _host_guard = branches
+        .iter()
+        .filter(|branch| {
+            scheme_guard.span.start <= branch.span.start
+                && branch.span.start < return_span.start
+                && branch_arm_abruptly_exits(branch.then_events)
+        })
+        .find(|branch| {
+            branch_condition_fact_for_span(&helper_file_index.branch_conditions, branch.span)
+                .and_then(|fact| fact.expression.as_ref())
+                .and_then(|expression| {
+                    url_rejected_host_collection(expression, &parsed, &guard.host_allowlist, &helper_calls)
+                })
+                .is_some_and(|collection| {
+                    url_collection_is_static(
+                        &collection,
+                        branch.span,
+                        &helper_file_index,
+                        &helper_file_calls,
+                        &guard.host_allowlist.static_collection_factories,
+                    )
+                })
+        })?;
+    let composition = helper_file_index
+        .string_compositions
+        .iter()
+        .find(|fact| fact.container_span == *return_span)?;
+    if !url_reconstruction_composition_is_exact(composition, &parsed, guard) {
+        return None;
+    }
+    let scheme_field = guard.scheme.component.field.as_deref()?;
+    let host_field = guard.host_allowlist.component.field.as_deref()?;
+    let path_field = guard.path_component.field.as_deref()?;
+    if [
+        parsed.clone(),
+        format!("{parsed}.{scheme_field}"),
+        format!("{parsed}.{host_field}"),
+        format!("{parsed}.{path_field}"),
+    ]
+    .iter()
+    .any(|place| {
+        place_is_assigned_between(
+            &helper_decl.flow_events,
+            place,
+            parser_assignment.span.end,
+            return_span.start,
+        )
+    }) {
+        return None;
+    }
+    Some(scheme_guard.span)
+}
+
+fn required_named_call_arguments_match(
+    call: &StructuredCall<'_>,
+    required: &[crate::rule::RequiredNamedArgumentSemantics],
+    file_index: &bonsai_lang_api::DeclIndex,
+) -> bool {
+    required.iter().all(|requirement| {
+        call.args.iter().enumerate().any(|(index, argument)| {
+            argument.name.as_deref() == Some(requirement.name.as_str())
+                && bonsai_lang_api::call_argument_value_fact(
+                    &file_index.call_argument_values,
+                    call.span,
+                    index,
+                )
+                .and_then(|fact| fact.static_value.as_ref())
+                    == Some(&requirement.value)
+        })
+    })
+}
+
+fn url_reconstruction_composition_is_exact(
+    composition: &bonsai_lang_api::StringCompositionFact,
+    parsed: &str,
+    guard: &crate::rule::UrlReconstructionGuardSemantics,
+) -> bool {
+    let [StringCompositionPart::Literal { value: prefix }, StringCompositionPart::Place { place: host }, StringCompositionPart::PlaceOrLiteral {
+        place: path,
+        fallback,
+    }] = composition.parts.as_slice()
+    else {
+        return false;
+    };
+    let Some(scheme) = prefix.strip_suffix("://") else {
+        return false;
+    };
+    let Some(scheme_field) = guard.scheme.component.field.as_deref() else {
+        return false;
+    };
+    let Some(host_field) = guard.host_allowlist.component.field.as_deref() else {
+        return false;
+    };
+    let Some(path_field) = guard.path_component.field.as_deref() else {
+        return false;
+    };
+    guard
+        .scheme
+        .allowed_values
+        .iter()
+        .any(|allowed| allowed == scheme)
+        && host == &format!("{parsed}.{host_field}")
+        && path == &format!("{parsed}.{path_field}")
+        && fallback == &guard.path_fallback
+        && scheme_field != host_field
+        && scheme_field != path_field
+        && host_field != path_field
+}
+
 fn url_guard_root_place(
     sink_call: &StructuredCall<'_>,
     sink_span: Span,

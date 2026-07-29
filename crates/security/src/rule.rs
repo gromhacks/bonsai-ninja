@@ -673,6 +673,25 @@ pub struct UrlNetworkGuardSemantics {
     pub redirect: Option<UrlRedirectGuardSemantics>,
 }
 
+/// Rulepack-owned roles for a helper that parses, validates, and reconstructs
+/// a URL before passing it to an outbound sink.
+///
+/// The owning language adapter lowers the complete string composition and
+/// boolean guard syntax. The engine only relates those compiler facts to the
+/// parser/component vocabulary and exact scalar requirements declared here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UrlReconstructionGuardSemantics {
+    pub sink_argument_index: usize,
+    pub parser: RuleTarget,
+    pub scheme: UrlSchemeGuardSemantics,
+    pub host_allowlist: UrlHostAllowlistSemantics,
+    pub path_component: UrlComponentSemantics,
+    pub path_fallback: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_sink_named_arguments: Vec<RequiredNamedArgumentSemantics>,
+}
+
 /// Role a sink rule plays in an implicit context channel.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -752,6 +771,8 @@ pub struct AnalysisSemantics {
     pub character_escape: Option<CharacterEscapeSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_network_guard: Option<UrlNetworkGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_reconstruction_guard: Option<UrlReconstructionGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_flow: Option<ContextFlowSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

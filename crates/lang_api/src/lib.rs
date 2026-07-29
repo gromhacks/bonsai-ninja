@@ -43,8 +43,8 @@ pub use types::{
     ExpressionField, ExpressionFlow, ExpressionProjection, FieldWrite, FiniteLiteralSelectionFact, FlowEvent,
     ImportIndex, ImportScope, ImportSpec, LanguageId, LoopKind, MembershipConditionFact, ModulePath,
     Operation, OperationKind, OperationOperand, OperationOperandRole, Ref, RefKind, RuntimeTypeNarrowingFact,
-    StaticScalarValue, StaticStringMapEntry, StaticStringMapFact, StringCategory, StringLiteral,
-    TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
+    StaticScalarValue, StaticStringMapEntry, StaticStringMapFact, StringCategory, StringCompositionFact,
+    StringCompositionPart, StringLiteral, TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
 };
 
 use bonsai_common::FileId;
