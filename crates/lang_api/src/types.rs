@@ -1543,6 +1543,39 @@ pub struct StaticStringMapFact {
     pub entries: Vec<StaticStringMapEntry>,
 }
 
+/// One exact value in a compiler-lowered string composition.
+///
+/// Language frontends emit these parts only when their grammar proves the
+/// complete expression shape. Shared analyses can consequently reason about
+/// reconstructed values without reparsing display text or carrying
+/// language-specific operator spellings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StringCompositionPart {
+    Literal {
+        value: String,
+    },
+    Place {
+        place: String,
+    },
+    /// A value selected by the language's null/falsey fallback operator,
+    /// such as Python's `value or "/"`.
+    PlaceOrLiteral {
+        place: String,
+        fallback: String,
+    },
+}
+
+/// A complete string composition lowered from one parsed expression.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StringCompositionFact {
+    /// The assignment/return syntax node that owns the composed value.
+    pub container_span: Span,
+    /// The exact parsed value-expression node.
+    pub value_span: Span,
+    pub parts: Vec<StringCompositionPart>,
+}
+
 /// An assignment whose result is selected exclusively from a finite,
 /// compiler-proven literal map.
 ///
@@ -1943,6 +1976,10 @@ pub struct DeclIndex {
     /// Complete static string maps decoded by the owning language frontend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub static_string_maps: Vec<StaticStringMapFact>,
+    /// Exact language-owned string-composition shapes, keyed by their
+    /// assignment/return container span.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub string_compositions: Vec<StringCompositionFact>,
     /// Finite literal-map selections decoded by the owning frontend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub finite_literal_selections: Vec<FiniteLiteralSelectionFact>,

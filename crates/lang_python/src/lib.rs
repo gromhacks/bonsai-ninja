@@ -9,7 +9,7 @@ use bonsai_lang_api::{
     AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, ConditionEquality,
     ConditionExpressionFact, ConditionOperandFact, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
     ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, StaticScalarValue,
-    TypeAliasBinding, Visibility,
+    StringCompositionFact, StringCompositionPart, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -203,6 +203,7 @@ impl LanguageAdapter for PythonAdapter {
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
             populate_python_condition_expressions(&mut idx, &tree, file, src);
+            idx.string_compositions = python_string_compositions(&tree, file, src);
             // Phase-6 return-type extraction: `def f() -> T:` populates
             // `Decl.return_type`, which `apply_assign_call_result_types`
             // then propagates onto LHS type_aliases.
@@ -518,6 +519,116 @@ fn python_static_string(node: Node<'_>, src: &[u8]) -> Option<String> {
     // Exact comparison fails closed for escaped strings until the Python
     // adapter owns a complete escape decoder.
     (!inner.contains('\\')).then(|| inner.to_string())
+}
+
+/// Lower Python string concatenation and `value or literal` fallback syntax
+/// into a complete, typed composition. Unsupported operands fail closed, so
+/// consumers never infer safety from a partial expression.
+fn python_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<StringCompositionFact> {
+    let mut facts = Vec::new();
+    for return_node in collect_kinds(tree, &["return_statement"]) {
+        let Some(value) = return_node.named_child(0) else {
+            continue;
+        };
+        let mut parts = Vec::new();
+        if lower_python_string_composition(value, src, &mut parts) && parts.len() > 1 {
+            facts.push(StringCompositionFact {
+                container_span: span_of(file, &return_node),
+                value_span: span_of(file, &value),
+                parts,
+            });
+        }
+    }
+    facts.sort_by_key(|fact| {
+        (
+            fact.container_span.start,
+            fact.container_span.end,
+            fact.value_span.start,
+            fact.value_span.end,
+        )
+    });
+    facts.dedup();
+    facts
+}
+
+fn lower_python_string_composition(
+    mut node: Node<'_>,
+    src: &[u8],
+    out: &mut Vec<StringCompositionPart>,
+) -> bool {
+    while matches!(
+        node.kind(),
+        "parenthesized_expression" | "parenthesized_expression_list"
+    ) {
+        let Some(inner) = node.named_child(0) else {
+            return false;
+        };
+        node = inner;
+    }
+    if let Some(value) = python_static_string(node, src) {
+        out.push(StringCompositionPart::Literal { value });
+        return true;
+    }
+    if let Some(place) = python_exact_place(node, src) {
+        out.push(StringCompositionPart::Place { place });
+        return true;
+    }
+    if node.kind() == "binary_operator" {
+        let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) else {
+            return false;
+        };
+        let operator = src
+            .get(left.end_byte()..right.start_byte())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::trim);
+        return operator == Some("+")
+            && lower_python_string_composition(left, src, out)
+            && lower_python_string_composition(right, src, out);
+    }
+    if node.kind() == "boolean_operator" {
+        let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) else {
+            return false;
+        };
+        let operator = src
+            .get(left.end_byte()..right.start_byte())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::trim);
+        let (Some(place), Some(fallback)) = (python_exact_place(left, src), python_static_string(right, src))
+        else {
+            return false;
+        };
+        if operator == Some("or") {
+            out.push(StringCompositionPart::PlaceOrLiteral { place, fallback });
+            return true;
+        }
+    }
+    false
+}
+
+fn python_exact_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => {
+            let name = node_text(&node, src).trim();
+            (!name.is_empty()).then(|| name.to_string())
+        }
+        "attribute" => {
+            let object = node.child_by_field_name("object")?;
+            let attribute = node.child_by_field_name("attribute")?;
+            let object = python_exact_place(object, src)?;
+            let attribute = node_text(&attribute, src).trim();
+            (!attribute.is_empty()).then(|| format!("{object}.{attribute}"))
+        }
+        "parenthesized_expression" | "parenthesized_expression_list" => {
+            python_exact_place(node.named_child(0)?, src)
+        }
+        _ => None,
+    }
 }
 
 /// FastAPI / Starlette parameter-binder markers. When a parameter's

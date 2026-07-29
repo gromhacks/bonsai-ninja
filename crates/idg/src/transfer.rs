@@ -1793,6 +1793,25 @@ impl<'a> TransferCtx<'a> {
         }
         if writers.is_empty() {
             writers = self.whole_call_result_writers_for_projection(name);
+            if !writers.is_empty() {
+                // Keep the exact projected read in the compiler graph as
+                // well as the conservative whole-result edge. Phase 3 can
+                // then attach a resolver-proven returned field directly to
+                // this read before it flows into a scalar assignment:
+                //
+                //   result = build()
+                //   value = result["field"]
+                //
+                // Without this node, field forwarding can only preserve the
+                // suffix onto `value.field`; the scalar `value` consumed by a
+                // later call remains disconnected.
+                let from = self.read_node(name);
+                self.emit(IdgEdge {
+                    from,
+                    to: consumer,
+                    meta,
+                });
+            }
         }
         if writers.is_empty() {
             // Unrooted read: route through the shared Read node so

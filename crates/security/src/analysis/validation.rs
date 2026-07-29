@@ -890,6 +890,7 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         || semantics.configured_argument_factory_guard.is_some()
         || semantics.character_escape.is_some()
         || semantics.url_network_guard.is_some()
+        || semantics.url_reconstruction_guard.is_some()
         || semantics.context_flow.is_some()
         || semantics.post_sink_policy.is_some())
         && rule.kind != RuleKind::Sink
@@ -899,7 +900,7 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "error",
             "invalid-analysis-semantics",
             Some(rule),
-            "sink_terminal_priority, guard_profile, path_containment_guard, path_consumer_containment_guard, relative_path_containment_guard, parameterized_query, nosql_filter, dynamic_key_denylist_guard, receiver_factory_guard, configured_argument_factory_guard, character_escape, url_network_guard, context_flow, and post_sink_policy are only valid on sink rules",
+            "sink_terminal_priority, guard_profile, path_containment_guard, path_consumer_containment_guard, relative_path_containment_guard, parameterized_query, nosql_filter, dynamic_key_denylist_guard, receiver_factory_guard, configured_argument_factory_guard, character_escape, url_network_guard, url_reconstruction_guard, context_flow, and post_sink_policy are only valid on sink rules",
         );
     }
     let path_profile = semantics.guard_profile == Some(GuardProfile::PythonPathContainment);
@@ -1346,6 +1347,74 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                         "invalid-analysis-semantics",
                         Some(rule),
                         &format!("url_network_guard.{role}.regex is invalid: {error}"),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(guard) = semantics.url_reconstruction_guard.as_ref() {
+        let callable_target = |target: &RuleTarget| {
+            target.name.as_ref().is_some_and(|name| !name.trim().is_empty())
+                || target.attribute.as_ref().is_some_and(|parts| {
+                    !parts.is_empty() && parts.iter().all(|part| !part.trim().is_empty())
+                })
+                || target
+                    .regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.trim().is_empty())
+        };
+        let exact_field = |component: &crate::rule::UrlComponentSemantics| {
+            component
+                .field
+                .as_ref()
+                .is_some_and(|field| !field.trim().is_empty())
+                && component.accessor.is_none()
+        };
+        let required_names: AHashSet<_> = guard
+            .required_sink_named_arguments
+            .iter()
+            .map(|argument| argument.name.trim())
+            .collect();
+        if !callable_target(&guard.parser)
+            || !exact_field(&guard.scheme.component)
+            || guard.scheme.comparison_predicate.is_some()
+            || guard.scheme.allowed_values.is_empty()
+            || guard.scheme.allowed_values.iter().any(|value| value.is_empty())
+            || !exact_field(&guard.host_allowlist.component)
+            || guard.host_allowlist.membership_predicate.is_some()
+            || guard
+                .host_allowlist
+                .static_collection_factories
+                .iter()
+                .any(|target| !callable_target(target))
+            || !exact_field(&guard.path_component)
+            || guard.path_fallback.is_empty()
+            || required_names.len() != guard.required_sink_named_arguments.len()
+            || required_names.iter().any(|name| name.is_empty())
+        {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "url_reconstruction_guard requires callable parser/static-collection targets, exact field components, non-empty allowed schemes/path fallback, and unique non-empty sink argument names",
+            );
+        }
+        for (role, target) in std::iter::once(("parser", &guard.parser)).chain(
+            guard
+                .host_allowlist
+                .static_collection_factories
+                .iter()
+                .map(|target| ("host_allowlist.static_collection_factories", target)),
+        ) {
+            if let Some(pattern) = target.regex.as_deref() {
+                if let Err(error) = Regex::new(pattern) {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "invalid-analysis-semantics",
+                        Some(rule),
+                        &format!("url_reconstruction_guard.{role}.regex is invalid: {error}"),
                     );
                 }
             }

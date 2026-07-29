@@ -33,6 +33,7 @@ use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
     branch_condition_fact_for_span, AssignValueKind, BranchConditionFact, BranchConditionPolarity,
     ConditionEquality, ConditionExpressionFact, ConditionOperandFact, DeclKind, FlowEvent, LanguageRegistry,
+    StringCompositionPart,
 };
 use bonsai_taint::{
     compose_idg_seed_nodes, CallResultPassthrough, CleanOutputOverwrite, EntryTaintGraph, IdgSeedRequest,
@@ -91,6 +92,7 @@ use guard_sanitizers::{
     python_compiled_regex_guard_sanitizer, python_url_ssrf_guard_sanitizer, receiver_factory_guard_sanitizer,
     relative_path_containment_guard_sanitizer, runtime_type_rejection_guard_sanitizer,
     source_sink_pair_is_low_signal, terminal_rejection_predicate_guard_span, url_network_guard_sanitizer,
+    url_reconstruction_guard_sanitizer,
 };
 use prototype_guard::prototype_pollution_sink_is_guarded;
 #[cfg(test)]
@@ -2898,9 +2900,22 @@ fn func_id_for_match(ws: &Workspace, hit: &RuleMatch) -> Option<FuncId> {
         }
     }
 
-    best_containing
+    let resolved = best_containing
         .map(|(_, fid)| fid)
-        .or_else(|| (named_count == 1).then_some(unique_named?))
+        .or_else(|| (named_count == 1).then_some(unique_named).flatten());
+    if resolved.is_none() {
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "unattributed match rule={} origin={:?} file={} span={}..{} expected={} named_candidates={named_count}",
+            hit.rule_id,
+            hit.origin,
+            hit.span.file.raw(),
+            hit.span.start,
+            hit.span.end,
+            expected_name.unwrap_or("<none>"),
+        );
+    }
+    resolved
 }
 
 struct SourceLineageEmission<'a> {

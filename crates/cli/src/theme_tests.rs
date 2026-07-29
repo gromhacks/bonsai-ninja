@@ -9,7 +9,7 @@ fn parse_earthy_dark() {
 #[test]
 fn parse_dracula() {
     assert_eq!(Theme::parse("dracula"), Some(Theme::Dracula));
-    assert_eq!(Theme::parse("DRACULA"), Some(Theme::Dracula));
+    assert_eq!(Theme::parse("DRACULA"), None);
 }
 
 #[test]

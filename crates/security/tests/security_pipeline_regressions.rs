@@ -8,16 +8,17 @@
 //! exercised together.
 
 use bonsai_idg::PointKind;
-use bonsai_lang_api::FlowEvent;
+use bonsai_lang_api::{FlowEvent, StaticScalarValue};
 use bonsai_security::loader::LanguagePack;
 use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
 use bonsai_security::{
     run_taint_analysis, run_taint_analysis_with_phase_progress, AnalysisSemantics, ConstraintKind,
     FindingStatus, FlowClass, GuardProfile, MatchKind, MatchSpec, NoSqlFilterSemantics,
-    PathContainmentGuardSemantics, RelativePathContainmentGuardSemantics, Rule, RuleConstraint, RuleKind,
-    RuleTarget, Rulepack, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions, TrustClass,
-    UrlComponentSemantics, UrlDnsGuardSemantics, UrlGuardRootSemantics, UrlHostAllowlistSemantics,
-    UrlNetworkGuardSemantics, UrlRedirectGuardSemantics, UrlSchemeGuardSemantics,
+    PathContainmentGuardSemantics, RelativePathContainmentGuardSemantics, RequiredNamedArgumentSemantics,
+    Rule, RuleConstraint, RuleKind, RuleTarget, Rulepack, SourceAnalysisOptions, SourceLineageLimits,
+    TaintAnalysisOptions, TrustClass, UrlComponentSemantics, UrlDnsGuardSemantics, UrlGuardRootSemantics,
+    UrlHostAllowlistSemantics, UrlNetworkGuardSemantics, UrlReconstructionGuardSemantics,
+    UrlRedirectGuardSemantics, UrlSchemeGuardSemantics,
 };
 use bonsai_taint::{compose_idg_seed_nodes, ensure_idg_service, IdgSeedRequest, TokenSet};
 use bonsai_workspace::Workspace;
@@ -349,6 +350,55 @@ class LocalOnly:
         }),
         "local object field must not create inferred class-field source: {sources:#?}"
     );
+}
+
+#[test]
+fn inferred_assigned_callables_remain_exactly_attributable() {
+    let cases = [
+        (
+            "python",
+            "/app/worker.py",
+            "transform = lambda data: eval(data)\n",
+            "transform",
+        ),
+        (
+            "typescript",
+            "/app/resolvers.ts",
+            r#"
+const resolvers = {
+  users: (_parent: unknown, args: { query: string }) => eval(args.query),
+};
+"#,
+            "users",
+        ),
+    ];
+
+    for (language, path, source, expected_function) in cases {
+        let ws = workspace(&[(path, source)]);
+        let pack = constrained_call_sink_rulepack(language, "source", "eval");
+        let report = run_taint_analysis(
+            &ws,
+            &pack,
+            TaintAnalysisOptions {
+                include_inferred_sources: true,
+                ..TaintAnalysisOptions::default()
+            },
+        )
+        .expect("taint analysis");
+        assert!(
+            report.analysis_complete,
+            "{language} inferred callable attribution incomplete: {:?}",
+            report.analysis_incomplete_reasons
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| { finding.finding.sink.enclosing_fn.as_deref() == Some(expected_function) }),
+            "{language} inferred callable did not reach eval: {:#?}",
+            report.findings
+        );
+    }
 }
 
 fn required_mega_flow_event_kinds(lang: &str) -> &'static [&'static str] {
@@ -4415,6 +4465,195 @@ async def probe():
             .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.python_url_ssrf_guard"),
         "expected Python SSRF guard sanitizer evidence, got {:#?}",
         finding.sanitizers_seen
+    );
+}
+
+#[test]
+fn python_url_reconstruction_helper_requires_exact_compiler_facts() {
+    let mut pack = constrained_call_sink_rulepack("python", "source", "requests.get");
+    let py_pack = pack.packs.get_mut("python").expect("python pack");
+    py_pack.sinks[0].id = "python.ssrf.requests_get".to_string();
+    py_pack.sinks[0].tag = Some("ssrf".to_string());
+    py_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        url_reconstruction_guard: Some(UrlReconstructionGuardSemantics {
+            sink_argument_index: 0,
+            parser: RuleTarget {
+                name: Some("urlparse".to_string()),
+                ..RuleTarget::default()
+            },
+            scheme: UrlSchemeGuardSemantics {
+                component: UrlComponentSemantics {
+                    field: Some("scheme".to_string()),
+                    accessor: None,
+                },
+                comparison_predicate: None,
+                allowed_values: vec!["https".to_string()],
+            },
+            host_allowlist: UrlHostAllowlistSemantics {
+                component: UrlComponentSemantics {
+                    field: Some("hostname".to_string()),
+                    accessor: None,
+                },
+                membership_predicate: None,
+                static_collection_factories: Vec::new(),
+            },
+            path_component: UrlComponentSemantics {
+                field: Some("path".to_string()),
+                accessor: None,
+            },
+            path_fallback: "/".to_string(),
+            required_sink_named_arguments: vec![RequiredNamedArgumentSemantics {
+                name: "allow_redirects".to_string(),
+                value: StaticScalarValue::Boolean(false),
+            }],
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let mut urlopen_sink = py_pack.sinks[0].clone();
+    urlopen_sink.id = "python.ssrf.urllib_request".to_string();
+    urlopen_sink.match_spec.callee = Some(RuleTarget {
+        attribute: Some(vec!["request".to_string(), "urlopen".to_string()]),
+        ..RuleTarget::default()
+    });
+    urlopen_sink
+        .analysis_semantics
+        .as_mut()
+        .and_then(|semantics| semantics.url_reconstruction_guard.as_mut())
+        .expect("url reconstruction semantics")
+        .required_sink_named_arguments
+        .clear();
+    py_pack.sinks.push(urlopen_sink);
+
+    let ws = workspace(&[(
+        "/app/svc.py",
+        r#"
+from urllib.parse import urlparse
+from urllib import request
+import requests
+
+ALLOWED = {"api.partner.example", "cdn.partner.example"}
+
+def source():
+    return ""
+
+def checked(url):
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED:
+        raise ValueError("blocked")
+    return "https://" + parsed.hostname + (parsed.path or "/")
+
+def returns_original(url):
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED:
+        raise ValueError("blocked")
+    return url
+
+def dynamic_hosts():
+    return set()
+
+def uses_dynamic_allowlist(url):
+    allowed = dynamic_hosts()
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in allowed:
+        raise ValueError("blocked")
+    return "https://" + parsed.hostname + (parsed.path or "/")
+
+def swaps_parser_result(url):
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError("blocked")
+    parsed = dynamic_parts(url)
+    if parsed.hostname not in ALLOWED:
+        raise ValueError("blocked")
+    return "https://" + parsed.hostname + (parsed.path or "/")
+
+def dynamic_parts(url):
+    return url
+
+def guarded():
+    url = source()
+    return requests.get(checked(url), allow_redirects=False)
+
+def guarded_urlopen():
+    url = source()
+    return request.urlopen(checked(url), timeout=5)
+
+def unsafe_original():
+    url = source()
+    return requests.get(returns_original(url), allow_redirects=False)
+
+def unsafe_dynamic_allowlist():
+    url = source()
+    return requests.get(uses_dynamic_allowlist(url), allow_redirects=False)
+
+def unsafe_overwrite():
+    url = source()
+    return requests.get(swaps_parser_result(url), allow_redirects=False)
+
+def unsafe_redirects():
+    url = source()
+    return requests.get(checked(url))
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    let functions: BTreeSet<_> = report
+        .findings
+        .iter()
+        .filter_map(|finding| finding.finding.sink.enclosing_fn.as_deref())
+        .collect();
+    assert_eq!(
+        functions,
+        BTreeSet::from([
+            "unsafe_dynamic_allowlist",
+            "unsafe_original",
+            "unsafe_overwrite",
+            "unsafe_redirects",
+        ]),
+        "{:#?}",
+        report.findings
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.finding.status == FindingStatus::Unsanitized),
+        "{:#?}",
+        report.findings
+    );
+
+    let explicit = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let guarded = explicit
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.enclosing_fn.as_deref() == Some("guarded"))
+        .expect("guarded reconstruction finding");
+    assert_eq!(guarded.finding.status, FindingStatus::Sanitized, "{guarded:#?}");
+    assert!(
+        guarded
+            .finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.url_reconstruction_guard"),
+        "{:#?}",
+        guarded.finding.sanitizers_seen
+    );
+    let guarded_urlopen = explicit
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.enclosing_fn.as_deref() == Some("guarded_urlopen"))
+        .expect("guarded urlopen reconstruction finding");
+    assert_eq!(
+        guarded_urlopen.finding.status,
+        FindingStatus::Sanitized,
+        "{guarded_urlopen:#?}"
     );
 }
 

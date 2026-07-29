@@ -412,6 +412,22 @@ pub(super) fn make_finding(
             sanitizers_seen.push(ssrf_guard);
         }
     }
+    if let Some(reconstruction_guard) = url_reconstruction_guard_sanitizer(
+        context.ws,
+        context.sink_func,
+        snk,
+        skr,
+        &context.sink_tainted_args,
+    ) {
+        let dedup_key = (
+            reconstruction_guard.file.clone(),
+            reconstruction_guard.line,
+            reconstruction_guard.column,
+        );
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(reconstruction_guard);
+        }
+    }
     if let Some(jwt_guard) =
         go_jwt_inline_keyfunc_algorithm_guard_sanitizer(context.ws, context.sink_func, snk, skr)
     {

@@ -24,7 +24,7 @@ use std::sync::Arc;
 ///
 /// Bump this whenever adapter lowering, [`DeclIndex`], [`ImportIndex`], or the
 /// object validation contract changes in a way that can alter compiler facts.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 5;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 6;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;
 const METADATA_KEY: u64 = 0;

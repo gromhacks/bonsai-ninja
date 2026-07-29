@@ -8594,11 +8594,12 @@ where
             }
 
             if let Some(ek) = entry_kind {
+                let source_span = inferred_parameter_source_span(decl);
+                let (file_path, line, col) = resolve_span(ws, file, source_span);
                 for (idx, param) in decl.params.iter().enumerate() {
                     if decl.receiver_param_index == Some(idx) {
                         continue;
                     }
-                    let (file_path, line, col) = resolve_span(ws, file, decl.name_span);
                     out.push(RuleMatch {
                         origin: if matches!(ek, EntryKind::Unreferenced) {
                             MatchOrigin::InferredUnreferencedParameter
@@ -8607,10 +8608,10 @@ where
                         },
                         rule_id: format!("entry-point.{}.param_{idx}", ek.rule_slug()),
                         language: language.clone(),
-                        file: file_path,
+                        file: file_path.clone(),
                         line,
                         column: col,
-                        span: decl.name_span,
+                        span: source_span,
                         match_text: param.clone(),
                         enclosing_fn: Some(decl.name.clone()),
                     });
@@ -8662,6 +8663,22 @@ where
         format_args!("decls={scanned_decls} matches={}", out.len()),
     );
     out
+}
+
+fn inferred_parameter_source_span(decl: &bonsai_lang_api::Decl) -> Span {
+    let name_is_owned = decl.name_span.file == decl.span.file
+        && decl.span.start <= decl.name_span.start
+        && decl.name_span.end <= decl.span.end;
+    if name_is_owned {
+        decl.name_span
+    } else {
+        // Assigned lambdas and object-property callables obtain a useful
+        // display name from their binding/property node, which is outside
+        // the callable value-expression span. Anchor the inferred parameter
+        // on the callable's own parsed declaration so duplicate display
+        // names remain exactly attributable.
+        decl.span
+    }
 }
 
 fn collect_entry_point_support_for_files(

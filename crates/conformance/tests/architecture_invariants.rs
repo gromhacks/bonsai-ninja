@@ -2529,6 +2529,7 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     let taint_value_flow = read(&root.join("crates/taint/src/value_flow.rs"));
     let workspace_trace = read(&root.join("crates/workspace/src/cross_module.rs"));
     let trace_schema = read(&root.join("crates/trace/src/lib.rs"));
+    let cli_args = read(&root.join("crates/cli/src/args.rs"));
     let cli_inspect = read(&root.join("crates/cli/src/commands/inspect.rs"));
     let cli_dump = read(&root.join("crates/cli/src/commands/dump.rs"));
     let cli_security = read(&root.join("crates/cli/src/commands/security.rs"));
@@ -2693,12 +2694,23 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
         "uncached inspect call-site rendering must use semantic callgraph edge spans only"
     );
     let dump_edges_body = function_body(&cli_dump, "cmd_dump_edges");
+    let precision_filter_start = cli_args
+        .find("pub(crate) enum PrecisionFilter")
+        .expect("missing CLI PrecisionFilter");
+    let precision_filter_tail = &cli_args[precision_filter_start..];
+    let precision_filter_end = precision_filter_tail
+        .find("\n}")
+        .map(|offset| offset + 2)
+        .expect("unterminated CLI PrecisionFilter");
+    let precision_filter_body = &precision_filter_tail[..precision_filter_end];
     assert!(
-        dump_edges_body.contains("PrecisionFilter::OverApproximate | PrecisionFilter::Unknown")
-            && dump_edges_body.contains("semantic-only")
-            && dump_edges_body.find("PrecisionFilter::OverApproximate | PrecisionFilter::Unknown")
-                < dump_edges_body.find("open_project(root)?"),
-        "dump-edges must reject diagnostic precision filters before opening/analyzing the workspace"
+        precision_filter_body.contains("Exact")
+            && precision_filter_body.contains("Narrowed")
+            && !precision_filter_body.contains("OverApproximate")
+            && !precision_filter_body.contains("Unknown")
+            && !dump_edges_body.contains("OverApproximate")
+            && !dump_edges_body.contains("Unknown"),
+        "dump-edges must make diagnostic precision filters unrepresentable so clap rejects them before command dispatch"
     );
     let security_taint_body = function_body(&cli_security, "cmd_flows");
     assert!(

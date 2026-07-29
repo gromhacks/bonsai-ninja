@@ -324,6 +324,7 @@ impl LanguageAdapter for RubyAdapter {
             call_receivers,
             call_argument_values,
             static_string_maps: Vec::new(),
+            string_compositions: Vec::new(),
             finite_literal_selections: Vec::new(),
             character_substitutions: Vec::new(),
             runtime_type_narrowings,

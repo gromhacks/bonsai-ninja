@@ -8,6 +8,22 @@
   cwe:
   - CWE-918
   - CWE-295
+  analysis_semantics:
+    url_reconstruction_guard:
+      sink_argument_index: 0
+      parser: {name: urlparse}
+      scheme:
+        component: {field: scheme}
+        allowed_values: [https]
+      host_allowlist:
+        component: {field: hostname}
+      path_component: {field: path}
+      path_fallback: /
+      required_sink_named_arguments:
+      - name: allow_redirects
+        value:
+          kind: boolean
+          value: false
   match:
     kind: call
     callee:
@@ -211,6 +227,17 @@
   severity: high
   cwe:
   - CWE-918
+  analysis_semantics:
+    url_reconstruction_guard:
+      sink_argument_index: 0
+      parser: {name: urlparse}
+      scheme:
+        component: {field: scheme}
+        allowed_values: [https]
+      host_allowlist:
+        component: {field: hostname}
+      path_component: {field: path}
+      path_fallback: /
   match:
     kind: call
     callee:
@@ -232,6 +259,17 @@
   severity: high
   cwe:
   - CWE-918
+  analysis_semantics:
+    url_reconstruction_guard:
+      sink_argument_index: 0
+      parser: {name: urlparse}
+      scheme:
+        component: {field: scheme}
+        allowed_values: [https]
+      host_allowlist:
+        component: {field: hostname}
+      path_component: {field: path}
+      path_fallback: /
   match:
     kind: call
     callee:
@@ -253,6 +291,17 @@
   severity: high
   cwe:
   - CWE-918
+  analysis_semantics:
+    url_reconstruction_guard:
+      sink_argument_index: 0
+      parser: {name: urlparse}
+      scheme:
+        component: {field: scheme}
+        allowed_values: [https]
+      host_allowlist:
+        component: {field: hostname}
+      path_component: {field: path}
+      path_fallback: /
   match:
     kind: call
     callee:
@@ -274,6 +323,17 @@
   severity: high
   cwe:
   - CWE-918
+  analysis_semantics:
+    url_reconstruction_guard:
+      sink_argument_index: 0
+      parser: {name: urlparse}
+      scheme:
+        component: {field: scheme}
+        allowed_values: [https]
+      host_allowlist:
+        component: {field: hostname}
+      path_component: {field: path}
+      path_fallback: /
   match:
     kind: call
     callee:

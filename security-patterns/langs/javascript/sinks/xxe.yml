@@ -187,7 +187,9 @@
       - parser
   description: "Disabled - sax has limited entity resolution."
 - id: javascript.xxe.fast_xml_parser_entities_enabled
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: javascript
   tag: xxe
   category: source-independent
@@ -213,7 +215,7 @@
       }
     expect_match_text:
     - XMLParser
-  description: "fast-xml-parser with entity processing enabled - audit parser use for entity expansion and unsafe downstream XML interpretation."
+  description: "Disabled - fast-xml-parser expands supported internal/named entities but rejects external SYSTEM entities; these options do not establish an XXE file/network access boundary."
 - id: javascript.xxe.libxmljs_loadxml
   enabled: true
   language: javascript
