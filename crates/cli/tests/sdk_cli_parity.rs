@@ -1670,13 +1670,18 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
             serde_json::to_value(project.dump().resolution_coverage(Default::default()))
                 .expect("resolution coverage json"),
         );
+        let mut path_options = bonsai_sdk::OpenOptions::lazy_query();
+        path_options.load_idg_sidecar = true;
+        let path_project = sdk()
+            .open_with_options(lang_workspace_path(lang), path_options)
+            .unwrap_or_else(|err| panic!("open {lang} SDK path project: {err}"));
         assert_json_eq(
             &format!("{lang} path"),
             run_cli(&[
                 "path", ws_arg, "--from", entry, "--to", "verify", "--format", "json",
             ]),
             serde_json::to_value(
-                project
+                path_project
                     .browse()
                     .paths(bonsai_sdk::PathFilters {
                         from: entry,
@@ -1847,7 +1852,6 @@ fn native_export_json_cli_matches_sdk_for_every_language() {
             .export()
             .native_json(bonsai_sdk::NativeExportOptions {
                 full_propagations: false,
-                complete_chains: false,
                 compiled_propagations: false,
             })
             .unwrap_or_else(|err| panic!("{lang} sdk native export: {err}"));

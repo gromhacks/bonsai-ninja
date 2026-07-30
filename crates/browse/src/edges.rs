@@ -112,7 +112,7 @@ pub fn compute_edge_id(
 /// its result set even though exact coverage still examines every candidate
 /// edge.
 pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let resolved = ws.cached_resolved_call_graph();
     let mut records: Vec<EdgeRecord> = resolved
         .inner()

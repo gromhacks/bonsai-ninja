@@ -340,12 +340,23 @@ fn compiler_object_generation_replays_typed_adapter_ir_without_reparsing() {
 
     let reopened = AnalyzerDb::new(Arc::clone(&vfs), registry);
     reopened.set_workspace_root(root.path().to_path_buf());
+    assert!(
+        reopened.import_index_uncached(file).is_some(),
+        "independent compiler import headers must load before declaration bodies"
+    );
+    assert!(
+        reopened.imports_for_uncached(file).is_empty(),
+        "the streaming import facade must preserve the exact empty adapter result"
+    );
+    assert!(
+        reopened.compiler_syntax_header_uncached(file).is_some(),
+        "independent compiler syntax headers must load before declaration bodies"
+    );
     let object = reopened
         .compiler_file_object_uncached(file)
         .expect("replay compiler object");
     assert_eq!(object.language.as_deref(), Some("python"));
     assert!(object.declarations.is_some());
-    assert!(reopened.import_index_uncached(file).is_some());
     assert_eq!(
         declaration_calls.load(Ordering::SeqCst),
         1,
@@ -354,7 +365,7 @@ fn compiler_object_generation_replays_typed_adapter_ir_without_reparsing() {
     assert_eq!(
         import_calls.load(Ordering::SeqCst),
         1,
-        "streaming imports must reuse exact compiler-object IR without invoking the adapter again"
+        "streaming imports must reuse the exact compiler header without invoking the adapter again"
     );
 
     vfs.write(
@@ -371,6 +382,112 @@ fn compiler_object_generation_replays_typed_adapter_ir_without_reparsing() {
         declaration_calls.load(Ordering::SeqCst),
         2,
         "a changed digest must lower exactly that compiler object again"
+    );
+}
+
+#[test]
+fn compiler_syntax_header_replays_adapter_call_targets_without_body_decode() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("fixture.py");
+    let vfs = Arc::new(Vfs::new());
+    let file = vfs.write(
+        path.to_string_lossy().into_owned(),
+        "def run(client, value):\n    cleaned = client.clean(value)\n    return cleaned\n",
+    );
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+    let db = AnalyzerDb::new(Arc::clone(&vfs), Arc::clone(&registry));
+    db.set_workspace_root(root.path().to_path_buf());
+    db.save_compiler_object_sidecar(root.path())
+        .expect("save compiler objects");
+
+    let reopened = AnalyzerDb::new(vfs, registry);
+    reopened.set_workspace_root(root.path().to_path_buf());
+    let header = reopened
+        .compiler_syntax_header_uncached(file)
+        .expect("load independent syntax header");
+    assert!(
+        header
+            .calls
+            .iter()
+            .any(|call| call.name.ends_with("client.clean")),
+        "adapter-emitted call target must survive the independently decoded projection: {:?}",
+        header.calls
+    );
+    assert!(
+        header
+            .factory_assignments
+            .iter()
+            .any(|assignment| assignment.target == "cleaned" && assignment.call_name.ends_with("clean")),
+        "direct call-result assignment must remain available for rulepack factory typing"
+    );
+    assert_eq!(reopened.stats().cached_decl_indexes, 0);
+}
+
+#[test]
+fn scoped_workspace_reuses_complete_objects_by_stable_file_identity() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let full_vfs = Arc::new(Vfs::new());
+    let first_path = root.path().join("first.py");
+    let candidate_path = root.path().join("candidate.py");
+    full_vfs.write(
+        first_path.to_string_lossy().into_owned(),
+        "def first():\n    return 1\n",
+    );
+    let candidate = full_vfs.write(
+        candidate_path.to_string_lossy().into_owned(),
+        "def candidate():\n    return 2\n",
+    );
+    let declaration_calls = Arc::new(AtomicUsize::new(0));
+    let import_calls = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(CountingPythonAdapter {
+        declaration_calls: Arc::clone(&declaration_calls),
+        import_calls,
+    }));
+    let full_db = AnalyzerDb::new(full_vfs, Arc::clone(&registry));
+    full_db.set_workspace_root(root.path().to_path_buf());
+    assert_eq!(
+        full_db
+            .save_compiler_object_sidecar(root.path())
+            .expect("save complete compiler objects"),
+        2
+    );
+    assert_eq!(declaration_calls.load(Ordering::SeqCst), 2);
+
+    let scoped_vfs = Arc::new(Vfs::new());
+    scoped_vfs.write_with_id(
+        candidate,
+        candidate_path.to_string_lossy().into_owned(),
+        "def candidate():\n    return 2\n",
+    );
+    let scoped_db = AnalyzerDb::new(Arc::clone(&scoped_vfs), registry);
+    scoped_db.set_workspace_root(root.path().to_path_buf());
+    let object = scoped_db
+        .compiler_file_object_uncached(candidate)
+        .expect("load scoped compiler object");
+    assert_eq!(object.file, candidate);
+    assert_eq!(
+        declaration_calls.load(Ordering::SeqCst),
+        2,
+        "an unchanged scoped file must reuse its complete-workspace compiler object"
+    );
+
+    scoped_vfs.write_with_id(
+        candidate,
+        candidate_path.to_string_lossy().into_owned(),
+        "def candidate():\n    return 3\n",
+    );
+    let changed = scoped_db
+        .compiler_file_object_uncached(candidate)
+        .expect("compile changed scoped object");
+    assert_eq!(changed.file, candidate);
+    assert_eq!(
+        declaration_calls.load(Ordering::SeqCst),
+        3,
+        "a changed scoped file must fall back to its Tree-sitter adapter"
     );
 }
 

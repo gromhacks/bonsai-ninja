@@ -480,3 +480,46 @@ fn global_index_identity_is_clone_stable_and_advances_on_semantic_mutation() {
     index.finalize_semantic_facts();
     assert_ne!(populated_identity, index.identity());
 }
+
+#[test]
+fn receiver_ancestry_projection_enriches_file_local_compiler_bodies() {
+    let class_file = FileId::new(40);
+    let body_file = FileId::new(41);
+    let mut child = decl(class_file, 0, "Child");
+    child.kind = DeclKind::Class;
+    child.bases.push("Base".to_string());
+    let mut body = decl(body_file, 0, "run");
+    body.flow_events.push(FlowEvent::Call {
+        span: Span::new(body_file, 10, 20),
+        name: "child.execute".to_string(),
+        receiver: Some("child".to_string()),
+        receiver_types: vec!["Child".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: Vec::new(),
+    });
+    let mut global = GlobalIndex::new();
+    global.insert_header_preprocessed(DeclIndex {
+        file: class_file,
+        defs: vec![child],
+        ..DeclIndex::default()
+    });
+    global.insert_header_preprocessed(DeclIndex {
+        file: body_file,
+        defs: vec![body.clone()],
+        ..DeclIndex::default()
+    });
+    global.finalize_semantic_facts();
+
+    let ancestry = global.receiver_ancestry();
+    let mut local = DeclIndex {
+        file: body_file,
+        defs: vec![body],
+        ..DeclIndex::default()
+    };
+    ancestry.apply_to_decl_index(&mut local);
+
+    let FlowEvent::Call { receiver_types, .. } = &local.defs[0].flow_events[0] else {
+        panic!("expected call");
+    };
+    assert_eq!(receiver_types, &["Child".to_string(), "Base".to_string()]);
+}

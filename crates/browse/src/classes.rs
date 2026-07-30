@@ -55,7 +55,7 @@ pub struct ClassOut {
 /// Sorted by `(file, line, name)` for deterministic output.
 pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, regex::Error> {
     use rayon::prelude::*;
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let name_match = make_name_filter(f.name, f.regex)?;
     let files: Vec<_> = global.all_files().collect();
     let mut out: Vec<ClassOut> = files

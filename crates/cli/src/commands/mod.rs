@@ -96,7 +96,16 @@ pub(crate) fn open_project_dataflow_prewarm(root: &std::path::Path) -> Result<(P
 }
 
 pub(crate) fn open_project_index_only(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
-    open_project_with_options(root, bonsai_sdk::OpenOptions::query_only())
+    open_project_with_options(root, bonsai_sdk::OpenOptions::lazy_query())
+}
+
+/// Open a semantic path query without hydrating unrelated compatibility
+/// caches. A fresh IDG sidecar is loaded when present; a miss remains
+/// read-only and the path facade falls back to the exact resolved callgraph.
+pub(crate) fn open_project_path_query(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
+    let mut options = bonsai_sdk::OpenOptions::lazy_query();
+    options.load_idg_sidecar = true;
+    open_project_with_options(root, options)
 }
 
 pub(crate) fn open_workspace_syntax_filtered_paths(
@@ -104,10 +113,7 @@ pub(crate) fn open_workspace_syntax_filtered_paths(
     include_filters: &[String],
     exclude_filters: &[String],
 ) -> Result<(Workspace, WorkspaceFooter)> {
-    let mut options = bonsai_sdk::OpenOptions::query_only();
-    options.load_dataflow_sidecar = false;
-    options.load_value_flow_sidecar = false;
-    options.eager_decl_index = false;
+    let options = bonsai_sdk::OpenOptions::lazy_query();
     let progress = workspace_open_progress();
     let ws = Workspace::open_query_filtered_paths_with_options_and_events(
         root,
@@ -192,7 +198,7 @@ pub(crate) fn open_project_index_only_with_rulepack(
     rules_dir: Option<&std::path::Path>,
 ) -> Result<(Project, WorkspaceFooter)> {
     let bonsai = bonsai_with_rulepack(root, rules_dir)?;
-    open_project_with_bonsai_and_options(root, bonsai, bonsai_sdk::OpenOptions::query_only())
+    open_project_with_bonsai_and_options(root, bonsai, bonsai_sdk::OpenOptions::lazy_query())
 }
 
 fn open_project_with_options(

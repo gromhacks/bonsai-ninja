@@ -67,9 +67,9 @@ pub struct CallOut {
 /// call.
 pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex::Error> {
     use rayon::prelude::*;
-    let global = ws.db().global_index();
     let callee_match = make_name_filter(f.callee, f.regex)?;
-    let files: Vec<_> = global.all_files().collect();
+    let caller_match = make_name_filter(f.caller, f.regex)?;
+    let files = ws.vfs().all_files();
     // `fold` accumulates per-thread (not per-file) so we don't pay
     // the per-file `Vec` allocation cost — `calls` on hub names
     // like TypeScript's `visitNode` produces millions of records,
@@ -79,17 +79,45 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
     let mut out: Vec<CallOut> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
+            if let Some(needle) = f.file {
+                let path = ws
+                    .vfs()
+                    .path(file)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !file_path_matches_filter(ws, &path, needle) {
+                    return acc;
+                }
+            }
+            // Calls is a syntactic inventory. It does not consume resolved
+            // symbols, so stream the exact file-local compiler object instead
+            // of constructing a workspace header/linkage table merely to
+            // remap unused SymbolIds. This also keeps lazy header construction
+            // out of the Rayon body loop.
+            let Some(index) = ws.db().decl_index_uncached(file) else {
+                return acc;
+            };
             // Pass 1 — flow-event walk per decl. Carries the
             // enclosing function name so the row's `caller` is
             // populated.
-            for decl in global.decls_in(file) {
-                walk_calls(&decl.flow_events, Some(decl.name.clone()), ws, &mut acc);
+            for decl in &index.defs {
+                if f.caller.is_some() && !caller_match(&decl.name) {
+                    continue;
+                }
+                walk_calls(
+                    &decl.flow_events,
+                    &decl.name,
+                    ws,
+                    &*callee_match,
+                    f.call_kind,
+                    &mut acc,
+                );
             }
             // Pass 2 — ref-table fallback. Catches module-level /
             // top-of-file calls (Python script statements, JS
             // top-level `require(...)`) the flow-event walker doesn't
             // reach because they live outside any decl.
-            if let Some(idx) = global.file_index(file) {
+            {
                 // Some adapters emit a synthetic `RefKind::Call` for
                 // bare-identifier subscript receivers (`params[:x]`,
                 // `row[0]`) so security rules shaped as
@@ -102,20 +130,26 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
                 // DSL synthesis (every real call emits only the Call
                 // ref, never both). Indexed lookups stay O(1) via a
                 // HashSet keyed on `(span.start, span.end)`.
-                let read_spans: ahash::AHashSet<(u64, u64)> = idx
+                let read_spans: ahash::AHashSet<(u64, u64)> = index
                     .refs
                     .iter()
                     .filter(|reference| reference.kind == RefKind::Read)
                     .map(|reference| (reference.span.start, reference.span.end))
                     .collect();
-                for reference in &idx.refs {
+                for reference in &index.refs {
                     if reference.kind == RefKind::Call
                         && !read_spans.contains(&(reference.span.start, reference.span.end))
+                        && f.caller.is_none()
+                        && f.call_kind.is_none()
                     {
+                        let callee = normalize_whitespace(&reference.name);
+                        if !callee_match(&callee) {
+                            continue;
+                        }
                         let (path, line, column) = format_span(&reference.span, ws);
                         acc.push(CallOut {
                             resolution_scope: CALLSITE_RESOLUTION_SCOPE,
-                            callee: normalize_whitespace(&reference.name),
+                            callee,
                             file: path,
                             line,
                             column,
@@ -135,31 +169,6 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
             larger.extend(smaller);
             larger
         });
-    out.retain(|call| {
-        if f.file
-            .is_some_and(|needle| !file_path_matches_filter(ws, &call.file, needle))
-        {
-            return false;
-        }
-        if !callee_match(&call.callee) {
-            return false;
-        }
-        if let Some(needle) = f.caller {
-            if !call.caller.as_deref().is_some_and(|s| s.contains(needle)) {
-                return false;
-            }
-        }
-        if let Some(want_kind) = f.call_kind {
-            if !call
-                .call_kind
-                .as_deref()
-                .is_some_and(|s| s.eq_ignore_ascii_case(want_kind))
-            {
-                return false;
-            }
-        }
-        true
-    });
     drop_assignment_call_rows_shadowed_by_explicit_calls(&mut out);
     // Dedup pass first: the flow-event walk and the ref-table scan
     // both surface the same physical call (flow-event knows the
@@ -308,7 +317,14 @@ fn is_bare_suffix_of(bare: &str, qualified: &str) -> bool {
 /// per `FlowEvent::Call` and per `FlowEvent::Assign` whose RHS is
 /// a call. `caller` is the enclosing function's name so each row
 /// can name its container.
-fn walk_calls(events: &[FlowEvent], caller: Option<String>, ws: &Workspace, out: &mut Vec<CallOut>) {
+fn walk_calls(
+    events: &[FlowEvent],
+    caller: &str,
+    ws: &Workspace,
+    callee_matches: &(dyn Fn(&str) -> bool + Send + Sync),
+    wanted_call_kind: Option<&str>,
+    out: &mut Vec<CallOut>,
+) {
     for event in events {
         match event {
             FlowEvent::Call {
@@ -317,15 +333,23 @@ fn walk_calls(events: &[FlowEvent], caller: Option<String>, ws: &Workspace, out:
                 call_kind,
                 ..
             } => {
+                let callee = normalize_whitespace(name);
+                if !callee_matches(&callee) {
+                    continue;
+                }
+                let call_kind = format!("{:?}", call_kind).to_lowercase();
+                if wanted_call_kind.is_some_and(|wanted| !call_kind.eq_ignore_ascii_case(wanted)) {
+                    continue;
+                }
                 let (path, line, column) = format_span(span, ws);
                 out.push(CallOut {
                     resolution_scope: CALLSITE_RESOLUTION_SCOPE,
-                    callee: normalize_whitespace(name),
+                    callee,
                     file: path,
                     line,
                     column,
-                    caller: caller.clone(),
-                    call_kind: Some(format!("{:?}", call_kind).to_lowercase()),
+                    caller: Some(caller.to_string()),
+                    call_kind: Some(call_kind),
                 });
             }
             FlowEvent::Assign {
@@ -333,6 +357,13 @@ fn walk_calls(events: &[FlowEvent], caller: Option<String>, ws: &Workspace, out:
                 source_call: Some(name),
                 ..
             } => {
+                if wanted_call_kind.is_some() {
+                    continue;
+                }
+                let callee = normalize_whitespace(name);
+                if !callee_matches(&callee) {
+                    continue;
+                }
                 // RHS-of-assign call: `x = foo()`. We emit a row
                 // without a `call_kind` so the dedup pass can drop
                 // it when an explicit `Call` row covers the same
@@ -340,11 +371,11 @@ fn walk_calls(events: &[FlowEvent], caller: Option<String>, ws: &Workspace, out:
                 let (path, line, column) = format_span(span, ws);
                 out.push(CallOut {
                     resolution_scope: CALLSITE_RESOLUTION_SCOPE,
-                    callee: normalize_whitespace(name),
+                    callee,
                     file: path,
                     line,
                     column,
-                    caller: caller.clone(),
+                    caller: Some(caller.to_string()),
                     call_kind: None,
                 });
             }
@@ -353,22 +384,24 @@ fn walk_calls(events: &[FlowEvent], caller: Option<String>, ws: &Workspace, out:
                 else_events,
                 ..
             } => {
-                walk_calls(then_events, caller.clone(), ws, out);
-                walk_calls(else_events, caller.clone(), ws, out);
+                walk_calls(then_events, caller, ws, callee_matches, wanted_call_kind, out);
+                walk_calls(else_events, caller, ws, callee_matches, wanted_call_kind, out);
             }
-            FlowEvent::Loop { body, .. } => walk_calls(body, caller.clone(), ws, out),
+            FlowEvent::Loop { body, .. } => {
+                walk_calls(body, caller, ws, callee_matches, wanted_call_kind, out);
+            }
             FlowEvent::Try {
                 body,
                 catch_events,
                 finally_events,
                 ..
             } => {
-                walk_calls(body, caller.clone(), ws, out);
-                walk_calls(catch_events, caller.clone(), ws, out);
-                walk_calls(finally_events, caller.clone(), ws, out);
+                walk_calls(body, caller, ws, callee_matches, wanted_call_kind, out);
+                walk_calls(catch_events, caller, ws, callee_matches, wanted_call_kind, out);
+                walk_calls(finally_events, caller, ws, callee_matches, wanted_call_kind, out);
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                walk_calls(body, caller.clone(), ws, out);
+                walk_calls(body, caller, ws, callee_matches, wanted_call_kind, out);
             }
             _ => {}
         }

@@ -157,11 +157,13 @@ truncation and do not feed semantic reachability. The streamed IDG sidecar has
 no workspace file-count ceiling.
 
 The current Elasticsearch references are the dated 30,055-file runs in
-[Release Readiness](RELEASE_READINESS.md). Production security completed with
-`analysis_complete: true`, no incomplete reasons, 169.10 seconds wall time,
-and about 1.56 GiB maximum RSS. A targeted exact inspect/taint query completed
-in 278.25 seconds at about 2.89 GiB under a 3 GiB compiler budget. Older
-synthetic and real-world benchmark measurements remain in
+[Release Readiness](RELEASE_READINESS.md). The exact large-workspace suite
+passed 4/4 in 210.39 seconds: warm semantic reuse took 4.34 seconds, default
+inspect took 17.33 seconds, and exact sanitizer inventory decoded only the
+4,382 AST bodies surviving compiler-header planning and completed in
+28.01 seconds. The gate requires production security to finish complete and
+keeps every measured warm query/analysis command below 30 seconds. Older
+synthetic and superseded whole-body timings remain in
 [the archived goal benchmark](goal-benchmark-2026-05-15.md).
 
 Use `BONSAI_DEBUG=security-phase` for phase timing and add `idg-build` when

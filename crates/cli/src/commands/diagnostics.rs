@@ -15,7 +15,7 @@ use crate::cli_println;
 use crate::progress;
 
 use super::{
-    not_found_with_suggestions, open_project_dataflow_prewarm, open_project_index_only,
+    bonsai_for_cli, not_found_with_suggestions, open_project_dataflow_prewarm, open_project_index_only,
     open_project_parse_only, open_project_sidecar_validation_only, open_project_streaming_parse_only,
     open_workspace_syntax_only,
 };
@@ -93,19 +93,22 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
 pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
     let executable = std::env::current_exe()?;
     loop {
-        for phase in [
-            SemanticWorkerPhase::Compiler,
-            SemanticWorkerPhase::Callgraph,
-            SemanticWorkerPhase::Retrieval,
-            SemanticWorkerPhase::Linkage,
-            SemanticWorkerPhase::Idg,
-        ] {
+        // Cache validation hashes the complete source snapshot and may inspect
+        // large factstore metadata. A fresh process is a hard reclamation
+        // boundary, so planner allocator pages cannot stack with compiler or
+        // graph workers.
+        let stats = semantic_cache_stats(&executable, root)?;
+        if semantic_generation_is_current(&stats.validation) {
+            return Ok(());
+        }
+        for phase in semantic_phase_plan(&stats.validation) {
             let phase_name = match phase {
                 SemanticWorkerPhase::Compiler => "compiler",
                 SemanticWorkerPhase::Retrieval => "retrieval",
                 SemanticWorkerPhase::Callgraph => "callgraph",
                 SemanticWorkerPhase::Linkage => "linkage",
                 SemanticWorkerPhase::Idg => "idg",
+                SemanticWorkerPhase::Manifest => "manifest",
             };
             let mut command = Command::new(&executable);
             command
@@ -126,8 +129,8 @@ pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
         // artifact describes the same current snapshot. An edit between
         // workers reruns the exact compiler pipeline until it reaches a
         // quiescent generation; there is no semantic retry cap.
-        let project = open_project_sidecar_validation_only(root)?;
-        if project.cache().structural_sidecars_are_current()? {
+        let validation = semantic_cache_stats(&executable, root)?.validation;
+        if semantic_generation_is_current(&validation) {
             return Ok(());
         }
         let retry = progress::ScopedSpinner::new(
@@ -137,7 +140,93 @@ pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
     }
 }
 
+fn semantic_generation_is_current(validation: &bonsai_sdk::CacheValidationReport) -> bool {
+    validation.semantic_ready && validation.manifest_status == bonsai_sdk::CacheFreshnessStatus::Fresh
+}
+
+fn semantic_cache_stats(
+    executable: &std::path::Path,
+    root: &std::path::Path,
+) -> Result<bonsai_sdk::CacheStats> {
+    let output = Command::new(executable)
+        .arg("cache")
+        .arg("stats")
+        .arg(root)
+        .arg("--format")
+        .arg("json")
+        .arg("--no-color")
+        .arg("--no-progress")
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "semantic cache validation exited with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        anyhow::anyhow!(
+            "semantic cache validation returned invalid JSON: {error}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        )
+    })
+}
+
+/// Compute the minimum exact phase closure needed for one coherent semantic
+/// generation. Independently versioned sidecars are the authority; the
+/// descriptive manifest never forces an otherwise current compiler phase to
+/// rerun.
+fn semantic_phase_plan(validation: &bonsai_sdk::CacheValidationReport) -> Vec<SemanticWorkerPhase> {
+    let sidecar_is_fresh = |name: &str| {
+        validation
+            .sidecars
+            .iter()
+            .find(|sidecar| sidecar.name == name)
+            .is_some_and(|sidecar| {
+                matches!(
+                    sidecar.status,
+                    bonsai_sdk::CacheFreshnessStatus::Fresh | bonsai_sdk::CacheFreshnessStatus::NotApplicable
+                )
+            })
+    };
+    let compiler_stale = !sidecar_is_fresh("compiler_objects");
+    // Compiler-object storage is an independently versioned serialization of
+    // adapter facts. Its storage ABI may change without changing callgraph,
+    // linkage, retrieval, or IDG semantics; those artifacts carry their own
+    // semantic ABIs and exact source fingerprints.
+    let callgraph_stale = !sidecar_is_fresh("callgraph");
+    let retrieval_stale = callgraph_stale || !sidecar_is_fresh("retrieval");
+    let linkage_stale = !sidecar_is_fresh("linkage");
+    let idg_stale = callgraph_stale || linkage_stale || !sidecar_is_fresh("idg");
+
+    let mut phases = [
+        (SemanticWorkerPhase::Compiler, compiler_stale),
+        (SemanticWorkerPhase::Callgraph, callgraph_stale),
+        (SemanticWorkerPhase::Retrieval, retrieval_stale),
+        (SemanticWorkerPhase::Linkage, linkage_stale),
+        (SemanticWorkerPhase::Idg, idg_stale),
+    ]
+    .into_iter()
+    .filter_map(|(phase, stale)| stale.then_some(phase))
+    .collect::<Vec<_>>();
+    // The IDG phase commits the manifest from its live exact workspace.
+    // Otherwise refresh the descriptive manifest after any artifact change,
+    // or when only manifest producer metadata drifted.
+    if !idg_stale
+        && (!phases.is_empty() || validation.manifest_status != bonsai_sdk::CacheFreshnessStatus::Fresh)
+    {
+        phases.push(SemanticWorkerPhase::Manifest);
+    }
+    phases
+}
+
 fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Result<()> {
+    if phase == SemanticWorkerPhase::Manifest {
+        let _ = bonsai_for_cli().cache(root).write_manifest()?;
+        return Ok(());
+    }
     let project = open_project_sidecar_validation_only(root)?;
     match phase {
         SemanticWorkerPhase::Compiler => project.cache().warm_compiler_object_sidecar(),
@@ -152,6 +241,7 @@ fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Re
             cli_println!("{}", serde_json::to_string_pretty(&stats)?);
             flush_stdout()
         }
+        SemanticWorkerPhase::Manifest => unreachable!("manifest phase returned before workspace open"),
     }
 }
 
@@ -217,4 +307,132 @@ pub(crate) fn cmd_dump_cfg(root: &std::path::Path, symbol: &str) -> Result<()> {
     stage.finish();
     cli_println!("{}", serde_json::to_string_pretty(&cfg)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod semantic_phase_tests {
+    use super::*;
+    use bonsai_sdk::{CacheFreshnessStatus, CacheSidecarValidation, CacheValidationReport};
+    use std::path::PathBuf;
+
+    fn validation(
+        compiler: CacheFreshnessStatus,
+        callgraph: CacheFreshnessStatus,
+        retrieval: CacheFreshnessStatus,
+        linkage: CacheFreshnessStatus,
+        idg: CacheFreshnessStatus,
+    ) -> CacheValidationReport {
+        let sidecars = [
+            ("compiler_objects", compiler),
+            ("callgraph", callgraph),
+            ("retrieval", retrieval),
+            ("linkage", linkage),
+            ("idg", idg),
+        ]
+        .into_iter()
+        .map(|(name, status)| CacheSidecarValidation {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            status,
+            exists: status != CacheFreshnessStatus::Missing,
+            bytes: 1,
+            reason: None,
+        })
+        .collect();
+        CacheValidationReport {
+            manifest_status: CacheFreshnessStatus::Fresh,
+            structural_ready: false,
+            semantic_ready: false,
+            legacy_dataflow_ready: false,
+            taint_graph_ready: false,
+            export_ready: false,
+            sidecars,
+            stale_reasons: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn all_current_sidecars_require_no_worker() {
+        let current = CacheFreshnessStatus::Fresh;
+        assert!(semantic_phase_plan(&validation(current, current, current, current, current)).is_empty());
+    }
+
+    #[test]
+    fn semantic_generation_requires_validated_semantic_readiness() {
+        let current = CacheFreshnessStatus::Fresh;
+        let mut report = validation(current, current, current, current, current);
+        report.structural_ready = true;
+        assert!(!semantic_generation_is_current(&report));
+        report.semantic_ready = true;
+        assert!(semantic_generation_is_current(&report));
+    }
+
+    #[test]
+    fn compiler_object_storage_invalidation_rebuilds_only_that_generation() {
+        let current = CacheFreshnessStatus::Fresh;
+        assert_eq!(
+            semantic_phase_plan(&validation(
+                CacheFreshnessStatus::Stale,
+                current,
+                current,
+                current,
+                current,
+            )),
+            vec![SemanticWorkerPhase::Compiler, SemanticWorkerPhase::Manifest,]
+        );
+    }
+
+    #[test]
+    fn leaf_invalidation_rebuilds_only_the_leaf() {
+        let current = CacheFreshnessStatus::Fresh;
+        assert_eq!(
+            semantic_phase_plan(&validation(
+                current,
+                current,
+                CacheFreshnessStatus::Missing,
+                current,
+                current,
+            )),
+            vec![SemanticWorkerPhase::Retrieval, SemanticWorkerPhase::Manifest,]
+        );
+    }
+
+    #[test]
+    fn linkage_invalidation_rebuilds_linkage_and_dependent_idg() {
+        let current = CacheFreshnessStatus::Fresh;
+        assert_eq!(
+            semantic_phase_plan(&validation(
+                current,
+                current,
+                current,
+                CacheFreshnessStatus::Stale,
+                current,
+            )),
+            vec![SemanticWorkerPhase::Linkage, SemanticWorkerPhase::Idg]
+        );
+    }
+
+    #[test]
+    fn non_applicable_idg_is_current() {
+        let current = CacheFreshnessStatus::Fresh;
+        assert!(semantic_phase_plan(&validation(
+            current,
+            current,
+            current,
+            current,
+            CacheFreshnessStatus::NotApplicable,
+        ))
+        .is_empty());
+    }
+
+    #[test]
+    fn stale_descriptive_manifest_refreshes_without_rebuilding_semantics() {
+        let current = CacheFreshnessStatus::Fresh;
+        let mut validation = validation(current, current, current, current, current);
+        validation.manifest_status = CacheFreshnessStatus::Stale;
+        assert_eq!(
+            semantic_phase_plan(&validation),
+            vec![SemanticWorkerPhase::Manifest]
+        );
+    }
 }

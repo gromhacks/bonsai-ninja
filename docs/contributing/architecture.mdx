@@ -63,15 +63,20 @@ detected from the host and the process's active nested Linux cgroup v1/v2
 memory controller, optionally lowered by
 `BONSAI_MEMORY_BUDGET_MB`. Weighted compiler batches use each source unit's
 actual byte size after subtracting the process's measured resident set and a
-safety margin; the conservative worker profile serializes exact units at a
-3 GiB budget, while larger budgets allow small units to share only the
-remaining parallelism. IDG transfer obtains the same exact VFS byte length
-through the compiler semantics provider after linkage/resolver state is
-resident. Unsupported RSS probes fall back to a conservative reserve. This is
-never an analysis budget. The workspace's exact-body cache also derives its
-byte budget from this effective memory limit. That cache changes how much
-adapter-lowered IR is retained between exact lookups, not which IR is produced
-or which files are analyzed.
+safety margin. The weighted scheduler charges a fixed per-unit frontend cost
+plus measured source bytes, so several small files can run concurrently under
+a 3 GiB budget while one genuinely large unit runs alone. IDG transfer obtains
+the same exact VFS byte length through the compiler semantics provider after
+linkage/resolver state is resident. Unsupported RSS probes fall back to a
+conservative reserve. This is never an analysis budget. The workspace's
+exact-body cache also derives its byte budget from this effective memory
+limit. That cache changes how much adapter-lowered IR is retained between
+exact lookups, not which IR is produced or which files are analyzed. The
+budget is not an operating-system RSS limit: clean memory-mapped factstore
+pages, allocator arenas, stacks, and output buffers can make RSS exceed it.
+Under pressure the OS can reclaim those clean pages while Bonsai serializes,
+spills, or exactly recomputes compiler bodies. Resource accounting changes
+throughput and representation only.
 
 **`crates/hash`** provides FNV-1a digests for every persisted ID. Sole API:
 `fnv1a_str_slice64`, `fnv1a_names64`, `fnv1a_bytes64`, `fnv1a_low32`. RFC
@@ -103,12 +108,27 @@ boundary. For each source snapshot it persists a relocatable
 events, syntax facts, and parser/adapter diagnostics. It never persists a raw
 Tree-sitter tree or parser handle.
 
+The object generation exposes two separately integrity-checked header
+projections: imports, plus compact syntax targets containing adapter-lowered
+calls, assignment aliases, factory assignments, and receiver/type evidence.
+Rule planning first tests raw source anchors, then exact import/package
+headers, then exact syntax targets. Only surviving files decompress
+declarations and flow events. The full body remains the canonical source when
+a surviving file needs matching, transfer, or rendered evidence; this is one
+compiler IR with staged decoding, not a second parser.
+
 Object identity is the workspace-relative path/module context, selected
 adapter, explicit frontend ABI, and SHA-256 of the complete source. A
 factstore generation contains exact per-object payload digests and a strong
 generation digest. Publication is atomic. A stale generation may still supply
 an unchanged content-addressed object; generation refresh copies its validated
 compressed payload directly and recompiles only misses.
+
+`FileId` is a deterministic full-workspace source ordinal, not the insertion
+position of a scoped query. Filtered and literal-prefiltered opens retain that
+ordinal with sparse VFS slots. A one-file or candidate-only workspace can
+therefore decode the exact same compiler object as a complete workspace
+without reparsing or changing symbol identity.
 
 ```mermaid
 flowchart LR
@@ -132,6 +152,28 @@ validates every sidecar against the same current workspace snapshot; if a file
 changed between workers, it reruns the exact phases until one coherent atomic
 generation is current. That retry reaches quiescence without an iteration cap.
 
+The linkage factstore publishes three independently decodable views of that
+generation:
+
+- a declaration/type symbol table used by syntax lookup and exact-body symbol
+  rebinding; and
+- finalized receiver inheritance used to enrich file-local compiler bodies
+  for receiver-sensitive inventory without loading the whole symbol table;
+  and
+- compact AST-derived call/return linkage used by callgraph and IDG stitching.
+
+Both carry the same source ledger, semantic ABI, declaration count, and
+canonical `FileId`/`SymbolId` order. A syntax query reads only the symbol
+payload. It does not deserialize call linkage and does not decode all
+per-file flow-event bodies merely to discard them. File-local inventory reads
+the receiver-ancestry payload, enriches the compact syntax-target header, and
+filters exact import and syntax-target facts before body decode. Import
+evidence is read directly from each compiler object even when optional
+workspace-package prewarm has no languages, so a static import cannot be lost
+at that phase boundary. When a selected function needs global flow evidence,
+its exact compiler object is streamed and rebound to the persisted symbol
+table.
+
 The global index is a linker header, not a second copy of every body. It keeps
 declarations, aggregate layouts, types, modules, imports, inheritance, and
 stable symbol identities. Exact consumers stream one compiler-object body at a
@@ -139,6 +181,46 @@ time, remap its file-local symbols to the header, and release it after the
 memory-aware batch unless the byte-weighted hot cache retains it. This is the
 large-workspace invariant: body and graph lifetimes do not multiply peak
 memory, while every requested body is still analyzed exactly.
+
+## Query phase contracts
+
+Commands request the lowest compiler product that can answer their contract:
+
+- `tree` walks the filesystem directly and never opens the compiler,
+  callgraph, rulepack, or IDG.
+- Syntax inventories stream file-local `CompiledFileObject` facts. Definitions
+  and cross-file symbol labels may retain compact linker headers; none of these
+  commands retains all function bodies.
+- File/name/kind predicates run during the IR walk before result-row
+  allocation. JSON pagination estimates serialized fields only and never reads
+  text-only source-line previews.
+- `read-file` opens a one-file scoped workspace by default. Explicit flow,
+  rulepack, or cross-file-body options select workspace semantics.
+- `inspect` matches compact headers, streams exact occurrence bodies per
+  candidate file, and hydrates exact bodies only for selected rendered chains.
+- Security and export retain compact linkage beside the sparse IDG and stream
+  exact compiler bodies through the byte-weighted cache.
+- Every IDG query reuses `IdgQueryService::global_linkage_index()`. Calling
+  `AnalyzerDb::global_index()` from an IDG query is an architecture violation:
+  it creates a second workspace-wide body representation and turns a warm
+  graph query back into a full frontend pass. Attribution may re-lower one
+  exact file through the compiler-object cache when rendered evidence needs
+  body-level events.
+
+A lazy workspace-wide cache must be initialized before entering a Rayon
+file loop or outside that loop entirely. Constructing it from a worker can
+deadlock a saturated pool and makes every worker wait for work that requires
+the same pool. `syntax_inventory_commands_never_materialize_workspace_bodies`,
+`inspect_taint_flow_uses_workspace_syntax_flow_query_facade`, and
+`idg_taint_queries_reuse_canonical_linkage_without_global_body_materialization`
+in the architecture conformance suite enforce these boundaries.
+
+The IDG's sparse monotone queue is a compiler fixed-point solver, not a
+bounded breadth-first path search. Facts are reprocessed only when the lattice
+state grows, including across recursive call components, until no state
+changes. There is no semantic hop, depth, iteration, file, or result ceiling.
+Path previews and pages are separate rendered artifacts and report any
+truncation explicitly.
 
 ## Adapter framework
 
@@ -233,6 +315,16 @@ store all spilled chunks in one append-only temporary file and truncate
 consumed tails. Memory scheduling therefore remains exact without making file
 descriptor use proportional to closure fan-out.
 
+These external representations are lazy. Normal function-sized closures begin
+with empty sparse sets and in-memory frontiers. A dense workspace bitset is
+allocated only when reached-node density makes it smaller than the sparse
+representation; positive/Bloom acceleration and temporary files are allocated
+only on the first actual spill. This matters because return-summary
+compilation creates many independent fixed points. Eagerly reserving each
+fixed point's maximum spill page makes large-project latency proportional to
+allocator and file setup rather than compiler facts. Unit and architecture
+conformance tests pin the lazy boundary.
+
 Large compiler phases transfer only their canonical result across a scoped
 worker-heap boundary. Transient maps, sort buffers, and CSR construction state
 are released before the next phase begins. This is allocation-lifetime
@@ -244,6 +336,32 @@ presentation phases. The workspace retains only the validated pipeline hash
 for the current immutable source generation, so reloading the same sidecar
 does not rescan the source and dependency trees. Any source edit clears that
 token together with the IDG and other semantic caches.
+
+Native export has one exact call-relation representation: the resolved
+callgraph. It never enumerates simple paths or exposes a capped/BFS prefix
+mode through the CLI or SDK; dense cyclic graphs would make that product
+exponential. The legacy `complete_chains` switch is therefore intentionally
+absent, while schema compatibility fields report
+`mode=compressed_callgraph`, zero truncation, and explain that concrete path
+rows are represented by the graph.
+
+Export phase ownership is sequential and enforced by conformance tests:
+
+1. compiler linkage and the single canonical resolved callgraph drive
+   structural edges and graph-backed presentation;
+2. callgraph rows are serialized, resident flow labels are released, and all
+   callgraph owners are dropped together;
+3. file-local reachable/intra/alias/class/entry facts stream from exact
+   compiler objects, then the exact-body cache is released; and
+4. only then is the canonical IDG opened for assignment/propagation
+   projection.
+
+Flow-ID rendering receives the already-open compiler header and canonical
+callgraph. It must not call `AnalyzerDb::global_index()`, construct a second
+workspace name/adjacency table, or reparse source. A one-shot export streams
+directly into its requested writer. Only explicit `cache rebuild --export`
+publishes the reusable default artifact, so a cache miss never creates a
+multi-gigabyte temporary copy beside the requested output.
 
 **`crates/retrieval`** is a fact-backed candidate index, not an evidence
 engine. It persists `FactDoc` records under `.bonsai/` with stable fact ids,
@@ -404,7 +522,12 @@ interactive output does not accumulate duplicate wheels.
 The reuse path is binary factstores, not JSON re-parsing. Explicit cache
 producers such as `index --semantic`, SDK `Bonsai::index_semantic`, and
 `cache rebuild` also write `.bonsai/manifest.json`: a descriptive JSON
-inventory of sidecar coverage, producer fingerprints, and missing reasons.
+inventory of sidecar coverage, producer fingerprints, missing reasons, and a
+versioned source ledger. The ledger stores each path's size, modification
+stamp, and exact SHA-256 digest. A warm validation reuses the digest only when
+the metadata stamp is unchanged; changed metadata always rehashes content.
+This turns an unchanged 30,000-file reopen into metadata validation without
+weakening exact source identity.
 Commands still validate each sidecar's own header, payload index, and
 pipeline fingerprint before reuse; the manifest is for diagnostics, SDK
 consumers, and downstream tooling that need to understand what was produced.

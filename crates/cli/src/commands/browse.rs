@@ -261,7 +261,7 @@ pub(crate) fn cmd_defs(
                     let headers =
                         with_flows_header(&["name", "kind", "location", "signature", "callees"], flows);
                     let mut t = u.table(&headers);
-                    let decls_by_name = decls_lookup(ws);
+                    let callees_by_name = callee_summaries(ws, 3);
                     for d in &rows {
                         // Perl's adapter emits both sigil'd (`$token`) and
                         // bare (`token`) forms for each parameter so the
@@ -278,10 +278,7 @@ pub(crate) fn cmd_defs(
                             format!("{}({})", d.name, display_params.join(", "))
                         };
                         let loc = format!("{}:{}:{}", short_file(&d.file), d.line, d.column);
-                        let callees_cell = match decls_by_name.get(&d.name) {
-                            Some(decl) => summarize_callees(decl, 3),
-                            None => String::new(),
-                        };
+                        let callees_cell = callees_by_name.get(&d.name).cloned().unwrap_or_default();
                         let mut cells = vec![
                             Cell::new(u.name(&d.name)),
                             Cell::new(u.kind(&d.kind)),
@@ -513,14 +510,35 @@ pub(crate) fn cmd_entrypoints(
     Ok(())
 }
 
-/// Build a name → `&Decl` lookup used by browse commands that want to
-/// surface a definition's flow (callees) alongside its location.
-pub(crate) fn decls_lookup(ws: &Workspace) -> std::collections::HashMap<String, bonsai_lang_api::Decl> {
+/// Build compact declaration-name → outgoing-call previews from compiler
+/// linkage facts. Rendering a definitions page must not hydrate every
+/// workspace body merely to show three callee names.
+pub(crate) fn callee_summaries(ws: &Workspace, limit: usize) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
-    let global = ws.db().global_index();
-    for f in global.all_files() {
-        for d in global.decls_in(f) {
-            map.entry(d.name.clone()).or_insert_with(|| d.clone());
+    let global = ws.compiler_linkage_index();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            let Some(facts) = global.linkage_facts(decl.symbol) else {
+                continue;
+            };
+            let mut names = facts
+                .calls
+                .iter()
+                .map(|call| call.name.to_string())
+                .collect::<Vec<_>>();
+            let mut seen = std::collections::HashSet::new();
+            names.retain(|name| seen.insert(name.clone()));
+            if names.is_empty() {
+                continue;
+            }
+            let total = names.len();
+            let shown = names.into_iter().take(limit).collect::<Vec<_>>();
+            let summary = if total > limit {
+                format!("{} (+{})", shown.join(" → "), total - limit)
+            } else {
+                shown.join(" → ")
+            };
+            map.entry(decl.name.clone()).or_insert(summary);
         }
     }
     map
@@ -823,10 +841,6 @@ fn browse_table_row_cost(cells: &[usize]) -> u64 {
         .saturating_add(cells.iter().map(|len| wrapped_table_cell_cost(*len)).sum::<u64>())
 }
 
-fn source_line_cell_cost(ws: &Workspace, file: &str, line: u32) -> u64 {
-    wrapped_table_cell_cost(read_line(ws, file, line).len().min(4_000))
-}
-
 fn source_line_estimated_cell_cost() -> u64 {
     wrapped_table_cell_cost(320)
 }
@@ -942,11 +956,7 @@ pub(crate) fn cmd_calls(
         (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::FlowAnnotator::new(ws));
     let cost_bytes = |c: &bonsai_sdk::CallOut| {
         if !text_cost {
-            return (c.callee.len()
-                + c.caller.as_deref().map_or(1, str::len)
-                + c.file.len()
-                + 16
-                + read_line(ws, &c.file, c.line).len()) as u64
+            return (c.callee.len() + c.caller.as_deref().map_or(1, str::len) + c.file.len() + 16) as u64
                 + paging::TABLE_ROW_CHROME_BYTES;
         }
         let caller = c.caller.as_deref().unwrap_or("-");
@@ -1199,14 +1209,15 @@ pub(crate) fn page_info_to_json(info: &paging::PageInfo) -> serde_json::Value {
 /// Read a single 1-indexed line from a workspace file path, trimming
 /// trailing whitespace. Returns empty on any I/O or lookup failure.
 pub(crate) fn read_line(ws: &Workspace, file_path: &str, line: u32) -> String {
-    // Find the `FileId` that matches this path.
-    let global = ws.db().global_index();
-    let Some(file_id) = global.all_files().find(|f| {
-        ws.vfs()
-            .path(*f)
-            .map(|p| p.display().to_string())
-            .is_ok_and(|p| p == file_path)
-    }) else {
+    let path = std::path::Path::new(file_path);
+    let file_id = ws.vfs().lookup(path).or_else(|| {
+        ws.vfs().all_files().into_iter().find(|file| {
+            ws.vfs()
+                .path(*file)
+                .is_ok_and(|candidate| candidate.as_path() == path)
+        })
+    });
+    let Some(file_id) = file_id else {
         return String::new();
     };
     let Ok(snapshot) = ws.vfs().snapshot(file_id) else {
@@ -1279,8 +1290,7 @@ pub(crate) fn cmd_imports(
                 + import.alias.as_deref().map_or(1, str::len)
                 + import.original_name.as_deref().map_or(1, str::len)
                 + import.file.len()
-                + 16
-                + read_line(ws, &import.file, import.line).len()) as u64
+                + 16) as u64
                 + paging::TABLE_ROW_CHROME_BYTES;
         }
         let alias = import.alias.as_deref().unwrap_or("-");
@@ -1298,7 +1308,7 @@ pub(crate) fn cmd_imports(
             kind.len(),
             loc_len,
         ])
-        .saturating_add(source_line_cell_cost(ws, &import.file, import.line))
+        .saturating_add(source_line_estimated_cell_cost())
         .saturating_add(flow_cost)
     };
     match format {
@@ -1578,8 +1588,7 @@ pub(crate) fn cmd_vars(
                 + v.in_function.len()
                 + v.source_name.as_deref().map_or(1, str::len)
                 + v.file.len()
-                + 16
-                + read_line(ws, &v.file, v.line).len()) as u64
+                + 16) as u64
                 + paging::TABLE_ROW_CHROME_BYTES;
         }
         let src = v.source_name.as_deref().unwrap_or("-");
@@ -1885,8 +1894,7 @@ pub(crate) fn cmd_args(
                 + a.value.len().min(80)
                 + a.keyword.as_deref().map_or(0, str::len)
                 + a.file.len()
-                + 16
-                + read_line(ws, &a.file, a.line).len()) as u64
+                + 16) as u64
                 + paging::TABLE_ROW_CHROME_BYTES;
         }
         let pos_len = a
@@ -2021,8 +2029,7 @@ pub(crate) fn cmd_operations(
                 + op.detail.as_deref().map_or(0, str::len)
                 + operands_len
                 + op.file.len()
-                + 16
-                + read_line(ws, &op.file, op.line).len()) as u64
+                + 16) as u64
                 + paging::TABLE_ROW_CHROME_BYTES;
         }
         let loc_len = short_file(&op.file).len() + 24;

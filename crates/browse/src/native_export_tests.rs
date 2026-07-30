@@ -120,38 +120,19 @@ def process(value):
 }
 
 #[test]
-fn materialized_chain_limits_are_always_finite() {
-    let limits = ExportChainLimits::bounded_materialization();
-    assert_eq!(
-        limits.max_chains_per_target,
-        EXPORT_FLOW_CHAIN_MAX_CHAINS_PER_TARGET
-    );
-    assert_eq!(limits.max_entry_probes, EXPORT_FLOW_CHAIN_MAX_ENTRY_PROBES);
-}
-
-#[test]
 fn compressed_complete_rows_are_honestly_non_materialized() {
-    assert!(!chain_rows_complete(true, 0));
-    assert!(!flow_id_rows_complete(true, 0));
-    assert!(chain_rows_incomplete_reason(true, 0, 16, 64, true)
-        .is_some_and(|reason| reason.contains("compressed_callgraph")));
-    assert!(flow_id_rows_incomplete_reason(true, 0, true)
-        .is_some_and(|reason| reason.contains("compressed_callgraph")));
     let compiled = NativeExportConfig {
         full_propagations: false,
-        complete_chains: true,
         compiled_propagations: true,
     };
     assert_eq!(propagation_mode(compiled), "compiled_idg");
     assert!(propagation_omitted_reason(compiled).is_none());
     let materialized = NativeExportConfig {
         full_propagations: true,
-        complete_chains: true,
         compiled_propagations: false,
     };
     assert_eq!(propagation_mode(materialized), "materialized_entries");
     assert!(propagation_omitted_reason(materialized).is_none());
-    assert_eq!(export_flow_label_options(), FlowIdLabelOptions::default());
 }
 
 #[test]
@@ -165,7 +146,6 @@ fn parser_gaps_make_buffered_and_streaming_exports_incomplete() {
     let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
     let config = NativeExportConfig {
         full_propagations: true,
-        complete_chains: true,
         compiled_propagations: false,
     };
 
@@ -201,7 +181,6 @@ fn unresolved_calls_make_native_export_incomplete() {
         dir.path(),
         NativeExportConfig {
             full_propagations: true,
-            complete_chains: true,
             compiled_propagations: false,
         },
     )
@@ -524,7 +503,6 @@ def entry(user):
         dir.path(),
         NativeExportConfig {
             full_propagations: true,
-            complete_chains: true,
             compiled_propagations: false,
         },
     )

@@ -14,8 +14,9 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::{qualified_names_match, FileId, Span, SymbolId};
 use bonsai_hash::Hasher as StableHasher;
 use bonsai_lang_api::{
-    AliasTarget, AssignmentValueIndex, CallArg, CallKind, CallTextPrefilter, Decl, DeclIndex, DeclKind,
-    FlowEvent, ImportSpec, ModulePath, RefKind, TypeAliasBinding,
+    AliasTarget, AssignmentValueIndex, CallArg, CallKind, CallTextPrefilter, CompilerAssignmentAlias,
+    CompilerSyntaxHeader, Decl, DeclIndex, DeclKind, FlowEvent, ImportSpec, ModulePath, RefKind,
+    TypeAliasBinding,
 };
 use bonsai_taint::{TaintedCall, TaintedCallKind};
 use bonsai_workspace::{decl_decorator_names, Workspace};
@@ -576,7 +577,7 @@ where
         rules,
         &mut on_file_done,
         MatchRunConfig {
-            mode: ConstraintMode::Strict,
+            mode: ConstraintMode::Inventory,
             taint_view: None,
             scan_files: None,
             factory: &empty_factory_returns(),
@@ -846,7 +847,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
         prepared.needs_workspace_package_context(),
         FactRetention::Transient,
     );
-    let global = streaming_global_linkage(ws);
+    let global = streaming_global_headers(ws);
     let Some(file_index) = ws.db().decl_index_remapped_to_headers(global.as_ref(), file) else {
         return false;
     };
@@ -957,7 +958,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
     taint_view: &InterTaintView<'_>,
 ) -> bool {
     let file = expected.span.file;
-    let global = streaming_global_linkage(ws);
+    let global = streaming_global_headers(ws);
     let Some(file_index) = ws.db().decl_index_remapped_to_headers(global.as_ref(), file) else {
         return false;
     };
@@ -1075,7 +1076,7 @@ pub(crate) fn rule_example_has_arg_index(ws: &Workspace, rule: &Rule, wanted_ind
     };
     let wanted_index = wanted_index as usize;
     let db = ws.db();
-    let global = streaming_global_linkage(ws);
+    let global = streaming_global_headers(ws);
     let constructor_names = if rule.match_spec.kind == MatchKind::New {
         collect_constructor_names(global.as_ref())
     } else {
@@ -1166,7 +1167,7 @@ where
         rules,
         &mut on_file_done,
         MatchRunConfig {
-            mode: ConstraintMode::SinkInventory,
+            mode: ConstraintMode::Inventory,
             taint_view: None,
             scan_files: Some(files),
             factory,
@@ -1196,6 +1197,8 @@ where
     if taint_view.is_none() {
         prepare_matcher_fact_caches_for_broad_scan();
     }
+    let debug_security_phase = bonsai_diagnostics::debug::is_enabled("security-phase");
+    let matcher_started = debug_security_phase.then(Instant::now);
     let db = ws.db();
     let files: Vec<_> = scan_files
         .map(|files| files.to_vec())
@@ -1221,17 +1224,55 @@ where
         crate::deps::workspace_dependency_package_context_for_scan(root, db.vfs().instance_id())
     });
     let prepared_by_language = build_prepared_rule_batches(&prepared, factory);
-    prepare_compiler_object_session_for_import_prewarm(ws, &files, &prepared_by_language, retention);
+    let compiler_session_started = debug_security_phase.then(Instant::now);
+    prepare_compiler_object_session_for_header_prewarm(ws, &files, &prepared_by_language, retention);
+    if let Some(started) = compiler_session_started {
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "matcher compiler-object session: {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+    }
     // Package/context gates and receiver-base matching both consume
     // workspace-global syntax facts. Build them once before the file-level
     // Rayon scan so workers borrow the canonical compiler IR instead of
     // racing to construct it or rebuilding per-file declarations afterward.
+    let imports_started = debug_security_phase.then(Instant::now);
     let prewarmed_import_contexts =
         prewarm_language_import_package_contexts(ws, &files, &prepared_by_language, retention);
-    let global_file_indexes = matcher_global_headers(ws, retention);
-    let receiver_base_map =
-        workspace_receiver_base_map_if_needed(&prepared, mode, global_file_indexes.as_ref());
-    let debug_security_phase = bonsai_diagnostics::debug::is_enabled("security-phase");
+    if let Some(started) = imports_started {
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "matcher import/package prewarm: {:.3}s languages={}",
+            started.elapsed().as_secs_f64(),
+            prewarmed_import_contexts.len()
+        );
+    }
+    let headers_started = debug_security_phase.then(Instant::now);
+    // Inventory matching is deliberately file-local: it lists syntax sites
+    // and does not perform receiver-ancestry or cross-file missing-call
+    // traversal. Local compiler symbols are already internally consistent, so
+    // loading/remapping the workspace symbol table here would be pure cost.
+    let global_file_indexes =
+        (!matches!(mode, ConstraintMode::Inventory)).then(|| matcher_global_headers(ws, retention));
+    let inventory_receiver_ancestry =
+        matches!(mode, ConstraintMode::Inventory).then(|| ws.compiler_receiver_ancestry());
+    if let Some(started) = headers_started {
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "matcher symbol projection: {:.3}s declarations={} receiver_types={}",
+            started.elapsed().as_secs_f64(),
+            global_file_indexes.as_ref().map_or(0, |headers| headers.len()),
+            inventory_receiver_ancestry
+                .as_ref()
+                .map_or(0, |ancestry| ancestry.len())
+        );
+    }
+    let receiver_base_map = global_file_indexes
+        .as_ref()
+        .map_or_else(AHashMap::new, |headers| {
+            workspace_receiver_base_map_if_needed(&prepared, mode, headers.as_ref())
+        });
     let needs_constructor_names = prepared
         .iter()
         .any(|rule| rule.rule.match_spec.kind == MatchKind::New);
@@ -1250,7 +1291,10 @@ where
         Vec::new()
     };
     let constructor_names = if needs_constructor_names {
-        collect_constructor_names_in_files(global_file_indexes.as_ref(), &constructor_files)
+        global_file_indexes.as_ref().map_or_else(
+            || collect_constructor_names_in_compiler_files(ws, &constructor_files),
+            |headers| collect_constructor_names_in_files(headers.as_ref(), &constructor_files),
+        )
     } else {
         AHashSet::new()
     };
@@ -1263,6 +1307,99 @@ where
             constructor_names.len()
         );
     }
+    // Apply cheap raw targets first, then exact import/package constraints in
+    // parallel from the prewarmed compiler headers. Retain only rule
+    // references for survivors; full declarations and flow events are decoded
+    // in the body phase below. This is the compiler's header/body boundary:
+    // scheduling changes, but every rule and file keeps the same semantics.
+    let raw_scan_files = files
+        .iter()
+        .copied()
+        .filter(|file| {
+            let Some(adapter) = ws.db().adapter_for(*file) else {
+                return false;
+            };
+            let Some(file_rules) = prepared_by_language.get(adapter.language_id().as_str()) else {
+                return false;
+            };
+            let Ok(snapshot) = ws.db().vfs().snapshot(*file) else {
+                return false;
+            };
+            file_rules.syntax_target_possible_in_text(
+                snapshot.text.as_ref(),
+                mode,
+                adapter.capabilities().call_text_prefilter,
+            )
+        })
+        .collect::<Vec<_>>();
+    let package_filter_started = debug_security_phase.then(Instant::now);
+    let scan_plan = {
+        use rayon::prelude::*;
+        raw_scan_files
+            .par_iter()
+            .map(|&file| {
+                let adapter = ws.db().adapter_for(file)?;
+                let language = adapter.language_id();
+                let file_rules = prepared_by_language.get(language.as_str())?;
+                let snapshot = ws.db().vfs().snapshot(file).ok()?;
+                let import_contexts = prewarmed_import_contexts.get(language.as_str());
+                let prewarmed_compiler_imports = import_contexts
+                    .and_then(|contexts| contexts.imports_by_file.get(&file))
+                    .map(Arc::as_ref);
+                let compiler_imports_owned = prewarmed_compiler_imports
+                    .is_none()
+                    .then(|| ws.db().compiler_import_index_uncached(file))
+                    .flatten();
+                let compiler_imports = prewarmed_compiler_imports.or(compiler_imports_owned.as_ref());
+                let rules = file_rules.filtered_rule_refs_for_text(FileRuleFilterContext {
+                    ws,
+                    file,
+                    text: snapshot.text.as_ref(),
+                    mode,
+                    retention,
+                    prewarmed_import_contexts: import_contexts,
+                    compiler_imports,
+                });
+                let mut syntax = ws.db().compiler_syntax_header_uncached(file);
+                if let (Some(ancestry), Some(syntax)) =
+                    (inventory_receiver_ancestry.as_ref(), syntax.as_mut())
+                {
+                    ancestry.apply_to_syntax_header(syntax);
+                }
+                if inventory_receiver_ancestry.is_none() {
+                    if let Some(syntax) = syntax.as_mut() {
+                        enrich_compiler_syntax_header_receiver_types(syntax, &receiver_base_map);
+                    }
+                }
+                let rules = syntax.as_ref().map_or(rules.clone(), |syntax| {
+                    file_rules.filtered_rule_refs_for_syntax_header(
+                        rules,
+                        syntax,
+                        compiler_imports,
+                        &constructor_names,
+                        language.as_str(),
+                    )
+                });
+                (!rules.is_empty()).then_some((file, rules))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+    };
+    if let Some(started) = package_filter_started {
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "matcher header/package filter: {:.3}s raw_candidates={} body_candidates={}",
+            started.elapsed().as_secs_f64(),
+            raw_scan_files.len(),
+            scan_plan.len()
+        );
+    }
+    let target_prefilter_skipped = total.saturating_sub(scan_plan.len());
+    for _ in 0..target_prefilter_skipped {
+        on_file_done();
+    }
     // Each `scan_file_rules` writes only to its own per-file Vec. Schedule
     // exact source-size-weighted batches so several small Tree-sitter units
     // can run together while an unusually large source runs alone. Batch
@@ -1270,12 +1407,12 @@ where
     // Match collection order is non-deterministic across runs, but downstream
     // callers sort before emission to keep finding ids stable.
     let workers = matcher_worker_count();
-    let source_bytes = files
+    let source_bytes = scan_plan
         .iter()
-        .map(|&file| {
+        .map(|(file, _)| {
             ws.db()
                 .vfs()
-                .snapshot(file)
+                .snapshot(*file)
                 .map_or(0, |snapshot| snapshot.text.len() as u64)
         })
         .collect::<Vec<_>>();
@@ -1284,67 +1421,54 @@ where
     if debug_security_phase {
         bonsai_diagnostics::debug_log!(
             "security-phase",
-            "matcher schedule: files={} batches={} max_parallel={}",
+            "matcher schedule: files={} candidates={} batches={} max_parallel={}",
             files.len(),
+            scan_plan.len(),
             batches.len(),
             parallel_width
         );
     }
-    if parallel_width <= 1 || files.len() <= 1 {
-        return files
+    if parallel_width <= 1 || scan_plan.len() <= 1 {
+        return scan_plan
             .iter()
-            .flat_map(|&file| {
+            .flat_map(|(file, rule_refs)| {
+                let file = *file;
                 let _syntax_release = TransientSyntaxRelease::new(ws, file, retention);
                 let mut file_out: Vec<RuleMatch> = Vec::new();
                 if let Some(adapter) = ws.db().adapter_for(file) {
                     let language = adapter.language_id();
-                    if let Some(file_rules) = prepared_by_language.get(language.as_str()) {
-                        if let Ok(snapshot) = ws.db().vfs().snapshot(file) {
-                            let Some(compiler_object) = ws.db().compiler_file_object_uncached(file) else {
-                                on_file_done();
-                                return file_out;
-                            };
-                            let file_imports = compiler_object.imports;
-                            let file_declarations = compiler_object.declarations;
-                            let Some(file_rules) = file_rules.filtered_for_text(FileRuleFilterContext {
-                                ws,
-                                file,
-                                text: snapshot.text.as_ref(),
-                                mode,
-                                retention,
-                                prewarmed_import_contexts: prewarmed_import_contexts.get(language.as_str()),
-                                compiler_imports: file_imports.as_ref(),
-                            }) else {
-                                on_file_done();
-                                return file_out;
-                            };
-                            let Some(file_index) = file_declarations else {
-                                on_file_done();
-                                return file_out;
-                            };
-                            let file_index = ws
-                                .db()
-                                .remap_decl_index_to_headers(global_file_indexes.as_ref(), file_index);
-                            let ctx = FileScanContext {
-                                ws,
-                                file,
-                                file_index: &file_index,
-                                file_imports: file_imports.as_ref(),
-                                import_package_contexts: prewarmed_import_contexts.get(language.as_str()),
-                                constructor_names: &constructor_names,
-                                mode,
-                                taint_view,
-                                retention,
-                                receiver_base_map: &receiver_base_map,
-                            };
-                            scan_file_rules(&ctx, &file_rules, &mut file_out);
-                            if dedup_file_matches {
-                                dedup_inventory_matches_in_place(&mut file_out);
-                            }
-                        } else {
-                            on_file_done();
-                            return file_out;
-                        }
+                    let file_rules = PreparedRuleBatch::new(rule_refs, factory.clone());
+                    let Some(compiler_object) = ws.db().compiler_file_object_uncached(file) else {
+                        on_file_done();
+                        return file_out;
+                    };
+                    let file_imports = compiler_object.imports;
+                    let Some(file_index) = compiler_object.declarations else {
+                        on_file_done();
+                        return file_out;
+                    };
+                    let mut file_index = match global_file_indexes.as_ref() {
+                        Some(headers) => ws.db().remap_decl_index_to_headers(headers.as_ref(), file_index),
+                        None => file_index,
+                    };
+                    if let Some(ancestry) = inventory_receiver_ancestry.as_ref() {
+                        ancestry.apply_to_decl_index(&mut file_index);
+                    }
+                    let ctx = FileScanContext {
+                        ws,
+                        file,
+                        file_index: &file_index,
+                        file_imports: file_imports.as_ref(),
+                        import_package_contexts: prewarmed_import_contexts.get(language.as_str()),
+                        constructor_names: &constructor_names,
+                        mode,
+                        taint_view,
+                        retention,
+                        receiver_base_map: &receiver_base_map,
+                    };
+                    scan_file_rules(&ctx, &file_rules, &mut file_out);
+                    if dedup_file_matches {
+                        dedup_inventory_matches_in_place(&mut file_out);
                     }
                 }
                 on_file_done();
@@ -1353,81 +1477,66 @@ where
             .collect();
     }
     let run_parallel_scan = |pool: Option<&rayon::ThreadPool>| {
+        let scan_total = scan_plan.len();
         let (tick_tx, tick_rx) = mpsc::channel();
         let parsed_files = Arc::new(AtomicUsize::new(0));
-        let text_skipped_files = Arc::new(AtomicUsize::new(0));
+        let text_skipped_files = Arc::new(AtomicUsize::new(target_prefilter_skipped));
         let parsed_files_worker = parsed_files.clone();
-        let text_skipped_files_worker = text_skipped_files.clone();
         std::thread::scope(|scope| {
             let worker = scope.spawn(move || {
                 let scan = || {
                     use rayon::prelude::*;
                     let mut out = Vec::new();
                     for range in &batches {
-                        let mut batch_out = files[range.clone()]
+                        let mut batch_out = scan_plan[range.clone()]
                             .par_iter()
-                            .flat_map_iter(|&file| {
+                            .flat_map_iter(|(file, rule_refs)| {
+                                let file = *file;
                                 let _syntax_release = TransientSyntaxRelease::new(ws, file, retention);
                                 let mut file_out: Vec<RuleMatch> = Vec::new();
                                 if let Some(adapter) = ws.db().adapter_for(file) {
                                     let language = adapter.language_id();
-                                    if let Some(file_rules) = prepared_by_language.get(language.as_str()) {
-                                        if let Ok(snapshot) = ws.db().vfs().snapshot(file) {
-                                            let Some(compiler_object) =
-                                                ws.db().compiler_file_object_uncached(file)
-                                            else {
-                                                let _ = tick_tx.send(());
-                                                return file_out;
-                                            };
-                                            let file_imports = compiler_object.imports;
-                                            let file_declarations = compiler_object.declarations;
-                                            let Some(file_rules) =
-                                                file_rules.filtered_for_text(FileRuleFilterContext {
-                                                    ws,
-                                                    file,
-                                                    text: snapshot.text.as_ref(),
-                                                    mode,
-                                                    retention,
-                                                    prewarmed_import_contexts: prewarmed_import_contexts
-                                                        .get(language.as_str()),
-                                                    compiler_imports: file_imports.as_ref(),
-                                                })
-                                            else {
-                                                text_skipped_files_worker.fetch_add(1, Ordering::Relaxed);
-                                                let _ = tick_tx.send(());
-                                                return file_out;
-                                            };
-                                            parsed_files_worker.fetch_add(1, Ordering::Relaxed);
-                                            let Some(file_index) = file_declarations else {
-                                                let _ = tick_tx.send(());
-                                                return file_out;
-                                            };
-                                            let file_index = ws.db().remap_decl_index_to_headers(
-                                                global_file_indexes.as_ref(),
-                                                file_index,
-                                            );
-                                            let ctx = FileScanContext {
-                                                ws,
-                                                file,
-                                                file_index: &file_index,
-                                                file_imports: file_imports.as_ref(),
-                                                import_package_contexts: prewarmed_import_contexts
-                                                    .get(language.as_str()),
-                                                constructor_names: &constructor_names,
-                                                mode,
-                                                taint_view,
-                                                retention,
-                                                receiver_base_map: &receiver_base_map,
-                                            };
-                                            scan_file_rules(&ctx, &file_rules, &mut file_out);
-                                            if dedup_file_matches {
-                                                dedup_inventory_matches_in_place(&mut file_out);
-                                            }
-                                        } else {
-                                            let _ = tick_tx.send(());
-                                            return file_out;
+                                    let file_rules = PreparedRuleBatch::new(rule_refs, factory.clone());
+                                    let Some(compiler_object) = ws.db().compiler_file_object_uncached(file)
+                                    else {
+                                        let _ = tick_tx.send(());
+                                        return file_out;
+                                    };
+                                    let file_imports = compiler_object.imports;
+                                    parsed_files_worker.fetch_add(1, Ordering::Relaxed);
+                                    let Some(file_index) = compiler_object.declarations else {
+                                        let _ = tick_tx.send(());
+                                        return file_out;
+                                    };
+                                    let mut file_index = match global_file_indexes.as_ref() {
+                                        Some(headers) => {
+                                            ws.db().remap_decl_index_to_headers(headers.as_ref(), file_index)
                                         }
+                                        None => file_index,
+                                    };
+                                    if let Some(ancestry) = inventory_receiver_ancestry.as_ref() {
+                                        ancestry.apply_to_decl_index(&mut file_index);
                                     }
+                                    let ctx = FileScanContext {
+                                        ws,
+                                        file,
+                                        file_index: &file_index,
+                                        file_imports: file_imports.as_ref(),
+                                        import_package_contexts: prewarmed_import_contexts
+                                            .get(language.as_str()),
+                                        constructor_names: &constructor_names,
+                                        mode,
+                                        taint_view,
+                                        retention,
+                                        receiver_base_map: &receiver_base_map,
+                                    };
+                                    scan_file_rules(&ctx, &file_rules, &mut file_out);
+                                    if dedup_file_matches {
+                                        dedup_inventory_matches_in_place(&mut file_out);
+                                    }
+                                } else {
+                                    let _ = tick_tx.send(());
+                                    return file_out;
                                 }
                                 let _ = tick_tx.send(());
                                 file_out
@@ -1443,14 +1552,15 @@ where
                 }
             });
             let mut completed = 0usize;
-            while completed < total {
+            while completed < scan_total {
                 match tick_rx.recv() {
                     Ok(()) => {
                         completed += 1;
                         if debug_security_phase && completed % 5_000 == 0 {
                             bonsai_diagnostics::debug_log!(
                                 "security-phase",
-                                "matcher scan progress: {completed}/{total}"
+                                "matcher candidate scan progress: {completed}/{}",
+                                scan_total
                             );
                         }
                         on_file_done();
@@ -1469,6 +1579,13 @@ where
                             text_skipped_files.load(Ordering::Relaxed),
                             out.len()
                         );
+                        if let Some(started) = matcher_started {
+                            bonsai_diagnostics::debug_log!(
+                                "security-phase",
+                                "matcher total: {:.3}s",
+                                started.elapsed().as_secs_f64()
+                            );
+                        }
                     }
                     out
                 }
@@ -1544,7 +1661,7 @@ fn matcher_worker_stack_bytes() -> usize {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConstraintMode {
     Strict,
-    SinkInventory,
+    Inventory,
     TaintEndpoint,
 }
 
@@ -1586,16 +1703,17 @@ fn matcher_global_headers(ws: &Workspace, retention: FactRetention) -> Arc<bonsa
     if retention == FactRetention::Cached {
         return ws.db().global_index();
     }
-    streaming_global_linkage(ws)
+    streaming_global_headers(ws)
 }
 
-/// Return the compact, workspace-wide compiler linkage table shared with the
-/// IDG. Broad security phases use this for stable symbols and cross-file
-/// resolution, then stream exact compiler-object bodies one file at a time.
-/// Keeping those two lifetimes separate prevents a second whole-project body
-/// index from becoming resident beside the IDG on large workspaces.
-fn streaming_global_linkage(ws: &Workspace) -> Arc<bonsai_index::GlobalIndex> {
-    ws.compiler_linkage_index()
+/// Return the compact workspace declaration/type symbol table.
+///
+/// Rule matching needs stable symbols, receiver ancestry, and cross-file
+/// declarations, but not call/return linkage. Loading the independent header
+/// payload keeps a broad inventory from deserializing the much larger IDG
+/// stitch table before it streams exact compiler-object bodies.
+fn streaming_global_headers(ws: &Workspace) -> Arc<bonsai_index::GlobalIndex> {
+    ws.compiler_header_index()
 }
 
 struct FileScanContext<'a, 'taint> {
@@ -1643,7 +1761,7 @@ fn workspace_receiver_base_map_if_needed(
     mode: ConstraintMode,
     global: &bonsai_index::GlobalIndex,
 ) -> AHashMap<String, Vec<String>> {
-    if matches!(mode, ConstraintMode::SinkInventory) {
+    if matches!(mode, ConstraintMode::Inventory) {
         return AHashMap::new();
     }
     if !rules.iter().any(prepared_rule_needs_receiver_base_map) {
@@ -1704,7 +1822,7 @@ impl ConstraintMode {
     /// source-specific taint pass rechecks arg-taint constraints
     /// before emitting a finding.
     fn ignore_arg_tainted(self) -> bool {
-        matches!(self, Self::SinkInventory | Self::TaintEndpoint)
+        matches!(self, Self::Inventory | Self::TaintEndpoint)
     }
 }
 
@@ -1818,6 +1936,31 @@ impl<'a> PreparedRule<'a> {
         mode: ConstraintMode,
         call_text_prefilter: CallTextPrefilter,
     ) -> bool {
+        if !self.syntax_target_possible_in_mode(text, mode, call_text_prefilter) {
+            return false;
+        }
+        self.package_text_anchors.is_empty()
+            || self
+                .package_text_anchors
+                .iter()
+                .any(|anchor| text.contains(anchor))
+            || file_packages.is_some_and(|packages| self.package_evidence_allows_text_anchor_skip(packages))
+    }
+
+    /// Cheap, import-independent proof that this file can still contain the
+    /// rule's syntax target.
+    ///
+    /// Package evidence may allow a package text anchor to be absent, so that
+    /// gate remains in [`Self::text_possible_in_mode`] after imports are
+    /// available. Target/call anchors cannot be created by imports; checking
+    /// them against the VFS snapshot before decoding a compiler object is
+    /// therefore lossless.
+    fn syntax_target_possible_in_mode(
+        &self,
+        text: &str,
+        mode: ConstraintMode,
+        call_text_prefilter: CallTextPrefilter,
+    ) -> bool {
         let target_possible = self
             .text_anchor_groups
             .iter()
@@ -1828,20 +1971,14 @@ impl<'a> PreparedRule<'a> {
         if !special_regex_text_possible(self.rule, text) {
             return false;
         }
-        if matches!(mode, ConstraintMode::SinkInventory) && call_text_prefilter != CallTextPrefilter::Disabled
-        {
+        if matches!(mode, ConstraintMode::Inventory) && call_text_prefilter != CallTextPrefilter::Disabled {
             if let Some(anchor) = self.call_text_anchor.as_deref() {
                 if !call_text_anchor_possible_in(text, anchor, call_text_prefilter) {
                     return false;
                 }
             }
         }
-        self.package_text_anchors.is_empty()
-            || self
-                .package_text_anchors
-                .iter()
-                .any(|anchor| text.contains(anchor))
-            || file_packages.is_some_and(|packages| self.package_evidence_allows_text_anchor_skip(packages))
+        true
     }
 
     fn package_evidence_allows_text_anchor_skip(&self, file_packages: &AHashSet<String>) -> bool {
@@ -2271,6 +2408,9 @@ fn text_anchor_groups_for_target(target: &RuleTarget, match_kind: MatchKind) -> 
     }
     if let Some(regex) = target.regex.as_deref() {
         let mut out = Vec::new();
+        for token in regex_required_hir_anchor_tokens(regex) {
+            push_text_anchor(&mut out, &token);
+        }
         for token in regex_literal_anchor_tokens(regex) {
             push_text_anchor(&mut out, &token);
         }
@@ -2292,6 +2432,76 @@ fn text_anchor_groups_for_target(target: &RuleTarget, match_kind: MatchKind) -> 
         }
     }
     groups
+}
+
+/// Return a conservative OR-group of literal tokens required by every regex
+/// match.
+///
+/// This walks `regex-syntax` HIR instead of interpreting pattern text. A
+/// concatenation may choose any one mandatory child; an alternation is usable
+/// only when every branch has a required literal, in which case the branch
+/// literals form one OR-group. Optional repetitions, classes, and look-around
+/// contribute no evidence. Empty output means "cannot prove a prefilter," so
+/// exact matcher evaluation remains the fallback.
+fn regex_required_hir_anchor_tokens(pattern: &str) -> Vec<String> {
+    let Ok(hir) = regex_syntax::Parser::new().parse(pattern) else {
+        return Vec::new();
+    };
+    required_hir_anchor_group(&hir)
+}
+
+fn required_hir_anchor_group(hir: &regex_syntax::hir::Hir) -> Vec<String> {
+    use regex_syntax::hir::HirKind;
+
+    match hir.kind() {
+        HirKind::Literal(literal) => strongest_literal_token(&literal.0).into_iter().collect(),
+        HirKind::Capture(capture) => required_hir_anchor_group(&capture.sub),
+        HirKind::Repetition(repetition) if repetition.min > 0 => required_hir_anchor_group(&repetition.sub),
+        HirKind::Concat(parts) => parts.iter().fold(Vec::new(), |strongest, part| {
+            stronger_anchor_group(strongest, required_hir_anchor_group(part))
+        }),
+        HirKind::Alternation(branches) => {
+            let mut alternatives = Vec::new();
+            for branch in branches {
+                let required = required_hir_anchor_group(branch);
+                if required.is_empty() {
+                    return Vec::new();
+                }
+                for token in required {
+                    if !alternatives.contains(&token) {
+                        alternatives.push(token);
+                    }
+                }
+            }
+            alternatives.sort();
+            alternatives
+        }
+        HirKind::Empty | HirKind::Class(_) | HirKind::Look(_) | HirKind::Repetition(_) => Vec::new(),
+    }
+}
+
+fn strongest_literal_token(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.split(|ch: char| !(ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()))
+        .filter(|token| token.len() >= 3)
+        .max_by_key(|token| token.len())
+        .map(str::to_string)
+}
+
+fn stronger_anchor_group(current: Vec<String>, candidate: Vec<String>) -> Vec<String> {
+    if current.is_empty() {
+        return candidate;
+    }
+    if candidate.is_empty() {
+        return current;
+    }
+    let current_min = current.iter().map(String::len).min().unwrap_or_default();
+    let candidate_min = candidate.iter().map(String::len).min().unwrap_or_default();
+    if candidate_min > current_min || (candidate_min == current_min && candidate.len() < current.len()) {
+        candidate
+    } else {
+        current
+    }
 }
 
 fn push_text_anchor(out: &mut Vec<String>, value: &str) {
@@ -2683,7 +2893,10 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
         out
     }
 
-    fn filtered_for_text(&self, context: FileRuleFilterContext<'_>) -> Option<Self> {
+    fn filtered_rule_refs_for_text(
+        &self,
+        context: FileRuleFilterContext<'_>,
+    ) -> Vec<&'p PreparedRule<'rule>> {
         let FileRuleFilterContext {
             ws,
             file,
@@ -2694,7 +2907,7 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             compiler_imports,
         } = context;
         let include_workspace_package_context = self.include_workspace_package_context
-            && (!matches!(mode, ConstraintMode::SinkInventory)
+            && (!matches!(mode, ConstraintMode::Inventory)
                 || workspace_manifest_package_context_allowed(ws, file));
         let file_packages = self.has_package_text_anchors.then(|| {
             file_package_set_with_prewarmed_workspace_context_and_retention(
@@ -2730,7 +2943,175 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
         // run inside the matcher. There are very few such rules, and
         // none in the default Java taint path.
         rules.extend(self.missing_rules.iter().copied());
-        (!rules.is_empty()).then(|| Self::new(&rules, self.factory.clone()))
+        rules
+    }
+
+    /// Narrow call/new rules with exact adapter-emitted call targets before
+    /// decoding declaration and flow bodies. Non-call rules remain untouched.
+    ///
+    /// The projection deliberately over-approximates declaration scope by
+    /// combining file-local aliases. That can retain extra bodies, but it
+    /// cannot suppress a match that the full matcher would emit.
+    fn filtered_rule_refs_for_syntax_header(
+        &self,
+        rules: Vec<&'p PreparedRule<'rule>>,
+        syntax: &CompilerSyntaxHeader,
+        compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+        constructor_names: &AHashSet<String>,
+        language: &str,
+    ) -> Vec<&'p PreparedRule<'rule>> {
+        if rules
+            .iter()
+            .all(|rule| !matches!(rule.rule.match_spec.kind, MatchKind::Call | MatchKind::New))
+        {
+            return rules;
+        }
+        let mut alias_map = compiler_imports
+            .map(bonsai_lang_api::alias_map_from_imports)
+            .unwrap_or_default();
+        extend_alias_map_with_declared_types(&mut alias_map, &syntax.type_aliases);
+        extend_alias_map_with_compiler_assignment_aliases(&mut alias_map, &syntax.assignment_aliases);
+        if let Some(specs) = self.factory.specs_for(language) {
+            let mut factory_aliases = Vec::new();
+            for assignment in &syntax.factory_assignments {
+                let expanded = expand_callee_alias(&assignment.call_name, &alias_map);
+                for spec in specs {
+                    if !factory_spec_matches_call(
+                        &assignment.call_name,
+                        assignment.call_receiver.as_deref(),
+                        spec,
+                    ) && !expanded
+                        .as_deref()
+                        .is_some_and(|expanded| factory_spec_matches_call(expanded, None, spec))
+                    {
+                        continue;
+                    }
+                    let binding = TypeAliasBinding {
+                        name: assignment.target.clone(),
+                        type_name: spec.type_name.clone(),
+                    };
+                    if !factory_aliases.contains(&binding) {
+                        factory_aliases.push(binding);
+                    }
+                }
+            }
+            extend_alias_map_with_declared_types(&mut alias_map, &factory_aliases);
+        }
+        rules
+            .into_iter()
+            .filter(|prepared| {
+                if !matches!(prepared.rule.match_spec.kind, MatchKind::Call | MatchKind::New) {
+                    return true;
+                }
+                syntax.calls.iter().any(|call| {
+                    if let Some(matched_callee) = callee_or_alias_matches(
+                        &call.name,
+                        &call.receiver_types,
+                        prepared.name,
+                        prepared.attribute,
+                        prepared.regex.as_ref(),
+                        &alias_map,
+                    ) {
+                        if !prepared.base_name_allows(&matched_callee) {
+                            return false;
+                        }
+                        return prepared.rule.match_spec.kind != MatchKind::New
+                            || call.call_kind == CallKind::Constructor
+                            || constructor_name_matches(&call.name, constructor_names);
+                    }
+                    false
+                })
+            })
+            .collect()
+    }
+
+    /// Return whether any rule in this language batch can match the raw file
+    /// text before imports or full adapter IR are decoded.
+    fn syntax_target_possible_in_text(
+        &self,
+        text: &str,
+        mode: ConstraintMode,
+        call_text_prefilter: CallTextPrefilter,
+    ) -> bool {
+        !self.missing_rules.is_empty()
+            || self
+                .call_rules
+                .iter()
+                .chain(self.read_rules.iter())
+                .chain(self.write_rules.iter())
+                .chain(self.param_rules.iter())
+                .chain(self.return_rules.iter())
+                .any(|rule| rule.syntax_target_possible_in_mode(text, mode, call_text_prefilter))
+    }
+}
+
+/// Extend compiler import/type aliases through adapter-proven assignment
+/// aliases to an unbounded fixed point. Header planning uses a file-wide
+/// over-approximation; the full body matcher retains declaration scope.
+fn extend_alias_map_with_compiler_assignment_aliases(
+    alias_map: &mut std::collections::HashMap<String, AliasTarget>,
+    assignments: &[CompilerAssignmentAlias],
+) {
+    if alias_map.is_empty() || assignments.is_empty() {
+        return;
+    }
+    let mut dependents: AHashMap<&str, Vec<&str>> = AHashMap::new();
+    for assignment in assignments {
+        dependents
+            .entry(assignment.source.as_str())
+            .or_default()
+            .push(assignment.target.as_str());
+    }
+    let mut pending = std::collections::VecDeque::new();
+    let mut queued = AHashSet::new();
+    for source in alias_map.keys() {
+        if queued.insert(source.clone()) {
+            pending.push_back(source.clone());
+        }
+    }
+    while let Some(source) = pending.pop_front() {
+        let Some(resolved) = alias_map.get(&source).cloned() else {
+            continue;
+        };
+        let Some(targets) = dependents.get(source.as_str()) else {
+            continue;
+        };
+        for target in targets {
+            if alias_map.contains_key(*target) {
+                continue;
+            }
+            alias_map.insert((*target).to_string(), resolved.clone());
+            if queued.insert((*target).to_string()) {
+                pending.push_back((*target).to_string());
+            }
+        }
+    }
+}
+
+/// Mirror full-body receiver typing on a compact compiler header.
+///
+/// Both the receiver identity and declared types are adapter facts. The
+/// file-wide lookup is conservative across declaration scopes, so it may keep
+/// an extra body but cannot reject an exact match.
+fn enrich_compiler_syntax_header_receiver_types(
+    syntax: &mut CompilerSyntaxHeader,
+    receiver_base_map: &AHashMap<String, Vec<String>>,
+) {
+    for call in &mut syntax.calls {
+        let receiver = call
+            .receiver
+            .as_deref()
+            .or_else(|| call_receiver_text(&call.name));
+        let receiver_root = receiver.and_then(receiver_root_name);
+        let mut direct_types = call.receiver_types.clone();
+        for alias in &syntax.type_aliases {
+            if receiver.is_some_and(|receiver| alias.name == receiver)
+                || receiver_root.as_deref() == Some(alias.name.as_str())
+            {
+                push_unique_string(&mut direct_types, alias.type_name.clone());
+            }
+        }
+        call.receiver_types = expanded_receiver_types(&direct_types, receiver_base_map);
     }
 }
 
@@ -2752,7 +3133,7 @@ fn build_prepared_rule_batches<'p, 'rule>(
 }
 
 /// Materialize one scoped compiler-object generation when this matcher pass
-/// needs a whole-language import projection.
+/// needs independently decodable import and syntax-target projections.
 ///
 /// The coordinator would otherwise lower complete declarations during the
 /// import prewarm and then lower them again during file matching. The scoped
@@ -2760,18 +3141,13 @@ fn build_prepared_rule_batches<'p, 'rule>(
 /// analyzed workspace; later phases stream the exact same adapter IR. Failure
 /// is an optimization miss only: every consumer falls back to canonical
 /// Tree-sitter lowering and preserves semantic coverage.
-fn prepare_compiler_object_session_for_import_prewarm<'p, 'rule>(
+fn prepare_compiler_object_session_for_header_prewarm<'p, 'rule>(
     ws: &Workspace,
     files: &[FileId],
     prepared_by_language: &AHashMap<String, PreparedRuleBatch<'p, 'rule>>,
     retention: FactRetention,
 ) {
-    if retention != FactRetention::Transient
-        || files.len() <= 1
-        || !prepared_by_language
-            .values()
-            .any(|batch| batch.include_workspace_package_context)
-    {
+    if retention != FactRetention::Transient || files.len() <= 1 {
         return;
     }
     let compiler_files = files
@@ -3756,7 +4132,7 @@ fn missing_target_in_reachable_callees(
     if max_depth == 0 {
         return false;
     }
-    let global = streaming_global_linkage(ws);
+    let global = streaming_global_headers(ws);
     let mut visited: AHashSet<bonsai_common::SymbolId> = AHashSet::new();
     let mut frontier: AHashSet<bonsai_common::SymbolId> = AHashSet::new();
 
@@ -4031,6 +4407,11 @@ struct WorkspaceImportPackageContext {
 struct LanguageImportPackageContexts {
     workspace: Arc<WorkspaceImportPackageContext>,
     by_file: AHashMap<FileId, Arc<WorkspaceImportPackageContext>>,
+    /// Exact adapter import IR retained from the language prewarm. Imports
+    /// are the compiler's lightweight header facts; keeping them lets package
+    /// constraints reject files before full declaration/flow objects are
+    /// decoded and also avoids reparsing relative-import targets.
+    imports_by_file: AHashMap<FileId, Arc<bonsai_lang_api::ImportIndex>>,
 }
 
 struct ImportComponents {
@@ -4091,7 +4472,7 @@ fn estimated_language_import_context_bytes(contexts: &LanguageImportPackageConte
     let mut seen = AHashSet::new();
     let workspace_identity = Arc::as_ptr(&contexts.workspace) as usize;
     seen.insert(workspace_identity);
-    contexts.by_file.values().fold(
+    let package_bytes = contexts.by_file.values().fold(
         estimated_workspace_import_context_bytes(&contexts.workspace),
         |total, context| {
             let total = total.saturating_add(32);
@@ -4102,7 +4483,32 @@ fn estimated_language_import_context_bytes(contexts: &LanguageImportPackageConte
                 total
             }
         },
-    )
+    );
+    contexts
+        .imports_by_file
+        .values()
+        .fold(package_bytes, |total, imports| {
+            imports
+                .imports
+                .iter()
+                .fold(total.saturating_add(64), |total, spec| {
+                    total
+                        .saturating_add(96)
+                        .saturating_add(u64::try_from(spec.module.len()).unwrap_or(u64::MAX))
+                        .saturating_add(
+                            spec.alias
+                                .as_ref()
+                                .and_then(|value| u64::try_from(value.len()).ok())
+                                .unwrap_or_default(),
+                        )
+                        .saturating_add(
+                            spec.original_name
+                                .as_ref()
+                                .and_then(|value| u64::try_from(value.len()).ok())
+                                .unwrap_or_default(),
+                        )
+                })
+        })
 }
 
 /// Build the set of canonical package names imported by `file`. Broad scans
@@ -4142,6 +4548,9 @@ fn file_package_set_with_prewarmed_workspace_context_and_retention(
     } else {
         Arc::new(LanguageImportPackageContexts::default())
     };
+    let prewarmed_file_imports = prewarmed_import_contexts
+        .and_then(|contexts| contexts.imports_by_file.get(&file))
+        .map(Arc::as_ref);
     let workspace_imports = Arc::clone(&language_imports.workspace);
     let component_imports = language_imports
         .by_file
@@ -4193,51 +4602,75 @@ fn file_package_set_with_prewarmed_workspace_context_and_retention(
             build_file_package_set(
                 ws,
                 file,
-                workspace_imports.as_ref(),
-                component_imports.as_ref(),
-                workspace_packages,
-                retention,
-                compiler_imports,
+                FilePackageSetInputs {
+                    workspace_imports: workspace_imports.as_ref(),
+                    component_imports: component_imports.as_ref(),
+                    workspace_packages,
+                    retention,
+                    compiler_imports: compiler_imports.or(prewarmed_file_imports),
+                    prewarmed_imports: prewarmed_import_contexts.map(|contexts| &contexts.imports_by_file),
+                },
             )
         },
         estimated_string_set_bytes,
     )
 }
 
+struct FilePackageSetInputs<'a> {
+    workspace_imports: &'a WorkspaceImportPackageContext,
+    component_imports: &'a WorkspaceImportPackageContext,
+    workspace_packages: Option<crate::deps::WorkspaceDependencyPackages>,
+    retention: FactRetention,
+    compiler_imports: Option<&'a bonsai_lang_api::ImportIndex>,
+    prewarmed_imports: Option<&'a AHashMap<FileId, Arc<bonsai_lang_api::ImportIndex>>>,
+}
+
 fn build_file_package_set(
     ws: &Workspace,
     file: FileId,
-    workspace_imports: &WorkspaceImportPackageContext,
-    component_imports: &WorkspaceImportPackageContext,
-    workspace_packages: Option<crate::deps::WorkspaceDependencyPackages>,
-    retention: FactRetention,
-    compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
+    inputs: FilePackageSetInputs<'_>,
 ) -> Arc<AHashSet<String>> {
     let mut out: AHashSet<String> = AHashSet::new();
-    if let Some(imports) = compiler_imports {
-        insert_file_import_packages(ws, file, imports, retention, &mut out);
+    if let Some(imports) = inputs.compiler_imports {
+        insert_file_import_packages(
+            ws,
+            file,
+            imports,
+            inputs.retention,
+            inputs.prewarmed_imports,
+            &mut out,
+        );
     } else {
-        let imports = match retention {
+        let imports = match inputs.retention {
             FactRetention::Cached => ws.db().import_index(file).map(|imports| (*imports).clone()),
             FactRetention::Transient => transient_import_index(ws, file),
         };
         if let Some(imports) = imports {
-            insert_file_import_packages(ws, file, &imports, retention, &mut out);
+            insert_file_import_packages(
+                ws,
+                file,
+                &imports,
+                inputs.retention,
+                inputs.prewarmed_imports,
+                &mut out,
+            );
         }
     }
     out.extend(
-        workspace_imports
+        inputs
+            .workspace_imports
             .packages
             .iter()
             .map(|package| workspace_import_package_marker(package)),
     );
     out.extend(
-        component_imports
+        inputs
+            .component_imports
             .packages
             .iter()
             .map(|package| component_import_package_marker(package)),
     );
-    if let Some(workspace_packages) = workspace_packages {
+    if let Some(workspace_packages) = inputs.workspace_packages {
         out.extend(workspace_packages.packages.iter().cloned());
     }
     Arc::new(out)
@@ -4298,7 +4731,11 @@ fn project_language_import_package_contexts(
             (file, projected)
         })
         .collect();
-    Arc::new(LanguageImportPackageContexts { workspace, by_file })
+    Arc::new(LanguageImportPackageContexts {
+        workspace,
+        by_file,
+        imports_by_file: base.imports_by_file.clone(),
+    })
 }
 
 fn project_workspace_import_package_context(
@@ -4374,16 +4811,14 @@ fn build_language_import_package_contexts(
                     .map(|imports| (*candidate_file, (*imports).clone()))
             })
             .collect(),
-        FactRetention::Transient => {
-            let mut imports = AHashMap::new();
-            ws.db()
-                .visit_compiler_file_objects_uncached(&files, |candidate_file, object| {
-                    if let Some(import_index) = object.and_then(|object| object.imports) {
-                        imports.insert(candidate_file, import_index);
-                    }
-                });
-            imports
-        }
+        FactRetention::Transient => files
+            .iter()
+            .filter_map(|candidate_file| {
+                ws.db()
+                    .import_index_uncached(*candidate_file)
+                    .map(|imports| (*candidate_file, imports))
+            })
+            .collect(),
     };
     let mut components = ImportComponents::new(files.len());
     for importer in files.iter().copied() {
@@ -4459,6 +4894,10 @@ fn build_language_import_package_contexts(
                     .map(|context| (candidate_file, context))
             })
             .collect(),
+        imports_by_file: imports_by_file
+            .into_iter()
+            .map(|(file, imports)| (file, Arc::new(imports)))
+            .collect(),
     })
 }
 
@@ -4467,6 +4906,7 @@ fn insert_file_import_packages(
     file: FileId,
     imports: &bonsai_lang_api::ImportIndex,
     retention: FactRetention,
+    prewarmed_imports: Option<&AHashMap<FileId, Arc<bonsai_lang_api::ImportIndex>>>,
     out: &mut AHashSet<String>,
 ) {
     for spec in &imports.imports {
@@ -4480,7 +4920,7 @@ fn insert_file_import_packages(
             insert_import_target_prefixes(out, stripped);
         }
         if let Some(imported_file) = resolve_relative_import_file(ws, file, &spec.module) {
-            for package in direct_package_imports_for_file(ws, imported_file, retention) {
+            for package in direct_package_imports_for_file(ws, imported_file, retention, prewarmed_imports) {
                 insert_local_import_package_markers(out, spec, &package);
             }
         }
@@ -4491,13 +4931,23 @@ fn direct_package_imports_for_file(
     ws: &Workspace,
     file: FileId,
     retention: FactRetention,
+    prewarmed_imports: Option<&AHashMap<FileId, Arc<bonsai_lang_api::ImportIndex>>>,
 ) -> AHashSet<String> {
     let mut out = AHashSet::new();
-    let imports = match retention {
-        FactRetention::Cached => ws.db().import_index(file).map(|imports| (*imports).clone()),
-        FactRetention::Transient => transient_import_index(ws, file),
+    let prewarmed = prewarmed_imports.and_then(|imports| imports.get(&file));
+    let loaded;
+    let imports = if let Some(imports) = prewarmed {
+        imports.as_ref()
+    } else {
+        loaded = match retention {
+            FactRetention::Cached => ws.db().import_index(file).map(|imports| (*imports).clone()),
+            FactRetention::Transient => transient_import_index(ws, file),
+        };
+        let Some(imports) = loaded.as_ref() else {
+            return out;
+        };
+        imports
     };
-    let Some(imports) = imports else { return out };
     for spec in &imports.imports {
         if spec.module.starts_with('.') {
             continue;
@@ -7971,7 +8421,7 @@ pub(crate) fn callback_extension_attribution_match(
         };
         Some(receiver_origin_callback_param_reaches_call)
     })?;
-    let global = streaming_global_linkage(ws);
+    let global = streaming_global_headers(ws);
     let file_index = ws
         .db()
         .decl_index_remapped_to_headers(global.as_ref(), sink.span.file)?;
@@ -8450,6 +8900,23 @@ fn collect_constructor_names_in_files(
     names
 }
 
+fn collect_constructor_names_in_compiler_files(ws: &Workspace, files: &[FileId]) -> AHashSet<String> {
+    let mut names = AHashSet::new();
+    for &file in files {
+        let Some(index) = ws.db().decl_index_uncached(file) else {
+            continue;
+        };
+        names.extend(
+            index
+                .defs
+                .iter()
+                .filter(|decl| matches!(decl.kind, DeclKind::Constructor))
+                .map(|decl| decl.name.clone()),
+        );
+    }
+    names
+}
+
 /// True when the callee's tail (after `.` / `::` qualification)
 /// names a known constructor. Lets `kind: new` rules fire on the
 /// `MyClass(x)` form even though the AST didn't tag it as a
@@ -8529,7 +8996,7 @@ where
     F: FnMut(),
 {
     let db = ws.db();
-    let global = streaming_global_linkage(ws);
+    let global = streaming_global_headers(ws);
     let mut files = scan_files.to_vec();
     files.sort_by_key(|file| file.raw());
     files.dedup();

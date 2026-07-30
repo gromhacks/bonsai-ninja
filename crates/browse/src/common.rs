@@ -282,7 +282,7 @@ impl Locator {
         loc.language = db
             .adapter_for(span.file)
             .map(|a| a.language_id().as_str().to_string());
-        let global = db.global_index();
+        let global = ws.compiler_linkage_index();
         let decls_in_file: &[bonsai_lang_api::Decl] = global.decls_in(span.file);
         let decls_ref: Vec<&bonsai_lang_api::Decl> = decls_in_file.iter().collect();
         if let Some((_func_id, decl_name)) = bonsai_inspect::find_enclosing_func(&decls_ref, span) {

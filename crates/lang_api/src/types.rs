@@ -634,6 +634,289 @@ pub enum FlowEvent {
     },
 }
 
+/// Independently decodable syntax targets projected from one compiler object.
+///
+/// This is a scheduling header, not a second semantic representation. It is
+/// derived only from [`DeclIndex`] facts emitted by the owning language
+/// adapter and lets broad consumers reject files that cannot contain a
+/// requested call before inflating declaration bodies and flow events.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerSyntaxHeader {
+    /// Every adapter-emitted call shape in the file. Spans and arguments stay
+    /// in the compiler-object body because they are needed only after a rule
+    /// target has selected the file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<CompilerCallHeader>,
+    /// Exact assignment aliases (`target = source`) from the adapter's flow
+    /// tree. Consumers may use these to extend import aliases to a fixed point
+    /// before deciding that a call target is impossible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignment_aliases: Vec<CompilerAssignmentAlias>,
+    /// Direct call-result assignments used by rulepack-declared factory
+    /// return typing. The call/receiver identities come from adapter facts,
+    /// never from parsing assignment text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub factory_assignments: Vec<CompilerFactoryCallAssignment>,
+    /// Adapter-derived type aliases visible somewhere in the file. This is an
+    /// intentional over-approximation for header planning; declaration-local
+    /// scope and ordering remain enforced by the full matcher body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_aliases: Vec<TypeAliasBinding>,
+}
+
+/// Compact call target retained in [`CompilerSyntaxHeader`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerCallHeader {
+    pub name: String,
+    /// Adapter-normalized receiver/base expression when the call event
+    /// provides one. No consumer may reconstruct this from source text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receiver_types: Vec<String>,
+    pub call_kind: CallKind,
+}
+
+/// One adapter-proven assignment alias retained in a syntax header.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerAssignmentAlias {
+    pub target: String,
+    pub source: String,
+}
+
+/// One direct call-result assignment retained for factory-return typing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerFactoryCallAssignment {
+    pub target: String,
+    pub call_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_receiver: Option<String>,
+}
+
+impl CompilerSyntaxHeader {
+    /// Project the complete file-local call surface from canonical adapter IR.
+    #[must_use]
+    pub fn from_decl_index(index: &DeclIndex) -> Self {
+        fn push_unique(values: &mut Vec<String>, value: &str) {
+            let value = value.trim();
+            if !value.is_empty() && !values.iter().any(|existing| existing == value) {
+                values.push(value.to_string());
+            }
+        }
+
+        fn walk(
+            events: &[FlowEvent],
+            assignment_values: &ahash::AHashMap<Span, &AssignmentValueFact>,
+            calls: &mut Vec<CompilerCallHeader>,
+            assignment_aliases: &mut Vec<CompilerAssignmentAlias>,
+            factory_assignments: &mut Vec<CompilerFactoryCallAssignment>,
+        ) {
+            for event in events {
+                match event {
+                    FlowEvent::Call {
+                        name,
+                        receiver,
+                        receiver_types,
+                        call_kind,
+                        ..
+                    } => calls.push(CompilerCallHeader {
+                        name: name.clone(),
+                        receiver: receiver.clone(),
+                        receiver_types: receiver_types.clone(),
+                        call_kind: *call_kind,
+                    }),
+                    FlowEvent::Assign {
+                        span,
+                        target,
+                        source_name,
+                        source_call,
+                        ..
+                    } => {
+                        let indexed = assignment_values.get(span).copied();
+                        if let Some(source) = source_name.as_deref() {
+                            let target = target.trim();
+                            let source = source.trim();
+                            if !target.is_empty() && !source.is_empty() {
+                                assignment_aliases.push(CompilerAssignmentAlias {
+                                    target: target.to_string(),
+                                    source: source.to_string(),
+                                });
+                            }
+                        }
+                        if let Some(name) = source_call
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                        {
+                            calls.push(CompilerCallHeader {
+                                name: name.to_string(),
+                                receiver: indexed
+                                    .and_then(|fact| fact.direct_call_receiver.as_deref())
+                                    .map(str::to_string),
+                                receiver_types: Vec::new(),
+                                call_kind: CallKind::Function,
+                            });
+                        }
+                        let call_name = indexed
+                            .and_then(|fact| fact.direct_call_name.as_deref())
+                            .or(source_call.as_deref())
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty());
+                        if let Some(call_name) = call_name {
+                            let target = target.trim();
+                            if !target.is_empty() {
+                                factory_assignments.push(CompilerFactoryCallAssignment {
+                                    target: target.to_string(),
+                                    call_name: call_name.to_string(),
+                                    call_receiver: indexed
+                                        .and_then(|fact| fact.direct_call_receiver.as_deref())
+                                        .map(str::to_string),
+                                });
+                            }
+                        }
+                    }
+                    FlowEvent::Branch {
+                        then_events,
+                        else_events,
+                        ..
+                    } => {
+                        walk(
+                            then_events,
+                            assignment_values,
+                            calls,
+                            assignment_aliases,
+                            factory_assignments,
+                        );
+                        walk(
+                            else_events,
+                            assignment_values,
+                            calls,
+                            assignment_aliases,
+                            factory_assignments,
+                        );
+                    }
+                    FlowEvent::Loop { body, .. }
+                    | FlowEvent::Defer { body, .. }
+                    | FlowEvent::Using { body, .. } => {
+                        walk(
+                            body,
+                            assignment_values,
+                            calls,
+                            assignment_aliases,
+                            factory_assignments,
+                        );
+                    }
+                    FlowEvent::Try {
+                        body,
+                        catch_events,
+                        finally_events,
+                        ..
+                    } => {
+                        walk(
+                            body,
+                            assignment_values,
+                            calls,
+                            assignment_aliases,
+                            factory_assignments,
+                        );
+                        walk(
+                            catch_events,
+                            assignment_values,
+                            calls,
+                            assignment_aliases,
+                            factory_assignments,
+                        );
+                        walk(
+                            finally_events,
+                            assignment_values,
+                            calls,
+                            assignment_aliases,
+                            factory_assignments,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut out = Self::default();
+        let assignment_values = index
+            .assignment_values
+            .iter()
+            .map(|fact| (fact.assignment_span, fact))
+            .collect::<ahash::AHashMap<_, _>>();
+        for decl in &index.defs {
+            walk(
+                &decl.flow_events,
+                &assignment_values,
+                &mut out.calls,
+                &mut out.assignment_aliases,
+                &mut out.factory_assignments,
+            );
+            for alias in &decl.type_aliases {
+                if !alias.name.trim().is_empty()
+                    && !alias.type_name.trim().is_empty()
+                    && !out.type_aliases.iter().any(|existing| existing == alias)
+                {
+                    out.type_aliases.push(alias.clone());
+                }
+            }
+        }
+        for reference in &index.refs {
+            if reference.kind == RefKind::Call && !reference.name.trim().is_empty() {
+                out.calls.push(CompilerCallHeader {
+                    name: reference.name.clone(),
+                    receiver: None,
+                    receiver_types: Vec::new(),
+                    call_kind: CallKind::Function,
+                });
+            }
+        }
+        for call in &mut out.calls {
+            call.receiver_types.sort();
+            call.receiver_types.dedup();
+        }
+        out.calls.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.call_kind.as_str().cmp(right.call_kind.as_str()))
+                .then_with(|| left.receiver.cmp(&right.receiver))
+                .then_with(|| left.receiver_types.cmp(&right.receiver_types))
+        });
+        out.calls.dedup_by(|left, right| left == right);
+        out.assignment_aliases.sort_by(|left, right| {
+            left.target
+                .cmp(&right.target)
+                .then_with(|| left.source.cmp(&right.source))
+        });
+        out.assignment_aliases.dedup_by(|left, right| left == right);
+        out.factory_assignments.sort_by(|left, right| {
+            left.target
+                .cmp(&right.target)
+                .then_with(|| left.call_name.cmp(&right.call_name))
+                .then_with(|| left.call_receiver.cmp(&right.call_receiver))
+        });
+        out.factory_assignments.dedup();
+        out.type_aliases.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.type_name.cmp(&right.type_name))
+        });
+        out.type_aliases.dedup();
+
+        // Retain stable first-seen receiver type spellings while avoiding a
+        // separate set allocation in every small compiler object.
+        for call in &mut out.calls {
+            let mut normalized = Vec::with_capacity(call.receiver_types.len());
+            for receiver_type in &call.receiver_types {
+                push_unique(&mut normalized, receiver_type);
+            }
+            call.receiver_types = normalized;
+        }
+        out
+    }
+}
+
 impl FlowEvent {
     /// Source span carried by this event.
     #[must_use]

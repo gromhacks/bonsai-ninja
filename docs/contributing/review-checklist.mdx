@@ -102,6 +102,17 @@ class and verify each box.
 
 ## Browse / Inspect / Trace change (`crates/browse`, `crates/inspect`, `crates/trace`)
 
+- [ ] **Compiler phase stays minimal.** Syntax commands do not call
+      `global_index()`, resolve a callgraph, open an IDG, or load a rulepack.
+      They stream exact file-local compiler objects or use compact headers.
+- [ ] **Predicates run before allocation.** File/name/kind/caller/callee
+      filters are applied during the Tree-sitter IR walk, not after collecting
+      every workspace row.
+- [ ] **No nested lazy construction.** A Rayon file loop does not initialize a
+      workspace-wide header, linkage, graph, or body cache. Initialize the
+      immutable product before the loop or stream independent file objects.
+- [ ] **Text rendering stays out of JSON cost.** JSON pagination does not read
+      source-line previews or build flow annotations absent from JSON rows.
 - [ ] **Browse tests pass.** `cargo test -p bonsai_workspace --test
       flow_event_audit_fixes` and the per-command tests.
 - [ ] **JSON shape stable.** Field names in `*Out` structs match
@@ -161,6 +172,77 @@ class and verify each box.
       sdk_cli_parity` passes.
 - [ ] **Documentation updated.** `docs/contributing/sdk.mdx` lists the new API.
 
+## Cache / performance / large-workspace change
+
+- [ ] **Stable scoped identity holds.** Filtered workspaces preserve the
+      complete workspace's deterministic `FileId` ordinal and reuse identical
+      compiler objects; scoped opens never publish partial sidecars as a full
+      generation.
+- [ ] **Cache validation is exact and cheap.** Sidecar headers are checked
+      before payload hydration. Unchanged manifest source-ledger entries avoid
+      rehashing; any metadata change forces SHA-256 content validation.
+- [ ] **Syntax lookup uses the symbol payload.** Complete declaration/type
+      lookup decodes the independent header payload from the linkage
+      factstore. It does not decode call linkage or every full compiler object
+      and then clear `FlowEvent` bodies.
+- [ ] **Header/body staging is preserved.** Compiler-object import indexes and
+      compact syntax-target facts remain independently integrity-checked and
+      decodable. Broad rule scans apply raw source anchors, exact
+      import/package predicates, and exact adapter-lowered syntax targets in
+      that order before decoding declaration/flow bodies. Streaming import
+      consumers read the header even when optional package prewarm is empty;
+      they do not invoke the adapter/parser again.
+- [ ] **File-local inventory keeps exact ancestry.** Receiver-sensitive
+      inventory loads the compact receiver-ancestry linkage payload and
+      enriches exact local bodies. It does not load the complete symbol table
+      or silently drop cross-file inheritance matches.
+- [ ] **Memory changes scheduling only.** `BONSAI_MEMORY_BUDGET_MB` and worker
+      settings may alter parallelism, cache retention, or spill frequency, but
+      never files, facts, closure, iterations, or findings.
+- [ ] **External-memory acceleration stays lazy.** Resident-only IDG fixed
+      points do not reserve maximum spill pages, dense workspace bitsets,
+      Bloom/positive caches, or temporary files. Promotion/spill is covered by
+      unit and conformance tests and changes representation only.
+- [ ] **One canonical callgraph is shared.** Workspace callgraph publication
+      seeds dataflow and flow-ID consumers with the same `Arc`; phase release
+      drops all shared owners without discarding computed labels/facts.
+- [ ] **Native export never enumerates paths.** CLI, SDK, and renderer expose
+      only the exact `compressed_callgraph` relation. There is no
+      `complete_chains`/capped-prefix switch, fixed chain count, BFS probe
+      budget, or graph-size heuristic. Schema truncation counters remain zero
+      and absent concrete rows reference the graph representation.
+- [ ] **Export phase residency is sequential.** Structural/flow callgraph rows
+      serialize first, then all canonical callgraph owners and resident
+      presentation labels are released. Exact file-local body projections
+      serialize next and release the body cache before the IDG opens. A
+      one-shot cache miss writes directly to the requested sink; only
+      `cache rebuild --export` may publish a reusable default export.
+- [ ] **IDG queries reuse IDG linkage.** Query code calls
+      `IdgQueryService::global_linkage_index()` and streams exact attribution
+      bodies on demand; it never calls `AnalyzerDb::global_index()` and
+      materializes every body beside an already-open graph.
+- [ ] **Architecture invariant passes.** Run
+      `cargo test --release -p bonsai_conformance --test
+      architecture_invariants`.
+- [ ] **Elasticsearch exact SLO gate passes.** Build the release binary, then
+      run `cargo test --release -p bonsai_cli --test
+      elasticsearch_large_repo -- --nocapture` with
+      `../elasticsearch` or `BONSAI_ELASTICSEARCH_ROOT`. The gate waits for
+      completed exact work and checks warm index, navigation, inspect,
+      inventory, and production taint latency under the default 3 GiB
+      scheduling budget; it never times out or truncates analysis.
+- [ ] **Large native export gate passes when relevant.** Export the complete
+      sibling Elasticsearch checkout under a recorded scheduling budget,
+      validate with `jq --stream`, and record bytes, wall time, physical
+      footprint/RSS, dirty resident memory when available, swaps, hash, and
+      incompleteness reasons. Confirm the three chain/flow modes are
+      `compressed_callgraph`, truncation counters are zero, and no hidden
+      `.bonsai/export.default.*` cache was created.
+- [ ] **Baseline changes are explained.** Record file count, cold versus warm
+      state, wall time, physical footprint/RSS, swaps, and
+      `analysis_complete`. Do not replace a regression with a looser SLO
+      without an intentional architecture rationale.
+
 ## Documentation-only change
 
 - [ ] **Code references match.** File paths, function names, type
@@ -205,6 +287,9 @@ class and verify each box.
       `#[cfg(test)] mod ...;` declaration.
 - [ ] `cargo build --release` is warning-free.
 - [ ] `cargo test --workspace` passes (full sweep before merging).
+- [ ] `[profile.test] debug = 0` remains enabled. The full workspace creates
+      hundreds of executables that each link the 21-language graph; opt in to
+      `CARGO_PROFILE_TEST_DEBUG=2` only for a focused debugger session.
 - [ ] No `panic!` / `unwrap()` introduced on user input.
 - [ ] No `unsafe_code` introduced.
 - [ ] Commit message explains the why, not just the what.

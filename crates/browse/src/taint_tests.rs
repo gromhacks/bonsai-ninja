@@ -65,4 +65,23 @@ fn dump_taint_token_seed_policy_supports_source_call_names() {
         "canonical call-name seed must start at the source call return: {:#?}",
         report.records
     );
+    assert!(
+        report
+            .records
+            .iter()
+            .all(|record| !record.tainted_args.is_empty()),
+        "dump-taint records must describe a concrete argument or receiver propagation: {:#?}",
+        report.records
+    );
+    assert!(
+        report.records.iter().any(|record| {
+            record.callee_name == "helper"
+                && record
+                    .tainted_args
+                    .iter()
+                    .any(|arg| arg.value_text == "raw" && arg.param_name == "value")
+        }),
+        "rendered propagation must hydrate exact Tree-sitter argument text: {:#?}",
+        report.records
+    );
 }

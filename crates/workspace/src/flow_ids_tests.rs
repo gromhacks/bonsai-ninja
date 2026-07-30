@@ -121,6 +121,35 @@ fn batch_labels_match_scalar_labels() {
 }
 
 #[test]
+fn resident_label_release_preserves_exact_recomputation() {
+    let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
+    let db = build_db_with(
+        &[(
+            "a.py",
+            "def entry(value):\n    return sink(value)\n\n\
+             def sink(value):\n    return value\n",
+        )],
+        adapter,
+    );
+    let sink = func_id_by_name(&db, "sink");
+    let cache = FlowIdCache::new();
+    let before = cache.labels_for_func(sink, &db, db.vfs());
+    assert!(cache.cached_line(sink).is_some());
+
+    cache.release_resident_labels();
+    assert!(
+        cache.cached_line(sink).is_none(),
+        "phase release must drop only resident presentation rows"
+    );
+
+    let after = cache.labels_for_func(sink, &db, db.vfs());
+    assert_eq!(
+        before, after,
+        "released labels must recompute deterministically from compiler facts"
+    );
+}
+
+#[test]
 fn exact_label_options_lift_default_label_caps() {
     let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
     let mut source = String::new();

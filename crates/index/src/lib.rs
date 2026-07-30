@@ -113,6 +113,84 @@ impl PartialEq for GlobalIndexIdentity {
 
 impl Eq for GlobalIndexIdentity {}
 
+/// Compact workspace-wide receiver inheritance facts.
+///
+/// File-local compiler objects already contain direct receiver types. This
+/// table adds only cross-file base ancestry, allowing file-local consumers to
+/// preserve exact receiver constraints without loading the complete global
+/// declaration table.
+#[derive(Clone, Debug, Default)]
+pub struct ReceiverAncestry {
+    by_type: AHashMap<String, Vec<String>>,
+}
+
+impl Serialize for ReceiverAncestry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut rows = self.by_type.iter().collect::<Vec<_>>();
+        rows.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        rows.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReceiverAncestry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let rows = Vec::<(String, Vec<String>)>::deserialize(deserializer)?;
+        Ok(Self {
+            by_type: rows.into_iter().collect(),
+        })
+    }
+}
+
+impl ReceiverAncestry {
+    /// Apply cross-file base types to one exact file-local compiler object.
+    pub fn apply_to_decl_index(&self, index: &mut DeclIndex) {
+        for decl in &mut index.defs {
+            enrich_receiver_types_in_events(&mut decl.flow_events, &self.by_type);
+        }
+        index.compact_storage();
+    }
+
+    /// Apply the same exact cross-file ancestry to a compact syntax header.
+    ///
+    /// Header enrichment affects candidate scheduling only; declaration-local
+    /// matching still reads the full compiler object and enforces scope.
+    pub fn apply_to_syntax_header(&self, header: &mut bonsai_lang_api::CompilerSyntaxHeader) {
+        for call in &mut header.calls {
+            let mut direct_types = call.receiver_types.clone();
+            if let Some(receiver) = call.receiver.as_deref() {
+                for alias in &header.type_aliases {
+                    if alias.name == receiver {
+                        push_unique(&mut direct_types, alias.type_name.clone());
+                    }
+                }
+            }
+            let mut seen = AHashSet::new();
+            for receiver_type in direct_types {
+                push_type_and_bases(&mut call.receiver_types, &receiver_type, &self.by_type, &mut seen);
+            }
+            dedup_strings(&mut call.receiver_types);
+        }
+    }
+
+    /// Number of receiver type keys represented by this projection.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_type.len()
+    }
+
+    /// Whether this projection contains no cross-file receiver ancestry.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_type.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GlobalIndex {
     identity: GlobalIndexIdentity,
@@ -162,6 +240,15 @@ impl GlobalIndex {
     #[must_use]
     pub fn identity(&self) -> GlobalIndexIdentity {
         self.identity.clone()
+    }
+
+    /// Project only finalized receiver inheritance facts from this symbol
+    /// generation.
+    #[must_use]
+    pub fn receiver_ancestry(&self) -> ReceiverAncestry {
+        ReceiverAncestry {
+            by_type: self.finalized_bases_by_type.clone(),
+        }
     }
 
     fn advance_identity(&mut self) {
@@ -679,6 +766,54 @@ struct GlobalIndexWireRef<'a> {
     by_file: Vec<(FileId, &'a DeclIndex)>,
     entries: Vec<Option<(FileId, u32)>>,
     linkage_by_symbol: Vec<(SymbolId, &'a FunctionLinkageFacts)>,
+}
+
+/// Borrowed declaration/type-header projection of a [`GlobalIndex`].
+///
+/// Compiler phase artifacts use this projection when a syntax consumer needs
+/// the complete symbol table but none of the call-linkage payload. It is
+/// intentionally serialized directly from the compact index: constructing a
+/// second workspace-sized `GlobalIndex` merely to clear linkage would double
+/// peak memory on large repositories.
+pub struct GlobalIndexHeaderProjection<'a>(&'a GlobalIndex);
+
+impl Serialize for GlobalIndexHeaderProjection<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let index = self.0;
+        let mut by_file: Vec<(FileId, &DeclIndex)> =
+            index.by_file.iter().map(|(file, index)| (*file, index)).collect();
+        by_file.sort_unstable_by_key(|(file, _)| file.raw());
+        let entries = index
+            .entries
+            .iter()
+            .map(|entry| {
+                entry.map(|(file, local_index)| {
+                    (
+                        file,
+                        u32::try_from(local_index).expect("per-file declaration index exceeds u32"),
+                    )
+                })
+            })
+            .collect();
+        GlobalIndexWireRef {
+            by_file,
+            entries,
+            linkage_by_symbol: Vec::new(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl GlobalIndex {
+    /// Serialize this index as complete declarations/types without retaining
+    /// AST call-linkage summaries or exact function bodies.
+    #[must_use]
+    pub fn header_projection(&self) -> GlobalIndexHeaderProjection<'_> {
+        GlobalIndexHeaderProjection(self)
+    }
 }
 
 #[derive(Deserialize)]

@@ -1420,6 +1420,25 @@ impl RootClosureVisited {
         }
     }
 
+    fn admits(&self, node: NodeId) -> bool {
+        match self {
+            Self::Dense(reached) => (node.0 as usize) < reached.len(),
+            Self::Sparse { node_count, .. } => (node.0 as usize) < *node_count,
+        }
+    }
+
+    #[cfg(test)]
+    fn sorted_nodes(&self) -> Vec<NodeId> {
+        match self {
+            Self::Dense(reached) => reached.iter().collect(),
+            Self::Sparse { reached, .. } => {
+                let mut nodes: Vec<_> = reached.iter().copied().map(NodeId).collect();
+                nodes.sort_unstable_by_key(|node| node.0);
+                nodes
+            }
+        }
+    }
+
     fn len(&self) -> usize {
         match self {
             Self::Dense(reached) => reached.popcount(),
@@ -1449,33 +1468,39 @@ struct ContextualClosureVisited {
     /// larger than the source graph on highly connected workspaces, so it
     /// uses the same external-memory representation as symbolic facts.
     states: SpillSet,
-    /// The public closure result is context-erased. One dense node bitset
-    /// avoids replaying the external relation merely to construct that result.
-    nodes: NodeBitSet,
+    /// The public closure result is context-erased. It starts sparse and
+    /// promotes to a dense bitset only when reached-node density justifies
+    /// workspace-sized storage.
+    nodes: RootClosureVisited,
 }
 
 impl ContextualClosureVisited {
     fn new(node_count: usize) -> Self {
         Self {
             states: contextual_node_store(),
-            nodes: NodeBitSet::zeros(node_count),
+            nodes: RootClosureVisited::new(node_count, 0),
         }
     }
 
     fn insert(&mut self, context: u32, node: NodeId) -> bool {
-        if node.0 as usize >= self.nodes.len() {
+        if !self.nodes.admits(node) {
             return false;
         }
         let key = (u128::from(context) << 32) | u128::from(node.0);
         if !self.states.insert(key) {
             return false;
         }
-        self.nodes.set(node);
+        self.nodes.insert(node);
         true
     }
 
     fn len(&self) -> u64 {
         self.states.len()
+    }
+
+    #[cfg(test)]
+    fn erased_nodes(&self) -> Vec<NodeId> {
+        self.nodes.sorted_nodes()
     }
 }
 
@@ -1496,15 +1521,34 @@ impl ClosureVisited {
     }
 
     fn nodes(&self) -> Vec<NodeId> {
-        // Both root and realizable-context states erase to the same public
-        // node domain. Union their already-maintained bitsets directly instead
-        // of materialising duplicate vectors and sorting the complete closure.
-        // Iteration is ascending, so this preserves the deterministic result
-        // order while reducing closure finalisation from O(R log R) to
-        // O(N / word + R).
-        let mut nodes = self.contextual.nodes.clone();
-        self.root.union_into(&mut nodes);
-        nodes.iter().collect()
+        match (&self.root, &self.contextual.nodes) {
+            (
+                RootClosureVisited::Sparse { reached: root, .. },
+                RootClosureVisited::Sparse {
+                    reached: contextual, ..
+                },
+            ) => {
+                let mut nodes = Vec::with_capacity(root.len().saturating_add(contextual.len()));
+                nodes.extend(root.iter().copied().map(NodeId));
+                nodes.extend(contextual.iter().copied().map(NodeId));
+                nodes.sort_unstable_by_key(|node| node.0);
+                nodes.dedup();
+                nodes
+            }
+            _ => {
+                // Dense closures retain the linear bitset finalisation path;
+                // only sparse, function-sized closures avoid allocating a
+                // workspace-sized result bitmap.
+                let node_count = match &self.root {
+                    RootClosureVisited::Dense(nodes) => nodes.len(),
+                    RootClosureVisited::Sparse { node_count, .. } => *node_count,
+                };
+                let mut nodes = NodeBitSet::zeros(node_count);
+                self.root.union_into(&mut nodes);
+                self.contextual.nodes.union_into(&mut nodes);
+                nodes.iter().collect()
+            }
+        }
     }
 }
 

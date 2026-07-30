@@ -451,10 +451,16 @@ bonsai-ninja export ./src --format graphml --output-path graph.graphml
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root. |
 | `--full-propagations` | false | Force exhaustive interprocedural propagation records. |
-| `--complete-chains` | false | Represent the complete semantic chain and flow-id relation as an exact compressed call graph, avoiding potentially exponential simple-path materialization. |
-| `--all` | false | Request the complete compiler graph: complete chain/label relations use exact `compressed_callgraph` form and propagation uses canonical `compiled_idg` form. Add `--full-propagations` only when concrete per-entry propagation rows are intentionally required. |
+| `--all` | false | Include the complete propagation relation in canonical `compiled_idg` form. Chain and flow-label relations are always exact `compressed_callgraph` data; add `--full-propagations` only when concrete per-entry propagation rows are intentionally required. |
 | `--format <FORMAT>` | json | `json`, `networkx`, `graphml`, or `cypher`. |
 | `--output-path <PATH>` | stdout | Write the selected export format to a file. |
+
+Native export never enumerates a capped prefix of call paths. The resolved
+callgraph is the exact linear-space representation of that path language, so
+the default remains complete without an exponential materialization step.
+A one-shot cache miss streams directly to the selected output; use
+`cache rebuild <workspace> --export` only when repeated exports justify a
+persisted copy.
 
 ## source-analysis
 

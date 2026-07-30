@@ -25,14 +25,16 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated on 2026-07-27:
+Validated on 2026-07-29:
 
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` passed;
   this strict gate compiled the complete workspace and every test target.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --release --locked` passed.
 - `cargo fmt --all -- --check` and `git diff --check` passed.
-- `cargo test --workspace --locked` passed in one exhaustive invocation
-  across all crates, integration binaries, adapter suites, and doc tests.
+- The last complete `cargo test --workspace --locked` baseline passed across
+  all crates, integration binaries, adapter suites, and doc tests. The final
+  architecture/lifecycle changes were then revalidated through their complete
+  release suites listed below.
 - Behavioral suites passed for callgraph, resolver, IDG, taint, security, SDK/CLI
   parity, the 1,076-case per-language CLI matrix, the 121-case end-to-end taint
   engine suite, conformance architecture invariants, and the exhaustive
@@ -63,18 +65,18 @@ The current deep rulepack gate is clean:
 | Measure | Result |
 |---|---:|
 | Rules | 7,152 |
-| Enabled rules | 5,999 |
-| Disabled rules | 1,153 |
-| Match examples | 10,499 |
-| Enabled match examples | 10,084 |
+| Enabled rules | 5,994 |
+| Disabled rules | 1,158 |
+| Match examples | 10,503 |
+| Enabled match examples | 10,079 |
 | Taint-replay misses | 0 |
 | Errors | 0 |
 | Warnings | 0 |
 
 On this macOS validation host, `syspolicyd` can delay the launch of newly
 linked Cargo test executables. That host-level launch latency is not analyzer
-runtime; the final release suite nevertheless completed in one uninterrupted
-workspace invocation.
+runtime. Release-profile affected-crate suites are the final-change gate on
+this host; CI still runs the complete workspace command.
 
 ## Self-analysis
 
@@ -110,88 +112,46 @@ seconds with 35,110,912 bytes maximum RSS.
 
 ## Elasticsearch scale result
 
-The current release binary was measured against the sibling Elasticsearch
-checkout with:
+The current release pipeline is measured against the sibling 30,055-source
+Elasticsearch checkout. The 2026-07-29 exact large-workspace integration gate
+passed 4/4 in 210.39 seconds under a 3 GiB scheduling budget. It starts fresh
+processes and covers warm semantic reuse, nine navigation commands, targeted
+inspect with taint evidence, security inventory, and production taint. Its
+enforced ceilings are 15 seconds for warm semantic reuse and 30 seconds for
+each measured query/analysis command.
 
-```bash
-./target/release/bonsai-ninja security ../elasticsearch taint-analysis \
-  --profile production \
-  --format json \
-  --all \
-  --no-color \
-  --no-progress
-```
+The current compiler-object generation required 212.19 seconds once and
+reopened in 4.34 seconds in the final gate. A default exact inspect query
+completed in 17.33 seconds. Exact sanitizer inventory examined all 30,055 files, rejected
+25,673 through raw/import/syntax compiler headers, decoded 4,382 bodies, and
+emitted 11,446 matches in 28.01 seconds. These are syntax/compiler facts, not
+Elasticsearch-specific name lists.
 
-The 2026-07-26 run completed successfully under
-`BONSAI_MEMORY_BUDGET_MB=3072`:
+Production security in the integration gate reports
+`analysis_complete: true`. The result is not capped: `--all` changes output
+pagination only, while sparse IDG closure runs to a fixed point regardless of
+rendering flags. Earlier cold timings in the thousands of seconds and broad
+query timings above 150 seconds describe superseded architectures that
+reparsed bodies or rebuilt workspace graphs; they are retained only in
+historical goal documents.
 
-| Measure | Result |
-|---|---:|
-| Indexed source files | 30,055 |
-| First-party files | 28,462 |
-| Dependency files | 104 |
-| Generated files | 1,068 |
-| Excluded files | 421 |
-| Source rule matches | 356 |
-| Sink rule matches | 1,515 |
-| Sanitizer rule matches | 47 |
-| Findings at production threshold | 0 |
-| `analysis_complete` | `true` |
-| Incomplete reasons | 0 |
-| Wall time | 169.71 s |
-| Maximum RSS | 1,665,384,448 bytes (about 1.55 GiB) |
-| Swaps | 0 |
-
-The result is not capped. `--all` removes output paging, while the semantic
-IDG closure itself is uncapped regardless of rendering flags. The streamed IDG
-sidecar has no source-file-count ceiling. Exact compressed export is used for
-potentially quadratic derived path families; `--full-propagations` is the
-explicit opt-in when a consumer requires every propagation record
-materialized.
-
-The same multi-file Python compiler flow was also run with 512 MiB and
-3,072 MiB scheduling budgets. Both runs completed with no incomplete reasons
-and byte-identical JSON (SHA-256
+The same multi-file compiler flow was also run with 512 MiB and 3,072 MiB
+scheduling budgets. Both runs completed with no incomplete reasons and
+byte-identical JSON (SHA-256
 `d2ac3c461569283b10855eff4bfda012a9be03c7480c2f09003703801ee8fc02`).
-This is a direct regression check that a smaller budget changes concurrency,
-cache retention, and spill frequency only—not analyzed syntax or semantic
-results.
+Memory settings may serialize workers, evict exact bodies, or spill relation
+pages; they do not change admitted files, facts, fixed-point scope, or results.
 
-Earlier notes reported parser diagnostics and
-`analysis_complete: false` on this checkout. That was a real frontend/adapter
-completeness signal, not harmless noise: any parser or semantic diagnostic
-that prevents required facts must remain visible as an incomplete reason.
-The current measured production scan reports `analysis_complete: true` with
-an empty reason list, so that older caveat no longer describes the current
-binary.
+### Native export under a 2 GiB compiler scheduling budget
 
-The exact large-workspace integration suite also passed 4/4 under the same
-3 GiB budget. It covers production security, inspect with taint evidence,
-nine navigation commands, and security inventories. Its completely cold
-semantic-sidecar run took 5,377.36 seconds. That is honest first-build latency,
-not bounded or omitted work: the one-heavy-unit scheduler stayed below the
-budget and built the requested Tree-sitter/compiler facts exactly. Use
-`index --semantic` or keep `index --watch` running when repeated interactive
-queries need those sidecars warm.
-
-### Targeted inspect under a 3 GiB compiler budget
-
-The cold exact query
-`inspect ../elasticsearch --query execute --taint-flow` completed in
-278.25 seconds with maximum RSS 3,101,949,952 bytes (about 2.89 GiB), zero
-swaps, 3,182 declaration hits, 200 rendered occurrence hits, and 100 rendered
-taint flows. Its output was byte-identical across the compared exact runs.
-The hit/flow counts are presentation windows; the semantic analysis itself was
-not capped.
-
-### Native export under a 3 GiB compiler budget
-
-The unfiltered whole-checkout native export was measured on 2026-07-23 with:
+The unfiltered whole-checkout native export was measured on 2026-07-29 with
+the exact compressed call relation that is now the only native-export chain
+mode:
 
 ```bash
-BONSAI_MEMORY_BUDGET_MB=3072 MIMALLOC_PURGE_DELAY=0 \
+BONSAI_MEMORY_BUDGET_MB=2048 MIMALLOC_PURGE_DELAY=0 \
+BONSAI_DEBUG=idg-summary,export-phase \
   ./target/release/bonsai-ninja export ../elasticsearch \
-  --all \
   --format json \
   --output-path /tmp/bonsai-es-export.json \
   --no-color \
@@ -201,52 +161,63 @@ BONSAI_MEMORY_BUDGET_MB=3072 MIMALLOC_PURGE_DELAY=0 \
 | Measure | Result |
 |---|---:|
 | Compiler functions summarized | 359,716 |
-| Symbolic-sensitive functions | 129,082 |
-| Contextual summary edges | 877,014 |
+| Symbolic-sensitive functions | 128,890 |
+| Contextual summary edges | 878,631 |
 | Parsed call facts | 3,495,591 |
-| Proven structural call records | 3,163,650 |
-| Numeric summary/runtime ready | 127.68 s |
-| Total wall time | 386.94 s |
-| JSON bytes | 5,683,867,076 |
-| Peak physical footprint | 3,088,476,608 bytes (about 2.88 GiB) |
-| macOS maximum RSS | 4,249,305,088 bytes |
-| Swaps | 0 |
-| Streaming JSON validation | passed (`jq --stream`) |
-| `analysis_complete` | `false` |
+| Proven structural call records | 3,163,799 |
+| Numeric summary/runtime ready | 114.09 s |
+| Total wall time | 344.50 s |
+| JSON bytes | 5,715,406,923 |
+| Peak physical footprint | 4,435,817,024 bytes |
+| macOS maximum RSS | 5,085,003,776 bytes |
+| Sampled dirty resident memory | about 2.4 GiB |
+| Swaps reported by `/usr/bin/time` | 0 |
+| Streaming JSON validation | passed |
+| SHA-256 | `6df0c041d9b1abc19ecf208604ff2c0d8afcfa44515f1ef4c19d7921acf1a51e` |
 
-The export finished without a file, edge, closure, call-depth, iteration, or
-elapsed-time cap. `--all` kept propagation in complete canonical `compiled_idg`
-form; it did not materialize the much larger per-entry transitive row product.
-Its incomplete status is an evidence boundary, not resource saturation: the
-unfiltered checkout reports `dynamic-call-sites:903`,
-`receiver-type-gaps:558627`, and `unresolved-call-sites:1276805`. Those calls
-cannot be presented as resolved compiler facts when their implementation/type
-evidence is absent or dynamic. The production security profile above is a
-different, explicitly filtered first-party scope and remains complete.
+This is a 5.7 GB artifact produced at about 16.6 MB/s, not interactive query
+latency. The exact symbolic/contextual fixed point consumed 114.09 seconds and
+JSON/phase streaming consumed the remainder. Native export never enumerates
+simple paths: the resolved callgraph is the exact linear-space
+representation, and the capped prefix mode and its CLI/SDK switch no longer
+exist. One-shot export writes directly to the requested sink and never builds
+then copies a hidden multi-gigabyte cache. Only the explicit
+`cache rebuild --export` workflow publishes a reusable export cache.
 
-The export streams top-level JSON sections and uses exact compressed graph
-representations for potentially quadratic path families. Fixed-width symbolic
-fact/transform pages and bounded external sort runs keep the semantic relation
-on disk while source-index offsets remain resident. A smaller cache can add
-I/O and wall time; it does not remove facts. The final measured binary includes
-generation-scoped pipeline-hash reuse for the IDG unload/reload boundary.
+`BONSAI_MEMORY_BUDGET_MB` is a compiler scheduling/spill budget, not an OS
+hard-RSS promise. The measured dirty working set was about 2.4 GiB; the larger
+macOS footprint/RSS includes clean memory-mapped compiler/factstore pages and
+allocator arenas that the OS may reclaim under pressure. A smaller machine
+can therefore trade paging and recomputation for time without losing facts,
+but exact export still needs storage for the output artifact and its live
+compiler relation. The regression contract is semantic identity plus
+phase-bounded residency, not a misleading claim that the operating system can
+be forced below the selected scheduler value.
+
+The default artifact intentionally omits concrete per-entry propagation rows
+and reports that omission. `--all` retains the complete propagation language
+in canonical `compiled_idg` form; `--full-propagations` materializes the much
+larger per-entry row product only when a downstream consumer explicitly needs
+it. Unfiltered workspace incompleteness remains an evidence boundary rather
+than resource saturation: dynamic calls, receiver-type gaps, and unresolved
+external implementations cannot be presented as resolved compiler facts.
 
 ## External benchmark snapshot
 
-The 2026-07-25 CVEBench-SAST run used isolated temporary copies of every
+The 2026-07-28 CVEBench-SAST run used isolated temporary copies of every
 vulnerable and fixed repository and did not mutate the benchmark checkout.
-All 460 scans completed with zero failures, timeouts, or incomplete scans:
-191.2 seconds total, 0.415 seconds mean, 0.849 seconds p95, and 1.083 seconds
-maximum.
+All 460 scans completed successfully. Mean scan latency was 0.494 seconds and
+p95 was 1.143 seconds.
 
 The benchmark's published aggregation reports:
 
 - Detection recall: 99.6%.
-- Precision: 84.5% (99.6% under its off-chain-noise exclusion).
-- File/line localization: 99.6%.
-- Source / sink / flow evidence: 99.1% / 99.6% / 99.1%.
-- Decoy trip rate: 0.1%.
-- Fix-validation rate: 30.4%.
+- Precision: 88.4%.
+- False positives per kLOC: 0.71.
+- Sanitizer recognition: 67.8%.
+- Fix-validation rate: 67.4%.
+- Decoy trip rate: 0.13%.
+- Mean final score: 4.32.
 
 The underlying artifact audit is stronger and also exposes dataset defects.
 Every one of the 230 primary source-to-sink flows was found. The sole apparent

@@ -122,7 +122,7 @@ pub fn dump_callgraph(ws: &Workspace) -> Vec<CallgraphRow> {
 /// (e.g. through `bonsai_inspect::ChainCache::resolved_graph`).
 pub fn callgraph_summary(ws: &Workspace, resolved: &ResolvedCallGraph) -> Vec<CallgraphRow> {
     use rayon::prelude::*;
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let files: Vec<_> = global.all_files().collect();
     let mut rows: Vec<CallgraphRow> = files
         .par_iter()
@@ -225,11 +225,14 @@ fn split_callable_spec(spec: &str) -> CallableSpec<'_> {
 /// choosing one.
 fn resolve_single_callable(ws: &Workspace, symbol: &str) -> Result<Option<Decl>, DumpLookupError> {
     let spec = split_callable_spec(symbol);
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let vfs = ws.db().vfs();
     let mut candidates: Vec<Decl> = bonsai_resolve::resolve_callable(&global, spec.name)
         .into_iter()
-        .filter_map(|func| global.decl_of(bonsai_common::SymbolId::new(func.raw())).cloned())
+        .filter_map(|func| {
+            ws.exact_decl(bonsai_common::SymbolId::new(func.raw()))
+                .map(|decl| (*decl).clone())
+        })
         .filter(|decl| {
             matches!(
                 decl.kind,

@@ -36,14 +36,14 @@ pub struct StringOut {
 /// Collect every string literal matching the filters.
 pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>, regex::Error> {
     use rayon::prelude::*;
-    let global = ws.db().global_index();
     let contains_match = make_name_filter(f.contains, f.regex)?;
-    let files: Vec<_> = global.all_files().collect();
+    let files = ws.vfs().all_files();
     let mut out: Vec<StringOut> = files
         .par_iter()
         .flat_map_iter(|&file| {
             let mut per_file: Vec<StringOut> = Vec::new();
-            let Some(idx) = global.file_index(file) else {
+            // String inventory consumes only file-local compiler facts.
+            let Some(idx) = ws.db().decl_index_uncached(file) else {
                 return per_file.into_iter();
             };
             for s in &idx.strings {
@@ -68,7 +68,7 @@ pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>,
                     continue;
                 }
                 if let Some(needle) = f.in_fn {
-                    let enclosing = enclosing_fn_for_file_line(ws, &path, line).unwrap_or_default();
+                    let enclosing = enclosing_fn_for_index_line(ws, file, &idx, line).unwrap_or_default();
                     if !enclosing.contains(needle) {
                         continue;
                     }
@@ -129,21 +129,30 @@ fn cached_span_map(
 /// alongside table rows without re-implementing the logic.
 #[must_use]
 pub fn enclosing_fn_for_file_line(ws: &Workspace, file_path: &str, line: u32) -> Option<String> {
-    use bonsai_lang_api::DeclKind;
-    let global = ws.db().global_index();
     // Look up the file by path string. Linear scan is fine — we
     // only call this once per browse-row's enclosing-fn check.
-    let span_map_cache_file = global.all_files().find(|f| {
+    let file = ws.vfs().all_files().into_iter().find(|f| {
         ws.vfs()
             .path(*f)
             .map(|p| p.display().to_string())
             .is_ok_and(|p| p == file_path)
     })?;
-    let span_map = cached_span_map(ws, span_map_cache_file)?;
+    let index = ws.db().decl_index_uncached(file)?;
+    enclosing_fn_for_index_line(ws, file, &index, line)
+}
+
+pub(crate) fn enclosing_fn_for_index_line(
+    ws: &Workspace,
+    file: bonsai_common::FileId,
+    index: &bonsai_lang_api::DeclIndex,
+    line: u32,
+) -> Option<String> {
+    use bonsai_lang_api::DeclKind;
+    let span_map = cached_span_map(ws, file)?;
     // Track the narrowest enclosing decl so a nested function /
     // method beats its containing module-level wrapper.
     let mut best: Option<(&bonsai_lang_api::Decl, u32)> = None;
-    for d in global.decls_in(span_map_cache_file) {
+    for d in &index.defs {
         if !matches!(
             d.kind,
             DeclKind::Function | DeclKind::Method | DeclKind::Constructor

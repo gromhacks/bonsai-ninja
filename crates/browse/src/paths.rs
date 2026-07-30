@@ -157,7 +157,7 @@ pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, r
         return Ok(outcome);
     }
 
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let mut rows = Vec::new();
     let mut hydration_reasons = Vec::new();
     let mut truncation = PathTruncation::None;
@@ -216,10 +216,13 @@ pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, r
 }
 
 fn matching_terminal_call_targets(ws: &Workspace, matcher: &Matcher) -> Vec<TerminalCallTarget> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let mut targets = Vec::new();
     for file in global.all_files() {
-        for decl in global.decls_in(file) {
+        let Some(index) = ws.exact_decl_index_shared(file) else {
+            continue;
+        };
+        for decl in &index.defs {
             if !matches!(
                 decl.kind,
                 DeclKind::Function | DeclKind::Method | DeclKind::Constructor
@@ -412,7 +415,7 @@ fn call_edge_from_idg_cross_call(edge: CrossCallEdge) -> CallEdge {
 }
 
 fn function_row(ws: &Workspace, func: FuncId) -> Option<PathFunctionRow> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let decl = global.decl_of(SymbolId::new(func.raw()))?;
     let (file, line, _) = format_span(&decl.name_span, ws);
     Some(PathFunctionRow {
@@ -702,7 +705,7 @@ mod tests {
         std::fs::write(dir.path().join("app.py"), "def entry():\n    return 1\n").expect("write fixture");
         let ws =
             Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
-        let global = ws.db().global_index();
+        let global = ws.compiler_linkage_index();
         let stale_path = ResolvedPath {
             funcs: vec![FuncId::new(u32::MAX)],
             edges: Vec::new(),

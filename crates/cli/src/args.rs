@@ -30,6 +30,7 @@ pub(crate) enum SemanticWorkerPhase {
     Callgraph,
     Linkage,
     Idg,
+    Manifest,
 }
 
 /// Default row cap for every browse command's text renderer. Chosen
@@ -2303,12 +2304,10 @@ pub(crate) enum Cmd {
                       top-level `analysis_scope`, `analysis_complete`, and \
                       `analysis_incomplete_reasons` fields so downstream tools \
                       never need to infer whether a document is complete. Chain and label \
-                      sections are bounded by default and marked incomplete \
-                      when capped; pass `--complete-chains` or `--all` to \
-                      request complete semantic chain and flow-id-label evidence. \
-                      Because even a small call graph can have exponentially many \
-                      exact paths, complete mode represents those sections as an \
-                      exact `compressed_callgraph` instead of materializing path rows. \
+                      Chain and flow-label evidence is always represented as \
+                      an exact `compressed_callgraph`: even a small call graph \
+                      can have exponentially many paths, so materializing a \
+                      capped prefix would be both less accurate and less scalable. \
                       Propagation records are \
                       omitted by default with explicit completeness metadata; \
                       pass `--full-propagations` when downstream tooling needs \
@@ -2316,6 +2315,13 @@ pub(crate) enum Cmd {
                       `analysis_complete=true`, downstream tooling can \
                       reconstruct every exported finding without re-running the \
                       analyzer.\n\
+                      \n\
+                      A one-shot export reuses a fresh default-export cache \
+                      when one was explicitly warmed, but a cache miss streams \
+                      directly to the requested sink without publishing a \
+                      hidden copy. Use `cache rebuild <workspace> --export` \
+                      when repeated exports justify storing that potentially \
+                      large document.\n\
                       \n\
                       Output defaults to compact JSON on stdout. `--format \
                       networkx` emits NetworkX node-link JSON; `--format \
@@ -2354,12 +2360,6 @@ pub(crate) enum Cmd {
         /// because records can be much larger than the structural graph.
         #[arg(long)]
         full_propagations: bool,
-        /// Request complete semantic chain and flow-id-label evidence.
-        /// Even small call graphs can have exponentially many exact paths,
-        /// so complete mode represents chain/label evidence as an exact
-        /// `compressed_callgraph` instead of materialized path rows.
-        #[arg(long)]
-        complete_chains: bool,
         /// Request the complete compiler graph. Potentially quadratic derived
         /// paths and per-entry propagation rows stay in exact compressed form;
         /// combine with `--full-propagations` only when concrete row expansion

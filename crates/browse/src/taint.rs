@@ -204,7 +204,7 @@ fn split_source_spec(spec: &str) -> SourceSpec<'_> {
 /// configured filters to the result.
 pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     let db = ws.db();
-    let global = db.global_index();
+    let global = ws.compiler_linkage_index();
 
     let spec = split_source_spec(f.source);
     let candidates = bonsai_resolve::resolve_callable(&global, spec.name);
@@ -256,10 +256,12 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         };
     }
     let source_func = source_candidates[0].0;
+    let source_symbol = bonsai_common::SymbolId::new(source_func.raw());
+    let exact_source = ws.exact_decl(source_symbol);
+    let source_decl = exact_source.as_deref().or_else(|| global.decl_of(source_symbol));
 
     let effective_seed: bonsai_taint::TokenSet = if f.seeds.is_empty() {
-        let symbol = bonsai_common::SymbolId::new(source_func.raw());
-        bonsai_taint::default_entry_taint_seed(global.decl_of(symbol))
+        bonsai_taint::default_entry_taint_seed(source_decl)
     } else {
         f.seeds.iter().cloned().collect()
     };
@@ -275,11 +277,12 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     let idg = db
         .idg_service()
         .unwrap_or_else(|| ws.build_and_seed_idg_service());
-    let global = db.global_index();
-    let mut seed_nodes = bonsai_taint::compose_idg_seed_nodes(
+    let global = ws.compiler_linkage_index();
+    let mut seed_nodes = bonsai_taint::compose_idg_seed_nodes_with_decl(
         bonsai_taint::IdgSeedRequest::token_api(source_func, &effective_seed),
         global.as_ref(),
         idg.as_ref(),
+        source_decl,
     );
     bonsai_taint::apply_configured_transfer_fixpoint(
         &mut seed_nodes,
@@ -462,7 +465,7 @@ fn tainted_unresolved_workspace_call_reasons(
         if resolved_sites.contains(&(*caller, *span)) || !seen_sites.insert((*caller, *span)) {
             continue;
         }
-        let Some(call_name) = caller_call_name(global, *caller, *span) else {
+        let Some(call_name) = caller_call_name(ws, global, *caller, *span) else {
             continue;
         };
         if workspace_call_site_has_semantic_resolution(ws, global, *caller, *span, &call_name) {
@@ -586,7 +589,12 @@ pub(crate) fn build_taint_record_from_cross_call(
     let (callee_file, callee_line, _) = format_span(&callee_decl.name_span, ws);
     let (call_file, call_line, call_column) = format_span(&ce.call_span, ws);
 
-    let tainted_args = tainted_args_from_cross_call(ce, callee_decl, global)?;
+    let exact_caller = ws.exact_decl(bonsai_common::SymbolId::new(ce.caller.raw()));
+    let caller_flow_decl = exact_caller.as_deref().unwrap_or(caller_decl);
+    let tainted_args = tainted_args_from_cross_call(ce, caller_flow_decl, callee_decl)?;
+    if tainted_args.is_empty() {
+        return None;
+    }
     let id_args: Vec<String> = tainted_args
         .iter()
         .map(|arg| {
@@ -645,17 +653,16 @@ fn source_line_text(ws: &Workspace, span: &bonsai_common::Span) -> String {
 
 fn tainted_args_from_cross_call(
     ce: &bonsai_idg::CrossCallEdge,
+    caller_decl: &bonsai_lang_api::Decl,
     callee_decl: &bonsai_lang_api::Decl,
-    global: &bonsai_index::GlobalIndex,
 ) -> Option<Vec<TaintedArgRecord>> {
     if ce.arg_idx == u32::MAX {
         if matches!(
             ce.relation,
             bonsai_idg::CrossCallRelation::Argument | bonsai_idg::CrossCallRelation::Capture
         ) {
-            if let Some((receiver, arg_count)) =
-                caller_call_receiver_and_arg_count(global, ce.caller, ce.call_span)
-                    .filter(|(receiver, _)| !receiver.trim().is_empty())
+            if let Some((receiver, arg_count)) = caller_call_receiver_and_arg_count(caller_decl, ce.call_span)
+                .filter(|(receiver, _)| !receiver.trim().is_empty())
             {
                 let (index, param_name) = if arg_count == 0 {
                     (usize::MAX, "receiver".to_string())
@@ -696,7 +703,7 @@ fn tainted_args_from_cross_call(
         }
         return Some(Vec::new());
     }
-    let value_text = caller_arg_value_text(global, ce.caller, ce.call_span, ce.arg_idx).unwrap_or_default();
+    let value_text = caller_arg_value_text(caller_decl, ce.call_span, ce.arg_idx).unwrap_or_default();
     let param_name = if ce.param_idx == u32::MAX {
         String::new()
     } else {
@@ -718,12 +725,10 @@ fn tainted_args_from_cross_call(
 /// `None` when the caller isn't in the index, isn't callable, or no
 /// Call event matches the span / index.
 fn caller_arg_value_text(
-    global: &bonsai_index::GlobalIndex,
-    caller: bonsai_common::FuncId,
+    caller_decl: &bonsai_lang_api::Decl,
     call_span: bonsai_common::Span,
     arg_idx: u32,
 ) -> Option<String> {
-    let decl = global.decl_of(bonsai_common::SymbolId::new(caller.raw()))?;
     fn find_call_arg<'a>(
         events: &'a [FlowEvent],
         target_span: bonsai_common::Span,
@@ -772,16 +777,14 @@ fn caller_arg_value_text(
         }
         None
     }
-    let arg = find_call_arg(&decl.flow_events, call_span, arg_idx as usize)?;
+    let arg = find_call_arg(&caller_decl.flow_events, call_span, arg_idx as usize)?;
     Some(arg.value_text.clone())
 }
 
 fn caller_call_receiver_and_arg_count(
-    global: &bonsai_index::GlobalIndex,
-    caller: bonsai_common::FuncId,
+    caller_decl: &bonsai_lang_api::Decl,
     call_span: bonsai_common::Span,
 ) -> Option<(String, usize)> {
-    let decl = global.decl_of(bonsai_common::SymbolId::new(caller.raw()))?;
     fn find_call_receiver(events: &[FlowEvent], target_span: bonsai_common::Span) -> Option<(&str, usize)> {
         for event in events {
             match event {
@@ -828,16 +831,19 @@ fn caller_call_receiver_and_arg_count(
         }
         None
     }
-    find_call_receiver(&decl.flow_events, call_span)
+    find_call_receiver(&caller_decl.flow_events, call_span)
         .map(|(receiver, arg_count)| (receiver.to_string(), arg_count))
 }
 
 fn caller_call_name(
+    ws: &Workspace,
     global: &bonsai_index::GlobalIndex,
     caller: bonsai_common::FuncId,
     call_span: bonsai_common::Span,
 ) -> Option<String> {
-    let decl = global.decl_of(bonsai_common::SymbolId::new(caller.raw()))?;
+    let symbol = bonsai_common::SymbolId::new(caller.raw());
+    let exact_caller = ws.exact_decl(symbol);
+    let decl = exact_caller.as_deref().or_else(|| global.decl_of(symbol))?;
     fn find_call_name(events: &[FlowEvent], target_span: bonsai_common::Span) -> Option<&str> {
         for event in events {
             match event {

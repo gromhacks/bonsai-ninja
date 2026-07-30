@@ -8,7 +8,6 @@
 //! refactor scoping.
 
 use crate::common::{file_path_matches_filter, format_span, make_name_filter, textual_relevance_key};
-use crate::strings::enclosing_fn_for_file_line;
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -87,18 +86,35 @@ struct ArgFact {
 /// output across runs and thread counts.
 pub fn args(ws: &Workspace, f: &ArgsFilters<'_>) -> Result<Vec<ArgOut>, regex::Error> {
     use rayon::prelude::*;
-    let global = ws.db().global_index();
     let callee_match = make_name_filter(f.callee, f.regex)?;
     let value_match = make_name_filter(f.value, f.regex)?;
-    let files: Vec<_> = global.all_files().collect();
+    let files = ws.vfs().all_files();
     // Per-thread accumulator (not per-file) so we don't pay the
     // per-file Vec allocation cost. See `calls::calls` for the same
     // shape and rationale.
     let mut facts: Vec<ArgFact> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
-            for decl in global.decls_in(file) {
-                walk_args(&decl.flow_events, ws, &mut acc);
+            if let Some(needle) = f.file {
+                let path = ws
+                    .vfs()
+                    .path(file)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !file_path_matches_filter(ws, &path, needle) {
+                    return acc;
+                }
+            }
+            // Argument inventory consumes file-local AST facts only. Avoid a
+            // global symbol remap and stream the immutable compiler object.
+            let Some(index) = ws.db().decl_index_uncached(file) else {
+                return acc;
+            };
+            for decl in &index.defs {
+                if f.in_fn.is_some_and(|needle| !decl.name.contains(needle)) {
+                    continue;
+                }
+                walk_args(&decl.flow_events, ws, &*callee_match, &*value_match, f, &mut acc);
             }
             acc
         })
@@ -110,37 +126,6 @@ pub fn args(ws: &Workspace, f: &ArgsFilters<'_>) -> Result<Vec<ArgOut>, regex::E
             larger.extend(smaller);
             larger
         });
-    facts.retain(|fact| {
-        let arg = &fact.out;
-        if !callee_match(&arg.callee) {
-            return false;
-        }
-        if f.file
-            .is_some_and(|needle| !file_path_matches_filter(ws, &arg.file, needle))
-        {
-            return false;
-        }
-        if let Some(needle) = f.in_fn {
-            let enclosing = enclosing_fn_for_file_line(ws, &arg.file, arg.line).unwrap_or_default();
-            if !enclosing.contains(needle) {
-                return false;
-            }
-        }
-        if f.value.is_some() && !value_match(&arg.value) {
-            return false;
-        }
-        if let Some(want_position) = f.position {
-            if arg.position != want_position {
-                return false;
-            }
-        }
-        if let Some(needle) = f.keyword {
-            if !arg.keyword.as_deref().is_some_and(|k| k.contains(needle)) {
-                return false;
-            }
-        }
-        true
-    });
     drop_shadowed_assignment_args(&mut facts);
     // Dedup: several adapters emit the same call expression
     // through multiple nested `call`-kind nodes (C and C++
@@ -208,11 +193,29 @@ fn arg_relevance_key(row: &ArgOut, f: &ArgsFilters<'_>) -> ((u8, usize), (u8, us
 /// Walk a decl's flow-event tree and append one [`ArgFact`] per
 /// call-site argument we observe. Recurses through every structural
 /// variant (`Branch`, `Loop`, `Try`, `Defer`, `Using`).
-fn walk_args(events: &[FlowEvent], ws: &Workspace, out: &mut Vec<ArgFact>) {
+fn walk_args(
+    events: &[FlowEvent],
+    ws: &Workspace,
+    callee_matches: &(dyn Fn(&str) -> bool + Send + Sync),
+    value_matches: &(dyn Fn(&str) -> bool + Send + Sync),
+    filters: &ArgsFilters<'_>,
+    out: &mut Vec<ArgFact>,
+) {
     for event in events {
         match event {
             FlowEvent::Call { name, args, .. } => {
+                if !callee_matches(name) {
+                    continue;
+                }
                 for (position, arg) in args.iter().enumerate() {
+                    if filters.position.is_some_and(|wanted| wanted != position)
+                        || filters.keyword.is_some_and(|needle| {
+                            !arg.name.as_deref().is_some_and(|name| name.contains(needle))
+                        })
+                        || (filters.value.is_some() && !value_matches(&arg.value_text))
+                    {
+                        continue;
+                    }
                     let (path, line, column) = format_span(&arg.span, ws);
                     out.push(ArgFact {
                         out: ArgOut {
@@ -235,11 +238,19 @@ fn walk_args(events: &[FlowEvent], ws: &Workspace, out: &mut Vec<ArgFact>) {
                 source_call_args,
                 ..
             } => {
+                if !callee_matches(name) || filters.keyword.is_some() {
+                    continue;
+                }
                 // RHS-of-assign call: `x = foo(a, b)` lets us recover
                 // the args even when the adapter doesn't surface a
                 // separate `Call` event for the call.
                 let (path, line, column) = format_span(span, ws);
                 for (position, value) in source_call_args.iter().enumerate() {
+                    if filters.position.is_some_and(|wanted| wanted != position)
+                        || (filters.value.is_some() && !value_matches(value))
+                    {
+                        continue;
+                    }
                     out.push(ArgFact {
                         out: ArgOut {
                             resolution_scope: ARG_RESOLUTION_SCOPE,
@@ -260,22 +271,24 @@ fn walk_args(events: &[FlowEvent], ws: &Workspace, out: &mut Vec<ArgFact>) {
                 else_events,
                 ..
             } => {
-                walk_args(then_events, ws, out);
-                walk_args(else_events, ws, out);
+                walk_args(then_events, ws, callee_matches, value_matches, filters, out);
+                walk_args(else_events, ws, callee_matches, value_matches, filters, out);
             }
-            FlowEvent::Loop { body, .. } => walk_args(body, ws, out),
+            FlowEvent::Loop { body, .. } => {
+                walk_args(body, ws, callee_matches, value_matches, filters, out);
+            }
             FlowEvent::Try {
                 body,
                 catch_events,
                 finally_events,
                 ..
             } => {
-                walk_args(body, ws, out);
-                walk_args(catch_events, ws, out);
-                walk_args(finally_events, ws, out);
+                walk_args(body, ws, callee_matches, value_matches, filters, out);
+                walk_args(catch_events, ws, callee_matches, value_matches, filters, out);
+                walk_args(finally_events, ws, callee_matches, value_matches, filters, out);
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                walk_args(body, ws, out);
+                walk_args(body, ws, callee_matches, value_matches, filters, out);
             }
             _ => {}
         }

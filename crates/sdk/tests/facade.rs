@@ -266,7 +266,7 @@ fn root_cache_stats_preserve_builder_rulepack_validation() {
 }
 
 #[test]
-fn facade_index_semantic_writes_structural_sidecars_and_query_hydrates_idg() {
+fn facade_index_semantic_writes_structural_sidecars_and_query_stays_lazy() {
     let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("semantic-index");
     let sdk = sdk();
@@ -324,6 +324,11 @@ fn facade_index_semantic_writes_structural_sidecars_and_query_hydrates_idg() {
         manifest.coverage.semantic_ready,
         "semantic manifest should declare reusable semantic facts ready: {manifest:#?}"
     );
+    assert_eq!(
+        manifest.workspace_source_files.len(),
+        indexed.stats().files,
+        "semantic manifest must persist one exact hash/change-stamp pair per compiler input"
+    );
     assert!(
         manifest.sidecars.iter().any(|sidecar| sidecar.name == "idg"
             && sidecar.status == bonsai_sdk::CacheManifestSidecarStatus::Present),
@@ -376,8 +381,8 @@ fn facade_index_semantic_writes_structural_sidecars_and_query_hydrates_idg() {
 
     let queried = sdk.open_query(&root).expect("query open after semantic index");
     assert!(
-        queried.workspace().db().idg_service().is_some(),
-        "query open should hydrate the existing IDG sidecar"
+        queried.workspace().db().idg_service().is_none(),
+        "opening a query project must not hydrate an unrelated IDG sidecar"
     );
     let path = queried
         .browse()
@@ -388,18 +393,22 @@ fn facade_index_semantic_writes_structural_sidecars_and_query_hydrates_idg() {
         })
         .expect("semantic path after index");
     assert!(
-        path.idg_available
+        !path.idg_available
             && path
                 .backends
                 .iter()
-                .any(|backend| backend == "warmed-idg-cross-call"),
-        "path should reuse the hydrated IDG semantic backend after SDK index: {path:#?}"
+                .any(|backend| backend == "resolved-callgraph"),
+        "a structural path query should use the exact callgraph without loading IDG pages: {path:#?}"
+    );
+    assert!(
+        queried.workspace().db().idg_service().is_none(),
+        "a structural path query must not hydrate the IDG as a side effect"
     );
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn long_lived_query_hydrates_idg_only_after_sidecar_appears() {
+fn long_lived_lazy_query_does_not_poll_unrequested_idg_sidecars() {
     let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let root = temp_python_micro("late-idg-hydration");
     let sdk = sdk();
@@ -418,12 +427,9 @@ fn long_lived_query_hydrates_idg_only_after_sidecar_appears() {
     );
 
     assert!(
-        queried.workspace().db().idg_service().is_some(),
-        "an already-open query project should hydrate a newly written IDG sidecar"
+        queried.workspace().db().idg_service().is_none(),
+        "an already-open lazy query project must not poll or hydrate an unrelated IDG sidecar"
     );
-    // The unchanged sidecar is already observed. A second boundary should be
-    // an identity check, not another factstore decode.
-    assert!(queried.workspace().db().idg_service().is_some());
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -479,6 +485,55 @@ fn cache_stats_validation_marks_semantic_sidecars_stale_after_source_change() {
         }),
         "retrieval factstore should be marked stale when manifest source fingerprint changes: {stale:#?}"
     );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cache_stats_reuses_independently_versioned_sidecars_when_only_manifest_build_changes() {
+    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
+    let root = temp_python_micro("semantic-cache-stale-build-manifest");
+    let sdk = sdk();
+    let indexed = sdk.index_semantic(&root).expect("semantic index");
+    let fresh = indexed.cache().stats().expect("fresh semantic cache stats");
+    assert!(
+        fresh.validation.structural_ready,
+        "fixture must be warm: {fresh:#?}"
+    );
+
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fresh.manifest).expect("read semantic manifest"))
+            .expect("parse semantic manifest");
+    manifest["build_fingerprint"] = serde_json::Value::String("older-release-build".to_string());
+    std::fs::write(
+        &fresh.manifest,
+        serde_json::to_vec_pretty(&manifest).expect("serialize edited manifest"),
+    )
+    .expect("write edited semantic manifest");
+
+    let stale_manifest = sdk.cache(&root).stats().expect("stats with stale manifest");
+    assert_eq!(
+        stale_manifest.validation.manifest_status,
+        bonsai_sdk::CacheFreshnessStatus::Stale,
+        "the descriptive producer manifest should report its stale build: {stale_manifest:#?}"
+    );
+    assert!(
+        stale_manifest.validation.structural_ready,
+        "a build-only manifest change must not invalidate independently versioned exact sidecars: {stale_manifest:#?}"
+    );
+    for name in ["compiler_objects", "callgraph", "linkage", "idg", "retrieval"] {
+        assert!(
+            stale_manifest.validation.sidecars.iter().any(|sidecar| {
+                sidecar.name == name
+                    && matches!(
+                        sidecar.status,
+                        bonsai_sdk::CacheFreshnessStatus::Fresh
+                            | bonsai_sdk::CacheFreshnessStatus::NotApplicable
+                    )
+            }),
+            "build-only manifest drift should preserve current `{name}`: {stale_manifest:#?}"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -2282,7 +2337,6 @@ fn facade_browse_dump_export_security_trace_and_inspect_work() {
         .export()
         .native_json(bonsai_sdk::NativeExportOptions {
             full_propagations: true,
-            complete_chains: false,
             compiled_propagations: false,
         })
         .expect("native export");

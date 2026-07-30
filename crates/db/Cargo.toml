@@ -11,6 +11,7 @@ description = "Incremental analyzer database."
 bonsai_common = { workspace = true }
 bonsai_diagnostics = { workspace = true }
 bonsai_factstore = { workspace = true }
+bonsai_hash = { workspace = true }
 bonsai_vfs = { workspace = true }
 bonsai_parser = { workspace = true }
 bonsai_lang_api = { workspace = true }

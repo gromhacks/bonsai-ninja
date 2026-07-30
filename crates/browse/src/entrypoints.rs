@@ -5,8 +5,8 @@
 //! it is a deterministic callgraph root view for code navigation.
 
 use crate::common::{
-    best_textual_relevance_key, collect_callee_names, file_path_matches_filter, format_span,
-    make_name_filter, textual_relevance_key,
+    best_textual_relevance_key, file_path_matches_filter, format_span, make_name_filter,
+    textual_relevance_key,
 };
 use bonsai_common::FuncId;
 use bonsai_lang_api::DeclKind;
@@ -44,7 +44,7 @@ pub struct EntryPointOut {
 /// Collect callable declarations with no semantic caller in the
 /// resolved callgraph.
 pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<EntryPointOut>, regex::Error> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let graph = ws.cached_resolved_call_graph();
     let name_match = make_name_filter(f.name, f.regex)?;
     let mut out = Vec::new();
@@ -73,7 +73,12 @@ pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<Ent
             if graph.callers_of(func).any(|edge| edge.precision.is_semantic()) {
                 continue;
             }
-            let mut callees = collect_callee_names(&decl.flow_events);
+            let mut callees = global
+                .linkage_facts(decl.symbol)
+                .into_iter()
+                .flat_map(|facts| facts.calls.iter())
+                .map(|call| call.name.to_string())
+                .collect::<Vec<_>>();
             let mut seen = ahash::AHashSet::default();
             callees.retain(|callee| seen.insert(callee.clone()));
             out.push(EntryPointOut {

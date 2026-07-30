@@ -13,7 +13,8 @@ use bonsai_diagnostics::{Diagnostic, DiagnosticSink, Severity};
 use bonsai_factstore::{
     FactStoreError, FactStoreReader, FactStoreWriter, PreparedFactStoreEntry, PreparedFactStorePayload,
 };
-use bonsai_lang_api::{DeclIndex, ImportIndex};
+use bonsai_hash::fnv1a_bytes64;
+use bonsai_lang_api::{CompilerSyntaxHeader, DeclIndex, ImportIndex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
@@ -22,9 +23,10 @@ use std::sync::Arc;
 
 /// Current per-file compiler-object wire and semantic ABI.
 ///
-/// Bump this whenever adapter lowering, [`DeclIndex`], [`ImportIndex`], or the
-/// object validation contract changes in a way that can alter compiler facts.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 6;
+/// Bump this whenever adapter lowering, [`DeclIndex`], [`ImportIndex`],
+/// [`CompilerSyntaxHeader`], or the object validation contract changes in a
+/// way that can alter compiler facts.
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 10;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;
 const METADATA_KEY: u64 = 0;
@@ -60,6 +62,7 @@ struct SourceDescriptor {
     path: String,
     language: Option<String>,
     source_digest: [u8; 32],
+    source_hash: u64,
     source_bytes: u64,
     version: u64,
 }
@@ -68,6 +71,10 @@ struct PreparedCompilerObject {
     compressed: Vec<u8>,
     payload_digest: [u8; 32],
     payload_len: u32,
+    imports: Option<ImportIndex>,
+    imports_digest: [u8; 32],
+    syntax: Option<CompilerSyntaxHeader>,
+    syntax_digest: [u8; 32],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,8 +91,18 @@ struct CompilerObjectFileMetadata {
     path: String,
     language: Option<String>,
     source_digest: [u8; 32],
+    source_hash: u64,
     payload_digest: [u8; 32],
     payload_len: u32,
+    /// Independently decodable compiler header facts. Broad package/import
+    /// planning must not inflate the declaration/flow body for every file.
+    imports: Option<ImportIndex>,
+    imports_digest: [u8; 32],
+    /// Independently decodable call-target projection. Broad match planning
+    /// uses it only to reject impossible files; exact matches still hydrate
+    /// from the canonical declaration/flow body.
+    syntax: Option<CompilerSyntaxHeader>,
+    syntax_digest: [u8; 32],
 }
 
 /// Read-only compiler-object generation. A generation may be globally stale
@@ -126,6 +143,12 @@ impl CompilerObjectStore {
         if reader.header().pipeline_hash != metadata_pipeline_hash(&metadata) {
             return Err(invalid_data("compiler-object pipeline fingerprint mismatch"));
         }
+        if metadata.files.iter().any(|file| {
+            import_index_digest(file.imports.as_ref()) != file.imports_digest
+                || compiler_syntax_header_digest(file.syntax.as_ref()) != file.syntax_digest
+        }) {
+            return Err(invalid_data("compiler-object independent-header digest mismatch"));
+        }
         Ok(Self {
             reader,
             metadata,
@@ -148,7 +171,8 @@ impl CompilerObjectStore {
             .map(|index| &self.metadata.files[index])?;
         (metadata.path == descriptor.path
             && metadata.language == descriptor.language
-            && metadata.source_digest == descriptor.source_digest)
+            && metadata.source_digest == descriptor.source_digest
+            && metadata.source_hash == descriptor.source_hash)
             .then_some(metadata)
     }
 
@@ -186,7 +210,19 @@ impl CompilerObjectStore {
             compressed: hit.payload,
             payload_digest: metadata.payload_digest,
             payload_len: metadata.payload_len,
+            imports: metadata.imports.clone(),
+            imports_digest: metadata.imports_digest,
+            syntax: metadata.syntax.clone(),
+            syntax_digest: metadata.syntax_digest,
         }))
+    }
+
+    fn load_imports(&self, descriptor: &SourceDescriptor) -> Option<ImportIndex> {
+        self.metadata_for(descriptor)?.imports.clone()
+    }
+
+    fn load_syntax(&self, descriptor: &SourceDescriptor) -> Option<CompilerSyntaxHeader> {
+        self.metadata_for(descriptor)?.syntax.clone()
     }
 
     fn validate_payload(&self, metadata: &CompilerObjectFileMetadata) -> std::io::Result<()> {
@@ -233,6 +269,9 @@ impl AnalyzerDb {
                 Ok(Some(object)) => loaded = Some(object),
                 Ok(None) => {}
                 Err(error) => {
+                    self.inner
+                        .compiler_object_store_requires_repair
+                        .store(true, std::sync::atomic::Ordering::Release);
                     bonsai_diagnostics::debug_log!(
                         "compiler-object",
                         "compiler object miss for {}: {}",
@@ -245,6 +284,47 @@ impl AnalyzerDb {
         let object = loaded.unwrap_or_else(|| self.compile_fresh_file_object(descriptor));
         self.publish_compiler_diagnostics(&object);
         Some(object)
+    }
+
+    /// Load the independently decodable import header for one exact source
+    /// snapshot. A valid compiler-object generation answers without
+    /// decompressing declaration bodies or flow events; a cache miss falls
+    /// back to the canonical Tree-sitter compiler object.
+    #[must_use]
+    pub fn compiler_import_index_uncached(&self, file: FileId) -> Option<ImportIndex> {
+        let descriptor = source_descriptor(self, file)?;
+        if let Some(imports) = self
+            .inner
+            .compiler_object_store
+            .read()
+            .as_ref()
+            .and_then(|store| store.load_imports(&descriptor))
+        {
+            return Some(imports);
+        }
+        self.compiler_file_object_uncached(file)?.imports
+    }
+
+    /// Load the independently decodable syntax-target header for one exact
+    /// source snapshot. The header is an adapter-IR projection and therefore
+    /// cannot introduce matches: it only avoids inflating a body when every
+    /// requested target is structurally impossible.
+    #[must_use]
+    pub fn compiler_syntax_header_uncached(&self, file: FileId) -> Option<CompilerSyntaxHeader> {
+        let descriptor = source_descriptor(self, file)?;
+        if let Some(syntax) = self
+            .inner
+            .compiler_object_store
+            .read()
+            .as_ref()
+            .and_then(|store| store.load_syntax(&descriptor))
+        {
+            return Some(syntax);
+        }
+        self.compiler_file_object_uncached(file)?
+            .declarations
+            .as_ref()
+            .map(CompilerSyntaxHeader::from_decl_index)
     }
 
     /// Visit exact compiler objects for a deterministic file sequence using
@@ -420,8 +500,13 @@ impl AnalyzerDb {
                     path: descriptor.path.clone(),
                     language: descriptor.language.clone(),
                     source_digest: descriptor.source_digest,
+                    source_hash: descriptor.source_hash,
                     payload_digest: encoded.payload_digest,
                     payload_len: encoded.payload_len,
+                    imports: encoded.imports,
+                    imports_digest: encoded.imports_digest,
+                    syntax: encoded.syntax,
+                    syntax_digest: encoded.syntax_digest,
                 });
             }
         }
@@ -449,7 +534,43 @@ impl AnalyzerDb {
         let entries = writer.finish().map_err(factstore_io)?;
         let store = CompilerObjectStore::open_at(path, temporary_root)?;
         *self.inner.compiler_object_store.write() = Some(Arc::new(store));
+        self.inner
+            .compiler_object_store_requires_repair
+            .store(false, std::sync::atomic::Ordering::Release);
         Ok(entries.saturating_sub(1))
+    }
+
+    /// Cheap exact-generation check used before a complete compiler phase.
+    ///
+    /// This compares the immutable generation header with the current VFS
+    /// snapshot but deliberately does not hash every compressed payload.
+    /// Individual object reads still verify their payload digest; a corrupt
+    /// hit marks the store for repair and the orchestrator republishes it
+    /// after the exact fallback compile completes.
+    #[must_use]
+    pub fn compiler_object_generation_matches_current_snapshot(&self) -> bool {
+        if self
+            .inner
+            .compiler_object_store_requires_repair
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        let Some(store) = self.inner.compiler_object_store.read().as_ref().cloned() else {
+            return false;
+        };
+        let mut descriptors = self
+            .inner
+            .vfs
+            .all_files()
+            .into_iter()
+            .filter_map(|file| source_descriptor(self, file))
+            .collect::<Vec<_>>();
+        descriptors.sort_unstable_by_key(|descriptor| descriptor.file.raw());
+        store.metadata.generation_digest == generation_digest(&descriptors)
+            && store.metadata.files.len() == descriptors.len()
+            && store.reader.len() == descriptors.len().saturating_add(1)
+            && store.covers(&descriptors)
     }
 
     /// Validate that the complete compiler-object generation matches the
@@ -481,6 +602,7 @@ impl AnalyzerDb {
                     && metadata.path == descriptor.path
                     && metadata.language == descriptor.language
                     && metadata.source_digest == descriptor.source_digest
+                    && metadata.source_hash == descriptor.source_hash
                     && store.validate_payload(metadata).is_ok()
             })
     }
@@ -566,6 +688,89 @@ pub fn validate_compiler_object_sidecar_layout(workspace_root: &Path) -> std::io
     Ok(store.metadata.files.len())
 }
 
+/// Exhaustively validate a compiler-object generation against the current
+/// supported source set without opening a compiler workspace.
+///
+/// The supplied hashes are the same streaming content fingerprints used by
+/// callgraph/linkage cache inspection. Object payloads remain bound to the
+/// stronger SHA-256 digest recorded in each immutable object; this projection
+/// lets cache orchestration prove that the generation covers exactly the
+/// current paths before advertising it as reusable.
+pub fn validate_compiler_object_sidecar_file_with_source_fingerprints<I, P>(
+    workspace_root: &Path,
+    fingerprints: I,
+) -> std::io::Result<usize>
+where
+    I: IntoIterator<Item = (P, u64)>,
+    P: AsRef<Path>,
+{
+    let store = compiler_object_store_for_source_fingerprints(workspace_root, fingerprints)?;
+    for file in &store.metadata.files {
+        store.validate_payload(file)?;
+    }
+    Ok(store.metadata.files.len())
+}
+
+/// Validate compiler-object schema and exact source coverage without hashing
+/// every compressed object payload.
+///
+/// This is the cache-planning contract. Every object payload is still bound
+/// to SHA-256 metadata and verified on read; the exhaustive validator above
+/// remains available for an explicit integrity audit.
+pub fn validate_compiler_object_sidecar_metadata_with_source_fingerprints<I, P>(
+    workspace_root: &Path,
+    fingerprints: I,
+) -> std::io::Result<usize>
+where
+    I: IntoIterator<Item = (P, u64)>,
+    P: AsRef<Path>,
+{
+    let store = compiler_object_store_for_source_fingerprints(workspace_root, fingerprints)?;
+    Ok(store.metadata.files.len())
+}
+
+fn compiler_object_store_for_source_fingerprints<I, P>(
+    workspace_root: &Path,
+    fingerprints: I,
+) -> std::io::Result<CompilerObjectStore>
+where
+    I: IntoIterator<Item = (P, u64)>,
+    P: AsRef<Path>,
+{
+    let store = CompilerObjectStore::open_reusable(workspace_root)?;
+    if store.reader.len() != store.metadata.files.len().saturating_add(1) {
+        return Err(invalid_data("compiler-object entry count mismatch"));
+    }
+    let canonical_root = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let mut current = fingerprints
+        .into_iter()
+        .map(|(path, hash)| {
+            let path = path.as_ref();
+            let relative = path
+                .strip_prefix(&canonical_root)
+                .or_else(|_| path.strip_prefix(workspace_root))
+                .unwrap_or(path);
+            (relative.to_string_lossy().replace('\\', "/"), hash)
+        })
+        .collect::<Vec<_>>();
+    current.sort();
+    let mut recorded = store
+        .metadata
+        .files
+        .iter()
+        .map(|file| (file.path.clone(), file.source_hash))
+        .collect::<Vec<_>>();
+    recorded.sort();
+    if current != recorded {
+        return Err(invalid_data(
+            "compiler-object sidecar source fingerprint mismatch",
+        ));
+    }
+    Ok(store)
+}
+
 fn source_descriptor(db: &AnalyzerDb, file: FileId) -> Option<SourceDescriptor> {
     let snapshot = db.inner.vfs.snapshot(file).ok()?;
     let path = db.inner.vfs.path(file).ok()?;
@@ -583,6 +788,7 @@ fn source_descriptor(db: &AnalyzerDb, file: FileId) -> Option<SourceDescriptor> 
         path,
         language,
         source_digest: digest_bytes(snapshot.text.as_bytes()),
+        source_hash: fnv1a_bytes64(snapshot.text.as_bytes()),
         source_bytes: u64::try_from(snapshot.text.len()).unwrap_or(u64::MAX),
         version: snapshot.version,
     })
@@ -613,6 +819,13 @@ fn prepare_compiler_object(
     let object = db.compile_fresh_file_object(descriptor.clone());
     ensure_source_version(db, descriptor)?;
     validate_object(&object, descriptor)?;
+    let imports = object.imports.clone();
+    let imports_digest = import_index_digest(imports.as_ref());
+    let syntax = object
+        .declarations
+        .as_ref()
+        .map(CompilerSyntaxHeader::from_decl_index);
+    let syntax_digest = compiler_syntax_header_digest(syntax.as_ref());
     let encoded = wire::encode_struct_map(&object).map_err(invalid_wire)?;
     let compressed = zstd::stream::encode_all(Cursor::new(encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)?;
     let payload_digest = digest_bytes(&compressed);
@@ -622,6 +835,10 @@ fn prepare_compiler_object(
         compressed,
         payload_digest,
         payload_len,
+        imports,
+        imports_digest,
+        syntax,
+        syntax_digest,
     })
 }
 
@@ -694,12 +911,23 @@ fn generation_digest(descriptors: &[SourceDescriptor]) -> [u8; 32] {
         }
         hasher.update([0]);
         hasher.update(descriptor.source_digest);
+        hasher.update(descriptor.source_hash.to_le_bytes());
     }
     hasher.finalize().into()
 }
 
 fn digest_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+fn import_index_digest(imports: Option<&ImportIndex>) -> [u8; 32] {
+    let encoded = wire::encode_struct_map(&imports).expect("ImportIndex wire encoding is infallible");
+    digest_bytes(&encoded)
+}
+
+fn compiler_syntax_header_digest(syntax: Option<&CompilerSyntaxHeader>) -> [u8; 32] {
+    let encoded = wire::encode_struct_map(&syntax).expect("CompilerSyntaxHeader wire encoding is infallible");
+    digest_bytes(&encoded)
 }
 
 fn compiler_frontend_semantic_fingerprint() -> u64 {
@@ -790,6 +1018,43 @@ mod tests {
 
         let object = db.compiler_file_object_uncached(file).expect("compile object");
         assert_eq!(object.path, "src/input.fixture");
+    }
+
+    #[test]
+    fn root_validator_binds_generation_to_exact_source_paths_and_hashes() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("src/input.fixture");
+        let vfs = Arc::new(Vfs::new());
+        vfs.write(source.to_string_lossy().into_owned(), Arc::<str>::from("source"));
+        let db = AnalyzerDb::new(Arc::clone(&vfs), Arc::new(LanguageRegistry::new()));
+        db.set_workspace_root(root.path().to_path_buf());
+        db.save_compiler_object_sidecar(root.path())
+            .expect("save objects");
+
+        assert_eq!(
+            validate_compiler_object_sidecar_file_with_source_fingerprints(
+                root.path(),
+                [(&source, fnv1a_bytes64(b"source"))],
+            )
+            .expect("exact source generation"),
+            1
+        );
+        assert!(
+            validate_compiler_object_sidecar_file_with_source_fingerprints(
+                root.path(),
+                [(&source, fnv1a_bytes64(b"changed"))],
+            )
+            .is_err(),
+            "same path with changed content must reject the generation"
+        );
+        assert!(
+            validate_compiler_object_sidecar_file_with_source_fingerprints(
+                root.path(),
+                [(root.path().join("src/other.fixture"), fnv1a_bytes64(b"source"))],
+            )
+            .is_err(),
+            "same content under a different module path must reject the generation"
+        );
     }
 
     #[test]

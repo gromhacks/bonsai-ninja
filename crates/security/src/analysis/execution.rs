@@ -993,6 +993,7 @@ where
     crate::matcher::release_matcher_fact_caches();
     ws.release_idg_service_cache();
     ws.release_resolved_call_graph_cache();
+    ws.release_compiler_header_cache();
     ws.release_exact_body_cache();
     ws.db().release_global_index();
     let CompiledSemanticGraph {

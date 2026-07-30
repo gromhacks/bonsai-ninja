@@ -21,9 +21,10 @@ use crate::cache_fingerprint::{
 use crate::flow_ids_disk::{decode as decode_flow_id_entry, encode as encode_flow_id_entry, FlowIdEntry};
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
-use bonsai_common::{workspace_bonsai_dir, FuncId, SymbolId, MATCHER_POLICY_FINGERPRINT};
+use bonsai_common::{workspace_bonsai_dir, FuncId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
+use bonsai_index::GlobalIndex;
 use bonsai_lang_api::DeclKind;
 use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
@@ -161,13 +162,14 @@ impl FlowIdCache {
         let cg = self.call_graph(db, vfs);
         let options = FlowIdLabelOptions::default();
         let (chains, trunc) = enumerate_chains(&cg, func, options.max_chains, options.max_probes);
+        let headers = db.build_global_header_index();
         // Mirror `inspect`'s chain extension: each backward chain
         // (root → … → target) gets every resolvable downstream call
         // path DFS-enumerated from its tail. The hashed name sequence
         // — and therefore the flow id — matches what
         // `inspect --query <enclosing_fn>` would emit, so ids from
         // browse paste directly into `inspect --flow F:...`.
-        let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, db, chains, options);
+        let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, headers.as_ref(), chains, options);
         let arc: Arc<[String]> = Arc::from(ids.into_boxed_slice());
         let mut inner = self.inner.write();
         inner.labels.insert(func, arc.clone());
@@ -221,18 +223,13 @@ impl FlowIdCache {
 
         if !missing.is_empty() {
             let cg = self.call_graph(db, vfs);
-            let path_resolver = SharedCallPathResolver::build(&cg, db);
+            let headers = db.build_global_header_index();
             let computed: Vec<(FuncId, Arc<[String]>, bool)> = missing
                 .par_iter()
                 .map(|&f| {
                     let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
-                    let (ids, label_trunc) = collect_flow_ids_for_chains_with_shared(
-                        &cg,
-                        db,
-                        chains,
-                        options,
-                        Some(&path_resolver),
-                    );
+                    let (ids, label_trunc) =
+                        collect_flow_ids_for_chains(&cg, headers.as_ref(), chains, options);
                     (f, Arc::from(ids.into_boxed_slice()), trunc || label_trunc)
                 })
                 .collect();
@@ -288,13 +285,12 @@ impl FlowIdCache {
         }
 
         let cg = self.call_graph(db, vfs);
-        let path_resolver = SharedCallPathResolver::build(&cg, db);
+        let headers = db.build_global_header_index();
         let computed_rows: Vec<(FuncId, Arc<[String]>, bool)> = unique
             .par_iter()
             .map(|&f| {
                 let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
-                let (ids, label_trunc) =
-                    collect_flow_ids_for_chains_with_shared(&cg, db, chains, options, Some(&path_resolver));
+                let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, headers.as_ref(), chains, options);
                 (f, Arc::from(ids.into_boxed_slice()), trunc || label_trunc)
             })
             .collect();
@@ -327,16 +323,32 @@ impl FlowIdCache {
         vfs: &bonsai_vfs::Vfs,
         options: FlowIdLabelOptions,
     ) -> Vec<(FuncId, Arc<[String]>, bool)> {
+        let headers = db.build_global_header_index();
+        self.labels_for_chain_sets_with_index_and_options(chain_sets, db, vfs, headers.as_ref(), options)
+    }
+
+    /// Flow-id labels from caller-provided backward chains and the compiler
+    /// header table already owned by the surrounding semantic phase.
+    ///
+    /// Whole-workspace exporters must use this form: rebuilding a body-level
+    /// global index after releasing the frontend phase reparses every source
+    /// file and overlaps those AST arenas with the complete callgraph.
+    pub fn labels_for_chain_sets_with_index_and_options(
+        &self,
+        chain_sets: Vec<(FuncId, Vec<Vec<FuncId>>, bool)>,
+        db: &AnalyzerDb,
+        vfs: &bonsai_vfs::Vfs,
+        headers: &GlobalIndex,
+        options: FlowIdLabelOptions,
+    ) -> Vec<(FuncId, Arc<[String]>, bool)> {
         if chain_sets.is_empty() {
             return Vec::new();
         }
         let cg = self.call_graph(db, vfs);
-        let path_resolver = SharedCallPathResolver::build(&cg, db);
         let computed: Vec<(FuncId, Arc<[String]>, bool)> = chain_sets
             .into_par_iter()
             .map(|(func, chains, chain_truncated)| {
-                let (ids, label_trunc) =
-                    collect_flow_ids_for_chains_with_shared(&cg, db, chains, options, Some(&path_resolver));
+                let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, headers, chains, options);
                 (
                     func,
                     Arc::from(ids.into_boxed_slice()),
@@ -424,7 +436,7 @@ impl FlowIdCache {
     /// compute — used to size the CLI progress bar before any work
     /// happens.
     pub fn pending_count(&self, db: &AnalyzerDb) -> usize {
-        let global = db.global_index();
+        let global = db.build_global_header_index();
         let already: AHashSet<FuncId> = self.inner.read().labels.keys().copied().collect();
         let mut count = 0usize;
         for file in global.all_files() {
@@ -458,7 +470,7 @@ impl FlowIdCache {
         F: Fn(FuncId) + Sync + Send,
     {
         let cg = self.call_graph(db, vfs);
-        let global = db.global_index();
+        let global = db.build_global_header_index();
         let already: AHashSet<FuncId> = self.inner.read().labels.keys().copied().collect();
         let mut todo: Vec<FuncId> = Vec::new();
         for file in global.all_files() {
@@ -478,14 +490,12 @@ impl FlowIdCache {
             self.inner.write().prewarmed = true;
             return;
         }
-        let path_resolver = SharedCallPathResolver::build(&cg, db);
         let results: Vec<(FuncId, Arc<[String]>, bool)> = todo
             .par_iter()
             .map(|&f| {
                 let options = FlowIdLabelOptions::default();
                 let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
-                let (ids, label_trunc) =
-                    collect_flow_ids_for_chains_with_shared(&cg, db, chains, options, Some(&path_resolver));
+                let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, global.as_ref(), chains, options);
                 on_each_done(f);
                 (f, Arc::from(ids.into_boxed_slice()), trunc || label_trunc)
             })
@@ -525,7 +535,7 @@ impl FlowIdCache {
         F: Fn(FuncId) + Sync + Send,
     {
         let cg = self.call_graph(db, vfs);
-        let global = db.global_index();
+        let global = db.build_global_header_index();
         let mut funcs: Vec<FuncId> = Vec::new();
         for file in global.all_files() {
             for decl in global.decls_in(file) {
@@ -580,7 +590,6 @@ impl FlowIdCache {
         }
         // Channel-based writer: workers push entries through the
         // queue; a dedicated writer thread serializes file I/O.
-        let path_resolver = SharedCallPathResolver::build(&cg, db);
         let writer = FactStoreWriter::create_with_capacity(
             path,
             FLOW_IDS_TABLE_ID,
@@ -607,8 +616,7 @@ impl FlowIdCache {
             }
             let options = FlowIdLabelOptions::default();
             let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
-            let (ids, label_trunc) =
-                collect_flow_ids_for_chains_with_shared(&cg, db, chains, options, Some(&path_resolver));
+            let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, global.as_ref(), chains, options);
             let entry = FlowIdEntry {
                 labels: ids,
                 truncated: trunc || label_trunc,
@@ -741,6 +749,25 @@ impl FlowIdCache {
     pub fn seed_call_graph(&self, graph: Arc<ResolvedCallGraph>) {
         self.inner.write().cg = Some(graph);
     }
+
+    /// Release only the shared graph allocation after a batch consumer has
+    /// completed. Computed labels and truncation metadata remain valid.
+    pub fn release_call_graph(&self) {
+        self.inner.write().cg = None;
+    }
+
+    /// Release resident presentation labels after a whole-workspace batch has
+    /// serialized them. This is allocation lifetime control only: an attached
+    /// factstore remains the exact source for later hydration, and otherwise
+    /// labels are deterministically recomputed from the canonical callgraph.
+    pub fn release_resident_labels(&self) {
+        let mut inner = self.inner.write();
+        inner.labels.clear();
+        inner.truncated.clear();
+        if inner.disk.is_none() {
+            inner.prewarmed = false;
+        }
+    }
 }
 
 /// Funnel `bonsai_factstore::FactStoreError` into `std::io::Error`
@@ -754,23 +781,13 @@ fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
 
 fn collect_flow_ids_for_chains(
     cg: &ResolvedCallGraph,
-    db: &AnalyzerDb,
+    headers: &GlobalIndex,
     chains: Vec<Vec<FuncId>>,
     options: FlowIdLabelOptions,
-) -> (Vec<String>, bool) {
-    collect_flow_ids_for_chains_with_shared(cg, db, chains, options, None)
-}
-
-fn collect_flow_ids_for_chains_with_shared(
-    cg: &ResolvedCallGraph,
-    db: &AnalyzerDb,
-    chains: Vec<Vec<FuncId>>,
-    options: FlowIdLabelOptions,
-    shared: Option<&SharedCallPathResolver>,
 ) -> (Vec<String>, bool) {
     let mut seen: AHashSet<String> = AHashSet::new();
     let mut truncated = false;
-    let mut call_paths = CallPathEnumerator::new(cg, db, shared);
+    let mut call_paths = CallPathEnumerator::new(cg);
     let mut names: AHashMap<FuncId, String> = AHashMap::new();
     'chains: for chain in chains {
         let (extended_paths, path_truncated) =
@@ -782,14 +799,10 @@ fn collect_flow_ids_for_chains_with_shared(
             let chain_names: Vec<String> = extended
                 .iter()
                 .map(|&fi| {
-                    shared
-                        .and_then(|resolver| resolver.name(fi).map(str::to_owned))
-                        .unwrap_or_else(|| {
-                            names
-                                .entry(fi)
-                                .or_insert_with(|| func_display_name(db, fi))
-                                .clone()
-                        })
+                    names
+                        .entry(fi)
+                        .or_insert_with(|| func_display_name(headers, fi))
+                        .clone()
                 })
                 .filter(|n| !n.is_empty())
                 .collect();
@@ -808,73 +821,15 @@ fn collect_flow_ids_for_chains_with_shared(
     (ids, truncated)
 }
 
-struct SharedCallPathResolver {
-    resolvable_callees: AHashMap<FuncId, Arc<[FuncId]>>,
-    names: AHashMap<FuncId, String>,
-}
-
-impl SharedCallPathResolver {
-    fn build(cg: &ResolvedCallGraph, db: &AnalyzerDb) -> Self {
-        let global = db.global_index();
-        let mut funcs: Vec<FuncId> = Vec::new();
-        let mut names: AHashMap<FuncId, String> = AHashMap::new();
-        for file in global.all_files() {
-            for decl in global.decls_in(file) {
-                if !matches!(
-                    decl.kind,
-                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                ) {
-                    continue;
-                }
-                let func = FuncId::new(decl.symbol.raw());
-                funcs.push(func);
-                names.insert(func, decl.name.clone());
-            }
-        }
-
-        let rows: Vec<(FuncId, Arc<[FuncId]>)> = funcs
-            .par_iter()
-            .map(|&caller| {
-                let callees = compute_resolvable_callees(cg, db, caller);
-                (caller, Arc::from(callees.into_boxed_slice()))
-            })
-            .collect();
-        let resolvable_callees = rows.into_iter().collect();
-        Self {
-            resolvable_callees,
-            names,
-        }
-    }
-
-    fn name(&self, func: FuncId) -> Option<&str> {
-        self.names.get(&func).map(String::as_str)
-    }
-
-    fn resolvable_callees(&self, caller: FuncId) -> &[FuncId] {
-        self.resolvable_callees
-            .get(&caller)
-            .map(|callees| callees.as_ref())
-            .unwrap_or(&[])
-    }
-}
-
 struct CallPathEnumerator<'a> {
     cg: &'a ResolvedCallGraph,
-    db: &'a AnalyzerDb,
-    shared: Option<&'a SharedCallPathResolver>,
     resolvable_callees_cache: AHashMap<FuncId, Vec<FuncId>>,
 }
 
 impl<'a> CallPathEnumerator<'a> {
-    fn new(
-        cg: &'a ResolvedCallGraph,
-        db: &'a AnalyzerDb,
-        shared: Option<&'a SharedCallPathResolver>,
-    ) -> Self {
+    fn new(cg: &'a ResolvedCallGraph) -> Self {
         Self {
             cg,
-            db,
-            shared,
             resolvable_callees_cache: AHashMap::new(),
         }
     }
@@ -888,7 +843,6 @@ impl<'a> CallPathEnumerator<'a> {
         if base.is_empty() {
             return (Vec::new(), false);
         }
-        let global = self.db.global_index();
         let mut out: Vec<Vec<FuncId>> = Vec::new();
         let mut stack: Vec<(Vec<FuncId>, usize)> = vec![(base.to_vec(), 0)];
         let mut truncated = false;
@@ -898,10 +852,6 @@ impl<'a> CallPathEnumerator<'a> {
                 break;
             }
             let Some(&tail) = path.last() else {
-                continue;
-            };
-            let Some(_tail_decl) = global.decl_of(SymbolId::new(tail.raw())) else {
-                out.push(path);
                 continue;
             };
             if extra >= max_extra {
@@ -932,9 +882,6 @@ impl<'a> CallPathEnumerator<'a> {
     }
 
     fn resolvable_callees(&mut self, caller: FuncId) -> &[FuncId] {
-        if let Some(shared) = self.shared {
-            return shared.resolvable_callees(caller);
-        }
         if !self.resolvable_callees_cache.contains_key(&caller) {
             let out = resolved_callees_from_graph(self.cg, caller);
             self.resolvable_callees_cache.insert(caller, out);
@@ -944,10 +891,6 @@ impl<'a> CallPathEnumerator<'a> {
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
-}
-
-fn compute_resolvable_callees(cg: &ResolvedCallGraph, _db: &AnalyzerDb, caller: FuncId) -> Vec<FuncId> {
-    resolved_callees_from_graph(cg, caller)
 }
 
 fn resolved_callees_from_graph(cg: &ResolvedCallGraph, caller: FuncId) -> Vec<FuncId> {
@@ -965,13 +908,12 @@ fn resolved_callees_from_graph(cg: &ResolvedCallGraph, caller: FuncId) -> Vec<Fu
     out
 }
 
-/// Look up a function's display name via the analyzer DB's global
-/// index. Returns empty when the function id isn't known (e.g.
-/// external / unresolved).
-fn func_display_name(db: &AnalyzerDb, func: FuncId) -> String {
-    let sym = bonsai_common::SymbolId::new(func.raw());
-    db.global_index()
-        .decl_of(sym)
+/// Look up a function's display name in the compiler header table. Returns
+/// empty when the function id isn't known (for example, an unresolved
+/// external). Flow-id rendering never needs declaration bodies.
+fn func_display_name(headers: &GlobalIndex, func: FuncId) -> String {
+    headers
+        .decl_of(bonsai_common::SymbolId::new(func.raw()))
         .map(|d| d.name.clone())
         .unwrap_or_default()
 }

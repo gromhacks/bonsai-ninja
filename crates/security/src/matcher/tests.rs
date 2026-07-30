@@ -593,6 +593,136 @@ fn assignment_source_call_facts_inherit_receiver_type_aliases() {
 }
 
 #[test]
+fn compiler_header_assignment_aliases_reach_an_unbounded_fixed_point() {
+    let mut aliases = std::collections::HashMap::from([(
+        "exec".to_string(),
+        AliasTarget::Member {
+            module: "child_process".to_string(),
+            member: "exec".to_string(),
+        },
+    )]);
+    let assignments = vec![
+        CompilerAssignmentAlias {
+            target: "first".to_string(),
+            source: "exec".to_string(),
+        },
+        CompilerAssignmentAlias {
+            target: "second".to_string(),
+            source: "first".to_string(),
+        },
+        CompilerAssignmentAlias {
+            target: "third".to_string(),
+            source: "second".to_string(),
+        },
+    ];
+
+    extend_alias_map_with_compiler_assignment_aliases(&mut aliases, &assignments);
+
+    assert_eq!(aliases.get("third"), aliases.get("exec"));
+}
+
+#[test]
+fn compiler_syntax_header_filters_only_impossible_call_rules() {
+    let matching_rule = rule_from_yaml(
+        r#"
+id: python.test.clean
+enabled: true
+language: python
+tag: test
+severity: info
+match:
+  kind: call
+  callee:
+    attribute: [client, clean]
+description: matching target
+"#,
+        crate::rule::RuleKind::Sanitizer,
+    );
+    let impossible_rule = rule_from_yaml(
+        r#"
+id: python.test.escape
+enabled: true
+language: python
+tag: test
+severity: info
+match:
+  kind: call
+  callee:
+    attribute: [html, escape]
+description: impossible target
+"#,
+        crate::rule::RuleKind::Sanitizer,
+    );
+    let matching = PreparedRule::new(&matching_rule).expect("matching rule prepares");
+    let impossible = PreparedRule::new(&impossible_rule).expect("impossible rule prepares");
+    let refs = vec![&matching, &impossible];
+    let batch = PreparedRuleBatch::new(&refs, empty_factory_returns());
+    let syntax = CompilerSyntaxHeader {
+        calls: vec![bonsai_lang_api::CompilerCallHeader {
+            name: "client.clean".to_string(),
+            receiver: Some("client".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+        }],
+        ..Default::default()
+    };
+
+    let filtered =
+        batch.filtered_rule_refs_for_syntax_header(refs, &syntax, None, &AHashSet::new(), "python");
+
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].rule.id, "python.test.clean");
+}
+
+#[test]
+fn compiler_syntax_header_resolves_static_member_imports_before_body_decode() {
+    let rule = rule_from_yaml(
+        r#"
+id: java.test.string_format
+enabled: true
+language: java
+tag: test
+severity: info
+match:
+  kind: call
+  callee:
+    attribute: [String, format]
+description: static import target
+"#,
+        crate::rule::RuleKind::Sanitizer,
+    );
+    let prepared = PreparedRule::new(&rule).expect("rule prepares");
+    let refs = vec![&prepared];
+    let batch = PreparedRuleBatch::new(&refs, empty_factory_returns());
+    let syntax = CompilerSyntaxHeader {
+        calls: vec![bonsai_lang_api::CompilerCallHeader {
+            name: "format".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+        }],
+        ..Default::default()
+    };
+    let imports = bonsai_lang_api::ImportIndex {
+        file: FileId::new(0),
+        imports: vec![bonsai_lang_api::ImportSpec {
+            span: span(),
+            module: "java.lang.String".to_string(),
+            alias: Some("format".to_string()),
+            is_wildcard: false,
+            original_name: Some("format".to_string()),
+            scope: Default::default(),
+        }],
+    };
+
+    let filtered =
+        batch.filtered_rule_refs_for_syntax_header(refs, &syntax, Some(&imports), &AHashSet::new(), "java");
+
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].rule.id, "java.test.string_format");
+}
+
+#[test]
 fn syntax_bound_resource_assignment_uses_rulepack_factory_type() {
     let mut factory = FactoryReturns::default();
     factory.by_language.insert(
@@ -734,6 +864,22 @@ description: Hibernate Session.get.
         crate::rule::RuleKind::Source,
     );
     let prepared = PreparedRule::new(&hibernate).expect("rule prepares");
+    assert!(
+        prepared.syntax_target_possible_in_mode(
+            "class App { Object get(Session s) { return s.get(id); } }",
+            ConstraintMode::Inventory,
+            CallTextPrefilter::Parenthesized,
+        ),
+        "the pre-decode gate must retain a real syntax target even when only imports can later prove its package"
+    );
+    assert!(
+        !prepared.syntax_target_possible_in_mode(
+            "class App { Object find(Session s) { return s.find(id); } }",
+            ConstraintMode::Inventory,
+            CallTextPrefilter::Parenthesized,
+        ),
+        "the pre-decode gate should reject files that cannot contain the structured target"
+    );
     assert!(
         !prepared.text_possible_in("class App { Object get(Session s) { return s.get(id); } }", None),
         "package-gated rules should not force parsing files with only receiver/tail text"
@@ -975,6 +1121,34 @@ def handler(payload):
         regex_literal_anchor_tokens(r"^(ElementTree|ET)\.XML$").is_empty(),
         "alternative regex branches must not become mandatory text anchors"
     );
+    assert_eq!(
+        regex_required_hir_anchor_tokens(r"^(ElementTree|ET)\.XML$"),
+        vec!["XML".to_string()],
+        "HIR must retain a literal required after every alternative branch"
+    );
+    assert_eq!(
+        regex_required_hir_anchor_tokens(
+            r"(^|\.)set(NString|Bytes|BigDecimal|Date|Time|Timestamp|Double|Float|Short|Byte|Null)$"
+        ),
+        vec![
+            "BigDecimal".to_string(),
+            "Byte".to_string(),
+            "Bytes".to_string(),
+            "Date".to_string(),
+            "Double".to_string(),
+            "Float".to_string(),
+            "NString".to_string(),
+            "Null".to_string(),
+            "Short".to_string(),
+            "Time".to_string(),
+            "Timestamp".to_string(),
+        ],
+        "HIR alternation anchors must include every viable long branch token without API-specific code"
+    );
+    assert!(
+        regex_required_hir_anchor_tokens(r"^(?:safe|[A-Z]+)$").is_empty(),
+        "an alternative branch without a required literal must disable the prefilter"
+    );
     assert!(
         regex_terminal_call_key("^(list|binary)_to_atom$").is_none(),
         "prefix alternatives must not be keyed by a non-candidate suffix"
@@ -1129,7 +1303,7 @@ description: LDAP search.
         !prepared.text_possible_in_mode(
             "class ElasticsearchHandler { String name = \"Elasticsearch\"; }",
             Some(&workspace_package),
-            ConstraintMode::SinkInventory,
+            ConstraintMode::Inventory,
             CallTextPrefilter::Parenthesized,
         ),
         "plain words containing a call name must not satisfy broad call-name prefiltering"
@@ -1138,7 +1312,7 @@ description: LDAP search.
         prepared.text_possible_in_mode(
             "class App { void f(DirContext ctx, String q) { ctx.search(\"ou=users\", q, null); } }",
             Some(&workspace_package),
-            ConstraintMode::SinkInventory,
+            ConstraintMode::Inventory,
             CallTextPrefilter::Parenthesized,
         ),
         "real call syntax should satisfy broad call-name prefiltering"

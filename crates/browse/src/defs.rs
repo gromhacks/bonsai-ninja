@@ -53,7 +53,8 @@ pub struct DefOut {
 /// `Vec<DefOut>`.
 pub fn defs(ws: &Workspace, f: &DefsFilters<'_>) -> Result<Vec<DefOut>, regex::Error> {
     use rayon::prelude::*;
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
+    let needs_exact_body = f.has_callee.is_some() || f.has_decorator.is_some();
     let name_match = make_name_filter(f.name, f.regex)?;
     let files: Vec<_> = global.all_files().collect();
     // Parallel per-file fan-out. Each file produces an independent
@@ -66,8 +67,13 @@ pub fn defs(ws: &Workspace, f: &DefsFilters<'_>) -> Result<Vec<DefOut>, regex::E
     let mut out: Vec<DefOut> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
-            let file_index = f.has_decorator.and_then(|_| global.file_index(file).cloned());
-            for decl in global.decls_in(file) {
+            let exact_index = needs_exact_body
+                .then(|| ws.db().decl_index_uncached(file))
+                .flatten();
+            let decls = exact_index
+                .as_ref()
+                .map_or_else(|| global.decls_in(file), |index| index.defs.as_slice());
+            for decl in decls {
                 let (path, line, column) = format_span(&decl.name_span, ws);
                 if f.file
                     .is_some_and(|needle| !file_path_matches_filter(ws, &path, needle))
@@ -89,7 +95,7 @@ pub fn defs(ws: &Workspace, f: &DefsFilters<'_>) -> Result<Vec<DefOut>, regex::E
                     }
                 }
                 if let Some(needle) = f.has_decorator {
-                    let decorators = file_index
+                    let decorators = exact_index
                         .as_ref()
                         .map(|idx| decl_decorator_names(ws, file, idx, decl.span, decl.name_span))
                         .unwrap_or_default();

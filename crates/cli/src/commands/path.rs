@@ -11,9 +11,7 @@ use crate::paging;
 use crate::progress;
 use crate::{cli_println, ui};
 
-use super::{
-    open_project_index_only as open_project, page_info_to_json, paged_json_incomplete_reasons, short_file,
-};
+use super::{open_project_path_query, page_info_to_json, paged_json_incomplete_reasons, short_file};
 
 pub(crate) struct PathCommandOptions<'a> {
     pub(crate) from: &'a str,
@@ -27,7 +25,7 @@ pub(crate) struct PathCommandOptions<'a> {
 }
 
 pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let (project, _footer) = open_project_path_query(root)?;
     let filters = PathFilters {
         from: options.from,
         to: options.to,
