@@ -14,8 +14,8 @@ bonsai-ninja does not require a project config file for normal scans. Workspace-
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `.bonsai/rules/` | directory | Absent | Optional workspace-local rule overlay. |
-| `.bonsai/manifest.json` | generated file | `index --semantic`, SDK semantic/full-prewarm facades, or `cache rebuild` | JSON inventory of cache coverage, producer fingerprints, sidecar paths, and missing reasons. Do not use as the hot analysis path; commands validate and read the binary sidecars. |
-| `.bonsai/compiler-objects.v*.factstore` | generated file | first phase of `index --semantic`, SDK semantic prewarm, or `cache rebuild` | Atomic generation of per-file adapter-lowered compiler objects and diagnostics, validated by relative path, adapter, frontend ABI, SHA-256 source digest, and payload digest. |
+| `.bonsai/manifest.json` | generated file | `index --semantic`, SDK semantic/full-prewarm facades, or `cache rebuild` | JSON inventory of cache coverage, producer fingerprints, sidecar paths, missing reasons, and the versioned exact source ledger. Unchanged path/size/mtime entries reuse their recorded SHA-256 digest; a metadata change forces content rehashing. Do not use as the analysis payload path; commands validate and read the binary sidecars. |
+| `.bonsai/compiler-objects.v*.factstore` | generated file | first phase of `index --semantic`, SDK semantic prewarm, or `cache rebuild` | Atomic generation of per-file adapter-lowered compiler objects and diagnostics, validated by relative path, adapter, frontend ABI, SHA-256 source digest, and payload digest. Import indexes and compact syntax-target facts (calls, assignment aliases, factory assignments, and receiver/type evidence) are independently integrity-checked headers that decode without declaration/flow bodies. |
 | `.bonsai/dataflow.v3.factstore` | generated file | SDK full prewarm, explicit dataflow prewarm, or exact query commands | Persisted dataflow sidecar. Do not edit manually. |
 | `.bonsai/value_flow.v*.factstore` | generated file | explicit compatibility prewarm/save APIs | Persisted legacy `ValueFlowGraph` projection. Canonical security/export semantics live in the IDG; do not edit manually. |
 | `.bonsai/flow_ids.v*.factstore` | generated file | SDK full prewarm or exact render/query commands | Persisted flow-id sidecar. Do not edit manually. |
@@ -23,6 +23,7 @@ bonsai-ninja does not require a project config file for normal scans. Workspace-
 | `.bonsai/idg.v*.factstore` | generated file | Query commands, `cache rebuild`, or `index --semantic` | Persisted IDG sidecar. Do not edit manually. |
 | `.bonsai/retrieval.v*.factstore` | generated file | `index --semantic`, `cache rebuild`, or small complete-workspace search on demand | Persisted fact-backed candidate index. Inspect may consume a warmed sidecar for pre-open large-workspace scoping, but does not build it as query-time evidence. Do not edit manually; it is candidate lookup only, not evidence. |
 | `.bonsai/taint_graph.v*.<mode>.<config>.factstore` | generated file | Security analysis commands | Versioned, mode/config-specific taint/source graph sidecar. Do not edit manually. |
+| `.bonsai/export.default.v*.json` | generated file | Explicit `cache rebuild --export` only | Reusable default native export. Normal one-shot `export` streams directly to stdout/`--output-path` and never creates then copies this potentially multi-gigabyte cache. The default export always uses the exact `compressed_callgraph`; capped path-prefix caches are not supported. |
 | `.bonsai/page-cache.v*/` | generated directory | Generated lazily | Versioned rendered-page cache for paginated CLI output. |
 | `security-patterns/` | directory | Auto-discovered | Rulepack root when `--rules-dir` and `BONSAI_RULES_DIR` are not set. |
 
@@ -40,22 +41,49 @@ projection supports older SDK/query surfaces; it is not a second taint engine.
 `index --watch` keeps a live workspace open, polls for saved changes, and
 reparses changed files in place.
 
+The manifest source ledger is a validation accelerator, not a weaker cache
+key. A warm reopen can stat unchanged sources instead of reading and hashing
+every byte. Any path, size, timestamp, adapter, frontend ABI, or payload
+identity change falls back to exact hashing/decoding before reuse. Missing,
+old-schema, or corrupt manifests are rebuilt; independently valid binary
+sidecars remain eligible through their own exact headers.
+
 Semantic workers publish compiler objects first. Unchanged compressed objects
 are copied into the next generation; only source/path/adapter/ABI misses are
 lowered again. Callgraph, retrieval, linkage, and IDG then consume that one
-generation. The IDG persistence phase replays typed stitch records from its
-first transfer pass instead of running transfer lowering twice. IDG writers
-hold a target-specific advisory lock for the complete generation, recheck a
-peer's completed sidecar before rebuilding, and remove only lock-proven
-FactStore staging files left by a terminated writer. Lock files under
-`.bonsai/` are ownership metadata and may remain after the process exits; the
-operating system releases their locks automatically.
+generation. Broad rule planning applies raw source anchors, exact
+import/package headers, and exact syntax-target headers in that order, then
+decodes bodies only for surviving files. Import headers are loaded directly
+from the compiler-object generation even when no workspace-package prewarm is
+needed; static imports must never disappear merely because that optional
+prewarm is empty. The linkage generation stores symbol headers, receiver
+ancestry, and call linkage as independent payloads so each command loads only
+its required compiler product. The IDG persistence phase replays typed stitch
+records from its first transfer pass instead of running transfer lowering
+twice. IDG writers hold a target-specific advisory lock for the complete
+generation, recheck a peer's completed sidecar before rebuilding, and remove
+only lock-proven FactStore staging files left by a terminated writer. Lock
+files under `.bonsai/` are ownership metadata and may remain after the process
+exits; the operating system releases their locks automatically.
+
+IDG closure storage also follows a strict lazy-allocation contract. A
+resident-only fixed point starts with sparse empty sets and frontiers. Dense
+workspace bitsets, bounded positive/Bloom acceleration, and temporary spill
+files appear only after actual relation density reaches the representation's
+promotion or spill threshold. Those thresholds schedule storage; they never
+cap facts, functions, paths, or iterations.
 
 Broad consumers keep a compact linkage index of declarations, types, modules,
 imports, inheritance, and stable symbols. They stream exact per-file bodies
 from compiler objects and remap those bodies to the retained symbols. The
 memory-derived body cache is an optimization only: eviction or an oversize
 body causes exact replay, never omission.
+
+Filtered/literal query workspaces retain the deterministic full-workspace
+`FileId` ordinal for each included source. This lets a scoped query decode the
+same compiler object generation as a complete open. Scoped workspaces never
+publish their partial retrieval, linkage, callgraph, or IDG products as the
+full workspace cache.
 
 Cache and render limits never change analysis semantics. The IDG factstore is
 streamed and has no source-file-count ceiling. A rendered page that exceeds
@@ -85,7 +113,7 @@ paths.
 |---|---|---|---|
 | `BONSAI_RULES_DIR` | path | Auto-discover | Rulepack directory. |
 | `BONSAI_PARSE_TIMEOUT_MS` | integer milliseconds | unset (uncapped) | Optional per-file tree-sitter parse timeout. `0` disables the timeout guard. |
-| `BONSAI_MEMORY_BUDGET_MB` | positive integer MiB | detected host/container limit | Lower the compiler's detected memory limit. Linux resolves the current process's nested cgroup v1/v2 memory controller, not only the root controller. Weighted phases first apply the conservative worker profile (one transient exact unit at 3 GiB), then subtract current process RSS and safety headroom before admitting more units. The exact-body hot cache is also byte-weighted from this limit. A smaller value can serialize work, evict bodies sooner, and cause exact recomputation; it cannot reduce analyzed files, facts, or graph closure. |
+| `BONSAI_MEMORY_BUDGET_MB` | positive integer MiB | detected host/container limit | Lower the compiler's scheduling/spill budget. Linux resolves the current process's nested cgroup v1/v2 memory controller, not only the root controller. Weighted phases subtract measured process RSS and safety headroom before admitting transient units; the exact-body hot cache derives from the same value. This is not an OS hard-RSS limit: clean memory-mapped factstore pages, allocator arenas, stacks, the binary, and output buffers can make RSS/physical footprint exceed it and are reclaimed or paged by the OS under pressure. A smaller value serializes work, evicts bodies sooner, and can cause exact recomputation/I/O; it cannot reduce analyzed files, facts, or graph closure. |
 | `BONSAI_COMPILER_JOBS` | positive integer | available CPU count | Upper bound on compiler-object workers before file-size/memory weighting. Every file is still compiled. |
 | `BONSAI_IDG_TRANSFER_BATCH_SEGMENTS` | positive integer | available Rayon workers | Upper bound on concurrently lowered IDG source-file segments before exact VFS-size/memory weighting. Every segment and transfer fact is still compiled. |
 | `BONSAI_SECURITY_JOBS` | positive integer | available CPU count | Upper bound on concurrent Tree-sitter matcher units before the shared syntax-memory scheduler. It changes throughput only, never the scanned file or rule set. |

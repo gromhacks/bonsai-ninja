@@ -28,7 +28,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -37,14 +37,14 @@ use std::{
     time::Duration,
 };
 
-const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v12.json";
-const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v12.meta.json";
+const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v13.json";
+const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v13.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
-const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v13";
+const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v14";
 const CACHE_MANIFEST_FILE: &str = "manifest.json";
 // v3 requires the immutable per-file compiler-object generation before every
 // linked semantic artifact.
-const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 3;
+const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 4;
 const RETRIEVAL_NO_CANDIDATES_FILTER: &str = "/__bonsai_no_retrieval_candidates__/__none__";
 static EXPORT_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -339,11 +339,13 @@ impl Bonsai {
         Ok(project)
     }
 
-    /// Open a workspace for fast semantic queries: load the dataflow sidecar
-    /// and compute requested missing facts on demand.
+    /// Open a workspace for fast semantic queries. Independently versioned
+    /// compiler services load their exact sidecar on first use; opening alone
+    /// does not hydrate unrelated callgraph, IDG, or compatibility dataflow
+    /// artifacts.
     pub fn open_query(&self, root: impl AsRef<Path>) -> Result<Project> {
         let root = root.as_ref();
-        let options = self.apply_workspace_options(WorkspaceOpenOptions::query_only());
+        let options = self.apply_workspace_options(WorkspaceOpenOptions::lazy_query());
         let ws = Workspace::open_with_options(root, self.registry.clone(), options)?;
         Ok(self.project(root, ws, options))
     }
@@ -493,7 +495,7 @@ impl Bonsai {
         exclude_filters: &[String],
     ) -> Result<Project> {
         let root = root.as_ref();
-        let options = self.apply_workspace_options(WorkspaceOpenOptions::query_only());
+        let options = self.apply_workspace_options(WorkspaceOpenOptions::lazy_query());
         let ws = Workspace::open_query_filtered_paths_with_options(
             root,
             self.registry.clone(),
@@ -517,7 +519,7 @@ impl Bonsai {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let root = root.as_ref();
-        let options = self.apply_workspace_options(WorkspaceOpenOptions::query_only());
+        let options = self.apply_workspace_options(WorkspaceOpenOptions::lazy_query());
         let ws = Workspace::open_query_filtered_paths_with_options_and_events(
             root,
             self.registry.clone(),
@@ -956,7 +958,9 @@ impl Project {
     fn workspace_languages(&self) -> Vec<String> {
         let mut langs = BTreeSet::new();
         let db = self.workspace.db();
-        for file in db.global_index().all_files() {
+        // Language inventory is a VFS/frontend property. Do not construct the
+        // retained whole-workspace body index merely to enumerate file IDs.
+        for file in self.workspace.vfs().all_files() {
             if let Some(adapter) = db.adapter_for(file) {
                 langs.insert(adapter.language_id().as_str().to_string());
             }
@@ -1373,7 +1377,7 @@ pub struct Cache<'a> {
     project: &'a Project,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CacheStats {
     pub bonsai_dir: PathBuf,
     pub bonsai_dir_exists: bool,
@@ -1417,7 +1421,7 @@ pub struct CacheStats {
     pub validation: CacheValidationReport,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CacheValidationReport {
     pub manifest_status: CacheFreshnessStatus,
     pub structural_ready: bool,
@@ -1444,7 +1448,7 @@ impl CacheValidationReport {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CacheSidecarValidation {
     pub name: String,
     pub path: PathBuf,
@@ -1455,7 +1459,7 @@ pub struct CacheSidecarValidation {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheFreshnessStatus {
     Fresh,
@@ -1489,12 +1493,30 @@ pub struct CacheManifest {
     pub workspace_root: PathBuf,
     pub cache_dir: PathBuf,
     pub workspace_sources: WorkspaceContentFingerprint,
+    /// Exact content hashes paired with strong filesystem change identities.
+    ///
+    /// Warm cache checks may reuse a hash only when every stamp field still
+    /// matches. A changed/new file is rehashed; removed paths disappear from
+    /// the current scan. Non-Unix platforms conservatively bypass this
+    /// optimization because their current stamp lacks ctime/device/inode.
+    #[serde(default)]
+    pub workspace_source_files: Vec<CacheManifestSourceFile>,
     pub dependency_metadata: WorkspaceContentFingerprint,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rulepack: Option<WorkspaceContentFingerprint>,
     pub coverage: CacheManifestCoverage,
     pub sidecars: Vec<CacheManifestSidecar>,
     pub validation_note: String,
+}
+
+/// Persisted exact source hash and filesystem identity used for incremental
+/// cache validation.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CacheManifestSourceFile {
+    /// Stable FNV-1a content hash used by semantic sidecar source contracts.
+    pub hash: u64,
+    /// Strong change identity captured for the same source snapshot.
+    pub stamp: SourceFileStamp,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1677,8 +1699,22 @@ impl WorkspaceCache {
     }
 
     fn manifest_from_stats(&self, stats: &CacheStats) -> Result<CacheManifest> {
+        let (source_files, source_stamps) = source_state_from_disk(&self.root)?;
+        self.manifest_from_stats_with_source_state(stats, &source_files, &source_stamps)
+    }
+
+    fn manifest_from_stats_with_source_state(
+        &self,
+        stats: &CacheStats,
+        source_files: &[bonsai_workspace::SourceFileFingerprint],
+        source_stamps: &[SourceFileStamp],
+    ) -> Result<CacheManifest> {
         let sidecars = cache_manifest_sidecars(stats);
-        let workspace_sources = workspace_source_fingerprint_from_disk(&self.root)?;
+        let workspace_sources = source_fingerprint_from_pairs(
+            &self.root,
+            source_files.iter().map(|file| (file.path.as_path(), file.hash)),
+        );
+        let workspace_source_files = manifest_source_files(source_files, source_stamps);
         let idg_sidecar_applicable =
             bonsai_workspace::idg_sidecar_enabled_for_file_count(workspace_sources.files);
         let coverage = cache_manifest_coverage(&sidecars, stats, idg_sidecar_applicable);
@@ -1690,6 +1726,7 @@ impl WorkspaceCache {
             workspace_root: self.root.clone(),
             cache_dir: stats.bonsai_dir.clone(),
             workspace_sources,
+            workspace_source_files,
             dependency_metadata: dependency_metadata_fingerprint(&self.root)?,
             rulepack: self.rulepack_root.as_deref().map(rulepack_content_fingerprint).transpose()?,
             coverage,
@@ -1781,7 +1818,11 @@ impl Cache<'_> {
     }
 
     pub fn write_manifest(&self) -> Result<CacheManifest> {
-        self.workspace_cache().write_manifest()
+        let manifest = self.manifest()?;
+        let mut bytes = serde_json::to_vec_pretty(&manifest)?;
+        bytes.push(b'\n');
+        write_atomic_bytes(&self.workspace_cache().manifest_path(), &bytes)?;
+        Ok(manifest)
     }
 
     pub fn clear_all(&self) -> std::io::Result<()> {
@@ -1835,7 +1876,7 @@ impl Cache<'_> {
     /// This performs no parsing and does not hydrate callgraph or IDG facts.
     pub fn structural_sidecars_are_current(&self) -> Result<bool> {
         let workspace = &self.project.workspace;
-        if !workspace.compiler_object_sidecar_is_current(&self.project.root) {
+        if !workspace.compiler_object_generation_matches_current_snapshot() {
             return Ok(false);
         }
         if !workspace.callgraph_sidecar_is_current(&self.project.root) {
@@ -1888,7 +1929,7 @@ impl Cache<'_> {
     /// security, inspect, and export.
     pub fn warm_compiler_object_sidecar(&self) -> Result<()> {
         let workspace = &self.project.workspace;
-        if !workspace.compiler_object_sidecar_is_current(&self.project.root) {
+        if !workspace.compiler_object_generation_matches_current_snapshot() {
             let _ = workspace.save_compiler_object_sidecar(&self.project.root)?;
         }
         Ok(())
@@ -1929,9 +1970,8 @@ impl Cache<'_> {
     /// it in a fresh worker process so released frontend arenas cannot inflate
     /// the graph phase's resident set on constrained machines.
     pub fn warm_idg_sidecar_and_manifest(&self) -> Result<()> {
-        let cache = self.workspace_cache();
         let workspace = &self.project.workspace;
-        if !workspace.compiler_object_sidecar_is_current(&self.project.root) {
+        if !workspace.compiler_object_generation_matches_current_snapshot() {
             let _ = workspace.save_compiler_object_sidecar(&self.project.root)?;
         }
         match workspace.validate_idg_sidecar_layout(&self.project.root) {
@@ -1963,7 +2003,7 @@ impl Cache<'_> {
                 let _ = workspace.build_and_persist_idg_sidecar()?;
             }
         }
-        let _ = cache.write_manifest()?;
+        let _ = self.write_manifest()?;
         Ok(())
     }
 
@@ -1987,14 +2027,14 @@ impl Cache<'_> {
         if warm_export {
             self.project.export().warm_default_json_cache()?;
         }
-        let _ = cache.write_manifest()?;
+        let _ = self.write_manifest()?;
         Ok(cache.stats()?)
     }
 
     pub fn rebuild_dataflow(&self) -> std::io::Result<()> {
         self.project.workspace.reindex_dataflow();
         self.project.workspace.save_dataflow_sidecar(&self.project.root)?;
-        let _ = self.workspace_cache().write_manifest();
+        let _ = self.write_manifest();
         Ok(())
     }
 }
@@ -2149,7 +2189,10 @@ fn cache_validation_report(
     root: &Path,
     rulepack_root: Option<&Path>,
 ) -> CacheValidationReport {
-    let source_files = match source_file_fingerprints_from_disk(root) {
+    let manifest_hint = fs::read(&stats.manifest)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<CacheManifest>(&bytes).ok());
+    let source_files = match source_file_fingerprints_for_cache_validation(root, manifest_hint.as_ref()) {
         Ok(fingerprints) => fingerprints,
         Err(err) => {
             return cache_validation_error_report(
@@ -2197,12 +2240,34 @@ fn cache_validation_report(
         }
         ManifestValidationState::Missing => (
             CacheFreshnessStatus::Missing,
-            validate_without_manifest(stats, idg_sidecar_applicable, export_validation),
-            vec!["cache manifest is missing; sidecars cannot be validated as reusable".to_string()],
+            validate_independent_sidecars(
+                stats,
+                root,
+                idg_sidecar_applicable,
+                export_validation,
+                &source_files,
+                false,
+                "cache manifest is missing",
+            ),
+            vec![
+                "cache manifest is missing; independently versioned sidecars were validated directly"
+                    .to_string(),
+            ],
         ),
-        ManifestValidationState::Stale(reasons) => (
+        ManifestValidationState::Stale {
+            reasons,
+            compiler_inputs_match,
+        } => (
             CacheFreshnessStatus::Stale,
-            validate_stale_manifest_sidecars(stats, idg_sidecar_applicable, export_validation),
+            validate_independent_sidecars(
+                stats,
+                root,
+                idg_sidecar_applicable,
+                export_validation,
+                &source_files,
+                compiler_inputs_match,
+                "cache manifest is stale",
+            ),
             reasons,
         ),
         ManifestValidationState::Error(reason) => (
@@ -2271,7 +2336,10 @@ fn cache_validation_error_report(stats: &CacheStats, reason: String) -> CacheVal
 enum ManifestValidationState {
     Fresh(Box<CacheManifest>),
     Missing,
-    Stale(Vec<String>),
+    Stale {
+        reasons: Vec<String>,
+        compiler_inputs_match: bool,
+    },
     Error(String),
 }
 
@@ -2304,6 +2372,13 @@ fn validate_cache_manifest(
         }
     };
 
+    let current_dependency_metadata = dependency_metadata_fingerprint(root);
+    let current_rulepack = rulepack_root.map(rulepack_content_fingerprint).transpose();
+    let compiler_inputs_match = manifest.matcher_policy_fingerprint == MATCHER_POLICY_FINGERPRINT
+        && manifest.workspace_sources == current_sources
+        && current_dependency_metadata
+            .as_ref()
+            .is_ok_and(|current| manifest.dependency_metadata == *current);
     let mut reasons = Vec::new();
     if manifest.schema_version != CACHE_MANIFEST_SCHEMA_VERSION {
         reasons.push(format!(
@@ -2327,14 +2402,14 @@ fn validate_cache_manifest(
     if manifest.workspace_sources != current_sources {
         reasons.push("workspace source content changed since the cache manifest was written".to_string());
     }
-    match dependency_metadata_fingerprint(root) {
+    match current_dependency_metadata {
         Ok(current) if manifest.dependency_metadata != current => {
             reasons.push("dependency metadata changed since the cache manifest was written".to_string());
         }
         Ok(_) => {}
         Err(err) => reasons.push(format!("dependency metadata fingerprint failed: {err}")),
     }
-    match rulepack_root.map(rulepack_content_fingerprint).transpose() {
+    match current_rulepack {
         Ok(current) if manifest.rulepack != current => {
             reasons.push("rulepack content changed since the cache manifest was written".to_string());
         }
@@ -2344,7 +2419,10 @@ fn validate_cache_manifest(
     if reasons.is_empty() {
         ManifestValidationState::Fresh(Box::new(manifest))
     } else {
-        ManifestValidationState::Stale(reasons)
+        ManifestValidationState::Stale {
+            reasons,
+            compiler_inputs_match,
+        }
     }
 }
 
@@ -2454,13 +2532,18 @@ fn validate_sidecar_payload(
 ) -> Option<String> {
     match input.name {
         "compiler_objects" if input.exists => {
-            bonsai_workspace::validate_compiler_object_sidecar_layout(root)
+            bonsai_workspace::validate_compiler_object_sidecar_metadata_with_source_fingerprints(
+                root,
+                source_files
+                    .iter()
+                    .map(|file| (file.path.as_path(), file.hash)),
+            )
                 .map(|_| ())
                 .err()
                 .map(|err| format!("compiler-object sidecar validation failed: {err}"))
         }
         "callgraph" if input.exists => {
-            bonsai_workspace::callgraph_sidecar::validate_callgraph_sidecar_file_with_source_fingerprints(
+            bonsai_workspace::callgraph_sidecar::validate_callgraph_sidecar_metadata_with_source_fingerprints(
                 input.path,
                 source_files
                     .iter()
@@ -2470,7 +2553,7 @@ fn validate_sidecar_payload(
                 .map(|err| format!("callgraph sidecar validation failed: {err}"))
         }
         "linkage" if input.exists => {
-            bonsai_workspace::linkage_sidecar::validate_linkage_sidecar_file_with_source_fingerprints(
+            bonsai_workspace::linkage_sidecar::validate_linkage_sidecar_metadata_with_source_fingerprints(
                 input.path,
                 source_files
                     .iter()
@@ -2479,7 +2562,7 @@ fn validate_sidecar_payload(
             .err()
             .map(|err| format!("linkage sidecar validation failed: {err}"))
         }
-        "idg" if input.exists => bonsai_workspace::validate_idg_sidecar_file(input.path)
+        "idg" if input.exists => bonsai_workspace::validate_idg_sidecar_layout_file(input.path)
             .err()
             .map(|err| format!("idg sidecar validation failed: {err}")),
         "retrieval" if input.exists => retrieval_pipeline_hash_from_sources(root, source_files)
@@ -2529,10 +2612,14 @@ fn validate_sidecar_payload(
     }
 }
 
-fn validate_without_manifest(
+fn validate_independent_sidecars(
     stats: &CacheStats,
+    root: &Path,
     idg_sidecar_applicable: bool,
     export_validation: CacheSidecarValidation,
+    source_files: &[bonsai_workspace::SourceFileFingerprint],
+    compiler_inputs_match: bool,
+    manifest_reason: &str,
 ) -> Vec<CacheSidecarValidation> {
     cache_validation_inputs(stats)
         .into_iter()
@@ -2543,47 +2630,40 @@ fn validate_without_manifest(
             if input.name == "idg" && !idg_sidecar_applicable {
                 return not_applicable_validation(input, "IDG sidecar is not applicable");
             }
+            if !input.exists {
+                return CacheSidecarValidation {
+                    name: input.name.to_string(),
+                    path: input.path.to_path_buf(),
+                    status: CacheFreshnessStatus::Missing,
+                    exists: false,
+                    bytes: input.bytes,
+                    reason: Some(format!("{manifest_reason}; sidecar is missing")),
+                };
+            }
+            if matches!(input.name, "idg" | "taint_graph") && !compiler_inputs_match {
+                return CacheSidecarValidation {
+                    name: input.name.to_string(),
+                    path: input.path.to_path_buf(),
+                    status: CacheFreshnessStatus::Stale,
+                    exists: true,
+                    bytes: input.bytes,
+                    reason: Some(format!(
+                        "{manifest_reason}; source/dependency/compiler inputs no longer match"
+                    )),
+                };
+            }
+            let validation_error = validate_sidecar_payload(input, root, source_files);
             CacheSidecarValidation {
                 name: input.name.to_string(),
                 path: input.path.to_path_buf(),
-                status: if input.exists {
-                    CacheFreshnessStatus::Unvalidated
-                } else {
-                    CacheFreshnessStatus::Missing
-                },
-                exists: input.exists,
-                bytes: input.bytes,
-                reason: Some("cache manifest is missing".to_string()),
-            }
-        })
-        .collect()
-}
-
-fn validate_stale_manifest_sidecars(
-    stats: &CacheStats,
-    idg_sidecar_applicable: bool,
-    export_validation: CacheSidecarValidation,
-) -> Vec<CacheSidecarValidation> {
-    cache_validation_inputs(stats)
-        .into_iter()
-        .map(|input| {
-            if input.name == "export_default" {
-                return export_validation.clone();
-            }
-            if input.name == "idg" && !idg_sidecar_applicable {
-                return not_applicable_validation(input, "IDG sidecar is not applicable");
-            }
-            CacheSidecarValidation {
-                name: input.name.to_string(),
-                path: input.path.to_path_buf(),
-                status: if input.exists {
+                status: if validation_error.is_some() {
                     CacheFreshnessStatus::Stale
                 } else {
-                    CacheFreshnessStatus::Missing
+                    CacheFreshnessStatus::Fresh
                 },
-                exists: input.exists,
+                exists: true,
                 bytes: input.bytes,
-                reason: Some("cache manifest is stale".to_string()),
+                reason: validation_error,
             }
         })
         .collect()
@@ -3125,6 +3205,138 @@ fn source_file_fingerprints_from_disk(root: &Path) -> Result<Vec<bonsai_workspac
         .with_context(|| format!("fingerprinting workspace sources under {}", root.display()))
 }
 
+fn source_file_stamps_from_disk(root: &Path) -> Result<Vec<SourceFileStamp>> {
+    let registry = bonsai_adapters::all_languages_registry();
+    let workspace = Workspace::new(registry);
+    workspace
+        .source_file_stamps(root)
+        .with_context(|| format!("scanning workspace source metadata under {}", root.display()))
+}
+
+fn source_state_from_disk(
+    root: &Path,
+) -> Result<(Vec<bonsai_workspace::SourceFileFingerprint>, Vec<SourceFileStamp>)> {
+    let registry = bonsai_adapters::all_languages_registry();
+    let workspace = Workspace::new(registry);
+    loop {
+        let before = workspace
+            .source_file_stamps(root)
+            .with_context(|| format!("scanning workspace source metadata under {}", root.display()))?;
+        let fingerprints = workspace
+            .source_file_fingerprints(root)
+            .with_context(|| format!("fingerprinting workspace sources under {}", root.display()))?;
+        let after = workspace
+            .source_file_stamps(root)
+            .with_context(|| format!("rescanning workspace source metadata under {}", root.display()))?;
+        let fingerprint_paths = fingerprints
+            .iter()
+            .map(|file| file.path.as_path())
+            .collect::<Vec<_>>();
+        let stamp_paths = after.iter().map(|stamp| stamp.path.as_path()).collect::<Vec<_>>();
+        if before == after && fingerprint_paths == stamp_paths {
+            return Ok((fingerprints, after));
+        }
+        // A checkout/editor changed the input during hashing. Repeat until one
+        // quiescent exact snapshot is observed; retry count never changes the
+        // compiler's file set or semantics.
+    }
+}
+
+fn source_file_fingerprints_for_cache_validation(
+    root: &Path,
+    manifest: Option<&CacheManifest>,
+) -> Result<Vec<bonsai_workspace::SourceFileFingerprint>> {
+    let Some(manifest) = manifest.filter(|manifest| {
+        manifest.schema_version == CACHE_MANIFEST_SCHEMA_VERSION
+            && !manifest.workspace_source_files.is_empty()
+    }) else {
+        return source_file_fingerprints_from_disk(root);
+    };
+    // ctime + device/inode makes stamp reuse exact for ordinary local Unix
+    // filesystems, including same-size rewrites and atomic editor replaces.
+    // The current non-Unix stamp intentionally carries zeros for those
+    // fields, so it falls back to content hashing.
+    if !cfg!(unix) {
+        return source_file_fingerprints_from_disk(root);
+    }
+
+    let stable_root = stable_root_path(root);
+    let recorded = manifest
+        .workspace_source_files
+        .iter()
+        .map(|file| {
+            (
+                stable_relative_path(&stable_root, root, file.stamp.path.as_path()),
+                file,
+            )
+        })
+        .collect::<AHashMap<_, _>>();
+    let current_stamps = source_file_stamps_from_disk(root)?;
+    let changed = current_stamps
+        .iter()
+        .filter(|stamp| {
+            let relative = stable_relative_path(&stable_root, root, &stamp.path);
+            recorded
+                .get(&relative)
+                .is_none_or(|file| !source_stamp_identity_matches(&file.stamp, stamp))
+        })
+        .count();
+    // A moved workspace or a mass checkout is faster and more memory-bounded
+    // through the existing parallel streaming hasher than through thousands
+    // of one-off file opens here.
+    if changed > 64 {
+        return source_file_fingerprints_from_disk(root);
+    }
+
+    current_stamps
+        .into_iter()
+        .map(|stamp| {
+            let relative = stable_relative_path(&stable_root, root, &stamp.path);
+            let hash = match recorded.get(&relative) {
+                Some(file) if source_stamp_identity_matches(&file.stamp, &stamp) => file.hash,
+                _ => streaming_file_content_digest(&stamp.path)?,
+            };
+            Ok(bonsai_workspace::SourceFileFingerprint {
+                path: stamp.path,
+                hash,
+            })
+        })
+        .collect()
+}
+
+fn source_stamp_identity_matches(left: &SourceFileStamp, right: &SourceFileStamp) -> bool {
+    left.len == right.len
+        && left.modified == right.modified
+        && left.change_seconds == right.change_seconds
+        && left.change_nanoseconds == right.change_nanoseconds
+        && left.device == right.device
+        && left.inode == right.inode
+}
+
+fn manifest_source_files(
+    fingerprints: &[bonsai_workspace::SourceFileFingerprint],
+    stamps: &[SourceFileStamp],
+) -> Vec<CacheManifestSourceFile> {
+    let hashes = fingerprints
+        .iter()
+        .map(|file| (file.path.as_path(), file.hash))
+        .collect::<AHashMap<_, _>>();
+    let mut files = stamps
+        .iter()
+        .filter_map(|stamp| {
+            hashes
+                .get(stamp.path.as_path())
+                .copied()
+                .map(|hash| CacheManifestSourceFile {
+                    hash,
+                    stamp: stamp.clone(),
+                })
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.stamp.path.cmp(&right.stamp.path));
+    files
+}
+
 fn retrieval_pipeline_hash_from_sources(
     root: &Path,
     fingerprints: &[bonsai_workspace::SourceFileFingerprint],
@@ -3233,6 +3445,21 @@ fn content_fingerprint_from_entries(
 fn file_content_digest(path: &Path) -> Result<u64> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(bonsai_hash::fnv1a_bytes64(&bytes))
+}
+
+fn streaming_file_content_digest(path: &Path) -> Result<u64> {
+    let mut file = fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut hasher = bonsai_hash::Hasher::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if read == 0 {
+            return Ok(hasher.finish());
+        }
+        hasher.absorb(&buffer[..read]);
+    }
 }
 
 fn stable_root_path(root: &Path) -> PathBuf {
@@ -3810,7 +4037,7 @@ pub struct Export<'a> {
     project: &'a Project,
 }
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug)]
 pub struct NativeExportOptions {
     /// Materialize exhaustive interprocedural propagation records.
     /// Defaults to false because propagation records can be much
@@ -3818,16 +4045,18 @@ pub struct NativeExportOptions {
     /// `analysis_complete=false`, `propagations_complete=false`, and
     /// omission reasons.
     pub full_propagations: bool,
-    /// Request complete semantic chain and flow-id-label evidence for
-    /// native JSON export. Defaults to false so the warmed default
-    /// export cache remains compact and predictable. Even small graphs can
-    /// have exponentially many exact paths, so complete mode always uses the
-    /// exact `compressed_callgraph` representation instead of materializing
-    /// every path row.
-    pub complete_chains: bool,
     /// Keep the complete propagation relation in canonical compiler form.
     /// This is the scalable exact mode used by CLI `export --all`.
     pub compiled_propagations: bool,
+}
+
+impl Default for NativeExportOptions {
+    fn default() -> Self {
+        Self {
+            full_propagations: false,
+            compiled_propagations: false,
+        }
+    }
 }
 
 impl Export<'_> {
@@ -3838,7 +4067,6 @@ impl Export<'_> {
             &self.project.root,
             bonsai_browse::NativeExportConfig {
                 full_propagations: options.full_propagations,
-                complete_chains: options.complete_chains,
                 compiled_propagations: options.compiled_propagations,
             },
         )
@@ -3851,7 +4079,6 @@ impl Export<'_> {
             &self.project.root,
             bonsai_browse::NativeExportConfig {
                 full_propagations: options.full_propagations,
-                complete_chains: options.complete_chains,
                 compiled_propagations: options.compiled_propagations,
             },
         )
@@ -3868,7 +4095,6 @@ impl Export<'_> {
             &self.project.root,
             bonsai_browse::NativeExportConfig {
                 full_propagations: options.full_propagations,
-                complete_chains: options.complete_chains,
                 compiled_propagations: options.compiled_propagations,
             },
             writer,
@@ -3916,7 +4142,7 @@ impl Export<'_> {
 
     pub fn write_default_json_cache_streaming(&self, options: NativeExportOptions) -> Result<()> {
         anyhow::ensure!(
-            !options.complete_chains && !options.full_propagations && !options.compiled_propagations,
+            !options.full_propagations && !options.compiled_propagations,
             "default export cache can only store default native export scope"
         );
         let rulepack_root = self
@@ -3943,7 +4169,6 @@ impl Export<'_> {
         }
         self.write_default_json_cache_streaming(NativeExportOptions {
             full_propagations: false,
-            complete_chains: false,
             compiled_propagations: false,
         })
     }

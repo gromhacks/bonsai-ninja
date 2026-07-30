@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn elasticsearch_test_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -176,6 +176,100 @@ fn assert_success(bin: &Path, args: &[String]) -> String {
     stdout
 }
 
+fn performance_limit(variable: &str, default_seconds: u64) -> Duration {
+    let seconds = std::env::var(variable)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default_seconds);
+    Duration::from_secs(seconds)
+}
+
+fn assert_performance(label: &str, elapsed: Duration, variable: &str, default_seconds: u64) {
+    let limit = performance_limit(variable, default_seconds);
+    assert!(
+        elapsed <= limit,
+        "{label} completed correctly but took {elapsed:.2?}, exceeding {limit:.2?}; \
+         this gate never terminates or caps analysis. Set {variable} only when \
+         intentionally calibrating a slower performance host"
+    );
+}
+
+fn assert_success_timed(bin: &Path, args: &[String]) -> (String, Duration) {
+    let started = Instant::now();
+    let output = assert_success(bin, args);
+    (output, started.elapsed())
+}
+
+fn ensure_elasticsearch_semantic_cache(bin: &Path, es: &Path) {
+    static PREWARM: OnceLock<Result<(), String>> = OnceLock::new();
+    PREWARM
+        .get_or_init(|| {
+            let started = Instant::now();
+            let args = es_args(es, &["index", "--semantic", "{es}"]);
+            let output = run_bonsai(bin, &args);
+            if !output.status.success() {
+                return Err(format!(
+                    "semantic prewarm failed with {}\nstdout:\n{}\nstderr:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            let stats = run_bonsai(bin, &es_args(es, &["cache", "stats", "{es}", "--format", "json"]));
+            if !stats.status.success() {
+                return Err(format!(
+                    "cache stats failed after semantic prewarm with {}\nstdout:\n{}\nstderr:\n{}",
+                    stats.status,
+                    String::from_utf8_lossy(&stats.stdout),
+                    String::from_utf8_lossy(&stats.stderr)
+                ));
+            }
+            let parsed: serde_json::Value = serde_json::from_slice(&stats.stdout)
+                .map_err(|error| format!("invalid cache stats JSON after prewarm: {error}"))?;
+            if parsed
+                .pointer("/validation/semantic_ready")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            {
+                return Err(format!(
+                    "semantic prewarm did not publish a reusable complete generation: {parsed}"
+                ));
+            }
+            eprintln!(
+                "Elasticsearch semantic generation ready in {:.2?}",
+                started.elapsed()
+            );
+
+            // A stale exact generation may take real compiler work. The next
+            // fresh process must validate and reuse it quickly. This measures
+            // completed work; it never kills analysis, narrows files, or caps
+            // graph closure/results.
+            let warm_args = es_args(es, &["index", "--semantic", "{es}"]);
+            let warm_started = Instant::now();
+            let warm_output = run_bonsai(bin, &warm_args);
+            if !warm_output.status.success() {
+                return Err(format!(
+                    "warm semantic reuse failed with {}\nstdout:\n{}\nstderr:\n{}",
+                    warm_output.status,
+                    String::from_utf8_lossy(&warm_output.stdout),
+                    String::from_utf8_lossy(&warm_output.stderr)
+                ));
+            }
+            let warm_elapsed = warm_started.elapsed();
+            let warm_limit = performance_limit("BONSAI_ES_WARM_INDEX_MAX_SECS", 15);
+            if warm_elapsed > warm_limit {
+                return Err(format!(
+                    "warm semantic index completed correctly but took {warm_elapsed:.2?}, \
+                     exceeding {warm_limit:.2?}; cache validation or reuse regressed"
+                ));
+            }
+            eprintln!("Elasticsearch warm semantic reuse completed in {warm_elapsed:.2?}");
+            Ok(())
+        })
+        .as_ref()
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
 fn es_args(es: &Path, rest: &[&str]) -> Vec<String> {
     let rules = rules_dir();
     let mut args = Vec::with_capacity(rest.len() + 1);
@@ -195,6 +289,7 @@ fn elasticsearch_navigation_commands_do_not_regress() {
     let (Some(bin), Some(es)) = (release_bin(), elasticsearch_root()) else {
         return;
     };
+    ensure_elasticsearch_semantic_cache(&bin, &es);
     let commands: &[&[&str]] = &[
         &["tree", "{es}", "--max-depth", "1", "--context", "4k"],
         &["search", "{es}", "execute", "--context", "4k"],
@@ -215,7 +310,14 @@ fn elasticsearch_navigation_commands_do_not_regress() {
         ],
     ];
     for command in commands {
-        let out = assert_success(&bin, &es_args(&es, command));
+        let args = es_args(&es, command);
+        let (out, elapsed) = assert_success_timed(&bin, &args);
+        assert_performance(
+            &format!("Elasticsearch navigation command {command:?}"),
+            elapsed,
+            "BONSAI_ES_NAVIGATION_MAX_SECS",
+            30,
+        );
         assert!(
             !out.trim().is_empty(),
             "bonsai-ninja {command:?} produced empty stdout"
@@ -229,15 +331,22 @@ fn elasticsearch_inspect_modes_do_not_regress() {
     let (Some(bin), Some(es)) = (release_bin(), elasticsearch_root()) else {
         return;
     };
-    let default_out = assert_success(
+    ensure_elasticsearch_semantic_cache(&bin, &es);
+    let (default_out, default_elapsed) = assert_success_timed(
         &bin,
         &es_args(&es, &["inspect", "{es}", "--query", "execute", "--context", "8k"]),
+    );
+    assert_performance(
+        "Elasticsearch default inspect",
+        default_elapsed,
+        "BONSAI_ES_INSPECT_MAX_SECS",
+        30,
     );
     assert!(
         default_out.contains("inspect `execute`"),
         "default inspect output lost query header:\n{default_out}"
     );
-    let taint_out = assert_success(
+    let (taint_out, taint_elapsed) = assert_success_timed(
         &bin,
         &es_args(
             &es,
@@ -252,6 +361,12 @@ fn elasticsearch_inspect_modes_do_not_regress() {
             ],
         ),
     );
+    assert_performance(
+        "Elasticsearch inspect --taint-flow",
+        taint_elapsed,
+        "BONSAI_ES_INSPECT_MAX_SECS",
+        30,
+    );
     assert!(
         taint_out.contains("TAINT FLOWS") || taint_out.contains("taint flow"),
         "explicit inspect --taint-flow did not render taint-flow evidence:\n{taint_out}"
@@ -264,6 +379,7 @@ fn elasticsearch_security_inventory_commands_do_not_regress() {
     let (Some(bin), Some(es)) = (release_bin(), elasticsearch_root()) else {
         return;
     };
+    ensure_elasticsearch_semantic_cache(&bin, &es);
     let commands: &[&[&str]] = &[
         &[
             "security",
@@ -309,7 +425,14 @@ fn elasticsearch_security_inventory_commands_do_not_regress() {
         ],
     ];
     for command in commands {
-        let out = assert_success(&bin, &es_args(&es, command));
+        let args = es_args(&es, command);
+        let (out, elapsed) = assert_success_timed(&bin, &args);
+        assert_performance(
+            &format!("Elasticsearch security inventory command {command:?}"),
+            elapsed,
+            "BONSAI_ES_SECURITY_INVENTORY_MAX_SECS",
+            30,
+        );
         assert!(
             !out.trim().is_empty(),
             "bonsai-ninja {command:?} produced empty stdout"
@@ -323,6 +446,7 @@ fn elasticsearch_production_taint_analysis_does_not_regress() {
     let (Some(bin), Some(es)) = (release_bin(), elasticsearch_root()) else {
         return;
     };
+    ensure_elasticsearch_semantic_cache(&bin, &es);
     let output = temp_output_path("taint-summary");
     let args = es_args(
         &es,
@@ -341,10 +465,16 @@ fn elasticsearch_production_taint_analysis_does_not_regress() {
             "{rules}",
         ],
     );
-    // Correctness is not time-bounded: a large real workspace must run to a
-    // semantic fixed point. Dedicated benchmark gates record wall time and
-    // peak RSS without killing analysis or returning an incomplete result.
-    let stdout = assert_success(&bin, &args);
+    // Correctness is not time-bounded: the command first runs to its semantic
+    // fixed point. The performance assertion is evaluated only after that
+    // completed result, so it cannot kill or silently truncate analysis.
+    let (stdout, elapsed) = assert_success_timed(&bin, &args);
+    assert_performance(
+        "Elasticsearch warm production taint analysis",
+        elapsed,
+        "BONSAI_ES_TAINT_MAX_SECS",
+        30,
+    );
     assert!(
         stdout.trim().is_empty(),
         "taint-analysis with --output-path should keep stdout empty, got:\n{stdout}"

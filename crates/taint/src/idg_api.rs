@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::EdgeKind;
-use bonsai_common::{FuncId, Precision, Span, SymbolId};
+use bonsai_common::{FuncId, Precision, Span};
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::FlowEvent;
 
@@ -228,11 +228,13 @@ pub(crate) fn idg_backed_interprocedural_taint_with_service(
     if entry_sources.is_empty() {
         return InterTaintResult::default();
     }
-    let global = db.global_index();
-    let seed_nodes = crate::reachable::compose_idg_seed_nodes(
+    let global = idg.global_linkage_index();
+    let exact_entry = crate::reachable::exact_decl_for_func(db, global.as_ref(), entry_func);
+    let seed_nodes = crate::reachable::compose_idg_seed_nodes_with_decl(
         crate::reachable::IdgSeedRequest::token_api(entry_func, entry_sources),
         global.as_ref(),
         idg,
+        exact_entry.as_ref(),
     );
     let graph = crate::reachable::entry_taint_graph_from_idg_query(
         crate::IdgTaintQuery::semantic(
@@ -244,6 +246,7 @@ pub(crate) fn idg_backed_interprocedural_taint_with_service(
             call_results_materialized: true,
             ..crate::IdgTaintTransfers::none()
         })
+        .with_global_index(global.as_ref())
         .with_max_precision(config.max_edge_precision),
     );
     entry_taint_graph_to_inter_result(graph, entry_func, entry_sources)
@@ -347,11 +350,13 @@ fn idg_backed_call_site_receives_taint(
         return false;
     }
     let idg = crate::idg_build::idg_service_for_inter_config(db, config);
-    let global = db.global_index();
-    let seed_nodes = crate::reachable::compose_idg_seed_nodes(
+    let global = idg.global_linkage_index();
+    let exact_entry = crate::reachable::exact_decl_for_func(db, global.as_ref(), func);
+    let seed_nodes = crate::reachable::compose_idg_seed_nodes_with_decl(
         crate::reachable::IdgSeedRequest::token_api(func, entry_sources),
         global.as_ref(),
         idg.as_ref(),
+        exact_entry.as_ref(),
     );
     let graph = crate::reachable::entry_taint_graph_from_idg_query(
         crate::IdgTaintQuery::semantic(
@@ -363,6 +368,7 @@ fn idg_backed_call_site_receives_taint(
             call_results_materialized: true,
             ..crate::IdgTaintTransfers::none()
         })
+        .with_global_index(global.as_ref())
         .with_max_precision(config.max_edge_precision),
     );
     let spans_match = |candidate: Span| {
@@ -371,8 +377,8 @@ fn idg_backed_call_site_receives_taint(
                 && candidate.start <= sink_span.end
                 && sink_span.start <= candidate.end)
     };
-    let sink_event = global
-        .decl_of(SymbolId::new(func.raw()))
+    let sink_event = exact_entry
+        .as_ref()
         .and_then(|decl| most_specific_sink_event(&decl.flow_events, sink_span));
     if graph.tainted_calls.iter().any(|call| {
         call.caller == func
@@ -399,7 +405,7 @@ fn idg_backed_call_site_receives_taint(
     else {
         return false;
     };
-    let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+    let Some(decl) = exact_entry.as_ref() else {
         return false;
     };
     let latest_writes = latest_receiver_field_writes_before(&decl.flow_events, receiver, event.span.start);

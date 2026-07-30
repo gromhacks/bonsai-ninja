@@ -37,9 +37,9 @@ pub use idg_query::{
 };
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{
-    apply_configured_transfer_fixpoint, compose_idg_seed_nodes, default_entry_graph_seed,
-    default_entry_taint_seed, entry_taint_call_records_from_idg, entry_taint_call_records_from_idg_query,
-    entry_taint_graph_from_idg, entry_taint_graph_from_idg_query,
+    apply_configured_transfer_fixpoint, compose_idg_seed_nodes, compose_idg_seed_nodes_with_decl,
+    default_entry_graph_seed, default_entry_taint_seed, entry_taint_call_records_from_idg,
+    entry_taint_call_records_from_idg_query, entry_taint_graph_from_idg, entry_taint_graph_from_idg_query,
     inspect_entry_taint_graph_from_idg_with_target_funcs, merge_into, name_reachable_through_chain_kinded,
     name_reachable_through_decl_kinded, name_reachable_through_file_kinded,
     name_reachable_through_func_kinded, source_seed_reaches_return_from_idg,

@@ -216,6 +216,13 @@ impl DataFlowCache {
         *self.cached_call_graph.write() = Some(graph);
     }
 
+    /// Release only the shared callgraph allocation. Cached dataflow facts
+    /// remain valid; a later graph-dependent miss receives the same canonical
+    /// workspace graph again.
+    pub fn release_call_graph(&self) {
+        *self.cached_call_graph.write() = None;
+    }
+
     /// Inject the workspace-wide `InterTaintCaches` singleton so the
     /// dataflow prewarm + lazy faults share the engine's resolver
     /// memo, alias maps, and function summaries with subsequent

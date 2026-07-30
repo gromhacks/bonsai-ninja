@@ -44,14 +44,36 @@ pub struct VarOut {
 /// `(name, in_function, file, line)` after the dedup pass.
 pub fn vars(ws: &Workspace, f: &VarsFilters<'_>) -> Result<Vec<VarOut>, regex::Error> {
     use rayon::prelude::*;
-    let global = ws.db().global_index();
     let name_match = make_name_filter(f.name, f.regex)?;
-    let files: Vec<_> = global.all_files().collect();
+    let files = ws.vfs().all_files();
     let mut out: Vec<VarOut> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
-            for decl in global.decls_in(file) {
-                walk_assigns(&decl.flow_events, &decl.name, ws, &mut acc);
+            if let Some(needle) = f.file {
+                let path = ws
+                    .vfs()
+                    .path(file)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !file_path_matches_filter(ws, &path, needle) {
+                    return acc;
+                }
+            }
+            let Some(index) = ws.db().decl_index_uncached(file) else {
+                return acc;
+            };
+            for decl in &index.defs {
+                if f.in_fn.is_some_and(|needle| !decl.name.contains(needle)) {
+                    continue;
+                }
+                walk_assigns(
+                    &decl.flow_events,
+                    &decl.name,
+                    ws,
+                    &*name_match,
+                    f.source,
+                    &mut acc,
+                );
             }
             acc
         })
@@ -62,27 +84,6 @@ pub fn vars(ws: &Workspace, f: &VarsFilters<'_>) -> Result<Vec<VarOut>, regex::E
             larger.extend(smaller);
             larger
         });
-    out.retain(|var| {
-        if !name_match(&var.name) {
-            return false;
-        }
-        if f.file
-            .is_some_and(|needle| !file_path_matches_filter(ws, &var.file, needle))
-        {
-            return false;
-        }
-        if let Some(needle) = f.in_fn {
-            if !var.in_function.contains(needle) {
-                return false;
-            }
-        }
-        if let Some(needle) = f.source {
-            if !var.source_name.as_deref().is_some_and(|s| s.contains(needle)) {
-                return false;
-            }
-        }
-        true
-    });
     // Dedup: several grammars (C# `local_declaration_statement →
     // variable_declaration → variable_declarator`, Go `short_var_
     // declaration`) emit the same assignment at multiple nested
@@ -136,7 +137,14 @@ fn var_relevance_key(row: &VarOut, f: &VarsFilters<'_>) -> ((u8, usize), (u8, us
 /// `FlowEvent::Assign`. RHS preference: explicit `source_name` >
 /// RHS-call name > comma-joined `source_names` (multi-source
 /// assignments).
-fn walk_assigns(events: &[FlowEvent], in_fn: &str, ws: &Workspace, out: &mut Vec<VarOut>) {
+fn walk_assigns(
+    events: &[FlowEvent],
+    in_fn: &str,
+    ws: &Workspace,
+    name_matches: &(dyn Fn(&str) -> bool + Send + Sync),
+    source_filter: Option<&str>,
+    out: &mut Vec<VarOut>,
+) {
     for event in events {
         match event {
             FlowEvent::Assign {
@@ -147,12 +155,20 @@ fn walk_assigns(events: &[FlowEvent], in_fn: &str, ws: &Workspace, out: &mut Vec
                 source_names,
                 ..
             } => {
-                let (path, line, column) = format_span(span, ws);
+                if !name_matches(target) {
+                    continue;
+                }
                 let source = source_name.clone().or_else(|| {
                     source_call
                         .clone()
                         .or_else(|| (!source_names.is_empty()).then(|| source_names.join(",")))
                 });
+                if source_filter
+                    .is_some_and(|needle| !source.as_deref().is_some_and(|source| source.contains(needle)))
+                {
+                    continue;
+                }
+                let (path, line, column) = format_span(span, ws);
                 out.push(VarOut {
                     name: target.clone(),
                     file: path,
@@ -168,22 +184,24 @@ fn walk_assigns(events: &[FlowEvent], in_fn: &str, ws: &Workspace, out: &mut Vec
                 else_events,
                 ..
             } => {
-                walk_assigns(then_events, in_fn, ws, out);
-                walk_assigns(else_events, in_fn, ws, out);
+                walk_assigns(then_events, in_fn, ws, name_matches, source_filter, out);
+                walk_assigns(else_events, in_fn, ws, name_matches, source_filter, out);
             }
-            FlowEvent::Loop { body, .. } => walk_assigns(body, in_fn, ws, out),
+            FlowEvent::Loop { body, .. } => {
+                walk_assigns(body, in_fn, ws, name_matches, source_filter, out);
+            }
             FlowEvent::Try {
                 body,
                 catch_events,
                 finally_events,
                 ..
             } => {
-                walk_assigns(body, in_fn, ws, out);
-                walk_assigns(catch_events, in_fn, ws, out);
-                walk_assigns(finally_events, in_fn, ws, out);
+                walk_assigns(body, in_fn, ws, name_matches, source_filter, out);
+                walk_assigns(catch_events, in_fn, ws, name_matches, source_filter, out);
+                walk_assigns(finally_events, in_fn, ws, name_matches, source_filter, out);
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                walk_assigns(body, in_fn, ws, out);
+                walk_assigns(body, in_fn, ws, name_matches, source_filter, out);
             }
             _ => {}
         }

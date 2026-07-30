@@ -122,8 +122,8 @@ pub struct ParamSideEffect {
 /// left to the caller (the inter pass builds its own per-run map).
 #[must_use]
 pub fn function_summary(db: &AnalyzerDb, func: FuncId) -> FunctionSummary {
-    let global = db.global_index();
     let idg = crate::idg_build::ensure_idg_service(db);
+    let global = idg.global_linkage_index();
     function_summary_from_idg(global.as_ref(), idg.as_ref(), func)
 }
 

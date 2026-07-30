@@ -72,7 +72,7 @@ pub fn compute_node_id(file_path: &str, start_byte: usize, end_byte: usize, kind
 pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
     use rayon::prelude::*;
     let depth_cap = f.max_depth.unwrap_or(usize::MAX);
-    let all_files: Vec<_> = ws.db().global_index().all_files().collect();
+    let all_files = ws.vfs().all_files();
     // Parallel per-file tree walk. `tree_sitter::Node` isn't Send,
     // but every node we touch is created, walked, and converted to
     // an owned `AstNode` entirely within a single worker's stack —
@@ -98,9 +98,8 @@ pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
             // `--function` narrows to the smallest tree-sitter node
             // covering that decl's span.
             let scoped_node = if let Some(func_name) = f.function {
-                let global = ws.db().global_index();
-                let decls_in_file = global.decls_in(file_id);
-                let matching_decl = decls_in_file.iter().find(|decl| decl.name == func_name)?;
+                let index = ws.db().decl_index_uncached(file_id)?;
+                let matching_decl = index.defs.iter().find(|decl| decl.name == func_name)?;
                 find_node_covering_span(tree_root, matching_decl.span.start, matching_decl.span.end)?
             } else {
                 tree_root

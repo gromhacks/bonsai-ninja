@@ -1688,6 +1688,25 @@ impl IdgWorkspace {
         Ok(workspace.segment_count())
     }
 
+    /// Validate the sidecar container, schema, and complete key layout without
+    /// decoding graph pages.
+    ///
+    /// The expected pipeline is taken from the artifact header. Callers must
+    /// separately prove source/dependency/compiler freshness (for example via
+    /// the workspace cache manifest) before treating the artifact as current.
+    pub fn validate_sidecar_layout_file(path: &std::path::Path) -> crate::IdgResult<usize> {
+        let reader = bonsai_factstore::FactStoreReader::open_relaxed(path)?;
+        if reader.header().table_id != IDG_WORKSPACE_TABLE_ID {
+            return Err(crate::IdgError::WrongTable {
+                got: reader.header().table_id,
+                expected: IDG_WORKSPACE_TABLE_ID,
+            });
+        }
+        let pipeline_hash = reader.header().pipeline_hash;
+        drop(reader);
+        Self::validate_sidecar_layout_with_pipeline(path, pipeline_hash)
+    }
+
     /// Validate the cheap-to-read sidecar contract for an exact pipeline
     /// without hydrating the complete graph. This checks the factstore header,
     /// section/index bounds, metadata schema, and the complete expected key

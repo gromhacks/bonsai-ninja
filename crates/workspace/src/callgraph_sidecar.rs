@@ -163,6 +163,26 @@ where
     I: IntoIterator<Item = (P, u64)>,
     P: AsRef<Path>,
 {
+    validate_callgraph_sidecar_metadata_with_source_fingerprints(path, fingerprints)?;
+    let (reader, _) = open_sidecar(path)?;
+    let graph = decode_graph(&reader)?;
+    Ok(graph.inner().edges.len())
+}
+
+/// Validate callgraph schema, compiler inputs, and source identity without
+/// decoding the graph payload.
+///
+/// Query-time graph loading still decodes and validates the exact payload.
+/// Cache planning uses this metadata-only contract so deciding whether a
+/// multi-gigabyte artifact is reusable does not itself materialize it.
+pub fn validate_callgraph_sidecar_metadata_with_source_fingerprints<I, P>(
+    path: &Path,
+    fingerprints: I,
+) -> std::io::Result<()>
+where
+    I: IntoIterator<Item = (P, u64)>,
+    P: AsRef<Path>,
+{
     let (reader, metadata) = open_sidecar(path)?;
     validate_metadata(path, &metadata)?;
     let mut current: Vec<(String, u64)> = fingerprints
@@ -176,8 +196,8 @@ where
             "callgraph sidecar source fingerprint mismatch",
         ));
     }
-    let graph = decode_graph(&reader)?;
-    Ok(graph.inner().edges.len())
+    drop(reader);
+    Ok(())
 }
 
 fn open_sidecar(path: &Path) -> std::io::Result<(FactStoreReader, CallgraphMetadata)> {

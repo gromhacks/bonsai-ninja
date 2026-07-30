@@ -13,6 +13,84 @@ depth, iteration, or result cap. `--all` controls artifact pagination; omitting
 it can produce a valid first page but must not be treated as review of every
 finding.
 
+Large-project speed depends on three pinned compiler ownership rules:
+compiler-object import/syntax headers must filter before body decode; every
+consumer must share the workspace's canonical resolved callgraph; and
+external-memory IDG acceleration must allocate lazily on promotion/spill.
+Architecture conformance rejects violations before the timed gate is run.
+Flow-ID/export code must reuse the live compiler linkage header and canonical
+callgraph instead of calling `global_index()`, and export must serialize/drop
+callgraph and exact-body phases before opening the IDG. Native export has no
+capped/BFS path-prefix mode: the resolved callgraph is always the exact
+linear-space path-language representation.
+
+## Workspace test build performance
+
+`[profile.test] debug = 0` is intentional. The repository has hundreds of
+standalone integration-test executables, and each large security/CLI test
+links the complete 21-language analysis graph. Embedding full DWARF made a
+cold `cargo test --workspace --locked` spend tens of minutes linking and
+triggered repeated macOS policy scans without improving test semantics. Do not
+remove this profile setting as routine cleanup. For an intentional debugger
+session, opt in locally:
+
+```bash
+CARGO_PROFILE_TEST_DEBUG=2 cargo test -p <crate> <test-name>
+```
+
+CI correctness still uses `cargo test --workspace --locked`; production
+runtime and memory measurements always use the release binary.
+
+## Large-workspace performance regression gate
+
+Engine, cache, query, security, and export changes must run the real
+Elasticsearch gate after building release:
+
+```bash
+cargo build --release --locked -p bonsai_cli
+BONSAI_ELASTICSEARCH_ROOT=../elasticsearch \
+  cargo test --release -p bonsai_cli \
+  --test elasticsearch_large_repo -- --nocapture
+```
+
+The test uses a 3 GiB compiler scheduling budget by default. It first allows a
+cold `index --semantic` to finish, then measures a second fresh-process warm
+reuse plus navigation, inspect, security inventory, and production taint
+commands. Every assertion is evaluated after the command exits and
+`analysis_complete` is checked, so an SLO failure cannot interrupt, skip, or
+truncate semantic work.
+
+Default warm ceilings are 15 seconds for semantic index reuse and 30 seconds
+for each query/analysis command. Dedicated slower performance hosts can
+calibrate `BONSAI_ES_WARM_INDEX_MAX_SECS`,
+`BONSAI_ES_NAVIGATION_MAX_SECS`, `BONSAI_ES_INSPECT_MAX_SECS`,
+`BONSAI_ES_SECURITY_INVENTORY_MAX_SECS`, and
+`BONSAI_ES_TAINT_MAX_SECS`. Do not raise a repository baseline merely to make
+a regression pass: record the host, source-file count, cold/warm cache state,
+wall time, physical footprint/RSS, swaps, and completeness, then review the
+phase/allocation change.
+
+The integration test deliberately does not write the multi-gigabyte native
+Elasticsearch artifact on every CI runner. Changes to native export, compiler
+summary closure, phase release, JSON streaming, or export caching must also run
+an artifact host gate:
+
+```bash
+BONSAI_MEMORY_BUDGET_MB=2048 MIMALLOC_PURGE_DELAY=0 \
+  ./target/release/bonsai-ninja export ../elasticsearch \
+  --format json \
+  --output-path /tmp/bonsai-es-export.json \
+  --no-color --no-progress
+jq --stream 'empty' /tmp/bonsai-es-export.json
+```
+
+Record bytes, wall time, physical footprint/RSS, dirty resident memory when
+available, swaps, and SHA-256. Confirm `flow_chains_mode`,
+`taint_graph.chains_mode`, and `taint_graph.flow_id_labels_mode` are all
+`compressed_callgraph`, every truncation counter is zero, and a one-shot cache
+miss did not create `.bonsai/export.default.*`. Do not replace this gate with a
+timeout or reintroduce a materialized path-prefix option.
+
 ## GitHub Release Artifacts
 
 Repository releases are built from `v*.*.*` tags by `.github/workflows/release.yml`. The workflow builds Linux x64, Linux arm64, macOS Intel, macOS Apple Silicon, Windows x64, and Windows arm64 archives, includes `security-patterns/`, `docs/`, `README.md`, `AGENTS.md`, `SKILLS.md`, and checksum files, then publishes them with `softprops/action-gh-release`.

@@ -141,6 +141,67 @@ impl Vfs {
         id
     }
 
+    /// Intern a path at a compiler-assigned workspace file id.
+    ///
+    /// Scoped query workspaces use this to preserve the deterministic ordinal
+    /// that the same path has in a complete workspace ingest. Sparse slots are
+    /// intentional: keeping the original id makes immutable per-file compiler
+    /// objects reusable across query scopes without rewriting typed spans or
+    /// weakening path/content validation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `file_id` is occupied by another path, or if `path` was
+    /// already interned at another id. Both are compiler orchestration
+    /// invariant violations.
+    pub fn write_with_id(
+        &self,
+        file_id: FileId,
+        path: impl Into<PathBuf>,
+        text: impl Into<Arc<str>>,
+    ) -> FileId {
+        let path = path.into();
+        let text = text.into();
+        let lookup_key = canonical_path_key(&path);
+        let mut inner = self.inner.write();
+        if let Some(&existing) = inner.by_path.get(&lookup_key) {
+            assert_eq!(
+                existing, file_id,
+                "path was interned at a different compiler file id"
+            );
+            let old = inner.files[file_id.raw() as usize]
+                .clone()
+                .expect("path table pointed at removed file");
+            inner.revision = inner.revision.wrapping_add(1);
+            inner.files[file_id.raw() as usize] = Some(FileSnapshot {
+                file_id,
+                path: old.path,
+                text,
+                version: old.version + 1,
+            });
+            return file_id;
+        }
+
+        let index = file_id.raw() as usize;
+        if inner.files.len() <= index {
+            inner.files.resize_with(index + 1, || None);
+            inner.edits_since.resize_with(index + 1, Vec::new);
+        }
+        assert!(
+            inner.files[index].is_none(),
+            "compiler file id was already occupied by a different path"
+        );
+        inner.files[index] = Some(FileSnapshot {
+            file_id,
+            path: Arc::new(path),
+            text,
+            version: 0,
+        });
+        inner.by_path.insert(lookup_key, file_id);
+        inner.revision = inner.revision.wrapping_add(1);
+        file_id
+    }
+
     /// Remove a file from the intern table. Existing `FileId`s are
     /// tombstoned rather than compacted so stale IDs cannot point at a
     /// different file after a delete/re-add cycle.

@@ -39,6 +39,7 @@ pub use types::{
     operations_from_flow_events, AggregateLayout, ArgumentPassingMode, AssignValueKind, AssignmentValueFact,
     AssignmentValueIndex, BranchConditionFact, BranchConditionPolarity, CallArg, CallArgumentValueFact,
     CallKind, CallReceiverFact, CharacterSubstitutionDomain, CharacterSubstitutionFact, Comment, CommentKind,
+    CompilerAssignmentAlias, CompilerCallHeader, CompilerFactoryCallAssignment, CompilerSyntaxHeader,
     ConditionEquality, ConditionExpressionFact, ConditionOperandFact, Decl, DeclIndex, DeclKind,
     ExpressionField, ExpressionFlow, ExpressionProjection, FieldWrite, FiniteLiteralSelectionFact, FlowEvent,
     ImportIndex, ImportScope, ImportSpec, LanguageId, LoopKind, MembershipConditionFact, ModulePath,

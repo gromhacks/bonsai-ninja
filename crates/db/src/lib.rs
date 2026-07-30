@@ -19,12 +19,17 @@ use bonsai_parser::{ParseError, ParsedFile, ParserCache, ParserOptions};
 use bonsai_trace::{finalize, TraceResult};
 use bonsai_vfs::Vfs;
 use parking_lot::{Mutex, RwLock};
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock,
+};
 
 mod compiler_object;
 
 pub use compiler_object::{
-    compiler_object_sidecar_path, validate_compiler_object_sidecar_layout, CompiledFileObject,
+    compiler_object_sidecar_path, validate_compiler_object_sidecar_file_with_source_fingerprints,
+    validate_compiler_object_sidecar_layout,
+    validate_compiler_object_sidecar_metadata_with_source_fingerprints, CompiledFileObject,
     COMPILER_OBJECT_CACHE_VERSION,
 };
 
@@ -80,6 +85,11 @@ struct DbInner {
     /// before use; a changed file simply falls through to exact Tree-sitter
     /// lowering while unchanged objects remain reusable.
     compiler_object_store: RwLock<Option<Arc<compiler_object::CompilerObjectStore>>>,
+    /// Set when an object in an otherwise current generation fails payload
+    /// validation. The active compiler falls back to exact Tree-sitter
+    /// lowering; complete workspace orchestration then republishes the
+    /// repaired generation instead of paying that fallback forever.
+    compiler_object_store_requires_repair: AtomicBool,
     /// Serializes persistent or ephemeral compiler-object generation. File
     /// lowering inside one generation remains memory-aware and parallel; only
     /// publication of the immutable generation is single-flight.
@@ -166,6 +176,7 @@ impl AnalyzerDb {
                 global_index_build: Mutex::new(()),
                 workspace_root: RwLock::new(None),
                 compiler_object_store: RwLock::new(None),
+                compiler_object_store_requires_repair: AtomicBool::new(false),
                 compiler_object_generation_build: Mutex::new(()),
                 compiler_diagnostics_published: RwLock::new(AHashSet::new()),
                 compiler_diagnostics_gate: Mutex::new(()),
@@ -184,6 +195,9 @@ impl AnalyzerDb {
             .map(Arc::new);
         *self.inner.workspace_root.write() = Some(root);
         *self.inner.compiler_object_store.write() = store;
+        self.inner
+            .compiler_object_store_requires_repair
+            .store(false, Ordering::Release);
     }
 
     /// Returns the workspace root path if set, or `None` for
@@ -592,10 +606,6 @@ impl AnalyzerDb {
         Some(stored)
     }
 
-    fn build_import_index_uncached(&self, file: FileId) -> Option<ImportIndex> {
-        self.build_import_index_with_diagnostics(file, &self.inner.diagnostics)
-    }
-
     fn build_import_index_with_diagnostics(
         &self,
         file: FileId,
@@ -609,10 +619,11 @@ impl AnalyzerDb {
     /// cache. Broad rule scans use this streaming path when import aliases
     /// are only needed while scanning the current file. Reuse the validated
     /// compiler object when available: its imports are the exact output of
-    /// the same adapter/Tree-sitter snapshot, so reparsing here would
-    /// duplicate frontend work without adding syntax evidence.
+    /// the same adapter/Tree-sitter snapshot. Compiler-object generations
+    /// expose imports as an independently decodable header, so this path does
+    /// not inflate declaration bodies or flow events.
     pub fn import_index_uncached(&self, file: FileId) -> Option<ImportIndex> {
-        self.compiler_file_object_uncached(file)?.imports
+        self.compiler_import_index_uncached(file)
     }
 
     /// Single source of truth for "the imports of `file`". Reads the
@@ -655,9 +666,8 @@ impl AnalyzerDb {
     /// [`Self::imports_for`], including the generic Tree-sitter fallback.
     #[must_use]
     pub fn imports_for_uncached(&self, file: FileId) -> Vec<ImportSpec> {
-        if let Some(idx) = self.build_import_index_uncached(file) {
+        if let Some(idx) = self.import_index_uncached(file) {
             let imports = idx.imports;
-            self.release_syntax(file);
             return imports;
         }
         let Ok(parsed) = self.parse(file) else {

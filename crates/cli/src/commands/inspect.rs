@@ -639,11 +639,11 @@ fn collect_decl_hits(
         return Vec::new();
     }
 
-    let global = if options.graph_flows_enabled {
-        ws.db().global_index()
-    } else {
-        ws.compiler_header_index()
-    };
+    // Declaration matching is a header query even when the caller later asks
+    // for graph evidence. Exact bodies are hydrated only for the selected
+    // chains below; retaining every workspace body here made a narrow inspect
+    // pay whole-program memory before it knew its targets.
+    let global = ws.compiler_header_index();
     let mut matched_decls = Vec::new();
     for file in options.files_in_path_order.iter().copied() {
         for decl in global.decls_in(file) {
@@ -1114,7 +1114,6 @@ fn scan_occurrence_facts(
         truncated_by_output_cap: hits_truncated_by_output_cap,
         truncated_by_attempt_cap: hits_truncated_by_attempt_cap,
     } = options;
-    let resident_global = (!syntax_fast_path).then(|| ws.db().global_index());
     if !occurrence_scan_skipped_for_id_lookup {
         let hit_phase = if partial_workspace {
             "hydrating verified facts"
@@ -1132,20 +1131,13 @@ fn scan_occurrence_facts(
                 break;
             }
             hit_bar.inc(1);
-            let streamed_index = syntax_fast_path
-                .then(|| ws.exact_decl_index_shared(file))
-                .flatten();
-            let idx = if let Some(index) = streamed_index.as_deref() {
-                index
-            } else {
-                let Some(index) = resident_global
-                    .as_ref()
-                    .and_then(|global| global.file_index(file))
-                else {
-                    continue;
-                };
-                index
+            // Occurrence facts are file-local Tree-sitter IR. Stream the
+            // exact compiler object in every mode instead of retaining a
+            // whole-workspace body index for semantic inspections.
+            let Some(streamed_index) = ws.exact_decl_index_shared(file) else {
+                continue;
             };
+            let idx = streamed_index.as_ref();
             // Preload decls in this file for enclosing-function lookup.
             let decls_in_file: Vec<&bonsai_lang_api::Decl> = idx.defs.iter().collect();
 
@@ -2057,20 +2049,31 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     let literal_prefilter = pattern.filter(|p| {
         !is_regex
             && p.len() >= 3
+            && !taint_flow_explicit
             && !graph_flows_enabled
             && render.group_id_filter.is_none()
             && workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT)
     });
-    let retrieval_prefilter = retrieval_prefilter_for_inspect(
-        root,
-        pattern,
-        is_regex,
-        filters,
-        graph_flows_enabled,
-        render.group_id_filter.is_some(),
-    )?;
+    let retrieval_prefilter = if taint_flow_explicit {
+        None
+    } else {
+        retrieval_prefilter_for_inspect(
+            root,
+            pattern,
+            is_regex,
+            filters,
+            graph_flows_enabled,
+            render.group_id_filter.is_some(),
+        )?
+    };
     let partial_workspace = retrieval_prefilter.is_some() || literal_prefilter.is_some();
-    let (project, _footer) = if let Some(include_filters) = retrieval_prefilter {
+    let (project, _footer) = if taint_flow_explicit {
+        // Retain the complete compiler header generation, but do not map the
+        // whole persisted IDG. `syntax_flow_session` compiles one exact
+        // source/target corridor after syntax matching, so a broad repository
+        // pays only for functions that can contribute to this query.
+        open_project(root)?
+    } else if let Some(include_filters) = retrieval_prefilter {
         open_project_index_filtered_paths(root, &include_filters, &[])?
     } else if let Some(literal) = literal_prefilter {
         open_project_index_matching_literal(root, literal)?
@@ -2469,7 +2472,7 @@ fn all_callable_entries(
     ws: &Workspace,
     files_in_path_order: &[bonsai_common::FileId],
 ) -> Vec<bonsai_common::FuncId> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_header_index();
     let mut seen = ahash::AHashSet::default();
     let mut entries = Vec::new();
     for file in files_in_path_order {
@@ -3071,7 +3074,7 @@ fn semantic_direct_callers(
     graph: &bonsai_callgraph::ResolvedCallGraph,
     target: bonsai_common::FuncId,
 ) -> Vec<RefOut> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_header_index();
     let target_name = global
         .decl_of(bonsai_common::SymbolId::new(target.raw()))
         .map(|decl| decl.name.clone())
@@ -3080,9 +3083,9 @@ fn semantic_direct_callers(
         .callers_of(target)
         .filter(|edge| edge.precision.is_semantic())
         .filter_map(|edge| {
-            let caller_decl = global.decl_of(bonsai_common::SymbolId::new(edge.from.raw()))?;
+            let caller_decl = ws.exact_decl(bonsai_common::SymbolId::new(edge.from.raw()))?;
             let span =
-                find_call_span_to_func_uncached(ws, caller_decl, target, &target_name).unwrap_or(edge.span);
+                find_call_span_to_func_uncached(ws, &caller_decl, target, &target_name).unwrap_or(edge.span);
             let (file, line, column) = format_span(&span, ws);
             Some(RefOut {
                 symbol: func_display_name(ws, edge.from),
@@ -5565,7 +5568,7 @@ fn build_filter_match(
             column: None,
         };
     };
-    let global = workspace.db().global_index();
+    let global = workspace.compiler_header_index();
     let symbol = bonsai_common::SymbolId::new(func_id.raw());
     match global.decl_of(symbol) {
         Some(decl) => {
@@ -5619,16 +5622,17 @@ pub(crate) fn render_flow_with_cached_call_spans(
     if chain.is_empty() {
         return None;
     }
-    let global = ws.db().global_index();
     // Chains now carry FuncIds all the way from enumeration, so each
     // hop resolves to exactly one decl — no name collision, no fallback
     // picker for "the candidate that calls the next hop." `decl_of` is
     // a direct SymbolId lookup.
+    // Clone only the declarations in the selected chain so their file-body
+    // cache pages may be released independently while rendering continues.
     let mut decls: Vec<bonsai_lang_api::Decl> = Vec::with_capacity(chain.len());
     let mut chain_names: Vec<String> = Vec::with_capacity(chain.len());
     for &func in chain {
         let symbol = bonsai_common::SymbolId::new(func.raw());
-        let decl = global.decl_of(symbol).cloned()?;
+        let decl = (*ws.exact_decl(symbol)?).clone();
         chain_names.push(decl.name.clone());
         decls.push(decl);
     }
@@ -5922,6 +5926,7 @@ fn render_function_source(
     let mut rendered_lines: Vec<InspectLine> = Vec::new();
     // Clamp to file size.
     let end_clamped = end_line.min(lines_in_src.len() as u32);
+    let local_index = ws.exact_decl_index_shared(file)?;
 
     // Structured-fact anchor lines for `--from` / `--to` markers.
     // Chain selection can match a needle via a propagated taint fact
@@ -5935,7 +5940,7 @@ fn render_function_source(
     let fact_anchor = |needle: Option<&str>| -> Option<u32> {
         let needle = needle?;
         let mut best: Option<u32> = None;
-        for nested in ws.db().global_index().decls_in(file) {
+        for nested in &local_index.defs {
             if nested.span.start < decl.span.start || nested.span.end > decl.span.end {
                 continue;
             }
@@ -6185,7 +6190,7 @@ fn owner_context_for_decl(
     decl: &bonsai_lang_api::Decl,
     span_map: &bonsai_common::SpanMap,
 ) -> Vec<InspectOwnerRendered> {
-    let global = ws.db().global_index();
+    let global = ws.compiler_header_index();
     let mut owners: Vec<&bonsai_lang_api::Decl> = Vec::new();
 
     let mut parent = decl.parent;

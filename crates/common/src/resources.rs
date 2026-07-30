@@ -72,10 +72,9 @@ pub fn compiler_worker_count(cpu_workers: usize) -> usize {
 /// schedule and cannot alter compiler semantics.
 #[must_use]
 pub fn compiler_weighted_batches(source_bytes: &[u64], cpu_workers: usize) -> Vec<Range<usize>> {
-    let cpu_workers = compiler_worker_count(cpu_workers);
     compiler_weighted_batches_for_limit_and_resident(
         source_bytes,
-        cpu_workers,
+        cpu_workers.max(1),
         effective_memory_limit_bytes(),
         current_process_resident_bytes(),
     )
@@ -497,6 +496,19 @@ mod tests {
                 Some(2 * BYTES_PER_GIB),
             ),
             vec![0..6, 6..10]
+        );
+    }
+
+    #[test]
+    fn weighted_compiler_batches_do_not_collapse_small_files_to_one_worker() {
+        assert_eq!(
+            compiler_weighted_batches_for_limit_and_resident(
+                &[1; 32],
+                8,
+                Some(3 * BYTES_PER_GIB),
+                Some(512 * 1024 * 1024),
+            ),
+            vec![0..8, 8..16, 16..24, 24..32]
         );
     }
 

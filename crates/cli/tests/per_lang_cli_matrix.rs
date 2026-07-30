@@ -2987,7 +2987,7 @@ fn mega_flow_reachable_facts_cover_every_hop_tokens() {
 }
 
 #[test]
-fn mega_flow_chains_visit_every_hop_in_path_set() {
+fn mega_flow_export_uses_exact_compressed_callgraph_without_materialized_chains() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "mega_flow");
     let Some((out, _, _)) = run(&["export", &w]) else {
@@ -2995,35 +2995,19 @@ fn mega_flow_chains_visit_every_hop_in_path_set() {
     };
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     let tg = &parsed["taint_graph"];
-    let fns = tg["functions"].as_array().unwrap();
-    let id_to_name: std::collections::HashMap<u64, String> = fns
-        .iter()
-        .filter_map(|f| {
-            let id = f.get("func_id").and_then(|v| v.as_u64())?;
-            let n = f.get("name").and_then(|v| v.as_str())?;
-            Some((id, n.to_string()))
-        })
-        .collect();
     let chains = tg["chains"].as_array().unwrap();
-    // Pick `execute` and verify at least one chain to it exists.
-    let execute_chains = chains
-        .iter()
-        .find(|c| c.get("target").and_then(|t| t.as_str()) == Some("execute"))
-        .unwrap_or_else(|| panic!("mega_flow export.chains missing target=execute"));
-    let chain_lists = execute_chains["chains"].as_array().unwrap();
     assert!(
-        !chain_lists.is_empty(),
-        "mega_flow: zero chains to execute — chain enumeration regressed"
+        chains.is_empty(),
+        "compressed export must not enumerate concrete paths"
     );
-    // At least one chain should visit handle_request.
-    let visits_entry = chain_lists.iter().any(|c| {
-        let ids: Vec<u64> = c.as_array().unwrap().iter().filter_map(|v| v.as_u64()).collect();
-        ids.iter()
-            .any(|id| id_to_name.get(id).map(|n| n == "handle_request").unwrap_or(false))
-    });
+    assert_eq!(tg["chains_mode"], "compressed_callgraph");
+    assert_eq!(tg["chains_complete"], false);
+    assert_eq!(tg["chains_truncated_targets"], 0);
     assert!(
-        visits_entry,
-        "mega_flow: no chain to execute starts at handle_request"
+        tg["chains_incomplete_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("complete semantic chain language")),
+        "compressed export must explain where the exact chain relation lives"
     );
 }
 
@@ -3079,7 +3063,7 @@ fn mega_flow_propagations_span_every_hop() {
 }
 
 #[test]
-fn mega_flow_flow_id_labels_generated_for_every_callable() {
+fn mega_flow_export_does_not_materialize_path_derived_flow_labels() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "mega_flow");
     let Some((out, _, _)) = run(&["export", &w]) else {
@@ -3089,22 +3073,18 @@ fn mega_flow_flow_id_labels_generated_for_every_callable() {
     let tg = &parsed["taint_graph"];
     let labels = tg["flow_id_labels"].as_array().unwrap();
     assert!(
-        !labels.is_empty(),
-        "mega_flow: no flow_id_labels — F: labels didn't generate"
+        labels.is_empty(),
+        "compressed export must not enumerate path labels"
     );
-    // Every label row must have at least one `F:` id.
-    for row in labels {
-        let ids: Vec<&str> = row["labels"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
-        assert!(
-            ids.iter().all(|id| id.starts_with("F:") && id.len() == 18),
-            "mega_flow: malformed flow id in labels: {row}"
-        );
-    }
+    assert_eq!(tg["flow_id_labels_mode"], "compressed_callgraph");
+    assert_eq!(tg["flow_id_labels_complete"], false);
+    assert_eq!(tg["flow_id_labels_truncated_functions"], 0);
+    assert!(
+        tg["flow_id_labels_incomplete_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("complete semantic flow relation")),
+        "compressed export must explain where the exact flow relation lives"
+    );
 }
 
 #[test]

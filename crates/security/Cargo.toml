@@ -26,6 +26,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 ahash = { workspace = true }
 regex = { workspace = true }
+regex-syntax = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }

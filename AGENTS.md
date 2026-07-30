@@ -43,19 +43,69 @@ and must report truncation explicitly.
 `index --semantic` first publishes an immutable content-addressed generation
 of per-file compiler objects. Each object is exact adapter-lowered IR plus
 diagnostics, validated by path, adapter, frontend ABI, and SHA-256 source
-content. Later phases stream those objects; they must not reparse source or
-invent a parallel lowering path. Persisted IDG construction lowers transfer
-facts once, spools typed stitch records/node maps, and replays them per segment.
-Memory scheduling may weight or serialize units, but must never cap semantic
-work. After the isolated workers finish, the parent validates that every
-sidecar describes one current workspace snapshot and reruns the exact sequence
-if a file changed between phases.
+content. Import indexes and compact syntax-target facts (calls, assignment
+aliases, factory assignments, and receiver/type evidence) are
+integrity-checked compiler headers inside the same generation and must remain
+independently decodable from declaration/flow bodies. Broad rule planning
+filters raw source anchors, exact import/package headers, and exact syntax
+targets in that order before decoding a surviving body. Later phases stream
+those objects; they must not reparse source or invent a parallel lowering
+path. Persisted IDG construction lowers transfer facts once, spools typed
+stitch records/node maps, and replays them per segment. Memory scheduling may
+weight or serialize units, but must never cap semantic work. After the
+isolated workers finish, the parent validates that every sidecar describes one
+current workspace snapshot and reruns the exact sequence if a file changed
+between phases.
+
+External-memory IDG structures must be lazy. Resident-only fixed points start
+with empty sparse sets/frontiers; Bloom filters, positive caches, dense
+workspace bitsets, and temporary spill files are created only when actual
+relation density crosses their representation threshold. Promotion and spill
+change storage only, never admitted facts or fixed-point scope. Keep the lazy
+allocation tests and conformance invariant: eagerly reserving maximum spill
+pages per function is a large-repository performance regression.
 
 For broad analysis, retain only workspace linkage headers (declarations,
 types, modules, imports, inheritance, and stable symbol identities) and stream
 exact adapter-lowered bodies on demand. Never make all project bodies resident
 beside the IDG. Body-cache eviction may cause exact recomputation; it must not
 change analyzed files, edges, or closure.
+The persisted linkage artifact has independently decodable symbol-header,
+receiver-ancestry, and call-linkage payloads. Syntax lookup reads only the
+symbol payload; file-local inventory reads only receiver ancestry; neither
+may decode unrelated call linkage or inflate every `CompiledFileObject`.
+Exact selected bodies remap against stable headers when global symbols are
+required.
+IDG queries must reuse `IdgQueryService::global_linkage_index()`; calling
+`AnalyzerDb::global_index()` while an IDG is open rebuilds every body beside
+the graph and is an architecture regression.
+
+Native export always represents the exact call/path language as
+`compressed_callgraph`. Do not add a capped/BFS path-prefix mode, a graph-size
+heuristic, or a `complete_chains` switch. Export structural/callgraph rows,
+release all canonical callgraph owners, stream exact file-local body
+projections, release the body cache, and only then open the IDG. A one-shot
+export writes directly to its requested sink; only explicit
+`cache rebuild --export` may publish a reusable export cache.
+
+Keep command phases intentional. `tree` is a direct filesystem walk. Syntax
+inventories (`search`, `defs`, `classes`, `entrypoints`, `calls`, `args`,
+`refs`, `strings`, `comments`, `vars`, and `operations`) may use compact
+headers or stream file-local compiler objects, but must not materialize the
+whole-workspace body index, resolved graph, IDG, or rulepack unless the command
+explicitly requests that semantic product. Apply file/name/kind predicates
+while walking compiler IR, before allocating result rows. Never initialize a
+lazy workspace-wide cache from inside a Rayon file loop. Scoped query
+workspaces preserve the full workspace's deterministic `FileId` ordinal so
+they can reuse content-addressed compiler objects without reparsing.
+
+Performance gates measure completed exact work; they never terminate, skip, or
+cap analysis. When query/cache/engine code changes, build release and run
+`cargo test --release -p bonsai_cli --test elasticsearch_large_repo
+-- --nocapture` with the sibling checkout (or
+`BONSAI_ELASTICSEARCH_ROOT`). The gate enforces warm semantic reuse and
+navigation/inspect/security SLOs under a 3 GiB scheduling budget. Update the
+measured baseline only for an intentional, reviewed architecture change.
 
 Always treat pagination as correctness. If output says more pages exist,
 continue with `--page 2`, `--page next`, or the printed `P:...` cursor

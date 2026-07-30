@@ -889,7 +889,7 @@ fn temp_workspace(tag: &str) -> PathBuf {
 }
 
 #[test]
-fn json_stdout_stays_clean_when_sidecars_are_stale() {
+fn json_stdout_stays_clean_without_loading_unrequested_stale_sidecars() {
     let Some(bin) = bin_path() else {
         return;
     };
@@ -937,8 +937,8 @@ fn main() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("ignoring stale or corrupt"),
-        "test fixture should exercise stale sidecar warning path, got stderr:\n{stderr}"
+        !stderr.contains("ignoring stale or corrupt"),
+        "taint analysis must not probe retired compatibility sidecars:\n{stderr}"
     );
     serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap_or_else(|error| {
         panic!(
@@ -1060,7 +1060,7 @@ fn security_progress_notes_stay_off_json_stdout_when_disabled() {
 }
 
 #[test]
-fn debug_progress_notes_respect_no_progress_and_do_not_leak_raw_engine_dumps() {
+fn debug_mode_skips_unrequested_cache_and_progress_notes() {
     let ws = temp_workspace("debug-progress-style");
     std::fs::write(
         ws.join("app.py"),
@@ -1094,9 +1094,8 @@ def handle():
     .unwrap();
 
     assert!(
-        out.stderr
-            .contains("[workspace-cache] dataflow factstore: miss · 0 entries"),
-        "workspace cache debug line should use CLI status grammar:\n{}",
+        !out.stderr.contains("[workspace-cache]"),
+        "taint analysis must not probe unrelated compatibility caches:\n{}",
         out.stderr
     );
     assert!(
@@ -2911,9 +2910,14 @@ fn mega_flow_exports_adapter_facts_for_taint_engine() {
             export_array_len(&export, &["taint_graph", "intra_taint"]) > 0,
             "{lang}: export taint_graph must include intraprocedural taint facts"
         );
-        assert!(
-            export_array_len(&export, &["taint_graph", "chains"]) > 0,
-            "{lang}: export taint_graph must include source-to-sink chain facts"
+        assert_eq!(
+            export["taint_graph"]["chains_mode"], "compressed_callgraph",
+            "{lang}: export must represent path reachability with the exact compressed callgraph"
+        );
+        assert_eq!(
+            export_array_len(&export, &["taint_graph", "chains"]),
+            0,
+            "{lang}: export must not materialize redundant path prefixes"
         );
     }
 }

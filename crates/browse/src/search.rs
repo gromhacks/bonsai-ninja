@@ -113,7 +113,6 @@ fn search_canonical(
     candidate_files: Option<&HashSet<String>>,
 ) -> Result<Vec<SearchHit>, regex::Error> {
     use rayon::prelude::*;
-    let global = ws.db().global_index();
     let q_lower = query.to_lowercase();
     // `Send + Sync` matcher shared across rayon workers.
     let matcher: Box<dyn Fn(&str) -> bool + Send + Sync> = if f.regex {
@@ -125,7 +124,7 @@ fn search_canonical(
     };
     let kind_filter = f.kind.map(str::to_lowercase);
     let file_filter = f.file;
-    let files: Vec<_> = global.all_files().collect();
+    let files = ws.vfs().all_files();
 
     let mut hits: Vec<SearchHit> = files
         .par_iter()
@@ -153,6 +152,12 @@ fn search_canonical(
                     }
                 }
                 out.push(hit);
+            };
+            let Some(object) = ws.db().compiler_file_object_uncached(file_id) else {
+                return per_file.into_iter();
+            };
+            let Some(index) = object.declarations.as_ref() else {
+                return per_file.into_iter();
             };
 
             // 1. Source files. Retrieval persists `kind=file` docs,
@@ -190,7 +195,7 @@ fn search_canonical(
             }
 
             // 2. Decls (functions / methods / classes / structs / ...).
-            for decl in global.decls_in(file_id) {
+            for decl in &index.defs {
                 let name_hit = matcher(&decl.name);
                 let qname_hit = decl.qualified_name.as_ref().is_some_and(|n| matcher(n));
                 if name_hit || qname_hit {
@@ -231,7 +236,12 @@ fn search_canonical(
             // retrieval when an adapter returns no import rows. This
             // does not change resolver/taint alias semantics, where
             // the adapter ImportIndex remains authoritative.
-            for imp in display_imports_for_search(ws, file_id) {
+            for imp in object
+                .imports
+                .as_ref()
+                .into_iter()
+                .flat_map(|imports| imports.imports.iter())
+            {
                 let mod_hit = matcher(&imp.module);
                 let alias_hit = imp.alias.as_ref().is_some_and(|a| matcher(a));
                 let orig_hit = imp.original_name.as_ref().is_some_and(|o| matcher(o));
@@ -272,8 +282,8 @@ fn search_canonical(
 
             // 5. Refs (read / write / call / decorator references
             //    captured by the adapter's ref extractor).
-            if let Some(idx) = global.file_index(file_id) {
-                for r in &idx.refs {
+            {
+                for r in &index.refs {
                     if !matcher(&r.name) {
                         continue;
                     }
@@ -305,7 +315,7 @@ fn search_canonical(
                 //    are covered by the in-decl flow walk above; this
                 //    block picks up top-level string facts the
                 //    adapter exposes at file scope.)
-                for s in &idx.strings {
+                for s in &index.strings {
                     if !matcher(&s.text) {
                         continue;
                     }
@@ -329,7 +339,7 @@ fn search_canonical(
                 //    surface, so search includes their stripped text
                 //    and exposes the adapter's comment category as
                 //    context.
-                for c in &idx.comments {
+                for c in &index.comments {
                     if !matcher(&c.text) {
                         continue;
                     }
@@ -390,13 +400,6 @@ fn search_canonical(
     });
     hits.truncate(limit);
     Ok(hits)
-}
-
-fn display_imports_for_search(
-    ws: &Workspace,
-    file: bonsai_common::FileId,
-) -> Vec<bonsai_lang_api::ImportSpec> {
-    ws.db().imports_for(file)
 }
 
 /// Lower rank = more informative, so wins when dedupping a

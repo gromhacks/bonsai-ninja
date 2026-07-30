@@ -320,7 +320,7 @@ fn read_file_with_taint_options(
 
     // Cross-file callers / callees for this file's decls.
     let resolved = ws.cached_resolved_call_graph();
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let file_funcs: Vec<FuncId> = global
         .decls_in(file_id)
         .iter()
@@ -393,9 +393,11 @@ fn read_file_with_taint_options(
     }
 
     // Build a line_decl_index from the file's decls.
-    let global = ws.db().global_index();
-    let line_decl_index: Vec<LineDeclSpan> = global
-        .decls_in(file_id)
+    let local_decls = ws
+        .exact_decl_index_shared(file_id)
+        .ok_or_else(|| anyhow::anyhow!("compiler declarations unavailable for {path}"))?;
+    let line_decl_index: Vec<LineDeclSpan> = local_decls
+        .defs
         .iter()
         .map(|d| {
             let loc = Locator::from_span(d.span, ws);
@@ -409,7 +411,7 @@ fn read_file_with_taint_options(
             }
         })
         .collect();
-    drop(global);
+    drop(local_decls);
 
     let primary_locator = Locator {
         file: raw_path.clone(),
@@ -701,7 +703,7 @@ fn match_to_locator(m: &FindingMatch) -> Locator {
 }
 
 fn func_to_locator(func: FuncId, ws: &Workspace) -> Locator {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let symbol = SymbolId::new(func.raw());
     let Some(decl) = global.decl_of(symbol) else {
         return Locator::external(format!("FuncId({})", func.raw()));
@@ -714,7 +716,6 @@ fn func_to_locator(func: FuncId, ws: &Workspace) -> Locator {
 mod tests;
 
 fn read_decl_body(loc: &Locator, ws: &Workspace) -> Option<String> {
-    let global = ws.db().global_index();
     // Find file id by path match.
     let file_id = ws.vfs().all_files().into_iter().find(|fid| {
         ws.vfs()
@@ -724,8 +725,9 @@ fn read_decl_body(loc: &Locator, ws: &Workspace) -> Option<String> {
             .unwrap_or(false)
     })?;
     let snap = ws.vfs().snapshot(file_id).ok()?;
+    let local_decls = ws.exact_decl_index_shared(file_id)?;
     // Find decl by name + line.
-    for decl in global.decls_in(file_id) {
+    for decl in &local_decls.defs {
         if loc.decl.as_deref() == Some(decl.name.as_str()) {
             let start = decl.span.start as usize;
             let end = (decl.span.end as usize).min(snap.text.len());

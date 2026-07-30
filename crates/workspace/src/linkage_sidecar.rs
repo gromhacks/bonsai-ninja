@@ -17,19 +17,26 @@ use bonsai_common::{wire, workspace_bonsai_dir, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_hash::fnv1a_bytes64;
-use bonsai_index::GlobalIndex;
+use bonsai_index::{GlobalIndex, ReceiverAncestry};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Current compiler-linkage schema and semantic ABI.
-pub const LINKAGE_CACHE_VERSION: u32 = 2;
+///
+/// Version 4 adds independently decodable receiver ancestry beside the
+/// declaration/type header and call-linkage payloads. File-local inventory
+/// scans can preserve cross-file receiver constraints without hydrating the
+/// complete global symbol table.
+pub const LINKAGE_CACHE_VERSION: u32 = 4;
 
 const LINKAGE_TABLE_ID: u32 = 103;
 const METADATA_KEY: u64 = 0;
 const LINKAGE_KEY: u64 = 1;
-const ENTRY_COUNT: usize = 2;
+const HEADER_KEY: u64 = 2;
+const RECEIVER_ANCESTRY_KEY: u64 = 3;
+const ENTRY_COUNT: usize = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LinkageMetadata {
@@ -72,10 +79,24 @@ pub(crate) fn save_linkage_sidecar(
             wire::encode(&metadata).map_err(invalid_wire)?,
         )
         .map_err(factstore_io)?;
+    let linkage = Arc::clone(&index);
     writer
         .add_streamed(LINKAGE_KEY, LINKAGE_CACHE_VERSION as u64, move |output| {
-            wire::encode_struct_map_to_writer(output, index.as_ref()).map_err(invalid_wire)
+            wire::encode_struct_map_to_writer(output, linkage.as_ref()).map_err(invalid_wire)
         })
+        .map_err(factstore_io)?;
+    let receiver_ancestry = index.receiver_ancestry();
+    writer
+        .add_streamed(HEADER_KEY, LINKAGE_CACHE_VERSION as u64, move |output| {
+            wire::encode_struct_map_to_writer(output, &index.header_projection()).map_err(invalid_wire)
+        })
+        .map_err(factstore_io)?;
+    writer
+        .add_owned(
+            RECEIVER_ANCESTRY_KEY,
+            LINKAGE_CACHE_VERSION as u64,
+            wire::encode_struct_map(&receiver_ancestry).map_err(invalid_wire)?,
+        )
         .map_err(factstore_io)?;
     writer.finish().map_err(factstore_io)?;
     let _ = prune_obsolete_linkage_sidecars(path);
@@ -85,7 +106,29 @@ pub(crate) fn save_linkage_sidecar(
 pub(crate) fn load_linkage_sidecar_checked(path: &Path, db: &AnalyzerDb) -> std::io::Result<GlobalIndex> {
     let (reader, metadata) = open_sidecar(path)?;
     validate_metadata(path, db, &metadata)?;
-    decode_linkage(&reader, &metadata)
+    decode_index_payload(&reader, &metadata, LINKAGE_KEY, "linkage")
+}
+
+/// Load only the complete declaration/type symbol table from the exact
+/// compiler-linkage artifact.
+///
+/// This payload contains no call-linkage summaries and no function bodies.
+/// Syntax lookup must use it instead of decoding every per-file compiler
+/// object merely to discard its flow events.
+pub(crate) fn load_header_sidecar_checked(path: &Path, db: &AnalyzerDb) -> std::io::Result<GlobalIndex> {
+    let (reader, metadata) = open_sidecar(path)?;
+    validate_metadata(path, db, &metadata)?;
+    decode_index_payload(&reader, &metadata, HEADER_KEY, "header")
+}
+
+/// Load only finalized cross-file receiver inheritance facts.
+pub(crate) fn load_receiver_ancestry_sidecar_checked(
+    path: &Path,
+    db: &AnalyzerDb,
+) -> std::io::Result<ReceiverAncestry> {
+    let (reader, metadata) = open_sidecar(path)?;
+    validate_metadata(path, db, &metadata)?;
+    decode_receiver_ancestry_payload(&reader)
 }
 
 /// Exhaustively validate a linkage artifact against explicit source hashes.
@@ -98,6 +141,40 @@ pub fn validate_linkage_sidecar_file_with_source_fingerprints<I, P>(
     path: &Path,
     fingerprints: I,
 ) -> std::io::Result<usize>
+where
+    I: IntoIterator<Item = (P, u64)>,
+    P: AsRef<Path>,
+{
+    validate_linkage_sidecar_metadata_with_source_fingerprints(path, fingerprints)?;
+    let (reader, metadata) = open_sidecar(path)?;
+    let index = decode_index_payload(&reader, &metadata, LINKAGE_KEY, "linkage")?;
+    let headers = decode_index_payload(&reader, &metadata, HEADER_KEY, "header")?;
+    decode_receiver_ancestry_payload(&reader)?;
+    if headers.len() != index.len() {
+        return Err(invalid_data(
+            "linkage sidecar header/linkage declaration count mismatch",
+        ));
+    }
+    Ok(index.len())
+}
+
+fn decode_receiver_ancestry_payload(reader: &FactStoreReader) -> std::io::Result<ReceiverAncestry> {
+    let hit = reader
+        .get(RECEIVER_ANCESTRY_KEY)
+        .map_err(factstore_io)?
+        .ok_or_else(|| invalid_data("linkage sidecar receiver ancestry is missing"))?;
+    if hit.body_hash != LINKAGE_CACHE_VERSION as u64 {
+        return Err(invalid_data("linkage sidecar receiver ancestry version mismatch"));
+    }
+    wire::decode(&hit.payload).map_err(invalid_wire)
+}
+
+/// Validate linkage schema, compiler inputs, and source identity without
+/// allocating the persisted global symbol table.
+pub fn validate_linkage_sidecar_metadata_with_source_fingerprints<I, P>(
+    path: &Path,
+    fingerprints: I,
+) -> std::io::Result<()>
 where
     I: IntoIterator<Item = (P, u64)>,
     P: AsRef<Path>,
@@ -118,25 +195,33 @@ where
     if current != recorded {
         return Err(invalid_data("linkage sidecar source fingerprint mismatch"));
     }
-    let index = decode_linkage(&reader, &metadata)?;
-    Ok(index.len())
+    drop(reader);
+    Ok(())
 }
 
-fn decode_linkage(reader: &FactStoreReader, metadata: &LinkageMetadata) -> std::io::Result<GlobalIndex> {
+fn decode_index_payload(
+    reader: &FactStoreReader,
+    metadata: &LinkageMetadata,
+    key: u64,
+    label: &'static str,
+) -> std::io::Result<GlobalIndex> {
     let mut payload = reader
-        .payload_reader(LINKAGE_KEY)
+        .payload_reader(key)
         .map_err(factstore_io)?
-        .ok_or_else(|| invalid_data("linkage sidecar payload is missing"))?;
+        .ok_or_else(|| invalid_data("linkage sidecar index payload is missing"))?;
     if payload.body_hash != LINKAGE_CACHE_VERSION as u64 {
-        return Err(invalid_data("linkage sidecar payload version mismatch"));
+        return Err(invalid_data("linkage sidecar index payload version mismatch"));
     }
     let index: GlobalIndex = wire::decode_from_reader(&mut payload).map_err(invalid_wire)?;
     let mut trailing = [0_u8; 1];
     if payload.read(&mut trailing)? != 0 {
-        return Err(invalid_data("linkage sidecar payload has trailing bytes"));
+        return Err(invalid_data("linkage sidecar index payload has trailing bytes"));
     }
     if index.len() as u64 != metadata.declaration_count {
-        return Err(invalid_data("linkage sidecar declaration count mismatch"));
+        return Err(invalid_data(match label {
+            "header" => "linkage sidecar header declaration count mismatch",
+            _ => "linkage sidecar declaration count mismatch",
+        }));
     }
     Ok(index)
 }
@@ -151,7 +236,11 @@ fn open_sidecar(path: &Path) -> std::io::Result<(FactStoreReader, LinkageMetadat
     if reader.header().table_id != LINKAGE_TABLE_ID {
         return Err(invalid_data("linkage sidecar factstore table mismatch"));
     }
-    if reader.len() != ENTRY_COUNT || !reader.contains_key(METADATA_KEY) || !reader.contains_key(LINKAGE_KEY)
+    if reader.len() != ENTRY_COUNT
+        || !reader.contains_key(METADATA_KEY)
+        || !reader.contains_key(LINKAGE_KEY)
+        || !reader.contains_key(HEADER_KEY)
+        || !reader.contains_key(RECEIVER_ANCESTRY_KEY)
     {
         return Err(invalid_data("linkage sidecar entry layout mismatch"));
     }
@@ -303,6 +392,10 @@ mod tests {
         assert!(validate_linkage_sidecar_for_db(&path, &db).is_ok());
         let restored = load_linkage_sidecar_checked(&path, &db).expect("load linkage");
         assert!(restored.is_empty());
+        let headers = load_header_sidecar_checked(&path, &db).expect("load headers");
+        assert!(headers.is_empty());
+        let ancestry = load_receiver_ancestry_sidecar_checked(&path, &db).expect("load receiver ancestry");
+        assert!(ancestry.is_empty());
 
         vfs.write("src/input.fixture".to_string(), Arc::<str>::from("second"));
         assert!(

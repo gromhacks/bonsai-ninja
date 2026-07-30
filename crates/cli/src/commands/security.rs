@@ -3745,7 +3745,7 @@ where
     I: IntoIterator<Item = FuncId>,
 {
     let mut out = ahash::AHashMap::new();
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     for func in funcs {
         if out.contains_key(&func) {
             continue;

@@ -1,8 +1,7 @@
 //! `bonsai-ninja export` — dump a scope-declared analyzed workspace as
 //! one JSON document. Every analysis fact in the native export is
-//! semantic-only; sections that are intentionally omitted or bounded by
-//! the default export scope are marked incomplete at both the top level
-//! and the section level.
+//! semantic-only; sections intentionally omitted by the default export
+//! scope are marked incomplete at both the top level and the section level.
 
 use anyhow::Result;
 use bonsai_sdk::GraphExportFormat;
@@ -12,19 +11,18 @@ use crate::commands::open_project_with_options;
 use crate::output;
 use crate::progress;
 
-/// Handler for `bonsai-ninja export`. Streams the warmed export-cache
-/// when fresh, otherwise builds the requested format (native JSON,
-/// NetworkX, GraphML, Cypher) and writes it to the configured output
-/// sink.
+/// Handler for `bonsai-ninja export`. Reuses an explicitly warmed default
+/// export cache when fresh; otherwise builds the requested format (native
+/// JSON, NetworkX, GraphML, Cypher) directly into the configured output sink.
+/// A one-shot export never creates a hidden multi-gigabyte cache and then
+/// copies it to the same requested destination.
 pub(crate) fn cmd_export(
     root: &std::path::Path,
     full_propagations: bool,
-    complete_chains: bool,
     compiled_propagations: bool,
     format: ExportFormat,
 ) -> Result<()> {
-    let cacheable_default_json =
-        format == ExportFormat::Json && !complete_chains && !full_propagations && !compiled_propagations;
+    let cacheable_default_json = format == ExportFormat::Json && !full_propagations && !compiled_propagations;
     if cacheable_default_json {
         let stage = progress::ScopedSpinner::new("checking export cache");
         let cache_hit = output::with_writer(|writer| {
@@ -67,19 +65,10 @@ pub(crate) fn cmd_export(
     let export = project.export();
     let options = bonsai_sdk::NativeExportOptions {
         full_propagations,
-        complete_chains,
         compiled_propagations,
     };
-    if !cacheable_default_json {
-        write_native_json(&export, options)?;
-        spin.finish();
-        return Ok(());
-    }
-    export.write_default_json_cache_streaming(options)?;
+    write_native_json(&export, options)?;
     spin.finish();
-    let stream_stage = progress::ScopedSpinner::new("streaming export output");
-    stream_default_cache_or_render(&export, options)?;
-    stream_stage.finish();
     Ok(())
 }
 
@@ -94,23 +83,6 @@ fn graph_export_format(format: ExportFormat) -> Option<GraphExportFormat> {
         ExportFormat::Graphml => Some(GraphExportFormat::Graphml),
         ExportFormat::Cypher => Some(GraphExportFormat::Cypher),
     }
-}
-
-fn stream_default_cache_or_render(
-    export: &bonsai_sdk::Export<'_>,
-    options: bonsai_sdk::NativeExportOptions,
-) -> Result<()> {
-    output::with_writer(|writer| {
-        // The cache file we just wrote should be fresh, so the streaming
-        // path is the expected branch. If it is not fresh, fall back to
-        // rendering directly so the user always gets exactly one valid
-        // JSON document on the output sink.
-        if !export.stream_default_json_cache_if_fresh(writer)? {
-            export.write_native_json(options, writer)?;
-            writeln!(writer)?;
-        }
-        Ok(())
-    })
 }
 
 fn write_native_json(

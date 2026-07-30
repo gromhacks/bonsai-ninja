@@ -34,6 +34,34 @@ fn tempdir(name: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn scoped_query_preserves_complete_workspace_file_ids() {
+    let root = tempdir("scoped-file-identity");
+    let first = root.join("first.py");
+    let candidate = root.join("second.py");
+    std::fs::write(&first, "def first():\n    return 1\n").expect("write first");
+    std::fs::write(&candidate, "def second():\n    return 2\n").expect("write second");
+
+    let complete = Workspace::open_query(&root, registry()).expect("open complete workspace");
+    let complete_candidate = complete.vfs().lookup(&candidate).expect("complete candidate id");
+    let scoped = Workspace::open_query_filtered_paths_with_options(
+        &root,
+        registry(),
+        &["second.py".to_string()],
+        &[],
+        WorkspaceOpenOptions::lazy_query(),
+    )
+    .expect("open scoped workspace");
+    let scoped_candidate = scoped.vfs().lookup(&candidate).expect("scoped candidate id");
+
+    assert_eq!(
+        scoped_candidate, complete_candidate,
+        "retrieval/path scoping must not renumber immutable compiler files"
+    );
+    assert_eq!(scoped.vfs().all_files(), vec![complete_candidate]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn cached_graph_is_shared_arc_across_calls() {
     let ws = ws_with(
         "app.py",
@@ -300,6 +328,16 @@ fn scoped_literal_workspace_does_not_write_whole_workspace_callgraph_sidecar() {
         !ws.is_complete_workspace_index(),
         "literal query workspace should be marked incomplete"
     );
+    let _ = ws.cached_resolved_call_graph();
+    let _ = ws.compiler_linkage_index();
+    assert!(
+        !bonsai_workspace::compiler_object_sidecar_path(&root).exists(),
+        "scoped compiler work must not publish a partial compiler-object generation"
+    );
+    assert!(
+        !bonsai_workspace::linkage_sidecar::linkage_sidecar_path(&root).exists(),
+        "scoped compiler work must not publish a partial linkage generation"
+    );
 
     let err = ws
         .save_callgraph_sidecar(&root)
@@ -311,6 +349,56 @@ fn scoped_literal_workspace_does_not_write_whole_workspace_callgraph_sidecar() {
         "scoped workspace must not publish {}",
         sidecar.display()
     );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn complete_lazy_semantic_miss_publishes_reusable_compiler_phases() {
+    let root = tempdir("lazy-semantic-publication");
+    std::fs::write(
+        root.join("app.py"),
+        "def helper(value):\n    return value\n\ndef main(value):\n    return helper(value)\n",
+    )
+    .expect("write app");
+
+    let first = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::lazy_query())
+        .expect("open first lazy workspace");
+    assert!(first.is_complete_workspace_index());
+    assert!(!bonsai_workspace::compiler_object_sidecar_path(&root).exists());
+    assert!(!bonsai_workspace::callgraph_sidecar::callgraph_sidecar_path(&root).exists());
+    assert!(!bonsai_workspace::linkage_sidecar::linkage_sidecar_path(&root).exists());
+
+    let first_graph = first.cached_resolved_call_graph();
+    let first_linkage = first.compiler_linkage_index();
+    assert_eq!(first_graph.inner().edges.len(), 1);
+    assert_eq!(first_linkage.find_by_name("main").len(), 1);
+    assert!(
+        first.compiler_object_sidecar_is_current(&root),
+        "the first complete compiler miss must publish exact per-file objects"
+    );
+    assert!(
+        first.callgraph_sidecar_is_current(&root),
+        "the first complete callgraph miss must publish its exact graph"
+    );
+    assert!(
+        first.compiler_linkage_sidecar_is_current(&root),
+        "the first complete linkage miss must publish its exact symbol table"
+    );
+    drop(first);
+
+    let second = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::lazy_query())
+        .expect("open second lazy workspace");
+    assert!(
+        second.load_callgraph_sidecar_checked(&root).is_ok(),
+        "a fresh process-equivalent workspace must reuse the published graph"
+    );
+    assert!(
+        second.load_compiler_linkage_sidecar_checked(&root).is_ok(),
+        "a fresh process-equivalent workspace must reuse the published linkage"
+    );
+    assert_eq!(second.cached_resolved_call_graph().inner().edges.len(), 1);
+    assert_eq!(second.compiler_linkage_index().find_by_name("main").len(), 1);
 
     std::fs::remove_dir_all(&root).ok();
 }

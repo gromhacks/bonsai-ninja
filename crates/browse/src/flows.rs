@@ -117,7 +117,7 @@ impl<'ws> FlowAnnotator<'ws> {
     /// Lazy `path → FileId` map. Build once, share across calls.
     fn file_by_path(&self) -> &ahash::AHashMap<String, FileId> {
         self.file_by_path.get_or_init(|| {
-            let global = self.ws.db().global_index();
+            let global = self.ws.compiler_linkage_index();
             let mut files = ahash::AHashMap::new();
             for file in global.all_files() {
                 if let Ok(path) = self.ws.vfs().path(file) {
@@ -147,7 +147,7 @@ impl<'ws> FlowAnnotator<'ws> {
             return Vec::new();
         };
         let map = bonsai_common::cached_span_map_arc(file_id, snap.version, &snap.text);
-        let global = self.ws.db().global_index();
+        let global = self.ws.compiler_linkage_index();
         let mut ranges = Vec::new();
         for decl in global.decls_in(file_id) {
             if !matches!(

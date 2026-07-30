@@ -707,8 +707,11 @@ pub fn inspect_entry_taint_graph_from_idg_with_target_funcs(
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
 ) -> EntryTaintGraph {
-    let global = db.global_index();
-    let entry_decl = global.decl_of(SymbolId::new(entry_func.raw()));
+    let global = idg.global_linkage_index();
+    let exact_entry = exact_decl_for_func(db, global.as_ref(), entry_func);
+    let entry_decl = exact_entry
+        .as_ref()
+        .or_else(|| global.decl_of(SymbolId::new(entry_func.raw())));
     let graph_seed = default_entry_graph_seed(entry_decl);
     if graph_seed.is_empty() {
         return EntryTaintGraph::default();
@@ -724,8 +727,25 @@ pub fn inspect_entry_taint_graph_from_idg_with_target_funcs(
             funcs: target_funcs,
             lineage_funcs: None,
             relevance: None,
-        }),
+        })
+        .with_global_index(global.as_ref()),
     )
+}
+
+/// Load one exact adapter-lowered function body against an immutable compiler
+/// header generation. Missing source or a stale function id is an ordinary
+/// negative lookup; callers may still use the compact declaration header.
+pub(crate) fn exact_decl_for_func(
+    db: &AnalyzerDb,
+    global: &GlobalIndex,
+    func: FuncId,
+) -> Option<bonsai_lang_api::Decl> {
+    let symbol = SymbolId::new(func.raw());
+    let file = global.declaring_file(symbol)?;
+    db.decl_index_remapped_to_headers(global, file)?
+        .defs
+        .into_iter()
+        .find(|decl| decl.symbol == symbol)
 }
 
 /// Walk the entry's flow events and collect every Assign target into
@@ -1077,6 +1097,25 @@ pub fn compose_idg_seed_nodes(
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<bonsai_idg::WsNodeId> {
+    compose_idg_seed_nodes_with_decl(request, global, idg, None)
+}
+
+/// Compose source nodes with an exact entry body when the selected policy
+/// needs local syntax. IDG consumers retain compact workspace linkage and
+/// stream this one compiler object instead of materializing every body.
+///
+/// Workspace-facing consumers should use this form whenever token policy may
+/// depend on local assignments or source-call returns. The compact linkage
+/// header intentionally does not retain complete function bodies; passing the
+/// streamed declaration preserves exact seed semantics without rebuilding a
+/// workspace-wide body index.
+#[must_use]
+pub fn compose_idg_seed_nodes_with_decl(
+    request: IdgSeedRequest<'_>,
+    global: &GlobalIndex,
+    idg: &bonsai_idg::IdgQueryService,
+    entry_decl: Option<&bonsai_lang_api::Decl>,
+) -> Vec<bonsai_idg::WsNodeId> {
     match request.policy {
         IdgSeedPolicy::RuleMatch => rule_match_seed_nodes(
             request.func,
@@ -1086,7 +1125,10 @@ pub fn compose_idg_seed_nodes(
             global,
             idg,
         ),
-        IdgSeedPolicy::TokenApi => token_api_seed_nodes(request.func, request.names, global, idg),
+        IdgSeedPolicy::TokenApi => {
+            let entry_decl = entry_decl.or_else(|| global.decl_of(SymbolId::new(request.func.raw())));
+            token_api_seed_nodes(request.func, request.names, entry_decl, global, idg)
+        }
     }
 }
 
@@ -1256,6 +1298,7 @@ fn rule_seed_name_matches(seed_names: &[String], point_name: &str) -> bool {
 fn token_api_seed_nodes(
     entry_func: FuncId,
     seeds: &TokenSet,
+    entry_decl: Option<&bonsai_lang_api::Decl>,
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<bonsai_idg::WsNodeId> {
@@ -1303,7 +1346,7 @@ fn token_api_seed_nodes(
     // READS. Seed reads only: projected writes may be later clean
     // overwrites and must never be resurrected as sources.
     nodes.extend(token_descendant_read_seed_nodes(entry_func, &expanded, idg));
-    if let Some(decl) = global.decl_of(SymbolId::new(entry_func.raw())) {
+    if let Some(decl) = entry_decl {
         // Locals that are the entry-most definition of a seed name (e.g.
         // Perl `my ($args) = @_;` when the adapter models the param as a
         // local write rather than a `Place::Param`) still need seeding.
@@ -1577,7 +1620,7 @@ pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) ->
         source,
         receiver_state,
         max_precision,
-        db,
+        db: _,
         global,
         idg,
     } = request;
@@ -1586,7 +1629,7 @@ pub fn source_seed_reaches_return_from_idg_query(request: IdgReturnQuery<'_>) ->
         tokens: seeds,
         seed,
     } = source;
-    let owned_global = global.is_none().then(|| db.global_index());
+    let owned_global = global.is_none().then(|| idg.global_linkage_index());
     let global = global
         .or(owned_global.as_deref())
         .expect("taint return query must have compiler linkage");
@@ -2294,7 +2337,7 @@ pub fn entry_taint_call_records_from_idg_query(request: IdgTaintQuery<'_>) -> En
         lineage_funcs,
         relevance,
     } = targets;
-    let owned_global = global.is_none().then(|| db.global_index());
+    let owned_global = global.is_none().then(|| idg.global_linkage_index());
     let global = global
         .or(owned_global.as_deref())
         .expect("taint query must have compiler linkage");
@@ -2396,7 +2439,7 @@ pub fn entry_taint_graph_from_idg_query(request: IdgTaintQuery<'_>) -> EntryTain
         lineage_funcs,
         relevance,
     } = targets;
-    let owned_global = global.is_none().then(|| db.global_index());
+    let owned_global = global.is_none().then(|| idg.global_linkage_index());
     let global = global
         .or(owned_global.as_deref())
         .expect("taint query must have compiler linkage");

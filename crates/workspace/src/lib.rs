@@ -37,7 +37,7 @@ use bonsai_common::{FileId, FuncId, Precision, SymbolId};
 use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
 use bonsai_hash::Hasher as StableHasher;
-use bonsai_index::GlobalIndex;
+use bonsai_index::{GlobalIndex, ReceiverAncestry};
 use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FlowEvent, LanguageRegistry};
 use bonsai_taint::{InterTaintCaches, KindedTokens};
 use bonsai_trace::{finalize, FinalizeCtx, TraceQuery, TraceQueryKind, TraceResult};
@@ -58,7 +58,9 @@ use thiserror::Error;
 use value_flow::ValueFlowCache;
 
 pub use bonsai_db::{
-    compiler_object_sidecar_path, validate_compiler_object_sidecar_layout, COMPILER_OBJECT_CACHE_VERSION,
+    compiler_object_sidecar_path, validate_compiler_object_sidecar_file_with_source_fingerprints,
+    validate_compiler_object_sidecar_layout,
+    validate_compiler_object_sidecar_metadata_with_source_fingerprints, COMPILER_OBJECT_CACHE_VERSION,
 };
 pub use cross_module::CrossModuleOptions;
 pub use decorators::decl_decorator_names;
@@ -105,6 +107,14 @@ pub fn idg_sidecar_path(workspace_root: &Path) -> std::path::PathBuf {
 /// Validate that an existing workspace IDG sidecar is structurally readable.
 pub fn validate_idg_sidecar_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
     bonsai_idg::workspace::IdgWorkspace::validate_sidecar_file(path)
+}
+
+/// Validate an IDG's schema and key layout without decoding graph pages.
+///
+/// This is suitable only after source/dependency/compiler freshness has been
+/// established independently.
+pub fn validate_idg_sidecar_layout_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
+    bonsai_idg::workspace::IdgWorkspace::validate_sidecar_layout_file(path)
 }
 
 /// Whether the default workspace-wide IDG sidecar is enabled for a workspace
@@ -552,7 +562,7 @@ pub struct SourceFileFingerprint {
 /// so an unchanged query pays for directory traversal and metadata only. On
 /// Unix, ctime plus device/inode identity also catches same-size rewrites and
 /// atomic editor replacements even when a tool preserves mtime.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceFileStamp {
     pub path: std::path::PathBuf,
     pub len: u64,
@@ -721,6 +731,31 @@ impl WorkspaceOpenOptions {
             save_value_flow_sidecar: false,
             prewarm_flow_ids: false,
             load_idg_sidecar: true,
+            eager_decl_index: false,
+            retain_eager_syntax_ir: false,
+            parse_timeout_ms: None,
+        }
+    }
+
+    /// Ingest the exact workspace snapshot but hydrate no semantic sidecar
+    /// until a command asks for that service.
+    ///
+    /// This is the default lifecycle for one-shot CLI commands. A definitions
+    /// query should not mmap an IDG, and a security inventory should not load
+    /// the compatibility value-flow cache. Canonical service entrypoints load
+    /// or build their independently validated artifact on first use.
+    #[must_use]
+    pub const fn lazy_query() -> Self {
+        Self {
+            load_callgraph_sidecar: false,
+            load_dataflow_sidecar: false,
+            prewarm_dataflow: false,
+            save_dataflow_sidecar: false,
+            load_value_flow_sidecar: false,
+            prewarm_value_flow: false,
+            save_value_flow_sidecar: false,
+            prewarm_flow_ids: false,
+            load_idg_sidecar: false,
             eager_decl_index: false,
             retain_eager_syntax_ir: false,
             parse_timeout_ms: None,
@@ -966,6 +1001,18 @@ impl Workspace {
         self.inner.db.compiler_object_sidecar_is_current(root)
     }
 
+    /// Cheap compiler-generation freshness check for orchestration.
+    ///
+    /// Payload digests are verified when an object is consumed; this method
+    /// proves that the current immutable generation covers the exact VFS
+    /// snapshot without reading every compressed payload.
+    #[must_use]
+    pub fn compiler_object_generation_matches_current_snapshot(&self) -> bool {
+        self.inner
+            .db
+            .compiler_object_generation_matches_current_snapshot()
+    }
+
     /// Persist the complete generation of relocatable, adapter-lowered file
     /// objects consumed by later compiler phases.
     pub fn save_compiler_object_sidecar(&self, root: &Path) -> std::io::Result<usize> {
@@ -1010,6 +1057,8 @@ impl Workspace {
     /// Seed the slot from a sidecar with [`Self::seed_resolved_call_graph`]
     /// at workspace open time to skip the initial build entirely.
     pub fn seed_resolved_call_graph(&self, graph: Arc<bonsai_callgraph::ResolvedCallGraph>) {
+        self.inner.dataflow.seed_call_graph(graph.clone());
+        self.inner.flow_ids.seed_call_graph(graph.clone());
         *self.inner.resolved_call_graph.write() = Some(graph);
     }
 
@@ -1052,6 +1101,9 @@ impl Workspace {
         }
         let path = callgraph_sidecar::callgraph_sidecar_path(root);
         let graph = self.cached_resolved_call_graph();
+        if callgraph_sidecar::validate_callgraph_sidecar_for_db(&path, &self.inner.db).is_ok() {
+            return Ok(());
+        }
         callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, graph)
     }
 
@@ -1093,7 +1145,11 @@ impl Workspace {
             ));
         }
         let path = linkage_sidecar::linkage_sidecar_path(root);
-        linkage_sidecar::save_linkage_sidecar(&path, &self.inner.db, self.compiler_linkage_index())
+        let linkage = self.compiler_linkage_index();
+        if linkage_sidecar::validate_linkage_sidecar_for_db(&path, &self.inner.db).is_ok() {
+            return Ok(());
+        }
+        linkage_sidecar::save_linkage_sidecar(&path, &self.inner.db, linkage)
     }
 
     /// Compact workspace-wide compiler linkage shared by call resolution and
@@ -1122,10 +1178,54 @@ impl Workspace {
                 *slot = Some(linkage.clone());
                 return linkage;
             }
+            if self.is_complete_workspace_index() {
+                self.ensure_reusable_compiler_objects_best_effort(&root);
+                // A peer compiler may have published the exact linkage while
+                // this process prepared compiler objects. Recheck before
+                // paying the streamed link pass.
+                if let Ok(linkage) = linkage_sidecar::load_linkage_sidecar_checked(&path, &self.inner.db) {
+                    let linkage = Arc::new(linkage);
+                    *slot = Some(linkage.clone());
+                    return linkage;
+                }
+            }
         }
         let linkage = self.inner.db.build_global_linkage_index();
+        if let Some(root) = self.root_path().filter(|_| self.is_complete_workspace_index()) {
+            // Any corrupt object encountered by the link pass fell back to
+            // exact Tree-sitter lowering and marked the generation dirty.
+            // Repair that generation before publishing linkage derived from
+            // it so the next process reuses the same compiler facts.
+            self.ensure_reusable_compiler_objects_best_effort(&root);
+            let path = linkage_sidecar::linkage_sidecar_path(&root);
+            if let Err(error) = linkage_sidecar::save_linkage_sidecar(&path, &self.inner.db, linkage.clone())
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "compiler linkage publication failed; keeping exact in-process result"
+                );
+            }
+        }
         *slot = Some(linkage.clone());
         linkage
+    }
+
+    fn ensure_reusable_compiler_objects_best_effort(&self, root: &Path) {
+        if self
+            .inner
+            .db
+            .compiler_object_generation_matches_current_snapshot()
+        {
+            return;
+        }
+        if let Err(error) = self.inner.db.save_compiler_object_sidecar(root) {
+            tracing::warn!(
+                path = %compiler_object_sidecar_path(root).display(),
+                error = %error,
+                "compiler-object publication failed; continuing with exact Tree-sitter lowering"
+            );
+        }
     }
 
     /// Complete workspace declaration/type headers without call linkage or
@@ -1143,24 +1243,66 @@ impl Workspace {
         if let Some(headers) = slot.as_ref() {
             return headers.clone();
         }
+        if let Some(root) = self.root_path() {
+            let path = linkage_sidecar::linkage_sidecar_path(&root);
+            if let Ok(headers) = linkage_sidecar::load_header_sidecar_checked(&path, &self.inner.db) {
+                let headers = Arc::new(headers);
+                *slot = Some(headers.clone());
+                return headers;
+            }
+            if self.is_complete_workspace_index() {
+                self.ensure_reusable_compiler_objects_best_effort(&root);
+                // Another compiler worker may have published the exact symbol
+                // table while this process repaired compiler objects.
+                if let Ok(headers) = linkage_sidecar::load_header_sidecar_checked(&path, &self.inner.db) {
+                    let headers = Arc::new(headers);
+                    *slot = Some(headers.clone());
+                    return headers;
+                }
+            }
+        }
         let headers = self.inner.db.build_global_header_index();
         *slot = Some(headers.clone());
         headers
     }
 
+    /// Finalized cross-file receiver ancestry without declaration headers,
+    /// call linkage, or function bodies.
+    ///
+    /// File-local inventory scans apply this compact compiler projection to
+    /// preserve inheritance-sensitive receiver constraints without hydrating
+    /// the complete workspace symbol table.
+    #[must_use]
+    pub fn compiler_receiver_ancestry(&self) -> Arc<ReceiverAncestry> {
+        if let Some(root) = self.root_path() {
+            let path = linkage_sidecar::linkage_sidecar_path(&root);
+            if let Ok(ancestry) =
+                linkage_sidecar::load_receiver_ancestry_sidecar_checked(&path, &self.inner.db)
+            {
+                return Arc::new(ancestry);
+            }
+        }
+        Arc::new(self.compiler_header_index().receiver_ancestry())
+    }
+
     fn take_exclusive_compiler_header_index(&self) -> Arc<GlobalIndex> {
+        // Ensure a persisted compiler symbol table is loaded before taking its
+        // cache allocation. A missing cache falls back to one exact streamed
+        // frontend pass; this function must never independently decode all
+        // file bodies after the same query already built the header table.
+        drop(self.compiler_header_index());
         let mut slot = self.inner.compiler_headers.write();
         if let Some(headers) = slot.take() {
             if Arc::strong_count(&headers) == 1 {
                 return headers;
             }
-            // Concurrent syntax readers keep their immutable generation.
-            // Restore the shared cache and build an independent exact header
-            // rather than cloning its complete workspace allocation.
-            *slot = Some(headers);
+            // Concurrent syntax readers keep their immutable generation. A
+            // compact header clone is bounded by declaration/type facts and
+            // avoids re-inflating every exact flow-event body.
+            *slot = Some(headers.clone());
+            return Arc::new((*headers).clone());
         }
-        drop(slot);
-        self.inner.db.build_global_header_index()
+        unreachable!("compiler header cache disappeared while exclusively locked")
     }
 
     /// Release the resident canonical IDG between whole-workspace compiler
@@ -1214,6 +1356,8 @@ impl Workspace {
     /// rebuilds the complete graph on demand.
     pub fn release_resolved_call_graph_cache(&self) {
         *self.inner.resolved_call_graph.write() = None;
+        self.inner.dataflow.release_call_graph();
+        self.inner.flow_ids.release_call_graph();
     }
 
     /// Release the standalone compiler linkage table at a compiler phase
@@ -1319,6 +1463,22 @@ impl Workspace {
             return Ok(None);
         }
         let pipeline_hash = self.cached_idg_workspace_pipeline_hash(Some(root));
+        // Reject a stale/corrupt generation before constructing the compiler
+        // linkage table it would need if it were reusable. The prior order
+        // made a cheap cache miss trigger a complete streamed linkage build,
+        // so every fresh CLI process could compile the workspace merely to
+        // discover that the graph header did not match.
+        if let Err(error) = bonsai_idg::workspace::IdgWorkspace::validate_sidecar_layout_with_pipeline(
+            &sidecar,
+            pipeline_hash,
+        ) {
+            bonsai_diagnostics::debug_log!(
+                "idg-build",
+                "workspace IDG sidecar rejected before linkage hydration: {}",
+                error
+            );
+            return Ok(None);
+        }
         // Build the compact AST/resolver linkage before opening the paged graph.
         // Tree-sitter lowers one file at a time, but its C allocator may keep
         // released parser arenas mapped. Loading a multi-gigabyte IDG first
@@ -1359,6 +1519,21 @@ impl Workspace {
         if let Some(hit) = cached {
             return hit;
         }
+        let complete_root = self.root_path().filter(|_| self.is_complete_workspace_index());
+        if let Some(root) = complete_root.as_deref() {
+            self.ensure_reusable_compiler_objects_best_effort(root);
+            // Preparing objects may overlap a peer process that publishes the
+            // graph. Prefer its validated immutable result over duplicate
+            // resolution work.
+            if let Ok(graph) = callgraph_sidecar::load_callgraph_sidecar_checked(
+                &callgraph_sidecar::callgraph_sidecar_path(root),
+                &self.inner.db,
+            ) {
+                let graph = Arc::new(graph);
+                self.seed_resolved_call_graph(graph.clone());
+                return graph;
+            }
+        }
         let built = self.build_resolved_call_graph();
         let arc = Arc::new(built);
         let mut slot = self.inner.resolved_call_graph.write();
@@ -1366,9 +1541,31 @@ impl Workspace {
             // Another thread populated the cache while we built —
             // discard our copy and return the established singleton
             // so downstream pointer-equality checks remain stable.
+            drop(slot);
+            self.inner.dataflow.seed_call_graph(existing.clone());
+            self.inner.flow_ids.seed_call_graph(existing.clone());
             return existing;
         }
+        // Publish the shared consumers before exposing the workspace slot.
+        // A concurrent caller that can observe the canonical graph must never
+        // race into rebuilding the same complete graph in DataFlowCache or
+        // FlowIdCache.
+        self.inner.dataflow.seed_call_graph(arc.clone());
+        self.inner.flow_ids.seed_call_graph(arc.clone());
         *slot = Some(arc.clone());
+        drop(slot);
+        if let Some(root) = complete_root {
+            self.ensure_reusable_compiler_objects_best_effort(&root);
+            let path = callgraph_sidecar::callgraph_sidecar_path(&root);
+            if let Err(error) = callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, arc.clone())
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "resolved callgraph publication failed; keeping exact in-process result"
+                );
+            }
+        }
         arc
     }
 
@@ -2658,9 +2855,16 @@ impl Workspace {
             read_supported_source_files_matching_literal(&canonical_root, &ws.inner.registry, literal)?;
         let file_count = files.len();
         for source in files {
-            let path = &source.path;
-            let old_id = ws.inner.vfs.lookup(path);
-            let id = ws.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
+            let SourceFileContent {
+                path,
+                text,
+                full_workspace_file,
+            } = source;
+            let old_id = ws.inner.vfs.lookup(&path);
+            let id = match full_workspace_file {
+                Some(file) => ws.inner.vfs.write_with_id(file, path, Arc::<str>::from(text)),
+                None => ws.inner.vfs.write(path, Arc::<str>::from(text)),
+            };
             if let Some(prev) = old_id {
                 ws.invalidate_after_file_change(prev);
             }
@@ -2743,9 +2947,16 @@ impl Workspace {
         )?;
         let file_count = files.len();
         for source in files {
-            let path = &source.path;
-            let old_id = ws.inner.vfs.lookup(path);
-            let id = ws.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
+            let SourceFileContent {
+                path,
+                text,
+                full_workspace_file,
+            } = source;
+            let old_id = ws.inner.vfs.lookup(&path);
+            let id = match full_workspace_file {
+                Some(file) => ws.inner.vfs.write_with_id(file, path, Arc::<str>::from(text)),
+                None => ws.inner.vfs.write(path, Arc::<str>::from(text)),
+            };
             if let Some(prev) = old_id {
                 ws.invalidate_after_file_change(prev);
             }
@@ -4303,6 +4514,10 @@ mod idg_pipeline_hash_tests;
 struct SourceFileContent {
     path: std::path::PathBuf,
     text: String,
+    /// Deterministic ordinal among all supported sources in the complete
+    /// workspace. Scoped readers retain it so immutable compiler objects
+    /// remain addressable by the same `FileId`.
+    full_workspace_file: Option<FileId>,
 }
 
 fn canonical_workspace_root(root: &Path) -> std::path::PathBuf {
@@ -4496,6 +4711,7 @@ where
         on_file(SourceFileContent {
             path: path.to_path_buf(),
             text,
+            full_workspace_file: None,
         })?;
     }
 
@@ -4547,7 +4763,11 @@ fn read_supported_source_file_at_path(
         Ok(text) => text,
         Err(error) => return Err(WorkspaceError::Io(error)),
     };
-    Ok(SourceFileContent { path, text })
+    Ok(SourceFileContent {
+        path,
+        text,
+        full_workspace_file: None,
+    })
 }
 
 fn read_supported_source_files_impl(
@@ -4578,19 +4798,33 @@ fn read_supported_source_files_impl(
         Err(std::io::Error),
     }
     let literal_lower = literal_filter.map(str::to_lowercase);
-    let outcomes: Vec<ReadOutcome> = entries
+    // Assign the same ordinal as a complete ingest before applying the query
+    // filter. This is the compiler's stable file identity; filtering first
+    // would renumber candidates and turn valid persistent objects into cache
+    // misses. Walking/extension selection is metadata-only and does not parse
+    // or read excluded source bodies.
+    let supported_entries = entries
+        .into_iter()
+        .filter(|entry| {
+            entry.file_type().is_some_and(|file_type| file_type.is_file())
+                && entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| registry.adapter_for_extension(extension).is_some())
+        })
+        .enumerate()
+        .map(|(ordinal, entry)| {
+            (
+                FileId::new(u32::try_from(ordinal).expect("too many supported source files")),
+                entry,
+            )
+        })
+        .collect::<Vec<_>>();
+    let outcomes: Vec<ReadOutcome> = supported_entries
         .into_par_iter()
-        .map(|entry| {
-            if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
-                return ReadOutcome::Skip;
-            }
+        .map(|(file, entry)| {
             let path = entry.path();
-            let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-                return ReadOutcome::Skip;
-            };
-            if registry.adapter_for_extension(ext).is_none() {
-                return ReadOutcome::Skip;
-            }
             if let Some(filter) = path_filter {
                 if !source_path_allowed(canonical_root, path, filter) {
                     return ReadOutcome::Skip;
@@ -4608,6 +4842,7 @@ fn read_supported_source_files_impl(
             ReadOutcome::Keep(SourceFileContent {
                 path: path.to_path_buf(),
                 text,
+                full_workspace_file: Some(file),
             })
         })
         .collect();

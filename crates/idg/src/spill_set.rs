@@ -288,7 +288,11 @@ pub(crate) struct SpillSet {
     /// those positives avoids a positioned read into a sorted run. Eviction
     /// only causes another exact lookup and therefore cannot change set
     /// membership or fixed-point semantics.
-    recent_positives: RwLock<RecentPositiveCache>,
+    /// Allocated only after the resident relation first spills. Before that,
+    /// `resident` is the complete relation, so a second membership structure
+    /// would only add allocator work to small compiler closures.
+    recent_positives: RwLock<Option<RecentPositiveCache>>,
+    recent_positive_budget_bytes: usize,
     resident_by_prefix: Option<AHashMap<u32, Vec<u128>>>,
     max_resident_entries: usize,
     levels: Vec<Option<SortedRun>>,
@@ -417,8 +421,12 @@ impl SpillSet {
     ) -> Self {
         let max_resident_entries = max_resident_entries.max(1);
         Self {
-            resident: AHashSet::with_capacity(max_resident_entries.min(16_384)),
-            recent_positives: RwLock::new(RecentPositiveCache::new(recent_positive_bytes)),
+            // Small compiler closures are overwhelmingly common. Let the
+            // resident delta grow with actual facts instead of reserving the
+            // maximum spill page for every closure up front.
+            resident: AHashSet::new(),
+            recent_positives: RwLock::new(None),
+            recent_positive_budget_bytes: recent_positive_bytes,
             resident_by_prefix: track_prefixes.then(AHashMap::default),
             max_resident_entries,
             levels: Vec::new(),
@@ -429,16 +437,28 @@ impl SpillSet {
     }
 
     pub(crate) fn insert(&mut self, key: u128) -> bool {
-        if self.resident.contains(&key) || self.recent_positives.get_mut().contains(key) {
+        if self.resident.contains(&key)
+            || self
+                .recent_positives
+                .get_mut()
+                .as_ref()
+                .is_some_and(|cache| cache.contains(key))
+        {
             return false;
         }
         if self.contains_in_runs(key) {
-            self.recent_positives.get_mut().remember_absent(key);
+            self.recent_positives
+                .get_mut()
+                .as_mut()
+                .expect("spilled relation has a positive cache")
+                .remember_absent(key);
             return false;
         }
 
         self.resident.insert(key);
-        self.recent_positives.get_mut().remember_absent(key);
+        if let Some(cache) = self.recent_positives.get_mut() {
+            cache.remember_absent(key);
+        }
         if let Some(by_prefix) = &mut self.resident_by_prefix {
             by_prefix.entry((key >> 96) as u32).or_default().push(key);
         }
@@ -460,7 +480,7 @@ impl SpillSet {
         // shortening here can otherwise make that promotion self-deadlock.
         let recently_positive = {
             let cache = self.recent_positives.read();
-            cache.contains(key)
+            cache.as_ref().is_some_and(|cache| cache.contains(key))
         };
         if self.resident.contains(&key) || recently_positive {
             return true;
@@ -468,7 +488,11 @@ impl SpillSet {
         if !self.contains_in_runs(key) {
             return false;
         }
-        self.recent_positives.write().remember(key);
+        self.recent_positives
+            .write()
+            .as_mut()
+            .expect("spilled relation has a positive cache")
+            .remember(key);
         true
     }
 
@@ -498,7 +522,10 @@ impl SpillSet {
     }
 
     pub(crate) fn recent_positive_len(&self) -> usize {
-        self.recent_positives.read().len()
+        self.recent_positives
+            .read()
+            .as_ref()
+            .map_or(0, RecentPositiveCache::len)
     }
 
     pub(crate) fn run_count(&self) -> usize {
@@ -552,6 +579,13 @@ impl SpillSet {
     fn flush(&mut self) {
         let mut keys: Vec<u128> = self.resident.drain().collect();
         keys.sort_unstable();
+        let positive_cache = self
+            .recent_positives
+            .get_mut()
+            .get_or_insert_with(|| RecentPositiveCache::new(self.recent_positive_budget_bytes));
+        for &key in &keys {
+            positive_cache.remember(key);
+        }
         if self.membership_filter.is_none()
             && self.membership_filter_budget_bytes >= std::mem::size_of::<u64>()
         {
@@ -595,7 +629,10 @@ impl SpillSet {
 pub(crate) struct SpillStack {
     resident: Vec<u128>,
     max_resident_entries: usize,
-    file: File,
+    /// The vast majority of compiler frontiers fit in `resident`. Creating a
+    /// temporary file per closure made setup cost proportional to function
+    /// count even when no external-memory work occurred.
+    file: Option<File>,
     chunks: Vec<SpillStackChunk>,
     len: u64,
 }
@@ -610,9 +647,9 @@ impl SpillStack {
     pub(crate) fn new(max_resident_entries: usize) -> Self {
         let max_resident_entries = max_resident_entries.max(1);
         Self {
-            resident: Vec::with_capacity(max_resident_entries.min(16_384)),
+            resident: Vec::new(),
             max_resident_entries,
-            file: tempfile::tempfile().expect("create exact compiler frontier store"),
+            file: None,
             chunks: Vec::new(),
             len: 0,
         }
@@ -644,12 +681,14 @@ impl SpillStack {
     }
 
     fn flush(&mut self) {
-        let offset = self
+        let file = self
             .file
+            .get_or_insert_with(|| tempfile::tempfile().expect("create exact compiler frontier store"));
+        let offset = file
             .seek(SeekFrom::End(0))
             .expect("seek exact compiler frontier store");
         {
-            let mut writer = BufWriter::new(&mut self.file);
+            let mut writer = BufWriter::new(&mut *file);
             for &key in &self.resident {
                 writer
                     .write_all(&key.to_le_bytes())
@@ -668,12 +707,15 @@ impl SpillStack {
         let Some(chunk) = self.chunks.pop() else {
             return;
         };
-        self.file
-            .seek(SeekFrom::Start(chunk.offset))
+        let file = self
+            .file
+            .as_mut()
+            .expect("spilled compiler frontier has a backing file");
+        file.seek(SeekFrom::Start(chunk.offset))
             .expect("seek exact compiler frontier chunk");
         self.resident.clear();
         {
-            let mut reader = BufReader::new(&mut self.file);
+            let mut reader = BufReader::new(&mut *file);
             for _ in 0..chunk.len {
                 self.resident
                     .push(read_key(&mut reader).expect("read exact compiler frontier chunk"));
@@ -682,8 +724,7 @@ impl SpillStack {
         // Chunks are consumed newest-first, so the popped chunk is always the
         // tail of the file. Truncation bounds disk use to the live frontier
         // and retains older chunk offsets unchanged.
-        self.file
-            .set_len(chunk.offset)
+        file.set_len(chunk.offset)
             .expect("truncate consumed exact compiler frontier chunk");
     }
 }
@@ -738,21 +779,44 @@ mod tests {
     #[test]
     fn recent_positive_cache_is_bounded_and_eviction_falls_back_to_exact_runs() {
         let mut set = SpillSet::new(2, 128, RECENT_POSITIVE_SET_BYTES, false);
-        let capacity = set.recent_positives.get_mut().keys.len();
+        assert!(
+            set.recent_positives.get_mut().is_none(),
+            "resident-only relations must not allocate spill acceleration"
+        );
+        assert!(set.insert(0));
+        assert!(set.insert(1));
+        let capacity = set
+            .recent_positives
+            .get_mut()
+            .as_ref()
+            .expect("first spill allocates positive cache")
+            .keys
+            .len();
         assert_eq!(capacity, RECENT_POSITIVE_ASSOCIATIVITY);
-        for key in 0..capacity as u128 {
+        for key in 2..capacity as u128 {
             assert!(set.insert(key));
         }
         assert_eq!(set.recent_positive_len(), capacity);
         assert!(set.insert(capacity as u128));
-        assert!(set.recent_positives.get_mut().contains(capacity as u128));
-        assert!(!set.recent_positives.get_mut().contains(0));
+        assert!(set
+            .recent_positives
+            .get_mut()
+            .as_ref()
+            .is_some_and(|cache| cache.contains(capacity as u128)));
+        assert!(!set
+            .recent_positives
+            .get_mut()
+            .as_ref()
+            .is_some_and(|cache| cache.contains(0)));
         assert!(
             set.contains(0),
             "read-only membership must fall back to the exact run"
         );
         assert!(
-            set.recent_positives.get_mut().contains(0),
+            set.recent_positives
+                .get_mut()
+                .as_ref()
+                .is_some_and(|cache| cache.contains(0)),
             "a proven read-only hit should populate the bounded hot cache"
         );
 
@@ -765,7 +829,16 @@ mod tests {
             "evicted positive must deduplicate from the exact run"
         );
         assert_eq!(set.len(), capacity as u64 + 1);
-        assert!(set.recent_positive_len() <= set.recent_positives.get_mut().keys.len());
+        assert!(
+            set.recent_positive_len()
+                <= set
+                    .recent_positives
+                    .get_mut()
+                    .as_ref()
+                    .expect("spilled set positive cache")
+                    .keys
+                    .len()
+        );
     }
 
     #[test]
@@ -852,6 +925,10 @@ mod tests {
     #[test]
     fn membership_filter_tracks_only_spilled_keys() {
         let mut set = SpillSet::new(4, 128, 128, false);
+        assert!(
+            set.recent_positives.get_mut().is_none(),
+            "resident-only sets must not allocate a positive cache"
+        );
         for key in 0..3 {
             assert!(set.insert(key));
         }
@@ -859,7 +936,15 @@ mod tests {
             set.membership_filter.is_none(),
             "resident membership is already exact and must not allocate a spill filter"
         );
+        assert!(
+            set.recent_positives.get_mut().is_none(),
+            "resident membership is already exact and must not allocate a positive cache"
+        );
         assert!(set.insert(3), "the fourth key flushes the resident delta");
+        assert!(
+            set.recent_positives.get_mut().is_some(),
+            "the first spill should instantiate its bounded positive cache"
+        );
         let filter = set.membership_filter.as_ref().expect("membership filter");
         assert!(
             (0..4).all(|key| filter.may_contain(key)),
@@ -897,7 +982,16 @@ mod tests {
     #[test]
     fn spill_stack_preserves_lifo_work_across_bounded_chunks() {
         let mut stack = SpillStack::new(2);
-        for key in 0..7 {
+        assert!(
+            stack.file.is_none(),
+            "resident-only frontiers must not create temporary files"
+        );
+        stack.push(0);
+        assert!(
+            stack.file.is_none(),
+            "frontier files must remain lazy below the spill threshold"
+        );
+        for key in 1..7 {
             stack.push(key);
         }
         assert_eq!(stack.chunks.len(), 3);
@@ -907,7 +1001,13 @@ mod tests {
         assert!(stack.is_empty());
         assert!(stack.chunks.is_empty());
         assert_eq!(
-            stack.file.metadata().expect("frontier store metadata").len(),
+            stack
+                .file
+                .as_ref()
+                .expect("spilled frontier backing file")
+                .metadata()
+                .expect("frontier store metadata")
+                .len(),
             0,
             "consumed LIFO chunks should release temporary disk space"
         );

@@ -1331,6 +1331,35 @@ fn export_produces_valid_json() {
 }
 
 #[test]
+fn one_shot_export_does_not_publish_a_hidden_export_cache() {
+    let workspace = tempdir_for_test("bonsai_export_no_implicit_cache");
+    std::fs::write(
+        workspace.join("app.py"),
+        "def identity(value):\n    return value\n",
+    )
+    .expect("write export fixture");
+    let Some(out) = run(&["export", workspace.to_str().expect("workspace utf8")]) else {
+        return;
+    };
+    serde_json::from_str::<serde_json::Value>(&out).expect("one-shot export JSON");
+
+    let implicit_cache = workspace.join(".bonsai");
+    if let Ok(entries) = std::fs::read_dir(&implicit_cache) {
+        let hidden_exports: Vec<_> = entries
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("export.default."))
+            .collect();
+        assert!(
+            hidden_exports.is_empty(),
+            "one-shot export must write only its requested sink; use `cache rebuild --export` \
+             for explicit cache publication, found {hidden_exports:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
 fn export_full_propagations_materializes_exact_records() {
     let ws = ws_path();
     let Some(out) = run(&["export", ws.to_str().unwrap(), "--full-propagations"]) else {
@@ -1365,42 +1394,19 @@ fn export_all_keeps_exact_propagation_language_in_compiler_form() {
 }
 
 #[test]
-fn export_includes_flow_chains_and_flow_graph() {
+fn export_uses_exact_compressed_chains_and_flow_graph() {
     let ws = ws_path();
     let Some(out) = run(&["export", ws.to_str().unwrap()]) else {
         return;
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
     let chains = v["flow_chains"].as_array().expect("flow_chains is array");
-    assert!(!chains.is_empty(), "flow_chains should list reachable targets");
     assert!(
-        v["flow_chains_complete"].is_boolean(),
-        "export must state whether flow_chains are exhaustive"
+        chains.is_empty(),
+        "default export must not materialize path prefixes"
     );
-    // run_admin_command is reachable from handle_request.
-    let rac = chains
-        .iter()
-        .find(|c| c["target"].as_str() == Some("run_admin_command"))
-        .expect("run_admin_command in flow_chains");
-    assert!(
-        rac["truncated"].is_boolean(),
-        "flow_chains rows must expose truncation state"
-    );
-    let first_chain: Vec<String> = rac["chains"][0]
-        .as_array()
-        .expect("chain array")
-        .iter()
-        .filter_map(|s| s.as_str().map(String::from))
-        .collect();
-    assert_eq!(
-        first_chain,
-        vec![
-            "handle_request".to_string(),
-            "update_user".to_string(),
-            "run_admin_command".to_string()
-        ],
-        "expected full upstream chain in export.flow_chains"
-    );
+    assert_eq!(v["flow_chains_mode"], "compressed_callgraph");
+    assert_eq!(v["flow_chains_truncated_targets"], 0);
 
     let graph = v["flow_graph"].as_array().expect("flow_graph is array");
     let hr = graph
@@ -1423,7 +1429,7 @@ fn export_includes_flow_chains_and_flow_graph() {
 }
 
 #[test]
-fn export_marks_capped_chain_sections_incomplete() {
+fn export_default_never_caps_chain_evidence() {
     let tmp = tempdir_for_test("bonsai_export_chain_completeness");
     write_fan_in_python_workspace(&tmp, 20);
 
@@ -1431,78 +1437,48 @@ fn export_marks_capped_chain_sections_incomplete() {
         return;
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
-    assert_eq!(
-        v["flow_chains_complete"], false,
-        "top-level flow_chains must not claim completeness after hitting the chain cap"
-    );
+    assert_eq!(v["flow_chains_mode"], "compressed_callgraph");
+    assert_eq!(v["flow_chains_truncated_targets"], 0);
+    assert!(v["flow_chains"].as_array().is_some_and(Vec::is_empty));
     assert_eq!(
         v["analysis_complete"], false,
-        "top-level export must not claim completeness when any evidence section is capped"
+        "default export still reports omitted concrete propagation rows"
     );
     assert!(
         v["analysis_incomplete_reasons"]
             .as_array()
-            .is_some_and(|reasons| reasons
-                .iter()
-                .any(|reason| reason.as_str().is_some_and(|text| text.contains("flow_chains")))),
-        "top-level export should name capped flow_chains in incomplete reasons"
-    );
-    assert!(
-        v["flow_chains_truncated_targets"].as_u64().unwrap_or(0) > 0,
-        "top-level export must count truncated flow_chains targets"
-    );
-    let flow_sink = v["flow_chains"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["target"].as_str() == Some("sink"))
-        .expect("sink row in flow_chains");
-    assert_eq!(flow_sink["truncated"], true);
-    assert!(
-        flow_sink["truncation_reason"].as_str().is_some(),
-        "truncated flow_chains rows must explain why"
+            .is_some_and(|reasons| reasons.iter().any(|reason| reason
+                .as_str()
+                .is_some_and(|text| text.contains("taint_graph.propagations")))),
+        "default incompleteness must describe omitted propagation rows, not a chain cap"
     );
 
     let tg = &v["taint_graph"];
-    assert_eq!(
-        tg["chains_complete"], false,
-        "taint_graph.chains must not claim completeness after hitting the chain cap"
-    );
-    assert!(
-        tg["chains_truncated_targets"].as_u64().unwrap_or(0) > 0,
-        "taint_graph must count truncated chain targets"
-    );
-    let taint_sink = tg["chains"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["target"].as_str() == Some("sink"))
-        .expect("sink row in taint_graph.chains");
-    assert_eq!(taint_sink["truncated"], true);
-    assert!(
-        taint_sink["truncation_reason"].as_str().is_some(),
-        "truncated taint_graph.chains rows must explain why"
-    );
-    assert!(
-        tg["flow_id_labels_complete"].is_boolean(),
-        "taint_graph must state flow-id label completeness"
-    );
+    assert_eq!(tg["chains_mode"], "compressed_callgraph");
+    assert_eq!(tg["chains_truncated_targets"], 0);
+    assert_eq!(tg["flow_id_labels_mode"], "compressed_callgraph");
+    assert_eq!(tg["flow_id_labels_truncated_functions"], 0);
 }
 
 #[test]
-fn export_complete_chains_uses_exact_compressed_graph() {
-    let tmp = tempdir_for_test("bonsai_export_complete_chains");
+fn export_default_uses_exact_compressed_graph() {
+    let tmp = tempdir_for_test("bonsai_export_exact_compressed");
     const FAN_IN_CALLERS: usize = 300;
     write_fan_in_python_workspace(&tmp, FAN_IN_CALLERS);
 
-    for flag in ["--complete-chains", "--all"] {
-        let Some(out) = run(&["export", tmp.to_str().unwrap(), flag]) else {
+    for flag in [None, Some("--all")] {
+        let mut args = vec!["export", tmp.to_str().unwrap()];
+        if let Some(flag) = flag {
+            args.push(flag);
+        }
+        let Some(out) = run(&args) else {
             return;
         };
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        let label = flag.unwrap_or("default");
         assert_eq!(
             v["flow_chains_mode"], "compressed_callgraph",
-            "{flag} must avoid unbounded simple-path materialization"
+            "{label} must avoid unbounded simple-path materialization"
         );
         assert_eq!(
             v["flow_chains_complete"], false,
@@ -1511,9 +1487,9 @@ fn export_complete_chains_uses_exact_compressed_graph() {
         assert_eq!(
             v["flow_chains_truncated_targets"].as_u64().unwrap_or(1),
             0,
-            "{flag} must clear top-level chain truncation counts"
+            "{label} must clear top-level chain truncation counts"
         );
-        if flag == "--all" {
+        if flag == Some("--all") {
             assert_eq!(
                 v["analysis_complete"], true,
                 "--all should be complete for the fan-in audit fixture"
@@ -1521,24 +1497,24 @@ fn export_complete_chains_uses_exact_compressed_graph() {
         } else {
             assert_eq!(
                 v["analysis_complete"], false,
-                "--complete-chains alone still omits propagation records"
+                "default export still omits concrete propagation records"
             );
         }
         assert!(
             v["flow_chains"].as_array().is_some_and(Vec::is_empty),
-            "{flag} should encode the chain language in the graph, not path rows"
+            "{label} should encode the chain language in the graph, not path rows"
         );
         assert!(
             v["flow_chains_incomplete_reason"]
                 .as_str()
                 .is_some_and(|reason| reason.contains("compressed_callgraph")),
-            "{flag} must explain why concrete rows are absent"
+            "{label} must explain why concrete rows are absent"
         );
 
         let tg = &v["taint_graph"];
         assert_eq!(
             tg["chains_mode"], "compressed_callgraph",
-            "{flag} must use compressed taint-chain evidence"
+            "{label} must use compressed taint-chain evidence"
         );
         assert_eq!(
             tg["chains_complete"], false,
@@ -1547,21 +1523,21 @@ fn export_complete_chains_uses_exact_compressed_graph() {
         assert_eq!(
             tg["chains_truncated_targets"].as_u64().unwrap_or(1),
             0,
-            "{flag} must clear taint_graph chain truncation counts"
+            "{label} must clear taint_graph chain truncation counts"
         );
         assert!(
             tg["chains"].as_array().is_some_and(Vec::is_empty),
-            "{flag} must not enumerate the fan-in path product"
+            "{label} must not enumerate the fan-in path product"
         );
         assert!(
             tg["chains_incomplete_reason"]
                 .as_str()
                 .is_some_and(|reason| reason.contains("compressed_callgraph")),
-            "{flag} must explain the concrete taint-chain omission"
+            "{label} must explain the concrete taint-chain omission"
         );
         assert_eq!(
             tg["flow_id_labels_mode"], "compressed_callgraph",
-            "{flag} must use the compressed flow relation"
+            "{label} must use the compressed flow relation"
         );
         assert_eq!(
             tg["flow_id_labels_complete"], false,
@@ -1570,21 +1546,21 @@ fn export_complete_chains_uses_exact_compressed_graph() {
         assert_eq!(
             tg["flow_id_labels_truncated_functions"].as_u64().unwrap_or(1),
             0,
-            "{flag} must clear flow-id-label truncation counts"
+            "{label} must clear flow-id-label truncation counts"
         );
         assert!(
             tg["flow_id_labels"].as_array().is_some_and(Vec::is_empty),
-            "{flag} must not enumerate the fan-in flow-id product"
+            "{label} must not enumerate the fan-in flow-id product"
         );
         assert!(
             tg["flow_id_labels_incomplete_reason"]
                 .as_str()
                 .is_some_and(|reason| reason.contains("compressed_callgraph")),
-            "{flag} must explain the concrete flow-id omission"
+            "{label} must explain the concrete flow-id omission"
         );
         assert!(
             tg["call_edges"].as_array().is_some_and(|edges| !edges.is_empty()),
-            "{flag} must retain the exact resolved semantic graph"
+            "{label} must retain the exact resolved semantic graph"
         );
     }
 }

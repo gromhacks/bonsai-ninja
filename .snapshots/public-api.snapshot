@@ -172,7 +172,9 @@ pub struct CallLinkageFact {
 pub struct CallResultLinkageFact {
 pub struct FunctionLinkageFacts {
 pub struct GlobalIndex {
+pub struct GlobalIndexHeaderProjection<'a>(&'a GlobalIndex);
 pub struct GlobalIndexIdentity(Arc<()>);
+pub struct ReceiverAncestry {
 pub struct ReturnedConstructorLinkageFact {
 
 === inspect ===
@@ -391,6 +393,7 @@ pub struct Cache<'a> {
 pub struct CacheManifest {
 pub struct CacheManifestCoverage {
 pub struct CacheManifestSidecar {
+pub struct CacheManifestSourceFile {
 pub struct CacheSidecarValidation {
 pub struct CacheStats {
 pub struct CacheValidationReport {
@@ -498,6 +501,7 @@ pub fn extend_func_set_with_semantic_callback_dispatchers(
 pub fn idg_sidecar_path(workspace_root: &Path) -> std::path::PathBuf {
 pub fn summarize_precision(trace: &TraceResult) -> PrecisionReport {
 pub fn validate_idg_sidecar_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
+pub fn validate_idg_sidecar_layout_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
 pub mod callgraph_sidecar;
 pub mod class_index;
 pub mod dataflow;

@@ -159,7 +159,7 @@ pub fn slices(ws: &Workspace, filters: &SliceFilters<'_>) -> SliceOutcome {
         return outcome;
     }
 
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let mut rows = Vec::new();
     for file in global.all_files() {
         let Ok(path) = ws.vfs().path(file) else {
@@ -172,7 +172,10 @@ pub fn slices(ws: &Workspace, filters: &SliceFilters<'_>) -> SliceOutcome {
         {
             continue;
         }
-        for decl in global.decls_in(file) {
+        let Some(index) = ws.exact_decl_index_shared(file) else {
+            continue;
+        };
+        for decl in &index.defs {
             if !is_callable_decl(decl.kind) || !decl_contains_line(ws, decl, filters.line) {
                 continue;
             }
@@ -999,8 +1002,7 @@ fn semantic_immediate_sources(
 }
 
 fn semantic_function_name(ws: &Workspace, func: FuncId) -> String {
-    ws.db()
-        .global_index()
+    ws.compiler_linkage_index()
         .decl_of(SymbolId::new(func.raw()))
         .map(|decl| decl.name.clone())
         .unwrap_or_else(|| format!("F:{}", func.raw()))

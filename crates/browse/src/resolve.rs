@@ -107,7 +107,7 @@ pub fn dump_resolve<F>(
 where
     F: FnOnce(&Workspace, &str) -> Vec<String>,
 {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
 
     // `--in-file` matches a workspace-relative file path. The same shape
     // any other browse filter uses.

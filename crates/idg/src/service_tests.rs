@@ -161,7 +161,7 @@ fn contextual_closure_visited_spills_exact_states_and_erases_context_only_in_res
         "out-of-range contextual nodes must stay excluded"
     );
 
-    let nodes: Vec<_> = visited.nodes.iter().collect();
+    let nodes = visited.erased_nodes();
     assert_eq!(
         nodes.iter().filter(|node| **node == NodeId(7)).count(),
         1,

@@ -257,7 +257,6 @@ pub fn tree(
     }
 
     let resolved = ws.cached_resolved_call_graph();
-    let global = ws.db().global_index();
     let cross_edges = build_cross_edges(&resolved, ws);
 
     let mut files: Vec<(String, bonsai_common::FileId)> = ws
@@ -280,8 +279,6 @@ pub fn tree(
         })
         .collect();
     files.sort_by(|a, b| a.0.cmp(&b.0));
-
-    drop(global);
 
     let mut tree_root = DirBuilder::default();
     let mut finding_incomplete_reasons: Vec<String> = Vec::new();
@@ -511,7 +508,10 @@ struct CrossEdgeIndex {
 
 fn build_cross_edges(graph: &bonsai_callgraph::ResolvedCallGraph, ws: &Workspace) -> CrossEdgeIndex {
     let mut index = CrossEdgeIndex::default();
-    let global = ws.db().global_index();
+    // Cross-file navigation needs symbol linkage, not retained function
+    // bodies. Keep this phase on the compact compiler linkage product so an
+    // SDK tree never materializes the whole-workspace body index.
+    let global = ws.compiler_linkage_index();
     for edge in graph
         .inner()
         .edges
@@ -579,7 +579,7 @@ fn precision_rank(p: Precision) -> u8 {
 }
 
 fn func_to_locator(func: FuncId, ws: &Workspace) -> Locator {
-    let global = ws.db().global_index();
+    let global = ws.compiler_linkage_index();
     let symbol = SymbolId::new(func.raw());
     let Some(decl) = global.decl_of(symbol) else {
         return Locator::external(format!("FuncId({})", func.raw()));

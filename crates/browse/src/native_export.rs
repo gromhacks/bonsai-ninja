@@ -10,9 +10,10 @@ use bonsai_common::{FileId, FuncId, Precision, Span, SpanMap, SymbolId};
 use bonsai_idg::CrossCallEdge;
 use bonsai_inspect::ChainCache;
 use bonsai_lang_api::{AssignValueKind, CallArg, CallKind, DeclKind, ExpressionFlow, FlowEvent, LoopKind};
-use bonsai_workspace::{decl_decorator_names, flow_ids::FlowIdLabelOptions, Workspace};
+use bonsai_workspace::{decl_decorator_names, Workspace};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
+use std::cell::RefCell;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -24,11 +25,6 @@ pub struct NativeExportConfig {
     /// This is explicit because full-workspace propagation exports
     /// can be much larger than the structural taint graph.
     pub full_propagations: bool,
-    /// Request complete semantic chain/flow-label evidence.
-    /// Routine exports bound only the optional materialized path rows. This
-    /// mode preserves the complete semantic relation as an exact compressed
-    /// callgraph because dense graphs can have exponentially many paths.
-    pub complete_chains: bool,
     /// Keep the complete propagation relation in compiler form rather than
     /// materializing its potentially quadratic per-entry transitive product.
     pub compiled_propagations: bool,
@@ -791,7 +787,6 @@ pub fn native_export_json(
         root,
         NativeExportConfig {
             full_propagations,
-            complete_chains: false,
             compiled_propagations: false,
         },
     )
@@ -820,7 +815,6 @@ pub fn render_native_export_json(
         root,
         NativeExportConfig {
             full_propagations,
-            complete_chains: false,
             compiled_propagations: false,
         },
     )
@@ -928,14 +922,8 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     drop(structural);
 
     let chain_cache = ChainCache::new(ws);
-    let chain_limits = ExportChainLimits::bounded_materialization();
     let phase_started = Instant::now();
-    let flow_sections = build_export_flow_sections(
-        global.as_ref(),
-        &chain_cache,
-        chain_limits,
-        config.complete_chains,
-    );
+    let flow_sections = build_export_flow_sections();
     export_phase_log(format_args!(
         "flow sections: {:.3}s chains={} truncated_targets={} mode={}",
         phase_started.elapsed().as_secs_f64(),
@@ -960,18 +948,11 @@ fn write_native_export_streaming<W: Write + ?Sized>(
             chain_cache: &chain_cache,
         },
     )?;
-    let flow_chains_truncated_targets = flow_sections.flow_chains_truncated_targets;
     drop(flow_sections);
 
-    let phase_started = Instant::now();
-    let functions = export_taint_functions(ws, &spans);
-    let chain_rows = export_taint_chains_and_flow_labels(
-        ws,
-        chain_limits,
-        &chain_cache,
-        &functions,
-        config.complete_chains,
-    );
+    // Completeness and entry-point inference consume file-local compiler
+    // bodies. Finish those exact frontend passes before retaining the large
+    // chain/flow-label presentation projection.
     let completeness_started = Instant::now();
     let workspace_incomplete_reasons = export_workspace_incomplete_reasons(ws);
     export_phase_log(format_args!(
@@ -979,29 +960,27 @@ fn write_native_export_streaming<W: Write + ?Sized>(
         completeness_started.elapsed().as_secs_f64(),
         workspace_incomplete_reasons.len()
     ));
-    let completeness = export_analysis_completeness(
-        config,
-        flow_chains_truncated_targets,
-        chain_rows.chains_truncated_targets,
-        chain_rows.flow_id_labels_truncated_functions,
-        chain_limits,
-        &workspace_incomplete_reasons,
-    );
-    // Entry-point inference needs resolved caller membership. Compute it in
-    // the callgraph phase and carry only the compact rendered rows across the
-    // IDG phase boundary.
     let entry_points = export_entry_points(ws, &spans);
+
+    let phase_started = Instant::now();
+    let functions = export_taint_functions(ws, &spans);
+    let chain_rows = export_taint_chains_and_flow_labels();
+    let completeness = export_analysis_completeness(config, &workspace_incomplete_reasons);
     drop(chain_cache);
     drop(global);
+    // Flow labels and entry points now own every name they render. Release the
+    // standalone compiler linkage table immediately; call-edge serialization
+    // below needs only the canonical numeric callgraph.
+    ws.release_compiler_linkage_cache();
     map.serialize_entry("analysis_complete", &completeness.complete)?;
     map.serialize_entry("analysis_incomplete_reasons", &completeness.incomplete_reasons)?;
     let taint_graph = ExportTaintGraphStreaming {
         ws,
         spans: &spans,
-        functions: &functions,
-        entry_points: &entry_points,
-        chain_rows: &chain_rows,
-        return_taint_by_func: &return_taint_by_func,
+        functions,
+        entry_points: RefCell::new(Some(entry_points)),
+        chain_rows: RefCell::new(Some(chain_rows)),
+        return_taint_by_func: RefCell::new(Some(return_taint_by_func)),
         config,
     };
     map.serialize_entry("taint_graph", &taint_graph)?;
@@ -1334,8 +1313,6 @@ fn export_phase_log(args: std::fmt::Arguments<'_>) {
     }
 }
 
-const EXPORT_FLOW_CHAIN_MAX_CHAINS_PER_TARGET: usize = 16;
-const EXPORT_FLOW_CHAIN_MAX_ENTRY_PROBES: usize = 64;
 const EXPORT_SEMANTIC_FLOW_MAX_PRECISION: Precision = Precision::Narrowed;
 const COMPRESSED_CHAIN_ROWS_REASON: &str = "concrete path rows are not materialized in compressed_callgraph mode; the complete semantic chain language is represented by the exported function and resolved call-edge graph";
 const COMPRESSED_FLOW_ID_ROWS_REASON: &str = "concrete flow-id label rows are not materialized in compressed_callgraph mode; the complete semantic flow relation is represented by the exported function and resolved call-edge graph";
@@ -1352,43 +1329,21 @@ fn export_analysis_scope(config: NativeExportConfig) -> ExportAnalysisScope {
     ExportAnalysisScope {
         semantic_max_precision: export_precision_label(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
         full_propagations: config.full_propagations,
-        complete_chains: config.complete_chains,
+        // The wire field is retained for schema compatibility. Native export
+        // always emits the exact compressed relation; there is no capped path
+        // materialization mode.
+        complete_chains: true,
         propagations_mode: propagation_mode(config),
     }
 }
 
 fn export_analysis_completeness(
     config: NativeExportConfig,
-    flow_chains_truncated_targets: usize,
-    taint_chains_truncated_targets: usize,
-    flow_id_labels_truncated_functions: usize,
-    chain_limits: ExportChainLimits,
     workspace_incomplete_reasons: &[String],
 ) -> ExportCompleteness {
     let mut incomplete_reasons = workspace_incomplete_reasons.to_vec();
     if let Some(reason) = propagation_omitted_reason(config) {
         incomplete_reasons.push(format!("taint_graph.propagations: {reason}"));
-    }
-    if let Some(reason) = chain_export_incomplete_reason(
-        flow_chains_truncated_targets,
-        chain_limits.max_chains_per_target,
-        chain_limits.max_entry_probes,
-        config.complete_chains,
-    ) {
-        incomplete_reasons.push(format!("flow_chains: {reason}"));
-    }
-    if let Some(reason) = chain_export_incomplete_reason(
-        taint_chains_truncated_targets,
-        chain_limits.max_chains_per_target,
-        chain_limits.max_entry_probes,
-        config.complete_chains,
-    ) {
-        incomplete_reasons.push(format!("taint_graph.chains: {reason}"));
-    }
-    if let Some(reason) =
-        flow_id_labels_incomplete_reason(flow_id_labels_truncated_functions, config.complete_chains)
-    {
-        incomplete_reasons.push(format!("taint_graph.flow_id_labels: {reason}"));
     }
     ExportCompleteness {
         complete: incomplete_reasons.is_empty(),
@@ -1404,26 +1359,6 @@ fn export_workspace_incomplete_reasons(ws: &Workspace) -> Vec<String> {
     reasons
 }
 
-#[derive(Copy, Clone, Debug)]
-struct ExportChainLimits {
-    max_chains_per_target: usize,
-    max_entry_probes: usize,
-}
-
-impl ExportChainLimits {
-    #[must_use]
-    fn bounded_materialization() -> Self {
-        Self {
-            max_chains_per_target: EXPORT_FLOW_CHAIN_MAX_CHAINS_PER_TARGET,
-            max_entry_probes: EXPORT_FLOW_CHAIN_MAX_ENTRY_PROBES,
-        }
-    }
-}
-
-fn export_flow_label_options() -> FlowIdLabelOptions {
-    FlowIdLabelOptions::default()
-}
-
 #[allow(clippy::struct_field_names)] // Serialized field names intentionally mirror export JSON keys.
 struct ExportFlowSections {
     flow_chains: Vec<ExportFlowChain>,
@@ -1433,154 +1368,16 @@ struct ExportFlowSections {
     flow_chains_incomplete_reason: Option<String>,
 }
 
-fn chain_rows_complete(compressed_chains: bool, truncated_targets: usize) -> bool {
-    !compressed_chains && truncated_targets == 0
-}
-
-fn chain_rows_incomplete_reason(
-    compressed_chains: bool,
-    truncated_targets: usize,
-    max_chains_per_target: usize,
-    max_entry_probes: usize,
-    complete_chains_requested: bool,
-) -> Option<String> {
-    if compressed_chains {
-        return Some(COMPRESSED_CHAIN_ROWS_REASON.to_string());
-    }
-    chain_export_incomplete_reason(
-        truncated_targets,
-        max_chains_per_target,
-        max_entry_probes,
-        complete_chains_requested,
-    )
-}
-
-fn flow_id_rows_complete(compressed_chains: bool, truncated_functions: usize) -> bool {
-    !compressed_chains && truncated_functions == 0
-}
-
-fn flow_id_rows_incomplete_reason(
-    compressed_chains: bool,
-    truncated_functions: usize,
-    complete_chains_requested: bool,
-) -> Option<String> {
-    if compressed_chains {
-        return Some(COMPRESSED_FLOW_ID_ROWS_REASON.to_string());
-    }
-    flow_id_labels_incomplete_reason(truncated_functions, complete_chains_requested)
-}
-
-fn chain_export_incomplete_reason(
-    truncated_targets: usize,
-    max_chains_per_target: usize,
-    max_entry_probes: usize,
-    complete_chains_requested: bool,
-) -> Option<String> {
-    (truncated_targets > 0).then(|| {
-        if complete_chains_requested {
-            format!(
-                "{truncated_targets} target(s) did not fully enumerate in complete-chain mode \
-                 (max_chains_per_target={max_chains_per_target}, max_entry_probes={max_entry_probes}); \
-                 rows with truncated=true are prefixes, not complete chain sets; \
-                 graph facts and taint facts are still exported, but chain evidence is explicitly incomplete"
-            )
-        } else {
-            format!(
-                "{truncated_targets} target(s) hit export chain enumeration limits \
-                 (max_chains_per_target={max_chains_per_target}, max_entry_probes={max_entry_probes}); \
-                 rows with truncated=true are prefixes, not complete chain sets; \
-                 rerun with complete_chains=true for exhaustive semantic chain enumeration"
-            )
-        }
-    })
-}
-
-fn flow_id_labels_incomplete_reason(
-    truncated_functions: usize,
-    complete_chains_requested: bool,
-) -> Option<String> {
-    (truncated_functions > 0).then(|| {
-        if complete_chains_requested {
-            format!(
-                "{truncated_functions} function(s) did not fully enumerate in complete-chain mode; \
-                 rows with truncated=true are prefixes, not complete label sets; \
-                 graph facts and taint facts are still exported, but flow-id evidence is explicitly incomplete"
-            )
-        } else {
-            format!(
-                "{truncated_functions} function(s) hit flow-id label limits; rows with truncated=true are prefixes, not complete label sets; rerun with complete_chains=true for exhaustive semantic flow-id label enumeration"
-            )
-        }
-    })
-}
-
-fn build_export_flow_sections(
-    global: &bonsai_index::GlobalIndex,
-    chain_cache: &ChainCache<'_>,
-    chain_limits: ExportChainLimits,
-    complete_chains: bool,
-) -> ExportFlowSections {
-    // Flow graph + per-function upstream chains. Default export emits
-    // bounded path rows with explicit truncation metadata. Complete export
-    // always uses the exact compressed semantic callgraph.
-    // Selecting unbounded simple-path materialization from a graph-size
-    // threshold is unsafe: a small graph can still have exponentially many
-    // paths (or cycles), while the compressed graph remains linear in facts.
-    let compressed_chains = complete_chains;
-    let mut flow_chains: Vec<ExportFlowChain> = Vec::new();
-    let mut flow_chains_truncated_targets = 0usize;
-    let flow_files: Vec<_> = global.all_files().collect();
-    for file in flow_files {
-        for d in global.functions_in(file) {
-            let func = bonsai_common::FuncId::new(d.symbol.raw());
-            if !compressed_chains {
-                let (chains_r, truncation) = chain_cache.chains_resolved(
-                    func,
-                    chain_limits.max_chains_per_target,
-                    chain_limits.max_entry_probes,
-                );
-                let truncated = truncation.is_truncated();
-                if truncated {
-                    flow_chains_truncated_targets += 1;
-                }
-                let meaningful_chains: Vec<Vec<String>> = chains_r
-                    .iter()
-                    .filter(|c| c.funcs.len() > 1)
-                    .map(|c| {
-                        c.funcs
-                            .iter()
-                            .map(|func| linkage_func_display_name(global, *func).to_string())
-                            .collect()
-                    })
-                    .collect();
-                if !meaningful_chains.is_empty() {
-                    flow_chains.push(ExportFlowChain {
-                        target: d.name.clone(),
-                        chains: meaningful_chains,
-                        truncated,
-                        truncation_reason: truncation.label().map(str::to_string),
-                    });
-                }
-            }
-        }
-    }
-    flow_chains.sort_by(|a, b| a.target.cmp(&b.target));
+fn build_export_flow_sections() -> ExportFlowSections {
+    // The exact semantic relation is the exported resolved callgraph. Simple
+    // path enumeration can be exponential even for a small cyclic graph, so
+    // native export has no alternate capped/prefix representation.
     ExportFlowSections {
-        flow_chains,
-        flow_chains_complete: chain_rows_complete(compressed_chains, flow_chains_truncated_targets),
-        flow_chains_mode: if compressed_chains {
-            "compressed_callgraph"
-        } else {
-            "enumerated_paths"
-        },
-        flow_chains_truncated_targets,
-        flow_chains_incomplete_reason: chain_rows_incomplete_reason(
-            compressed_chains,
-            flow_chains_truncated_targets,
-            chain_limits.max_chains_per_target,
-            chain_limits.max_entry_probes,
-            complete_chains,
-        ),
+        flow_chains: Vec::new(),
+        flow_chains_complete: false,
+        flow_chains_mode: "compressed_callgraph",
+        flow_chains_truncated_targets: 0,
+        flow_chains_incomplete_reason: Some(COMPRESSED_CHAIN_ROWS_REASON.to_string()),
     }
 }
 
@@ -1662,10 +1459,10 @@ fn linkage_func_display_name(global: &bonsai_index::GlobalIndex, func: FuncId) -
 struct ExportTaintGraphStreaming<'a> {
     ws: &'a Workspace,
     spans: &'a ExportSpanCache,
-    functions: &'a [ExportTaintFunction],
-    entry_points: &'a [ExportEntryPoint],
-    chain_rows: &'a ExportTaintChainsAndFlowLabels,
-    return_taint_by_func: &'a ahash::AHashMap<FuncId, Vec<u32>>,
+    functions: Vec<ExportTaintFunction>,
+    entry_points: RefCell<Option<Vec<ExportEntryPoint>>>,
+    chain_rows: RefCell<Option<ExportTaintChainsAndFlowLabels>>,
+    return_taint_by_func: RefCell<Option<ahash::AHashMap<FuncId, Vec<u32>>>>,
     config: NativeExportConfig,
 }
 
@@ -1676,7 +1473,7 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
     {
         let mut map = serializer.serialize_map(None)?;
 
-        let functions = self.functions;
+        let functions = self.functions.as_slice();
         map.serialize_entry("functions", functions)?;
 
         map.serialize_entry("call_edges", &ExportTaintCallEdgesStreaming { ws: self.ws })?;
@@ -1688,15 +1485,50 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
         self.ws.release_resolved_call_graph_cache();
         self.ws.release_compiler_linkage_cache();
 
-        let function_summaries = export_function_summaries(self.return_taint_by_func, functions);
-        map.serialize_entry("function_summaries", &function_summaries)?;
-        drop(function_summaries);
-
-        let projection_idg = export_projection_idg_service(self.ws);
-        if !self.config.full_propagations {
-            projection_idg.release_query_indexes();
+        {
+            let return_taint = self.return_taint_by_func.borrow();
+            let function_summaries = export_function_summaries(
+                return_taint
+                    .as_ref()
+                    .expect("native export return summaries are serialized once"),
+                functions,
+            );
+            map.serialize_entry("function_summaries", &function_summaries)?;
         }
+        self.return_taint_by_func.borrow_mut().take();
 
+        // Chain rows are presentation projections computed from the complete
+        // callgraph. Serialize and release them before opening the multi-
+        // gigabyte IDG so the two exact representations never overlap.
+        {
+            let chain_rows = self.chain_rows.borrow();
+            let chain_rows = chain_rows
+                .as_ref()
+                .expect("native export chain rows are serialized once");
+            map.serialize_entry("chains", &chain_rows.chains)?;
+            map.serialize_entry("chains_complete", &chain_rows.chains_complete)?;
+            map.serialize_entry("chains_mode", &chain_rows.chains_mode)?;
+            map.serialize_entry("chains_truncated_targets", &chain_rows.chains_truncated_targets)?;
+            if let Some(reason) = &chain_rows.chains_incomplete_reason {
+                map.serialize_entry("chains_incomplete_reason", &reason)?;
+            }
+            map.serialize_entry("flow_id_labels", &chain_rows.flow_id_labels)?;
+            map.serialize_entry("flow_id_labels_complete", &chain_rows.flow_id_labels_complete)?;
+            map.serialize_entry("flow_id_labels_mode", &chain_rows.flow_id_labels_mode)?;
+            map.serialize_entry(
+                "flow_id_labels_truncated_functions",
+                &chain_rows.flow_id_labels_truncated_functions,
+            )?;
+            if let Some(reason) = &chain_rows.flow_id_labels_incomplete_reason {
+                map.serialize_entry("flow_id_labels_incomplete_reason", &reason)?;
+            }
+        }
+        self.chain_rows.borrow_mut().take();
+        self.ws.flow_ids().release_resident_labels();
+
+        // These compiler projections consume file-local typed bodies but not
+        // the IDG. Finish them while the IDG is closed, then release exact-body
+        // caches before entering the graph phase.
         map.serialize_entry(
             "reachable_facts",
             &ExportReachableFactsStreaming {
@@ -1704,7 +1536,37 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
                 functions,
             },
         )?;
+        map.serialize_entry(
+            "intra_taint",
+            &ExportIntraTaintStreaming {
+                ws: self.ws,
+                functions,
+            },
+        )?;
+        let alias_maps = export_alias_maps(self.ws);
+        map.serialize_entry("alias_maps", &alias_maps)?;
+        drop(alias_maps);
+        let class_fields = export_class_fields(self.ws, self.spans);
+        map.serialize_entry("class_fields", &class_fields)?;
+        drop(class_fields);
+        {
+            let entry_points = self.entry_points.borrow();
+            map.serialize_entry(
+                "entry_points",
+                entry_points
+                    .as_deref()
+                    .expect("native export entry points are serialized once"),
+            )?;
+        }
+        if !self.config.full_propagations {
+            self.entry_points.borrow_mut().take();
+        }
+        self.ws.release_exact_body_cache();
 
+        let projection_idg = export_projection_idg_service(self.ws);
+        if !self.config.full_propagations {
+            projection_idg.release_query_indexes();
+        }
         map.serialize_entry(
             "assign_chains",
             &ExportAssignChainsStreaming {
@@ -1713,58 +1575,24 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
             },
         )?;
 
-        map.serialize_entry(
-            "intra_taint",
-            &ExportIntraTaintStreaming {
+        {
+            let entry_points = self.entry_points.borrow();
+            let propagation_rows = ExportTaintPropagationsStreaming {
                 ws: self.ws,
-                functions,
-            },
-        )?;
-
-        let alias_maps = export_alias_maps(self.ws);
-        map.serialize_entry("alias_maps", &alias_maps)?;
-        drop(alias_maps);
-
-        let class_fields = export_class_fields(self.ws, self.spans);
-        map.serialize_entry("class_fields", &class_fields)?;
-        drop(class_fields);
-
-        let entry_points = self.entry_points;
-        map.serialize_entry("entry_points", entry_points)?;
-
-        let propagation_rows = ExportTaintPropagationsStreaming {
-            ws: self.ws,
-            spans: self.spans,
-            idg: &projection_idg,
-            entry_points,
-            full_propagations: self.config.full_propagations,
-        };
-        map.serialize_entry("propagations", &propagation_rows)?;
+                spans: self.spans,
+                idg: &projection_idg,
+                entry_points: entry_points.as_deref().unwrap_or(&[]),
+                full_propagations: self.config.full_propagations,
+            };
+            map.serialize_entry("propagations", &propagation_rows)?;
+        }
         map.serialize_entry("propagations_complete", &self.config.full_propagations)?;
         map.serialize_entry("propagations_mode", propagation_mode(self.config))?;
         if let Some(reason) = propagation_omitted_reason(self.config) {
             map.serialize_entry("propagations_omitted_reason", &reason)?;
         }
+        self.entry_points.borrow_mut().take();
         drop(projection_idg);
-
-        let chain_rows = self.chain_rows;
-        map.serialize_entry("chains", &chain_rows.chains)?;
-        map.serialize_entry("chains_complete", &chain_rows.chains_complete)?;
-        map.serialize_entry("chains_mode", &chain_rows.chains_mode)?;
-        map.serialize_entry("chains_truncated_targets", &chain_rows.chains_truncated_targets)?;
-        if let Some(reason) = &chain_rows.chains_incomplete_reason {
-            map.serialize_entry("chains_incomplete_reason", &reason)?;
-        }
-        map.serialize_entry("flow_id_labels", &chain_rows.flow_id_labels)?;
-        map.serialize_entry("flow_id_labels_complete", &chain_rows.flow_id_labels_complete)?;
-        map.serialize_entry("flow_id_labels_mode", &chain_rows.flow_id_labels_mode)?;
-        map.serialize_entry(
-            "flow_id_labels_truncated_functions",
-            &chain_rows.flow_id_labels_truncated_functions,
-        )?;
-        if let Some(reason) = &chain_rows.flow_id_labels_incomplete_reason {
-            map.serialize_entry("flow_id_labels_incomplete_reason", &reason)?;
-        }
 
         map.end()
     }
@@ -2829,149 +2657,35 @@ fn export_precision_rank(precision: Precision) -> u8 {
     }
 }
 
-fn export_taint_chains_and_flow_labels(
-    ws: &Workspace,
-    chain_limits: ExportChainLimits,
-    chain_cache: &ChainCache<'_>,
-    functions: &[ExportTaintFunction],
-    complete_chains: bool,
-) -> ExportTaintChainsAndFlowLabels {
-    use bonsai_common::FuncId;
-
-    let db = ws.db();
-    let compressed_chains = complete_chains;
-
-    // ---- chains: per-target FuncId chain list ----
+fn export_taint_chains_and_flow_labels() -> ExportTaintChainsAndFlowLabels {
     let phase_started = Instant::now();
-    let mut chains: Vec<ExportChain> = Vec::new();
-    let mut chains_truncated_targets = 0usize;
-    let mut flow_label_chain_sets: Vec<(FuncId, Vec<Vec<FuncId>>, bool)> =
-        Vec::with_capacity(functions.len());
-    if !compressed_chains {
-        for f in functions {
-            let target = FuncId::new(f.func_id);
-            let (resolved_chains, truncation) = chain_cache.chains_resolved(
-                target,
-                chain_limits.max_chains_per_target,
-                chain_limits.max_entry_probes,
-            );
-            let truncated = truncation.is_truncated();
-            if truncated {
-                chains_truncated_targets += 1;
-            }
-            flow_label_chain_sets.push((
-                target,
-                resolved_chains.iter().map(|c| c.funcs.clone()).collect(),
-                truncated,
-            ));
-            let nontrivial: Vec<Vec<u32>> = resolved_chains
-                .iter()
-                .filter(|c| c.funcs.len() > 1)
-                .map(|c| c.funcs.iter().map(|fid| fid.raw()).collect())
-                .collect();
-            if nontrivial.is_empty() {
-                continue;
-            }
-            chains.push(ExportChain {
-                target_func_id: f.func_id,
-                target: f.name.clone(),
-                chains: nontrivial,
-                truncated,
-                truncation_reason: truncation.label().map(str::to_string),
-            });
-        }
-    }
-    chains.sort_by_key(|c| c.target_func_id);
     export_phase_log(format_args!(
         "taint.chains: {:.3}s count={} truncated_targets={} mode={}",
         phase_started.elapsed().as_secs_f64(),
-        chains.len(),
-        chains_truncated_targets,
-        if compressed_chains {
-            "compressed_callgraph"
-        } else {
-            "enumerated_paths"
-        }
+        0,
+        0,
+        "compressed_callgraph"
     ));
-
-    // ---- flow_id_labels: per-function F:/G: labels ----
     let phase_started = Instant::now();
-    let flow_label_options = export_flow_label_options();
-    let flow_label_rows = if compressed_chains {
-        Vec::new()
-    } else {
-        ws.flow_ids().labels_for_chain_sets_with_options(
-            flow_label_chain_sets,
-            db,
-            ws.vfs(),
-            flow_label_options,
-        )
-    };
-    let function_names: ahash::AHashMap<u32, &str> =
-        functions.iter().map(|f| (f.func_id, f.name.as_str())).collect();
-    let mut flow_id_labels: Vec<ExportFlowIdLabels> = Vec::new();
-    let mut flow_id_labels_truncated_functions = 0usize;
-    for (func, labels, truncated) in flow_label_rows {
-        if truncated {
-            flow_id_labels_truncated_functions += 1;
-        }
-        if labels.is_empty() {
-            continue;
-        }
-        let func_id = func.raw();
-        flow_id_labels.push(ExportFlowIdLabels {
-            func_id,
-            function: function_names
-                .get(&func_id)
-                .copied()
-                .unwrap_or_default()
-                .to_string(),
-            labels: labels.iter().cloned().collect(),
-            truncated,
-        });
-    }
-    flow_id_labels.sort_by_key(|l| l.func_id);
     export_phase_log(format_args!(
         "taint.flow_id_labels: {:.3}s count={} truncated_functions={} mode={}",
         phase_started.elapsed().as_secs_f64(),
-        flow_id_labels.len(),
-        flow_id_labels_truncated_functions,
-        if compressed_chains {
-            "compressed_callgraph"
-        } else {
-            "materialized_flow_ids"
-        }
+        0,
+        0,
+        "compressed_callgraph"
     ));
 
     ExportTaintChainsAndFlowLabels {
-        chains,
-        chains_complete: chain_rows_complete(compressed_chains, chains_truncated_targets),
-        chains_mode: if compressed_chains {
-            "compressed_callgraph"
-        } else {
-            "enumerated_paths"
-        },
-        chains_truncated_targets,
-        chains_incomplete_reason: chain_rows_incomplete_reason(
-            compressed_chains,
-            chains_truncated_targets,
-            chain_limits.max_chains_per_target,
-            chain_limits.max_entry_probes,
-            complete_chains,
-        ),
-        flow_id_labels,
-        flow_id_labels_complete: flow_id_rows_complete(compressed_chains, flow_id_labels_truncated_functions),
-        flow_id_labels_mode: if compressed_chains {
-            "compressed_callgraph"
-        } else {
-            "materialized_flow_ids"
-        },
-        flow_id_labels_truncated_functions,
-        flow_id_labels_incomplete_reason: flow_id_rows_incomplete_reason(
-            compressed_chains,
-            flow_id_labels_truncated_functions,
-            complete_chains,
-        ),
+        chains: Vec::new(),
+        chains_complete: false,
+        chains_mode: "compressed_callgraph",
+        chains_truncated_targets: 0,
+        chains_incomplete_reason: Some(COMPRESSED_CHAIN_ROWS_REASON.to_string()),
+        flow_id_labels: Vec::new(),
+        flow_id_labels_complete: false,
+        flow_id_labels_mode: "compressed_callgraph",
+        flow_id_labels_truncated_functions: 0,
+        flow_id_labels_incomplete_reason: Some(COMPRESSED_FLOW_ID_ROWS_REASON.to_string()),
     }
 }
 

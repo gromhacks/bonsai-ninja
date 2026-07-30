@@ -54,10 +54,9 @@ pub struct OperationOut {
 pub fn operations(ws: &Workspace, f: &OperationsFilters<'_>) -> Result<Vec<OperationOut>, regex::Error> {
     use rayon::prelude::*;
 
-    let global = ws.db().global_index();
     let kind_match = make_name_filter(f.kind, f.regex)?;
     let name_match = make_name_filter(f.name, f.regex)?;
-    let files: Vec<_> = global.all_files().collect();
+    let files = ws.vfs().all_files();
     let mut out: Vec<OperationOut> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
@@ -70,11 +69,18 @@ pub fn operations(ws: &Workspace, f: &OperationsFilters<'_>) -> Result<Vec<Opera
             {
                 return acc;
             }
-            for decl in global.decls_in(file) {
+            let Some(index) = ws.db().decl_index_uncached(file) else {
+                return acc;
+            };
+            for decl in &index.defs {
                 if f.in_fn.is_some_and(|needle| !decl.name.contains(needle)) {
                     continue;
                 }
                 for op in operations_from_flow_events(&decl.flow_events) {
+                    let kind = op.kind.as_str().to_string();
+                    if !kind_match(&kind) {
+                        continue;
+                    }
                     let (_path, line, column) = format_span(&op.span, ws);
                     let operands: Vec<OperationOperandOut> = op
                         .operands
@@ -89,8 +95,14 @@ pub fn operations(ws: &Workspace, f: &OperationsFilters<'_>) -> Result<Vec<Opera
                         .clone()
                         .or_else(|| operands.first().map(|operand| operand.name.clone()))
                         .unwrap_or_else(|| op.kind.as_str().to_string());
+                    if f.name.is_some()
+                        && !name_match(&name)
+                        && !operands.iter().any(|operand| name_match(&operand.name))
+                    {
+                        continue;
+                    }
                     acc.push(OperationOut {
-                        kind: op.kind.as_str().to_string(),
+                        kind,
                         name,
                         file: file_path.clone(),
                         line,
@@ -110,18 +122,6 @@ pub fn operations(ws: &Workspace, f: &OperationsFilters<'_>) -> Result<Vec<Opera
             larger.extend(smaller);
             larger
         });
-    out.retain(|op| {
-        if !kind_match(&op.kind) {
-            return false;
-        }
-        if f.name.is_some()
-            && !name_match(&op.name)
-            && !op.operands.iter().any(|operand| name_match(&operand.name))
-        {
-            return false;
-        }
-        true
-    });
     drop_assignment_source_call_rows_shadowed_by_explicit_calls(&mut out);
     let kind_rank = |op: &OperationOut| {
         if f.kind.is_some() && !f.regex {

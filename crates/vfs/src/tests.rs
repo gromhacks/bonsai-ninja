@@ -27,6 +27,23 @@ fn write_interns_and_versions() {
 }
 
 #[test]
+fn compiler_assigned_ids_preserve_sparse_workspace_identity() {
+    let vfs = Vfs::new();
+    let expected = FileId::new(7);
+    let actual = vfs.write_with_id(expected, "scoped.py", "def scoped():\n    pass\n");
+
+    assert_eq!(actual, expected);
+    assert_eq!(vfs.lookup(Path::new("scoped.py")), Some(expected));
+    assert_eq!(vfs.all_files(), vec![expected]);
+    assert_eq!(vfs.file_count(), 1);
+    assert_eq!(vfs.snapshot(expected).unwrap().file_id, expected);
+
+    let updated = vfs.write_with_id(expected, "scoped.py", "def scoped():\n    return 1\n");
+    assert_eq!(updated, expected);
+    assert_eq!(vfs.snapshot(expected).unwrap().version, 1);
+}
+
+#[test]
 fn new_instances_have_distinct_cache_identity() {
     let a = Vfs::new();
     let b = Vfs::new();

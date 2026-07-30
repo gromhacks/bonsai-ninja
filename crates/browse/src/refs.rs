@@ -1,7 +1,6 @@
 //! `bonsai-ninja refs` data layer.
 
 use crate::common::{file_path_matches_filter, format_span, textual_relevance_key};
-use crate::strings::enclosing_fn_for_file_line;
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -39,11 +38,12 @@ pub struct RefOut {
 /// All references to a `symbol` (or matching a regex when
 /// `f.regex` is set), filtered by kind / file / enclosing fn.
 ///
-/// Non-regex queries first try the resolver-driven `refs_to(sym)`
-/// lookup (fast, exact); they fall back to a full ref-table scan
-/// when nothing comes back. Regex queries always scan.
+/// Exact file-local compiler objects remain the source of truth. The CLI may
+/// use the retrieval sidecar to narrow candidate files, but every rendered row
+/// is hydrated from adapter-lowered reference or flow facts.
 pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<RefOut>, regex::Error> {
-    let global = ws.db().global_index();
+    use rayon::prelude::*;
+
     // Non-regex queries match either the bare name (`open`) or a
     // qualified suffix (`fs.open` matches when the user passes `open`).
     let symbol_match: Box<dyn Fn(&str) -> bool + Send + Sync> = if f.regex {
@@ -55,114 +55,91 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
         let dotted_prefix = format!("{needle}.");
         Box::new(move |s: &str| s == needle || s.ends_with(&dotted_suffix) || s.starts_with(&dotted_prefix))
     };
-    // Refs at a span where both a Read AND a Call exist are the DSL
-    // subscript-synthesis signature (see `extract_call_refs` in
-    // `lang_api::kit`): `params[:x]`, `row[0]`, `session['user']`
-    // emit a `Read` at the subscript plus a synthetic `Call` so
-    // security rules shaped as `kind: call callee.name: params` fire.
-    // For the human-facing refs table this double-counts every
-    // subscript with a misleading `call` row. Pre-build the set of
-    // "spans with a Read ref" per file so we can drop the synthetic
-    // Call without losing the real one.
-    let subscript_call_spans: ahash::AHashMap<bonsai_common::FileId, ahash::AHashSet<(u64, u64)>> = {
-        let mut map: ahash::AHashMap<bonsai_common::FileId, ahash::AHashSet<(u64, u64)>> =
-            ahash::AHashMap::default();
-        for file in global.all_files() {
-            if let Some(idx) = global.file_index(file) {
-                let read_spans: ahash::AHashSet<(u64, u64)> = idx
-                    .refs
-                    .iter()
-                    .filter(|reference| reference.kind == bonsai_lang_api::RefKind::Read)
-                    .map(|reference| (reference.span.start, reference.span.end))
-                    .collect();
-                if !read_spans.is_empty() {
-                    map.insert(file, read_spans);
-                }
+    let files = ws.vfs().all_files();
+    let mut out: Vec<RefOut> = files
+        .par_iter()
+        .fold(Vec::new, |mut per_thread, &file| {
+            let file_path = ws
+                .vfs()
+                .path(file)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if f.file
+                .is_some_and(|needle| !file_path_matches_filter(ws, &file_path, needle))
+            {
+                return per_thread;
             }
-        }
-        map
-    };
-    let is_synthetic_call = |file: bonsai_common::FileId, reference: &bonsai_lang_api::Ref| -> bool {
-        reference.kind == bonsai_lang_api::RefKind::Call
-            && subscript_call_spans
-                .get(&file)
-                .is_some_and(|set| set.contains(&(reference.span.start, reference.span.end)))
-    };
-    let mut out: Vec<RefOut> = Vec::new();
-    // Fast path: exact-name lookup against the resolver's
-    // symbol → refs table. Skipped for regex queries since that
-    // table is indexed by exact name only.
-    if !f.regex {
-        let symbol_ids = global.find_by_name(symbol);
-        for &sym_id in symbol_ids {
-            for (file_id, reference) in global.refs_to(sym_id) {
-                if is_synthetic_call(file_id, reference) {
+            let Some(index) = ws.db().decl_index_uncached(file) else {
+                return per_thread;
+            };
+
+            // A Call at the exact same span as a Read is the adapter's
+            // subscript-DSL synthesis (`params[:x]`, `row[0]`). Keep the real
+            // Read and omit the browse-only duplicate Call.
+            let read_spans: ahash::AHashSet<(u64, u64)> = index
+                .refs
+                .iter()
+                .filter(|reference| reference.kind == bonsai_lang_api::RefKind::Read)
+                .map(|reference| (reference.span.start, reference.span.end))
+                .collect();
+            for reference in &index.refs {
+                if !symbol_match(&reference.name)
+                    || (reference.kind == bonsai_lang_api::RefKind::Call
+                        && read_spans.contains(&(reference.span.start, reference.span.end)))
+                {
+                    continue;
+                }
+                let kind = format!("{:?}", reference.kind).to_lowercase();
+                if f.kind.is_some_and(|wanted| !kind.eq_ignore_ascii_case(wanted))
+                    || f.in_fn.is_some_and(|needle| {
+                        !enclosing_function_for_span(&index, reference.span)
+                            .is_some_and(|name| name.contains(needle))
+                    })
+                {
                     continue;
                 }
                 let (path, line, column) = format_span(&reference.span, ws);
-                let snippet = read_snippet(ws, &reference.span);
-                out.push(RefOut {
+                per_thread.push(RefOut {
                     symbol: reference.name.clone(),
                     file: path,
                     line,
                     column,
-                    kind: format!("{:?}", reference.kind).to_lowercase(),
-                    snippet,
+                    kind,
+                    snippet: read_snippet(ws, &reference.span),
                 });
             }
-        }
-    }
-    // Fallback: full ref-table scan. Always runs for regex queries;
-    // also runs for substring queries when the fast path produced
-    // nothing (callee names that are method-shaped — `socket.send` —
-    // don't sit under the bare `send` symbol).
-    if out.is_empty() || f.regex {
-        use rayon::prelude::*;
-        let files: Vec<_> = global.all_files().collect();
-        let mut extra: Vec<RefOut> = files
-            .par_iter()
-            .flat_map_iter(|&file| {
-                let mut per_file: Vec<RefOut> = Vec::new();
-                let Some(idx) = global.file_index(file) else {
-                    return per_file.into_iter();
-                };
-                for reference in &idx.refs {
-                    if symbol_match(&reference.name) && !is_synthetic_call(file, reference) {
-                        let (path, line, column) = format_span(&reference.span, ws);
-                        per_file.push(RefOut {
-                            symbol: reference.name.clone(),
+
+            if f.kind.is_none_or(|wanted| wanted.eq_ignore_ascii_case("read")) {
+                for decl in &index.defs {
+                    if f.in_fn.is_some_and(|needle| !decl.name.contains(needle)) {
+                        continue;
+                    }
+                    walk_flow_source_reads(&decl.flow_events, &mut |name, span| {
+                        if !symbol_match(name) {
+                            return;
+                        }
+                        let span = refine_span_to_name(ws, span, name);
+                        let (path, line, column) = format_span(&span, ws);
+                        per_thread.push(RefOut {
+                            symbol: name.to_string(),
                             file: path,
                             line,
                             column,
-                            kind: format!("{:?}", reference.kind).to_lowercase(),
-                            snippet: read_snippet(ws, &reference.span),
+                            kind: "read".to_string(),
+                            snippet: read_snippet(ws, &span),
                         });
-                    }
+                    });
                 }
-                per_file.into_iter()
-            })
-            .collect();
-        out.append(&mut extra);
-    }
-    append_flow_source_read_refs(ws, &*symbol_match, &mut out);
-    out.retain(|reference| {
-        if f.kind.is_some_and(|k| !reference.kind.eq_ignore_ascii_case(k)) {
-            return false;
-        }
-        if f.file
-            .is_some_and(|needle| !file_path_matches_filter(ws, &reference.file, needle))
-        {
-            return false;
-        }
-        if let Some(needle) = f.in_fn {
-            let enclosing =
-                enclosing_fn_for_file_line(ws, &reference.file, reference.line).unwrap_or_default();
-            if !enclosing.contains(needle) {
-                return false;
             }
-        }
-        true
-    });
+            per_thread
+        })
+        .reduce(Vec::new, |mut larger, mut smaller| {
+            if smaller.len() > larger.len() {
+                std::mem::swap(&mut larger, &mut smaller);
+            }
+            larger.extend(smaller);
+            larger
+        });
     let mut seen = ahash::AHashSet::default();
     out.retain(|reference| {
         seen.insert((
@@ -193,42 +170,29 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
     Ok(out)
 }
 
-fn append_flow_source_read_refs(
-    ws: &Workspace,
-    symbol_match: &(dyn Fn(&str) -> bool + Send + Sync),
-    out: &mut Vec<RefOut>,
-) {
-    let global = ws.db().global_index();
-    for file in global.all_files() {
-        let Some(index) = global.file_index(file) else {
-            continue;
-        };
-        for decl in &index.defs {
-            walk_flow_source_reads(&decl.flow_events, &mut |name, span| {
-                if !symbol_match(name) {
-                    return;
-                }
-                let span = refine_span_to_name(ws, span, name);
-                let (path, line, column) = format_span(&span, ws);
-                if out.iter().any(|reference| {
-                    reference.kind == "read"
-                        && reference.symbol == name
-                        && reference.file == path
-                        && reference.line == line
-                }) {
-                    return;
-                }
-                out.push(RefOut {
-                    symbol: name.to_string(),
-                    file: path,
-                    line,
-                    column,
-                    kind: "read".to_string(),
-                    snippet: read_snippet(ws, &span),
-                });
-            });
-        }
-    }
+fn enclosing_function_for_span(
+    index: &bonsai_lang_api::DeclIndex,
+    span: bonsai_common::Span,
+) -> Option<&str> {
+    use bonsai_lang_api::DeclKind;
+    index
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            )
+        })
+        .filter(|decl| {
+            let body = decl.body_span.unwrap_or(decl.span);
+            body.file == span.file && body.start <= span.start && span.end <= body.end
+        })
+        .min_by_key(|decl| {
+            let body = decl.body_span.unwrap_or(decl.span);
+            body.end.saturating_sub(body.start)
+        })
+        .map(|decl| decl.name.as_str())
 }
 
 fn refine_span_to_name(ws: &Workspace, span: bonsai_common::Span, name: &str) -> bonsai_common::Span {
