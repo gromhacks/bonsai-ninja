@@ -3456,6 +3456,9 @@ fn render_finding_security_header(u: &Ui, idx: usize, combined: &CombinedFinding
     for source in &combined.additional_sources {
         render_finding_side(u, FindingSide::Source, source, pack);
     }
+    for transform in &f.taint_transforms_seen {
+        render_finding_side(u, FindingSide::TaintTransform, transform, pack);
+    }
     for s in &f.sanitizers_seen {
         render_finding_side(u, FindingSide::Sanitizer, s, pack);
     }
@@ -3501,6 +3504,7 @@ fn all_sink_matches(combined: &CombinedFindingWithChain) -> Vec<FindingMatch> {
 #[derive(Copy, Clone)]
 enum FindingSide {
     Source,
+    TaintTransform,
     Sanitizer,
     Sink,
 }
@@ -3509,6 +3513,7 @@ impl FindingSide {
     fn label(self) -> &'static str {
         match self {
             Self::Source => "SOURCE:",
+            Self::TaintTransform => "TAINT TRANSFORM:",
             Self::Sanitizer => "SANITIZER:",
             Self::Sink => "SINK:",
         }
@@ -3519,13 +3524,14 @@ impl FindingSide {
     fn narrative_prefix(self) -> &'static str {
         match self {
             Self::Source => "untrusted input —",
+            Self::TaintTransform => "taint preserved by —",
             Self::Sanitizer => "sanitized via —",
             Self::Sink => "dangerous operation —",
         }
     }
 }
 
-/// Emit one side of the finding (source / sanitizer / sink) as a
+/// Emit one side of the finding (source / taint transform / sanitizer / sink) as a
 /// short prose block: label, rule id, the "what this is" narrative
 /// line (rule description prefixed with a side-specific framing),
 /// file:line:col location with enclosing function, and a compact
@@ -3600,7 +3606,7 @@ fn render_finding_side(u: &Ui, side: FindingSide, m: &FindingMatch, pack: &Rulep
     // Sink-side only: sink severity (source severity is irrelevant).
     // The finding's severity (from the sink) already appears in the
     // headline, so skip it here.
-    if matches!(side, FindingSide::Sanitizer) {
+    if matches!(side, FindingSide::Sanitizer | FindingSide::TaintTransform) {
         if let Some(r) = rule {
             if !r.packages.is_empty() {
                 chips.push(meta_chip(u, "packages", u.dim(&r.packages.join(", "))));
@@ -3706,6 +3712,9 @@ fn render_finding_block_compact(u: &Ui, combined: &CombinedFindingWithChain, pac
     render_site_code(u, "SOURCE", &f.source, pack);
     for source in &combined.additional_sources {
         render_site_code(u, "SOURCE", source, pack);
+    }
+    for transform in &f.taint_transforms_seen {
+        render_site_code(u, "TAINT TRANSFORM", transform, pack);
     }
     for s in &f.sanitizers_seen {
         render_site_code(u, "SANITIZER", s, pack);

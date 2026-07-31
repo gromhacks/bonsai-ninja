@@ -24,6 +24,38 @@ fn assert_function_was_parsed(workspace: &Workspace, expected: &str) {
 }
 
 #[test]
+fn exact_body_replay_reuses_resident_linkage_without_rebuilding_headers() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::write(
+        root.path().join("app.py"),
+        "def endpoint(value):\n    return value\n",
+    )
+    .expect("write Python fixture");
+    let workspace = Workspace::open(root.path(), python_registry()).expect("open workspace");
+    let linkage = workspace.compiler_linkage_index();
+    let symbol = linkage
+        .all_files()
+        .flat_map(|file| linkage.decls_in(file))
+        .find(|decl| decl.name == "endpoint")
+        .map(|decl| decl.symbol)
+        .expect("endpoint symbol");
+
+    workspace.release_compiler_header_cache();
+    assert!(workspace.inner.compiler_headers.read().is_none());
+    assert_eq!(
+        workspace
+            .exact_decl(symbol)
+            .expect("replay exact declaration")
+            .name,
+        "endpoint"
+    );
+    assert!(
+        workspace.inner.compiler_headers.read().is_none(),
+        "resident linkage must remain the exact-body identity source"
+    );
+}
+
+#[test]
 fn long_minified_named_source_is_parsed_by_single_file_and_parallel_ingest() {
     let root = tempfile::tempdir().expect("workspace tempdir");
     let path = root.path().join("app.min.py");
@@ -123,6 +155,30 @@ fn exact_query_worklist_preserves_global_file_identity_without_opening_siblings(
             .as_path(),
         beta.as_path()
     );
+}
+
+#[test]
+fn single_file_local_id_maps_to_its_persisted_header_partition() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::write(root.path().join("alpha.py"), "def alpha():\n    return 1\n").expect("write alpha");
+    std::fs::write(root.path().join("beta.py"), "def beta():\n    return 2\n").expect("write beta");
+
+    let complete = Workspace::index(root.path(), python_registry()).expect("complete workspace");
+    complete
+        .save_compiler_linkage_sidecar(root.path())
+        .expect("persist linkage sidecar");
+    let scoped = Workspace::open_query_matching_path(root.path(), python_registry(), Path::new("beta.py"))
+        .expect("single-file query");
+    assert_eq!(
+        scoped.vfs().all_files(),
+        vec![FileId::new(0)],
+        "a navigation-only open stays dense and does not walk sibling metadata"
+    );
+
+    let headers = scoped.compiler_header_index_for_files(&scoped.vfs().all_files());
+    assert_eq!(headers.all_files().collect::<Vec<_>>(), vec![FileId::new(1)]);
+    assert!(headers.find_by_name("alpha").is_empty());
+    assert_eq!(headers.find_by_name("beta").len(), 1);
 }
 
 #[test]

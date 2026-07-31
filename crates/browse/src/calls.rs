@@ -9,7 +9,8 @@
 //! doesn't reach).
 
 use crate::common::{
-    file_path_matches_filter, format_span, make_callable_name_filter, make_name_filter, textual_relevance_key,
+    decl_or_ancestor_name_matches, file_path_matches_filter, format_span, make_callable_name_filter,
+    make_name_filter, textual_relevance_key,
 };
 use bonsai_lang_api::{FlowEvent, RefKind};
 use bonsai_workspace::Workspace;
@@ -99,11 +100,17 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
             let Some(index) = ws.db().decl_index_uncached(file) else {
                 return acc;
             };
+            let defs_by_symbol = index
+                .defs
+                .iter()
+                .map(|decl| (decl.symbol, decl))
+                .collect::<ahash::AHashMap<_, _>>();
             // Pass 1 — flow-event walk per decl. Carries the
             // enclosing function name so the row's `caller` is
             // populated.
             for decl in &index.defs {
-                if f.caller.is_some() && !caller_match(&decl.name) {
+                if f.caller.is_some() && !decl_or_ancestor_name_matches(decl, &defs_by_symbol, &*caller_match)
+                {
                     continue;
                 }
                 walk_calls(

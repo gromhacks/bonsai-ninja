@@ -38,6 +38,9 @@ use std::sync::Arc;
 /// On-disk snapshot version for the workspace-wide taint graph.
 /// Disk format is the streaming factstore; bumping this invalidates
 /// every cached sidecar so consumers get a fresh build on next open.
+// v15 (2026-07-31): lambda/local-function ownership, Perl package calls, and
+// implicit-class constructor resolution changed; cached reachability must use
+// the rebuilt linkage, callgraph, and IDG scope chain.
 // v14 (2026-07-30): nested lexical endpoint identities changed with
 // compiler-object v13; cached reachability must use the rebuilt IDG.
 // v12 (2026-07-25): Security source graphs now execute against the exact
@@ -50,7 +53,7 @@ use std::sync::Arc;
 // RHS call spans for assignment-derived terminal calls.
 // v9 (2026-05-27): taint graph derives from the IDG, whose construction
 // and seeding changed enough that old graphs are no longer equivalent.
-pub const TAINT_GRAPH_CACHE_VERSION: u32 = 14;
+pub const TAINT_GRAPH_CACHE_VERSION: u32 = 15;
 
 /// Caller-defined table id stamped into the factstore header. 4 is
 /// the next slot after dataflow (2), value-flow (1), flow-ids (3).

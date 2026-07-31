@@ -2005,7 +2005,11 @@ fn collect_ast_bound_call_candidates(
         let implicit_enclosing_constructor = context
             .caller_capabilities
             .effective_constructor_method_names()
-            .contains(&constructor_tail);
+            .contains(&constructor_tail)
+            || context
+                .caller_capabilities
+                .effective_implicit_receiver_tokens()
+                .contains(&constructor_tail);
         values = collect_constructor_targets_for_class_call(
             &constructor_context,
             facts.name,

@@ -26,6 +26,34 @@ pub type Span = bonsai_common::Span;
 /// readable.
 pub type NameFilter = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Match a declaration or any compiler-owned lexical ancestor by name.
+///
+/// Lambda/local-function declarations remain the immediate owners of their
+/// calls, but human filters such as `--in-fn outer` should include code nested
+/// lexically inside `outer`. Parent SymbolIds are adapter facts; this never
+/// infers ancestry from generated names or rendered source text.
+pub(crate) fn decl_or_ancestor_name_matches(
+    decl: &bonsai_lang_api::Decl,
+    defs_by_symbol: &ahash::AHashMap<bonsai_common::SymbolId, &bonsai_lang_api::Decl>,
+    matches: &(dyn Fn(&str) -> bool + Send + Sync),
+) -> bool {
+    let mut current = Some(decl);
+    // A valid declaration tree is acyclic. The bound makes malformed adapter
+    // output fail closed instead of looping forever.
+    for _ in 0..=defs_by_symbol.len() {
+        let Some(candidate) = current else {
+            return false;
+        };
+        if matches(&candidate.name) {
+            return true;
+        }
+        current = candidate
+            .parent
+            .and_then(|parent| defs_by_symbol.get(&parent).copied());
+    }
+    false
+}
+
 /// Build a name-matcher that respects `needle` + `regex`. Returns
 /// a closure that returns `true` when `needle` is `None` OR the
 /// candidate matches.

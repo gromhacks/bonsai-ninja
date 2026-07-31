@@ -133,6 +133,11 @@ pub(super) struct FindingBuildContext<'a> {
     pub(super) chain_names: Vec<String>,
     pub(super) san_by_func: &'a AHashMap<FuncId, Vec<&'a RuleMatch>>,
     pub(super) ws: &'a Workspace,
+    /// Immutable compiler identities materialized once by the analysis
+    /// planner. Finding attribution runs inside the source-group Rayon pool;
+    /// re-entering the workspace header cache here can recursively acquire
+    /// its write lock when a worker steals another source-group job.
+    pub(super) global: &'a Arc<GlobalIndex>,
     /// Spans of every call site the engine recorded as carrying
     /// tainted argument flow on this source's graph. A sanitizer
     /// only credits the finding when its match span overlaps one
@@ -156,7 +161,7 @@ pub(super) fn make_finding(
     context: FindingBuildContext<'_>,
 ) -> Option<Finding> {
     let skr = pack.find_rule_by_id(&snk.rule_id)?;
-    let attributed_sink = callback_extension_attribution_match(context.ws, snk, skr);
+    let attributed_sink = callback_extension_attribution_match(context.ws, context.global.as_ref(), snk, skr);
     let report_sink = attributed_sink.as_ref().unwrap_or(snk);
     let is_inferred = src.origin != MatchOrigin::Rulepack;
     let source_rule = if is_inferred {

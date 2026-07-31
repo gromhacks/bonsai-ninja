@@ -1,7 +1,7 @@
 //! `bonsai-ninja refs` data layer.
 
 use crate::common::{file_path_matches_filter, format_span, textual_relevance_key};
-use bonsai_common::short_qualified_tail;
+use bonsai_common::{short_qualified_tail, QUALIFIED_NAME_SEPARATORS};
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -47,17 +47,32 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
 
     // Non-regex queries match either the bare name (`open`) or a
     // qualified suffix (`fs.open` matches when the user passes `open`).
-    let symbol_match: Box<dyn Fn(&str) -> bool + Send + Sync> = if f.regex {
-        let compiled = regex::Regex::new(symbol)?;
-        Box::new(move |s: &str| compiled.is_match(s))
+    // A qualified query keeps its qualifier identity: `SearchAction.TYPE`
+    // must not broaden to every unrelated `*.TYPE` reference. We still
+    // accept a bare adapter-emitted tail because some grammars lower a
+    // semantically-qualified reference as only its lexical call token.
+    let regex = f.regex.then(|| regex::Regex::new(symbol)).transpose()?;
+    let query_is_qualified = short_qualified_tail(symbol) != symbol;
+    let qualified_targets: ahash::AHashSet<bonsai_common::SymbolId> = if query_is_qualified {
+        let global = ws.compiler_header_index();
+        global
+            .all_files()
+            .flat_map(|file| global.decls_in(file))
+            .filter(|decl| declaration_matches_symbol_query(decl, symbol))
+            .map(|decl| decl.symbol)
+            .collect()
     } else {
-        let needle = symbol.to_string();
-        let lexical_name = short_qualified_tail(symbol).to_string();
-        let dotted_suffix = format!(".{lexical_name}");
-        let dotted_prefix = format!("{lexical_name}.");
-        Box::new(move |s: &str| {
-            s == needle || s == lexical_name || s.ends_with(&dotted_suffix) || s.starts_with(&dotted_prefix)
-        })
+        ahash::AHashSet::default()
+    };
+    let symbol_match = |candidate: &str, resolved: Option<bonsai_common::SymbolId>| {
+        regex.as_ref().map_or_else(
+            || {
+                let allow_bare_qualified_tail =
+                    resolved.is_some_and(|target| qualified_targets.contains(&target));
+                symbol_query_matches(symbol, candidate, allow_bare_qualified_tail)
+            },
+            |compiled| compiled.is_match(candidate),
+        )
     };
     let files = ws.vfs().all_files();
     let mut out: Vec<RefOut> = files
@@ -76,6 +91,15 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
             let Some(index) = ws.db().decl_index_uncached(file) else {
                 return per_thread;
             };
+            let qualified_call_spans = if query_is_qualified && regex.is_none() {
+                let mut spans = ahash::AHashSet::default();
+                for decl in &index.defs {
+                    collect_matching_qualified_call_spans(&decl.flow_events, symbol, &mut spans);
+                }
+                spans
+            } else {
+                ahash::AHashSet::default()
+            };
 
             // A Call at the exact same span as a Read is the adapter's
             // subscript-DSL synthesis (`params[:x]`, `row[0]`). Keep the real
@@ -87,7 +111,9 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
                 .map(|reference| (reference.span.start, reference.span.end))
                 .collect();
             for reference in &index.refs {
-                if !symbol_match(&reference.name)
+                let syntax_qualified_call = reference.kind == bonsai_lang_api::RefKind::Call
+                    && qualified_call_spans.contains(&(reference.span.start, reference.span.end));
+                if (!symbol_match(&reference.name, reference.resolved) && !syntax_qualified_call)
                     || (reference.kind == bonsai_lang_api::RefKind::Call
                         && read_spans.contains(&(reference.span.start, reference.span.end)))
                 {
@@ -119,7 +145,11 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
                         continue;
                     }
                     walk_flow_source_reads(&decl.flow_events, &mut |name, span| {
-                        if !symbol_match(name) {
+                        // Flow-event reads do not carry resolved symbol
+                        // identity. A qualified query must therefore fail
+                        // closed on a bare tail instead of mixing every
+                        // unrelated field/method with that common name.
+                        if !symbol_match(name, None) {
                             return;
                         }
                         let span = refine_span_to_name(ws, span, name);
@@ -144,16 +174,6 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
             larger.extend(smaller);
             larger
         });
-    let mut seen = ahash::AHashSet::default();
-    out.retain(|reference| {
-        seen.insert((
-            reference.symbol.clone(),
-            reference.file.clone(),
-            reference.line,
-            reference.column,
-            reference.kind.clone(),
-        ))
-    });
     // Rank the queried symbol before deterministic kind/file grouping
     // so exact and prefix hits survive small render budgets first.
     let symbol_rank = |reference: &RefOut| {
@@ -171,7 +191,158 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
             .then_with(|| a.file.cmp(&b.file))
             .then_with(|| a.line.cmp(&b.line))
     });
+    // Adapters can emit both the exact referenced symbol and a wider
+    // expression (`Action.TYPE` and `Action.TYPE.name()`) at the same
+    // source site. A refs row is a source location, not an IR-fact dump;
+    // after relevance sorting, retain the best spelling once per site/kind.
+    let mut seen = ahash::AHashSet::default();
+    out.retain(|reference| {
+        seen.insert((
+            reference.file.clone(),
+            reference.line,
+            reference.column,
+            reference.kind.clone(),
+        ))
+    });
     Ok(out)
+}
+
+fn declaration_matches_symbol_query(decl: &bonsai_lang_api::Decl, query: &str) -> bool {
+    decl.name == query
+        || decl.qualified_name.as_deref().is_some_and(|qualified| {
+            qualified == query
+                || QUALIFIED_NAME_SEPARATORS.iter().any(|separator| {
+                    qualified
+                        .strip_suffix(query)
+                        .is_some_and(|prefix| prefix.ends_with(separator))
+                })
+        })
+}
+
+fn symbol_query_matches(query: &str, candidate: &str, allow_bare_qualified_tail: bool) -> bool {
+    if candidate == query {
+        return true;
+    }
+    let lexical_name = short_qualified_tail(query);
+    let query_is_qualified = lexical_name != query;
+    if query_is_qualified {
+        // Adapter-lowered short references are a necessary compatibility
+        // form, but another qualified receiver with the same tail is not.
+        (allow_bare_qualified_tail && candidate == lexical_name)
+            || QUALIFIED_NAME_SEPARATORS.iter().any(|separator| {
+                candidate
+                    .strip_suffix(query)
+                    .is_some_and(|prefix| prefix.ends_with(separator))
+            })
+            || QUALIFIED_NAME_SEPARATORS.iter().any(|separator| {
+                candidate
+                    .strip_prefix(query)
+                    .is_some_and(|suffix| suffix.starts_with(separator))
+            })
+    } else {
+        QUALIFIED_NAME_SEPARATORS.iter().any(|separator| {
+            candidate
+                .strip_suffix(query)
+                .is_some_and(|prefix| prefix.ends_with(separator))
+                || candidate
+                    .strip_prefix(query)
+                    .is_some_and(|suffix| suffix.starts_with(separator))
+        })
+    }
+}
+
+fn collect_matching_qualified_call_spans(
+    events: &[FlowEvent],
+    query: &str,
+    spans: &mut ahash::AHashSet<(u64, u64)>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                receiver_types,
+                ..
+            } => {
+                if qualified_call_matches_query(query, name, receiver.as_deref(), receiver_types) {
+                    spans.insert((span.start, span.end));
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_matching_qualified_call_spans(then_events, query, spans);
+                collect_matching_qualified_call_spans(else_events, query, spans);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_matching_qualified_call_spans(body, query, spans);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_matching_qualified_call_spans(body, query, spans);
+                collect_matching_qualified_call_spans(catch_events, query, spans);
+                collect_matching_qualified_call_spans(finally_events, query, spans);
+            }
+            FlowEvent::Assign { .. }
+            | FlowEvent::AggregateAssign { .. }
+            | FlowEvent::Return { .. }
+            | FlowEvent::Throw { .. }
+            | FlowEvent::Await { .. }
+            | FlowEvent::Yield { .. }
+            | FlowEvent::Break { .. }
+            | FlowEvent::Continue { .. }
+            | FlowEvent::Lifecycle { .. } => {}
+        }
+    }
+}
+
+fn qualified_call_matches_query(
+    query: &str,
+    call_name: &str,
+    receiver: Option<&str>,
+    receiver_types: &[String],
+) -> bool {
+    let Some(query_owner) = qualified_owner(query) else {
+        return false;
+    };
+    if short_qualified_tail(query) != short_qualified_tail(call_name) {
+        return false;
+    }
+    receiver
+        .into_iter()
+        .chain(receiver_types.iter().map(String::as_str))
+        .any(|candidate| qualified_owner_matches(query_owner, candidate))
+}
+
+fn qualified_owner(name: &str) -> Option<&str> {
+    QUALIFIED_NAME_SEPARATORS
+        .iter()
+        .filter_map(|separator| name.rfind(separator).map(|index| (index, *separator)))
+        .max_by_key(|(index, separator)| (*index, separator.len()))
+        .map(|(index, _)| &name[..index])
+        .filter(|owner| !owner.is_empty())
+}
+
+fn qualified_owner_matches(query_owner: &str, candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate == query_owner {
+        return true;
+    }
+    QUALIFIED_NAME_SEPARATORS.iter().any(|separator| {
+        query_owner
+            .strip_suffix(candidate)
+            .is_some_and(|prefix| prefix.ends_with(separator))
+            || candidate
+                .strip_suffix(query_owner)
+                .is_some_and(|prefix| prefix.ends_with(separator))
+    })
 }
 
 fn enclosing_function_for_span(
@@ -390,6 +561,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn qualified_symbol_query_preserves_receiver_identity() {
+        assert!(symbol_query_matches(
+            "TransportSearchAction.TYPE",
+            "TransportSearchAction.TYPE",
+            false
+        ));
+        assert!(symbol_query_matches("TransportSearchAction.TYPE", "TYPE", true));
+        assert!(!symbol_query_matches("TransportSearchAction.TYPE", "TYPE", false));
+        assert!(symbol_query_matches(
+            "TransportSearchAction.TYPE",
+            "org.elasticsearch.TransportSearchAction.TYPE",
+            false
+        ));
+        assert!(!symbol_query_matches(
+            "TransportSearchAction.TYPE",
+            "TransportGetAction.TYPE",
+            false
+        ));
+        assert!(
+            symbol_query_matches("TYPE", "TransportGetAction.TYPE", false),
+            "a deliberately bare query remains a cross-receiver inventory"
+        );
+        assert!(symbol_query_matches("run", "Service::run", false));
+        assert!(symbol_query_matches("run", "service->run", false));
+    }
+
+    #[test]
     fn qualified_symbol_query_matches_adapter_emitted_short_reference() {
         let root = tempfile::tempdir().expect("workspace tempdir");
         std::fs::write(
@@ -400,12 +598,58 @@ mod tests {
         let workspace =
             Workspace::index(root.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
 
-        let rows = refs(&workspace, "package.service.target", &RefsFilters::default())
-            .expect("qualified refs query");
+        let global = workspace.compiler_header_index();
+        let qualified = global
+            .all_files()
+            .flat_map(|file| global.decls_in(file))
+            .find(|decl| decl.name == "target")
+            .and_then(|decl| decl.qualified_name.as_deref())
+            .expect("adapter emits a compiler-qualified target name")
+            .to_string();
+        let rows = refs(&workspace, &qualified, &RefsFilters::default()).expect("qualified refs query");
 
         assert!(
             rows.iter().any(|row| row.symbol == "target"),
             "a compiler-qualified query must still match the adapter's short call reference"
         );
+    }
+
+    #[test]
+    fn qualified_java_call_uses_ast_receiver_without_matching_sibling_receiver() {
+        let root = tempfile::tempdir().expect("workspace tempdir");
+        std::fs::write(
+            root.path().join("Target.java"),
+            "class Target { static void run() {} }\n",
+        )
+        .expect("write target");
+        std::fs::write(
+            root.path().join("Caller.java"),
+            "class Caller { void call() { Target.run(); } }\n",
+        )
+        .expect("write caller");
+        std::fs::write(
+            root.path().join("Other.java"),
+            "class Other { static void run() {} void call() { Other.run(); } }\n",
+        )
+        .expect("write sibling");
+        let workspace =
+            Workspace::index(root.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+        let rows = refs(
+            &workspace,
+            "Target.run",
+            &RefsFilters {
+                kind: Some("call"),
+                ..RefsFilters::default()
+            },
+        )
+        .expect("qualified refs query");
+
+        assert_eq!(
+            rows.len(),
+            1,
+            "only the AST-qualified Target call belongs here: {rows:?}"
+        );
+        assert!(rows[0].file.ends_with("Caller.java"), "{rows:?}");
+        assert!(rows[0].snippet.contains("Target.run()"), "{rows:?}");
     }
 }

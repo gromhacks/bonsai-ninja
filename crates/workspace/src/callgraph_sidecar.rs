@@ -22,6 +22,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// v25 (2026-07-31): rebuild callable identities and scope attribution after
+// standalone lambdas/local functions gained exact lexical parents, Perl
+// package calls became static functions, and adapter-declared implicit class
+// receivers began resolving inherited constructors from the lexical class.
 // v24 (2026-07-31): AST value/type bindings are no longer classified as
 // import/module aliases. Unresolved field receivers therefore cannot fall
 // through to unrelated same-leaf workspace callables.
@@ -58,7 +62,7 @@ use std::sync::Arc;
 // v13 (2026-07-18): metadata and graph payloads are independent factstore
 // entries, so freshness checks do not recursively decode millions of edges.
 // v12 (2026-07-16): MessagePack replaced the retired binary codec.
-pub const CALLGRAPH_CACHE_VERSION: u32 = 24;
+pub const CALLGRAPH_CACHE_VERSION: u32 = 25;
 
 const CALLGRAPH_TABLE_ID: u32 = 102;
 const METADATA_KEY: u64 = 0;
@@ -559,6 +563,139 @@ impl CallgraphQueryService {
             .filter(|site| visited.contains(&site.caller))
             .copied()
             .collect::<Vec<_>>();
+        Ok(ResolvedCallGraph::from_persisted_parts(
+            nodes,
+            edges,
+            local_bindings,
+            unresolved_workspace_sites,
+        ))
+    }
+
+    /// Materialize every semantic caller chain that reaches `targets`, plus
+    /// the targets' direct semantic callees.
+    ///
+    /// This is the exact graph shape needed by a target-oriented inspect:
+    /// complete incoming chains establish how execution reaches the selected
+    /// declaration, while one-hop outgoing edges explain what it immediately
+    /// delegates to. The reverse traversal is uncapped and decodes one file
+    /// partition at a time; it never allocates the unrelated workspace graph.
+    pub(crate) fn materialize_reaching_with_direct_callees(
+        &self,
+        targets: &[FuncId],
+        max_precision: Option<bonsai_common::Precision>,
+    ) -> std::io::Result<ResolvedCallGraph> {
+        if targets.is_empty() {
+            return Ok(ResolvedCallGraph::from_persisted_parts(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+
+        let target_set = targets.iter().copied().collect::<AHashSet<_>>();
+        let mut functions = target_set.clone();
+        let mut pending = BTreeMap::<u32, Vec<FuncId>>::new();
+        for &target in &target_set {
+            let file = self.node_file(target).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("inspect target {} has no callable node", target.raw()),
+                )
+            })?;
+            pending.entry(file.raw()).or_default().push(target);
+        }
+
+        let mut edges = Vec::new();
+        while let Some((file, mut callees)) = pending.pop_first() {
+            callees.sort_unstable_by_key(|func| func.raw());
+            callees.dedup();
+            let requested = callees.into_iter().collect::<AHashSet<_>>();
+            let partition = self.partition(FileId::new(file))?;
+            for edge in partition.incoming.iter().filter(|edge| {
+                requested.contains(&edge.to) && max_precision.is_none_or(|max| edge.precision <= max)
+            }) {
+                edges.push(edge.clone());
+                if !functions.insert(edge.from) {
+                    continue;
+                }
+                let caller_file = self.node_file(edge.from).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("inspect predecessor {} has no callable node", edge.from.raw()),
+                    )
+                })?;
+                pending.entry(caller_file.raw()).or_default().push(edge.from);
+            }
+        }
+
+        let mut targets_by_file = BTreeMap::<u32, AHashSet<FuncId>>::new();
+        for &target in &target_set {
+            let file = self.node_file(target).expect("validated target callable node");
+            targets_by_file.entry(file.raw()).or_default().insert(target);
+        }
+        for (file, file_targets) in targets_by_file {
+            let partition = self.partition(FileId::new(file))?;
+            for edge in partition.outgoing.iter().filter(|edge| {
+                file_targets.contains(&edge.from) && max_precision.is_none_or(|max| edge.precision <= max)
+            }) {
+                edges.push(edge.clone());
+                functions.insert(edge.to);
+            }
+        }
+
+        let edge_key = |edge: &CallEdge| {
+            (
+                edge.from.raw(),
+                edge.to.raw(),
+                edge.span.file.raw(),
+                edge.span.start,
+                edge.span.end,
+                edge.kind as u8,
+                edge.precision.rank(),
+            )
+        };
+        edges.sort_unstable_by_key(edge_key);
+        edges.dedup_by_key(|edge| edge_key(edge));
+
+        let mut functions_by_file = BTreeMap::<u32, AHashSet<FuncId>>::new();
+        for &function in &functions {
+            let file = self.node_file(function).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("inspect graph function {} has no callable node", function.raw()),
+                )
+            })?;
+            functions_by_file.entry(file.raw()).or_default().insert(function);
+        }
+        let mut nodes = Vec::new();
+        let mut local_bindings = Vec::new();
+        let mut unresolved_workspace_sites = Vec::new();
+        for (file, requested) in functions_by_file {
+            let partition = self.partition(FileId::new(file))?;
+            nodes.extend(
+                partition
+                    .nodes
+                    .iter()
+                    .filter(|node| requested.contains(&node.func))
+                    .cloned(),
+            );
+            local_bindings.extend(
+                partition
+                    .local_bindings
+                    .iter()
+                    .filter(|binding| requested.contains(&binding.caller))
+                    .cloned(),
+            );
+            unresolved_workspace_sites.extend(
+                partition
+                    .unresolved_workspace_sites
+                    .iter()
+                    .filter(|site| requested.contains(&site.caller))
+                    .copied(),
+            );
+        }
+
         Ok(ResolvedCallGraph::from_persisted_parts(
             nodes,
             edges,
@@ -1803,6 +1940,23 @@ mod tests {
         );
         assert_eq!(between.local_binding_records().len(), 1);
         assert_eq!(between.unresolved_workspace_site_records().len(), 1);
+
+        let reaching = service
+            .materialize_reaching_with_direct_callees(&[FuncId::new(2)], None)
+            .expect("query complete callers and direct callees");
+        assert_eq!(
+            reaching
+                .inner()
+                .edges
+                .iter()
+                .map(|edge| (edge.from, edge.to))
+                .collect::<Vec<_>>(),
+            vec![(FuncId::new(1), FuncId::new(2)), (FuncId::new(2), FuncId::new(3))]
+        );
+        assert_eq!(
+            reaching.nodes().iter().map(|node| node.func).collect::<Vec<_>>(),
+            vec![FuncId::new(1), FuncId::new(2), FuncId::new(3)]
+        );
 
         let direct = service
             .materialize_direct_between(&[FuncId::new(1)], &[FuncId::new(2), FuncId::new(3)])

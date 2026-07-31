@@ -26,6 +26,9 @@ use std::sync::Arc;
 /// Bump this whenever adapter lowering, [`DeclIndex`], [`ImportIndex`],
 /// [`CompilerSyntaxHeader`], or the object validation contract changes in a
 /// way that can alter compiler facts.
+// v15: standalone lambdas and named local callables retain their nearest
+// Tree-sitter lexical callable parent; Perl package modules own their
+// declarations and `Package::sub(...)` lowers as a static function call.
 // v13: nested class-like declarations retain their exact lexical parent, so
 // member qualified identities include every enclosing AST owner.
 // v14: receiver-less constructor events inherit the enclosing declaration
@@ -34,7 +37,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 14;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 15;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

@@ -289,6 +289,38 @@ impl Workspace {
         self.reopen_query_workspace_for_graph(graph, "source-target workspace")
     }
 
+    /// Reopen the exact compiler neighborhood needed to inspect callable
+    /// targets: every semantic caller chain plus each target's direct
+    /// semantic callees.
+    ///
+    /// The persisted callgraph traversal is uncapped and partition-backed.
+    /// A missing or stale sidecar returns `None`; callers must then use the
+    /// canonical complete-workspace fallback instead of treating cache
+    /// absence as an empty graph.
+    #[must_use]
+    pub fn target_inspect_query_workspace(
+        &self,
+        target_funcs: &[FuncId],
+        max_precision: Option<bonsai_common::Precision>,
+    ) -> Option<Workspace> {
+        if target_funcs.is_empty() {
+            return None;
+        }
+        let service = self.callgraph_query_service()?;
+        let graph = match service.materialize_reaching_with_direct_callees(target_funcs, max_precision) {
+            Ok(graph) => graph,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "target inspect callgraph partitions rejected: {}",
+                    error
+                );
+                return None;
+            }
+        };
+        self.reopen_query_workspace_for_graph(graph, "target inspect workspace")
+    }
+
     fn persisted_source_flow_corridor(
         &self,
         source_funcs: &[FuncId],

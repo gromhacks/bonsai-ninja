@@ -3,14 +3,15 @@ use super::bindings::{
 };
 use super::{
     annotate_tuple_call_result_bindings, apply_assign_call_result_types, apply_call_receiver_types,
-    apply_constructor_result_type_aliases, argument_place, assignment_value_node, build_call_event,
-    callable_reference_name, canonical_simple_type_name, collect_kinds, expression_flow_from_node,
-    extend_alias_map_with_flow_events, extract_assignment_value_facts, extract_call_receiver_facts,
-    extract_return_value_name, extract_rhs_expr_operands, extract_runtime_type_narrowing_facts,
-    extract_string_literals, language_from_pack, lower_local_closure_captures, node_text,
-    normalize_call_name_whitespace, normalize_call_result_assignment_sources,
-    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, span_of,
-    walk_flow_events, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
+    apply_constructor_result_type_aliases, argument_place, assign_lexical_callable_parents,
+    assignment_value_node, build_call_event, callable_reference_name, canonical_simple_type_name,
+    collect_kinds, expression_flow_from_node, extend_alias_map_with_flow_events,
+    extract_assignment_value_facts, extract_call_receiver_facts, extract_return_value_name,
+    extract_rhs_expr_operands, extract_runtime_type_narrowing_facts, extract_string_literals,
+    language_from_pack, lower_local_closure_captures, node_text, normalize_call_name_whitespace,
+    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
+    receiver_projected_alias_matches, span_of, walk_flow_events, GENERIC_HANDLER,
+    SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
     AliasTarget, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind,
@@ -1566,6 +1567,35 @@ fn m9_func_decl(raw: u32, name: &str, return_type: Option<&str>, flow_events: Ve
         return_type: return_type.map(str::to_string),
         is_variadic: false,
     }
+}
+
+#[test]
+fn lexical_callable_parent_stack_selects_nearest_ast_owner() {
+    let file = FileId::new(0);
+    let mut outer = m9_func_decl(1, "outer", None, Vec::new());
+    outer.span = Span::new(file, 0, 200);
+    outer.body_span = Some(Span::new(file, 10, 190));
+    let mut local = m9_func_decl(2, "local", None, Vec::new());
+    local.span = Span::new(file, 20, 150);
+    local.body_span = Some(Span::new(file, 30, 140));
+    let mut lambda = m9_func_decl(3, "<lambda>", None, Vec::new());
+    lambda.span = Span::new(file, 40, 60);
+    lambda.body_span = Some(Span::new(file, 45, 55));
+    let mut sibling = m9_func_decl(4, "sibling", None, Vec::new());
+    sibling.span = Span::new(file, 210, 260);
+    sibling.body_span = Some(Span::new(file, 220, 250));
+    let mut defs = vec![sibling, lambda, outer, local];
+
+    assign_lexical_callable_parents(&mut defs);
+    let parent_by_name = defs
+        .iter()
+        .map(|decl| (decl.name.as_str(), decl.parent))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    assert_eq!(parent_by_name["outer"], None);
+    assert_eq!(parent_by_name["local"], Some(SymbolId::new(1)));
+    assert_eq!(parent_by_name["<lambda>"], Some(SymbolId::new(2)));
+    assert_eq!(parent_by_name["sibling"], None);
 }
 
 // audit L3: `canonical_simple_type_name` must strip array / nullable /

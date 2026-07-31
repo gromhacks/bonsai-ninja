@@ -171,6 +171,7 @@ impl LanguageAdapter for PerlAdapter {
             }
         }
         for decl in &mut idx.defs {
+            normalize_perl_package_call_kinds(&mut decl.flow_events);
             rewrite_perl_call_arg_texts(&mut decl.flow_events, &source);
             normalize_perl_hash_deref_flow_events(&mut decl.flow_events, &source, &assignment_values);
             if let Some((_, tree)) = parsed.as_ref() {
@@ -281,6 +282,48 @@ impl LanguageAdapter for PerlAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+/// Perl's `Package::sub(...)` form is a statically-qualified subroutine call,
+/// not method dispatch. The shared lowering deliberately treats `::` as a
+/// method separator for languages such as C++ and Rust; correct that one
+/// language-specific runtime distinction here. True Perl method dispatch uses
+/// `->` and remains `CallKind::Method` (or `Constructor` for `->new`).
+fn normalize_perl_package_call_kinds(events: &mut [FlowEvent]) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name,
+                receiver,
+                call_kind,
+                ..
+            } if *call_kind == CallKind::Method && receiver.is_none() && name.contains("::") => {
+                *call_kind = CallKind::Function;
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_perl_package_call_kinds(then_events);
+                normalize_perl_package_call_kinds(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_perl_package_call_kinds(body)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_perl_package_call_kinds(body);
+                normalize_perl_package_call_kinds(catch_events);
+                normalize_perl_package_call_kinds(finally_events);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -3088,7 +3131,12 @@ fn perl_flow_has_contained_call(
 fn is_class_like(kind: DeclKind) -> bool {
     matches!(
         kind,
-        DeclKind::Class | DeclKind::Interface | DeclKind::Trait | DeclKind::Struct | DeclKind::Enum
+        DeclKind::Module
+            | DeclKind::Class
+            | DeclKind::Interface
+            | DeclKind::Trait
+            | DeclKind::Struct
+            | DeclKind::Enum
     )
 }
 

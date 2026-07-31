@@ -41,7 +41,7 @@ use std::{
 const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v13.json";
 const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v13.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
-const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v14";
+const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v15";
 const CACHE_MANIFEST_FILE: &str = "manifest.json";
 // v6 records an exact Git/HEAD/worktree source-state snapshot. Fresh CLI
 // processes can therefore reuse the manifest's complete compiler input table

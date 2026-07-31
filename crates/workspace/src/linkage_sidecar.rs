@@ -38,6 +38,9 @@ use std::sync::Arc;
 /// Version 9 retains complete nested lexical identities from compiler-object
 /// ABI v13.
 ///
+/// Version 10 retains standalone lambda/local-callable lexical parents and
+/// Perl package/static-call identity from compiler-object ABI v15.
+///
 /// Version 6 stores declaration headers as independently decodable per-file
 /// partitions. Scoped compiler worklists no longer allocate every workspace
 /// header merely to replay a handful of exact bodies.
@@ -49,7 +52,7 @@ use std::sync::Arc;
 /// declaration/type header and call-linkage payloads. File-local inventory
 /// scans can preserve cross-file receiver constraints without hydrating the
 /// complete global symbol table.
-pub const LINKAGE_CACHE_VERSION: u32 = 9;
+pub const LINKAGE_CACHE_VERSION: u32 = 10;
 
 const LINKAGE_TABLE_ID: u32 = 103;
 const METADATA_KEY: u64 = 0;
