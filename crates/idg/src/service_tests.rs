@@ -10,6 +10,54 @@ fn span(file: u32, start: u64, end: u64) -> Span {
 }
 
 #[test]
+fn structural_boundary_index_groups_exact_callees_without_hash_buckets() {
+    let caller = FuncId::new(10);
+    let first_site = span(0, 20, 30);
+    let second_site = span(0, 40, 50);
+    let rows = vec![
+        ContextBoundaryKey {
+            caller,
+            callee: FuncId::new(13),
+            span: first_site,
+        },
+        ContextBoundaryKey {
+            caller,
+            callee: FuncId::new(12),
+            span: second_site,
+        },
+        ContextBoundaryKey {
+            caller,
+            callee: FuncId::new(11),
+            span: first_site,
+        },
+        ContextBoundaryKey {
+            caller,
+            callee: FuncId::new(13),
+            span: first_site,
+        },
+    ];
+    let index = StructuralBoundaryIndex::new(rows);
+
+    assert_eq!(
+        index
+            .for_site(caller, first_site)
+            .iter()
+            .map(|key| key.callee)
+            .collect::<Vec<_>>(),
+        vec![FuncId::new(11), FuncId::new(13)]
+    );
+    assert_eq!(
+        index
+            .for_site(caller, second_site)
+            .iter()
+            .map(|key| key.callee)
+            .collect::<Vec<_>>(),
+        vec![FuncId::new(12)]
+    );
+    assert!(index.for_site(FuncId::new(99), first_site).is_empty());
+}
+
+#[test]
 fn packed_symbolic_strings_preserve_exact_sorted_utf8_identity() {
     let values = vec![
         "0.deep.field".to_string(),
@@ -1877,40 +1925,6 @@ fn cross_call_edges_in_closure_reports_callarg_to_param() {
         }),
         "expected one CallArg→Param edge for f→g, got {edges:?}",
     );
-}
-
-#[test]
-fn argumentless_receiver_shape_canonicalizes_legacy_argument_zero() {
-    let call_span = span(0, 20, 30);
-    let receiver_call = FlowEvent::Call {
-        span: call_span,
-        name: "repo.persist".to_string(),
-        receiver: Some("repo".to_string()),
-        receiver_types: vec!["Repository".to_string()],
-        call_kind: bonsai_lang_api::CallKind::Method,
-        args: Vec::new(),
-    };
-    assert!(call_event_is_argumentless_receiver(&[receiver_call], call_span));
-
-    let explicit_arg_call = FlowEvent::Call {
-        span: call_span,
-        name: "repo.persist".to_string(),
-        receiver: Some("repo".to_string()),
-        receiver_types: vec!["Repository".to_string()],
-        call_kind: bonsai_lang_api::CallKind::Method,
-        args: vec![bonsai_lang_api::CallArg {
-            passing_mode: Default::default(),
-            span: span(0, 25, 28),
-            name: None,
-            value_text: "data".to_string(),
-            place: Some("data".to_string()),
-            source_names: vec!["data".to_string()],
-        }],
-    };
-    assert!(!call_event_is_argumentless_receiver(
-        &[explicit_arg_call],
-        call_span
-    ));
 }
 
 #[test]

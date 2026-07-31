@@ -29,8 +29,9 @@ use bonsai_sdk::refs::read_snippet;
 use bonsai_sdk::RefOut;
 
 use super::{
-    format_span, nearest_names, open_project_index_filtered_paths, open_project_index_matching_literal,
-    open_project_index_only as open_project, page_info_to_json, paged_json_incomplete_reasons, short_file,
+    format_span, nearest_names, open_project_index_matching_literal, open_project_index_matching_path,
+    open_project_index_only as open_project, open_project_index_retrieval_candidate_union,
+    open_project_index_retrieval_candidates, page_info_to_json, paged_json_incomplete_reasons, short_file,
     truncate,
 };
 
@@ -54,6 +55,11 @@ struct InspectOut {
     params: Vec<String>,
     direct_callers: Vec<RefOut>,
     callees: Vec<String>,
+    /// Whether static entry-point chains were actually evaluated for this
+    /// declaration. Plain large-workspace inspect is intentionally a syntax
+    /// query; an empty `flows` list in that mode must not be presented as
+    /// proof that no caller reaches the symbol.
+    graph_flows_evaluated: bool,
     flows: Vec<InspectFlowRendered>,
     /// Longest-shared-suffix grouping of `flows`. Always populated
     /// alongside `flows` so JSON consumers can pick either view.
@@ -507,25 +513,7 @@ fn workspace_file_count_exceeds(root: &std::path::Path, limit: usize) -> bool {
     false
 }
 
-fn retrieval_prefilter_for_inspect(
-    root: &std::path::Path,
-    pattern: Option<&str>,
-    is_regex: bool,
-    filters: InspectFilters<'_>,
-    graph_flows_enabled: bool,
-    group_id_filter_active: bool,
-) -> Result<Option<Vec<String>>> {
-    retrieval_prefilter_for_inspect_with_limit(
-        root,
-        pattern,
-        is_regex,
-        filters,
-        graph_flows_enabled,
-        group_id_filter_active,
-        INSPECT_GRAPH_FLOW_FILE_LIMIT,
-    )
-}
-
+#[cfg(test)]
 fn retrieval_prefilter_for_inspect_with_limit(
     root: &std::path::Path,
     pattern: Option<&str>,
@@ -695,6 +683,7 @@ fn collect_decl_hits(
                 params: decl.params.clone(),
                 direct_callers: Vec::new(),
                 callees: Vec::new(),
+                graph_flows_evaluated: false,
                 flows: Vec::new(),
                 groups: Vec::new(),
                 summary: InspectSummary {
@@ -741,11 +730,6 @@ fn collect_decl_hits(
             extended_chains.extend(paths.into_iter().map(|path| (path, chain.precision)));
         }
         if options.filters.from.is_some() || options.filters.to.is_some() {
-            chain_cache.prewarm_taint_facts(
-                extended_chains
-                    .iter()
-                    .filter_map(|(chain, _)| chain.first().copied()),
-            );
             extended_chains.retain(|(path, _)| {
                 let mut chain_names: Vec<String> =
                     path.iter().map(|&func| func_display_name(ws, func)).collect();
@@ -838,6 +822,7 @@ fn collect_decl_hits(
             params: decl.params.clone(),
             direct_callers,
             callees,
+            graph_flows_evaluated: true,
             flows,
             groups,
             summary,
@@ -1272,6 +1257,17 @@ fn collect_occurrence_hits<'workspace>(
     if graph_flows_enabled {
         let _ = chain_cache.resolved_graph();
     }
+    let endpoint_corridor_funcs =
+        (partial_workspace && graph_flows_enabled && filters.from.is_some() && filters.to.is_some()).then(
+            || {
+                chain_cache
+                    .resolved_graph()
+                    .nodes()
+                    .iter()
+                    .map(|node| node.func)
+                    .collect::<ahash::AHashSet<_>>()
+            },
+        );
     // Counts candidates we silently dropped because `max_hits` was
     // already saturated. An overestimate (some of these would also
     // have been filtered out by `--from`/`--to`/etc.) but the right
@@ -1332,6 +1328,12 @@ fn collect_occurrence_hits<'workspace>(
         }
         let containing_name: Option<&str> = containing.as_ref().map(|(_, n)| n.as_str());
         let containing_id: Option<bonsai_common::FuncId> = containing.as_ref().map(|(f, _)| *f);
+        if endpoint_corridor_funcs
+            .as_ref()
+            .is_some_and(|corridor| containing_id.is_none_or(|func| !corridor.contains(&func)))
+        {
+            return;
+        }
         if out.iter().any(|hit| {
             hit.kind == kind
                 && hit.text == text
@@ -1954,7 +1956,7 @@ fn finish_inspect(
                     &paging_cfg,
                     pattern,
                     is_regex,
-                ));
+                )?);
                 Ok(())
             })?;
             let Some(current_info) = current_info else {
@@ -1977,7 +1979,7 @@ fn finish_inspect(
                 let text = page_cache::capture(|| {
                     page_info = Some(render_inspect_report_text(
                         ws, &report, &render, &page_cfg, pattern, is_regex,
-                    ));
+                    )?);
                     Ok(())
                 })?;
                 if let Some(info) = page_info {
@@ -2025,6 +2027,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // `--query X` with neither `--from` nor `--to` keeps its current
     // behavior (filter is a no-op; every chain for every matched hit
     // surfaces).
+    let explicit_endpoint_graph_flow = filters.from.is_some() && filters.to.is_some();
     let mut filters = filters;
     if !is_regex {
         if let Some(p) = pattern {
@@ -2035,53 +2038,190 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             }
         }
     }
+    let exact_file_path = filters.file.and_then(|file| {
+        let requested = std::path::Path::new(file);
+        let absolute = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            root.join(requested)
+        };
+        absolute.is_file().then_some(requested)
+    });
+    let large_workspace =
+        exact_file_path.is_none() && workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT);
     let structural_flow_lookup = render
         .flow_id_filter
         .as_deref()
         .is_some_and(|id| id.starts_with("F:"))
         || render.group_id_filter.is_some();
-    let default_graph_flow = taint_flow
-        && !taint_flow_explicit
-        && render.flow_id_filter.is_none()
-        && render.group_id_filter.is_none()
-        && !workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT);
-    let graph_flows_enabled = graph_flow || structural_flow_lookup || default_graph_flow;
+    // A from→to pair explicitly asks a relational question, so structural
+    // graph evidence is part of that command's job. A plain query remains a
+    // syntax/index lookup unless the caller opts into graph or taint facts.
+    let graph_flows_enabled = graph_flow || structural_flow_lookup || explicit_endpoint_graph_flow;
     let literal_prefilter = pattern.filter(|p| {
         !is_regex
             && p.len() >= 3
             && !taint_flow_explicit
             && !graph_flows_enabled
             && render.group_id_filter.is_none()
-            && workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT)
+            && large_workspace
     });
-    let retrieval_prefilter = if taint_flow_explicit {
-        None
-    } else {
-        retrieval_prefilter_for_inspect(
+    let retrieval_project = if !taint_flow_explicit
+        && exact_file_path.is_none()
+        && !is_regex
+        && pattern.is_some_and(|pattern| pattern.len() >= 3)
+        && !graph_flows_enabled
+        && render.group_id_filter.is_none()
+        && large_workspace
+    {
+        open_project_index_retrieval_candidates(
             root,
-            pattern,
-            is_regex,
-            filters,
-            graph_flows_enabled,
-            render.group_id_filter.is_some(),
+            pattern.expect("retrieval eligibility requires a pattern"),
+            bonsai_sdk::SearchFilters {
+                file: filters.file,
+                ..Default::default()
+            },
         )?
+    } else {
+        None
     };
-    let partial_workspace = retrieval_prefilter.is_some() || literal_prefilter.is_some();
+    let endpoint_retrieval_project = if !taint_flow_explicit
+        && exact_file_path.is_none()
+        && !is_regex
+        && explicit_endpoint_graph_flow
+        && large_workspace
+    {
+        open_project_index_retrieval_candidate_union(
+            root,
+            &[
+                filters.from.expect("explicit endpoint query has a source"),
+                filters.to.expect("explicit endpoint query has a target"),
+            ],
+            bonsai_sdk::SearchFilters {
+                file: filters.file,
+                ..Default::default()
+            },
+        )?
+    } else {
+        None
+    };
+    let endpoint_retrieval_used = endpoint_retrieval_project.is_some();
+    let direct_file_scope = exact_file_path.is_some() && !taint_flow_explicit && !graph_flows_enabled;
+    let partial_workspace = direct_file_scope
+        || retrieval_project.is_some()
+        || endpoint_retrieval_used
+        || literal_prefilter.is_some();
     let (project, _footer) = if taint_flow_explicit {
         // Retain the complete compiler header generation, but do not map the
         // whole persisted IDG. `syntax_flow_session` compiles one exact
         // source/target corridor after syntax matching, so a broad repository
         // pays only for functions that can contribute to this query.
         open_project(root)?
-    } else if let Some(include_filters) = retrieval_prefilter {
-        open_project_index_filtered_paths(root, &include_filters, &[])?
+    } else if direct_file_scope {
+        open_project_index_matching_path(root, exact_file_path.expect("checked exact file path"))?
+    } else if let Some(project) = endpoint_retrieval_project {
+        project
+    } else if let Some(project) = retrieval_project {
+        project
     } else if let Some(literal) = literal_prefilter {
         open_project_index_matching_literal(root, literal)?
     } else {
         open_project(root)?
     };
     let prepare_stage = progress::ScopedSpinner::new("preparing inspect query");
-    let ws = project.workspace();
+    let initial_ws = project.workspace();
+    let endpoint_funcs = if explicit_endpoint_graph_flow && partial_workspace {
+        let candidate_files = initial_ws.vfs().all_files();
+        let from = filters
+            .from
+            .and_then(|from| initial_ws.lookup_functions_in_persisted_headers(from, &candidate_files));
+        let to = filters
+            .to
+            .and_then(|to| initial_ws.lookup_functions_in_persisted_headers(to, &candidate_files));
+        bonsai_diagnostics::debug_log!(
+            "compiler-cache",
+            "inspect endpoint candidates: files={} from_matches={} to_matches={}",
+            candidate_files.len(),
+            from.as_ref().map_or(0, Vec::len),
+            to.as_ref().map_or(0, Vec::len)
+        );
+        from.zip(to)
+    } else {
+        None
+    };
+    let endpoint_workspace = endpoint_funcs.as_ref().and_then(|(from, to)| {
+        initial_ws.source_target_query_workspace(from, to, Some(bonsai_common::Precision::Narrowed))
+    });
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect endpoint corridor: retrieval={} resolved={} scoped={}",
+        endpoint_retrieval_used,
+        endpoint_funcs.is_some(),
+        endpoint_workspace.is_some()
+    );
+    let exact_endpoint_absent = endpoint_funcs
+        .as_ref()
+        .is_some_and(|(from, to)| from.is_empty() || to.is_empty());
+    let fallback_project = if explicit_endpoint_graph_flow
+        && endpoint_workspace.is_none()
+        && endpoint_retrieval_used
+        && !exact_endpoint_absent
+    {
+        Some(open_project(root)?)
+    } else {
+        None
+    };
+    let ws = endpoint_workspace.as_ref().map_or_else(
+        || {
+            fallback_project
+                .as_ref()
+                .map_or(initial_ws, |(project, _)| project.workspace())
+        },
+        |workspace| workspace,
+    );
+    // A missing/stale partitioned callgraph is an acceleration miss, not a
+    // reason to hydrate the complete resident graph. Compile the exact
+    // uncapped source-reachable worklist and seed only this invocation's
+    // presentation cache. Stable workspace FuncIds from the retrieval
+    // candidate workspace remain valid in the complete fallback workspace.
+    let endpoint_fallback_graph = if exact_endpoint_absent {
+        Some(std::sync::Arc::new(bonsai_callgraph::ResolvedCallGraph::default()))
+    } else if explicit_endpoint_graph_flow && endpoint_workspace.is_none() {
+        let endpoint_funcs = endpoint_funcs.clone().or_else(|| {
+            filters
+                .from
+                .and_then(|from| ws.lookup_function(from))
+                .zip(filters.to.and_then(|to| ws.lookup_function(to)))
+                .map(|(from, to)| (vec![from], vec![to]))
+        });
+        endpoint_funcs.map(|(from, to)| {
+            let corridor =
+                ws.source_reachable_query_call_graph(&from, &to, Some(bonsai_common::Precision::Narrowed));
+            tracing::debug!(
+                target: "compiler-cache",
+                sources = from.len(),
+                targets = to.len(),
+                reached_targets = corridor.reached_targets,
+                files = corridor.files.len(),
+                funcs = corridor.funcs.len(),
+                nodes = corridor.graph.nodes().len(),
+                edges = corridor.graph.inner().edges.len(),
+                "inspect endpoint fallback compiled"
+            );
+            corridor.graph
+        })
+    } else {
+        None
+    };
+    if endpoint_workspace.is_some() || endpoint_fallback_graph.is_some() {
+        // The compiler corridor already resolved both qualified endpoints to
+        // exact FuncIds. Inspect's presentation matcher operates on short
+        // Tree-sitter callable names, so compare lexical tails inside that
+        // proven graph rather than requiring each rendered hop to repeat its
+        // full module/class qualification.
+        filters.from = filters.from.map(bonsai_lang_api::kit::short_name_of);
+        filters.to = filters.to.map(bonsai_lang_api::kit::short_name_of);
+    }
     let global = ws.compiler_header_index();
     let full_source_for_large_bodies =
         paging_cfg.all || render.flow_id_filter.is_some() || render.group_id_filter.is_some();
@@ -2091,7 +2231,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // single-shot lookups after the first hit on each function.
     // `--no-cache` / `BONSAI_NO_CACHE` swaps this for a pass-through
     // variant that always takes the cold path.
-    let chain_cache = build_chain_cache(ws);
+    let chain_cache = build_chain_cache(ws, endpoint_fallback_graph.clone());
     let (downstream_max_extra, downstream_max_paths) = if paging_cfg.all {
         (usize::MAX, usize::MAX)
     } else {
@@ -2102,7 +2242,10 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // per-file alias maps and per-edge span lookups for this invocation;
     // otherwise hub queries such as Redis's `--query system` repeatedly
     // rescan the same parse trees while checking the same edges.
-    let mut edge_resolver = CallEdgeResolver::new(ws);
+    let mut edge_resolver = endpoint_fallback_graph.map_or_else(
+        || CallEdgeResolver::new(ws),
+        |graph| CallEdgeResolver::with_resolved_graph(ws, graph),
+    );
 
     // When no query is supplied, `inspect` becomes a filter-driven
     // enumeration. Declaration hits stay opt-in in this mode, but
@@ -2115,7 +2258,10 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         None => Matcher::MatchAll,
     };
     let filter_only_occurrence_pattern = if pattern.is_none() {
-        filters.to.or(filters.from)
+        filters
+            .to
+            .or(filters.from)
+            .map(bonsai_lang_api::kit::short_name_of)
     } else {
         None
     };
@@ -2981,11 +3127,15 @@ fn terminal_kind_label(kind: &TaintedCallKind) -> &'static str {
 
 /// Build a `ChainCache` respecting the global `--no-cache` setting.
 /// Returns a cache with memoization enabled unless the user opted out.
-fn build_chain_cache(ws: &Workspace) -> ChainCache<'_> {
-    if *NO_CACHE.get().unwrap_or(&false) {
-        ChainCache::without_cache(ws)
-    } else {
-        ChainCache::new(ws)
+fn build_chain_cache(
+    ws: &Workspace,
+    resolved_graph: Option<std::sync::Arc<bonsai_callgraph::ResolvedCallGraph>>,
+) -> ChainCache<'_> {
+    match (*NO_CACHE.get().unwrap_or(&false), resolved_graph) {
+        (true, Some(graph)) => ChainCache::without_cache_with_resolved_graph(ws, graph),
+        (false, Some(graph)) => ChainCache::with_resolved_graph(ws, graph),
+        (true, None) => ChainCache::without_cache(ws),
+        (false, None) => ChainCache::new(ws),
     }
 }
 
@@ -3989,7 +4139,7 @@ fn render_inspect_report_text(
     paging_cfg: &paging::PagingConfig,
     pattern: Option<&str>,
     is_regex: bool,
-) -> paging::PageInfo {
+) -> Result<paging::PageInfo> {
     let u = ui();
     let view = resolve_view(render, report);
     render_inspect_header(u, report, view);
@@ -4118,9 +4268,12 @@ fn render_inspect_report_text(
         // real render outpaces `simulate_page_starts`' estimates. Resolve
         // against every unit offset — matching only simulated page starts
         // silently replayed page 1 whenever the two disagreed.
-        paging::PageArg::Cursor(c) => (0..=total_units)
-            .find(|off| paging::cursor_id("inspect", filters_hash, *off as u64) == *c)
-            .unwrap_or_else(|| page_starts.first().copied().unwrap_or(0)),
+        paging::PageArg::Cursor(c) => paging::resolve_cursor_offset(
+            c,
+            "inspect",
+            filters_hash,
+            (0..=total_units).map(|offset| offset as u64),
+        )? as usize,
         paging::PageArg::Next => {
             // `--page next` advances past the page recorded in the
             // last-cursor history; falls back to page 1 with no history.
@@ -4179,7 +4332,7 @@ fn render_inspect_report_text(
         start_offset: start_offset as u64,
         total_tokens_uncapped,
     };
-    render_inspect_page(
+    Ok(render_inspect_page(
         InspectPageContext {
             ws,
             ui: u,
@@ -4198,7 +4351,7 @@ fn render_inspect_report_text(
         },
         &unit_full_cost,
         &unit_compact_cost,
-    )
+    ))
 }
 
 /// Build the ordered, deduplicated list of folded occurrence flows
@@ -5246,6 +5399,59 @@ fn walk_flow_hits<F>(
         &mut Vec<HitOut>,
     ),
 {
+    let mut explicit_calls = Vec::new();
+    collect_explicit_call_hits(events, &mut explicit_calls);
+    walk_flow_hits_inner(events, in_fn_id, in_fn, context, &explicit_calls, out, push_hit);
+}
+
+fn collect_explicit_call_hits<'a>(events: &'a [FlowEvent], out: &mut Vec<(&'a str, bonsai_common::Span)>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { name, span, .. } => out.push((name, *span)),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_explicit_call_hits(then_events, out);
+                collect_explicit_call_hits(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_explicit_call_hits(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_explicit_call_hits(body, out);
+                collect_explicit_call_hits(catch_events, out);
+                collect_explicit_call_hits(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn walk_flow_hits_inner<F>(
+    events: &[FlowEvent],
+    in_fn_id: bonsai_common::FuncId,
+    in_fn: &str,
+    context: FlowHitWalkContext<'_>,
+    explicit_calls: &[(&str, bonsai_common::Span)],
+    out: &mut Vec<HitOut>,
+    push_hit: &mut F,
+) where
+    F: FnMut(
+        &str,
+        String,
+        bonsai_common::Span,
+        Option<(bonsai_common::FuncId, String)>,
+        bool,
+        &mut Vec<HitOut>,
+    ),
+{
     let containing = |id: bonsai_common::FuncId, name: &str| Some((id, name.to_string()));
     for e in events {
         match e {
@@ -5291,7 +5497,13 @@ fn walk_flow_hits<F>(
                 ..
             } => {
                 if let Some(call) = source_call {
-                    if context.want("call") && context.matcher.is_match(call) {
+                    let shadowed_by_explicit_call = explicit_calls.iter().any(|(name, call_span)| {
+                        *name == call
+                            && call_span.file == span.file
+                            && call_span.start >= span.start
+                            && call_span.end <= span.end
+                    });
+                    if !shadowed_by_explicit_call && context.want("call") && context.matcher.is_match(call) {
                         let call_span = refine_hit_span(context.workspace, *span, call);
                         push_hit(
                             "call",
@@ -5350,11 +5562,27 @@ fn walk_flow_hits<F>(
                 else_events,
                 ..
             } => {
-                walk_flow_hits(then_events, in_fn_id, in_fn, context, out, push_hit);
-                walk_flow_hits(else_events, in_fn_id, in_fn, context, out, push_hit);
+                walk_flow_hits_inner(
+                    then_events,
+                    in_fn_id,
+                    in_fn,
+                    context,
+                    explicit_calls,
+                    out,
+                    push_hit,
+                );
+                walk_flow_hits_inner(
+                    else_events,
+                    in_fn_id,
+                    in_fn,
+                    context,
+                    explicit_calls,
+                    out,
+                    push_hit,
+                );
             }
             FlowEvent::Loop { body, .. } => {
-                walk_flow_hits(body, in_fn_id, in_fn, context, out, push_hit);
+                walk_flow_hits_inner(body, in_fn_id, in_fn, context, explicit_calls, out, push_hit);
             }
             // Recurse into every event that carries nested flow events.
             // Previously this list stopped at Branch/Loop so any call /
@@ -5366,12 +5594,28 @@ fn walk_flow_hits<F>(
                 finally_events,
                 ..
             } => {
-                walk_flow_hits(body, in_fn_id, in_fn, context, out, push_hit);
-                walk_flow_hits(catch_events, in_fn_id, in_fn, context, out, push_hit);
-                walk_flow_hits(finally_events, in_fn_id, in_fn, context, out, push_hit);
+                walk_flow_hits_inner(body, in_fn_id, in_fn, context, explicit_calls, out, push_hit);
+                walk_flow_hits_inner(
+                    catch_events,
+                    in_fn_id,
+                    in_fn,
+                    context,
+                    explicit_calls,
+                    out,
+                    push_hit,
+                );
+                walk_flow_hits_inner(
+                    finally_events,
+                    in_fn_id,
+                    in_fn,
+                    context,
+                    explicit_calls,
+                    out,
+                    push_hit,
+                );
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                walk_flow_hits(body, in_fn_id, in_fn, context, out, push_hit);
+                walk_flow_hits_inner(body, in_fn_id, in_fn, context, explicit_calls, out, push_hit);
             }
             _ => {}
         }
@@ -5419,6 +5663,13 @@ fn render_inspect_text(out: &InspectOut, render: &InspectRenderOptions, view: Re
     }
     if !out.callees.is_empty() {
         cli_println!("   {} {}", u.dim("outgoing calls:"), out.callees.join(", "));
+    }
+    if !out.graph_flows_evaluated {
+        cli_println!(
+            "\n   {}",
+            u.dim("(static entry-point chains not requested; pass --graph-flow to evaluate them)")
+        );
+        return;
     }
     if out.flows.is_empty() {
         cli_println!(

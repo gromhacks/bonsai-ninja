@@ -47,12 +47,29 @@ use std::path::{Path, PathBuf};
 // v9 (2026-07-16): MessagePack replaces the retired binary codec.
 // v10 (2026-07-16): compact string/comment candidate rows retain their
 // enclosing AST callable names, restoring the v7 candidate contract.
-pub const RETRIEVAL_SCHEMA_VERSION: u32 = 10;
+/// v11 preserves adapter-declared class/interface/struct/trait/enum taxonomy
+/// and lexical member ownership from compiler-object ABI v11.
+/// v12 adds independently decodable, per-file/kind trigram Bloom pages.
+/// One-shot queries no longer inflate the complete compressed document
+/// snapshot merely to discover which canonical source files to hydrate.
+/// Bloom membership is candidate-only and can return extra files, never omit
+/// a lexical match; canonical compiler hydration still decides every result.
+/// v13 merges those candidate filters per file. Fact-kind filtering remains
+/// a canonical hydration concern, avoiding repeated filter payloads and work
+/// while preserving the same no-false-negative candidate contract.
+/// v14 rebuilds declaration candidate terms after nested class-like owners
+/// gained their complete AST lexical-parent chain. Qualified endpoint lookup
+/// must never reuse a sidecar containing the former truncated identities.
+pub const RETRIEVAL_SCHEMA_VERSION: u32 = 14;
 
 /// Factstore table id for retrieval snapshots.
 pub const RETRIEVAL_TABLE_ID: u32 = 0x5254_5631;
 
 const SNAPSHOT_KEY: u64 = 0x5254_5249_4556_414c;
+const CANDIDATE_DIRECTORY_KEY: u64 = 0x5254_4341_4e44_4449;
+const CANDIDATE_PAGE_KEY_BASE: u64 = 0x8000_0000_0000_0000;
+const CANDIDATE_PAGE_KEY_MASK: u64 = 0x0fff_ffff_ffff_ffff;
+const CANDIDATE_PAGE_TARGET_BYTES: usize = 4 * 1024 * 1024;
 const PIPELINE_SALT: u64 = 0x7a91_5f4c_2d31_8870;
 const DEFAULT_ON_DEMAND_BUILD_FILE_LIMIT: usize = 512;
 
@@ -133,6 +150,27 @@ struct CompactFactDoc {
     normalized_search_text: u32,
     content_fingerprint: u64,
     pipeline_fingerprint: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CandidateDirectory {
+    schema_version: u32,
+    pipeline_fingerprint: u64,
+    doc_count: usize,
+    files: Vec<String>,
+    page_keys: Vec<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CandidateBloom {
+    file: u32,
+    bit_len: u32,
+    bits: Vec<u64>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct CandidateBloomPage {
+    entries: Vec<CandidateBloom>,
 }
 
 /// Result of ensuring the persisted retrieval sidecar exists.
@@ -1133,12 +1171,8 @@ pub fn query_sidecar_file_paths_with_pipeline(
     }
     let path = retrieval_sidecar_path(workspace_root);
     let reader = FactStoreReader::open(&path, RETRIEVAL_TABLE_ID, pipeline).map_err(map_factstore_io)?;
-    let hit = reader
-        .get(SNAPSHOT_KEY)
-        .map_err(map_factstore_io)?
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "retrieval snapshot missing"))?;
-    let snapshot = decode_compact_snapshot_hit(hit, pipeline)?;
-    snapshot.query_file_paths(query)
+    let directory = decode_candidate_directory(&reader, pipeline)?;
+    query_candidate_partitions(&reader, &directory, query)
 }
 
 /// Validate that a retrieval factstore is structurally readable and carries
@@ -1157,24 +1191,14 @@ pub fn validate_sidecar_file(path: &Path) -> std::io::Result<usize> {
             ),
         ));
     }
-    let hit = reader
-        .get(SNAPSHOT_KEY)
-        .map_err(map_factstore_io)?
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "retrieval snapshot missing"))?;
-    let snapshot = decode_compact_snapshot_hit(hit, reader.header().pipeline_hash)?;
-    Ok(snapshot.docs.len())
+    validate_candidate_directory_layout(&reader, reader.header().pipeline_hash)
 }
 
 /// Validate that a retrieval factstore is structurally readable and fresh for
 /// the exact pipeline hash query frontends use before candidate lookup.
 pub fn validate_sidecar_file_with_pipeline(path: &Path, pipeline: u64) -> std::io::Result<usize> {
     let reader = FactStoreReader::open(path, RETRIEVAL_TABLE_ID, pipeline).map_err(map_factstore_io)?;
-    let hit = reader
-        .get(SNAPSHOT_KEY)
-        .map_err(map_factstore_io)?
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "retrieval snapshot missing"))?;
-    let snapshot = decode_compact_snapshot_hit(hit, pipeline)?;
-    Ok(snapshot.docs.len())
+    validate_candidate_directory_layout(&reader, pipeline)
 }
 
 /// Load a fresh sidecar or build/save one on demand.
@@ -1468,6 +1492,268 @@ impl CompactFactSnapshot {
     }
 }
 
+fn write_candidate_pages(
+    snapshot: &CompactFactSnapshot,
+    writer: &FactStoreWriter,
+) -> std::io::Result<CandidateDirectory> {
+    let mut file_values = BTreeSet::new();
+    for doc in &snapshot.docs {
+        file_values.insert(snapshot.string(doc.file_path)?.to_string());
+    }
+    let files = file_values.into_iter().collect::<Vec<_>>();
+    let file_ids = files
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            (
+                value.as_str(),
+                u32::try_from(index).expect("retrieval file directory exceeds u32"),
+            )
+        })
+        .collect::<AHashMap<_, _>>();
+    // Sort compact doc ordinals rather than cloning documents. Bloom filters
+    // are built one file at a time and streamed immediately,
+    // so peak memory follows the largest group instead of the workspace-wide
+    // inverted posting count.
+    let mut rows = snapshot
+        .docs
+        .iter()
+        .enumerate()
+        .map(|(index, doc)| Ok((file_ids[snapshot.string(doc.file_path)?], index)))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    rows.sort_unstable();
+
+    let mut page_keys = Vec::new();
+    let mut page = CandidateBloomPage::default();
+    let mut page_bytes = 0usize;
+    let mut offset = 0usize;
+    while offset < rows.len() {
+        let (file, _) = rows[offset];
+        let end = rows[offset..]
+            .iter()
+            .position(|&(candidate_file, _)| candidate_file != file)
+            .map_or(rows.len(), |relative| offset + relative);
+        let mut hashes = BTreeSet::new();
+        for &(_, doc_index) in &rows[offset..end] {
+            let doc = &snapshot.docs[doc_index];
+            for value in std::iter::once(snapshot.string(doc.normalized_search_text)?)
+                .chain(std::iter::once(snapshot.string(doc.fact_id)?))
+                .chain(doc.stable_ids.iter().filter_map(|id| snapshot.string(*id).ok()))
+            {
+                hashes.extend(trigram_hashes(&value.to_lowercase()));
+            }
+        }
+        let candidate = CandidateBloom::from_hashes(file, hashes)?;
+        let candidate_bytes = candidate.bits.len().saturating_mul(std::mem::size_of::<u64>());
+        if !page.entries.is_empty()
+            && page_bytes.saturating_add(candidate_bytes) > CANDIDATE_PAGE_TARGET_BYTES
+        {
+            write_candidate_page(writer, &mut page_keys, std::mem::take(&mut page))?;
+            page_bytes = 0;
+        }
+        page_bytes = page_bytes.saturating_add(candidate_bytes);
+        page.entries.push(candidate);
+        offset = end;
+    }
+    if !page.entries.is_empty() {
+        write_candidate_page(writer, &mut page_keys, page)?;
+    }
+
+    Ok(CandidateDirectory {
+        schema_version: snapshot.schema_version,
+        pipeline_fingerprint: snapshot.pipeline_fingerprint,
+        doc_count: snapshot.docs.len(),
+        files,
+        page_keys,
+    })
+}
+
+impl CandidateBloom {
+    fn from_hashes(file: u32, hashes: BTreeSet<u64>) -> std::io::Result<Self> {
+        let requested_bits = hashes
+            .len()
+            .max(1)
+            .checked_mul(12)
+            .ok_or_else(|| invalid_message("retrieval candidate Bloom filter size overflow"))?;
+        let bit_len = requested_bits
+            .max(256)
+            .checked_next_power_of_two()
+            .ok_or_else(|| invalid_message("retrieval candidate Bloom filter size overflow"))?;
+        let bit_len_u32 = u32::try_from(bit_len)
+            .map_err(|_| invalid_message("retrieval candidate Bloom filter exceeds wire limits"))?;
+        let mut bits = vec![0_u64; bit_len.div_ceil(64)];
+        for hash in hashes {
+            for position in bloom_positions(hash, bit_len - 1) {
+                bits[position / 64] |= 1_u64 << (position % 64);
+            }
+        }
+        Ok(Self {
+            file,
+            bit_len: bit_len_u32,
+            bits,
+        })
+    }
+
+    fn may_contain_all(&self, hashes: &[u64]) -> bool {
+        let mask = self.bit_len as usize - 1;
+        hashes.iter().all(|&hash| {
+            bloom_positions(hash, mask)
+                .into_iter()
+                .all(|position| self.bits[position / 64] & (1_u64 << (position % 64)) != 0)
+        })
+    }
+}
+
+fn bloom_positions(hash: u64, mask: usize) -> [usize; 5] {
+    let second = hash.rotate_left(29) | 1;
+    std::array::from_fn(|index| hash.wrapping_add(second.wrapping_mul(index as u64)) as usize & mask)
+}
+
+fn write_candidate_page(
+    writer: &FactStoreWriter,
+    page_keys: &mut Vec<u64>,
+    page: CandidateBloomPage,
+) -> std::io::Result<()> {
+    let ordinal = u64::try_from(page_keys.len())
+        .map_err(|_| invalid_message("retrieval candidate page count exceeds u64"))?;
+    if ordinal > CANDIDATE_PAGE_KEY_MASK {
+        return Err(invalid_message(
+            "retrieval candidate page count exceeds key space",
+        ));
+    }
+    let key = CANDIDATE_PAGE_KEY_BASE | ordinal;
+    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1)?;
+    wire::encode_to_writer(&mut encoder, &page).map_err(invalid_data)?;
+    let bytes = encoder.finish()?;
+    writer
+        .add_owned(key, fnv1a_bytes64(&bytes), bytes)
+        .map_err(map_factstore_io)?;
+    page_keys.push(key);
+    Ok(())
+}
+
+fn query_candidate_partitions(
+    reader: &FactStoreReader,
+    directory: &CandidateDirectory,
+    query: &RetrievalQuery<'_>,
+) -> std::io::Result<Vec<String>> {
+    let mut hashes = trigram_hashes(&query.text.trim().to_lowercase());
+    hashes.sort_unstable();
+    hashes.dedup();
+    if hashes.is_empty() {
+        let hit = reader
+            .get(SNAPSHOT_KEY)
+            .map_err(map_factstore_io)?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "retrieval snapshot missing"))?;
+        return decode_compact_snapshot_hit(hit, directory.pipeline_fingerprint)?.query_file_paths(query);
+    }
+
+    let mut paths = BTreeSet::new();
+    for &key in &directory.page_keys {
+        let page = decode_candidate_page(reader, key, directory)?;
+        for candidate in page.entries {
+            let file = &directory.files[candidate.file as usize];
+            // Fact-kind is deliberately not encoded into the candidate
+            // filter. This can admit an extra file when different fact kinds
+            // share query terms, but canonical hydration applies `query.kind`
+            // before rendering and therefore remains exact.
+            if query
+                .file
+                .is_some_and(|filter| !file_path_matches_query(file, filter, query.workspace_root))
+                || !candidate.may_contain_all(&hashes)
+            {
+                continue;
+            }
+            paths.insert(file.clone());
+        }
+    }
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    if query.limit > 0 {
+        paths.truncate(query.limit);
+    }
+    Ok(paths)
+}
+
+fn decode_candidate_directory(
+    reader: &FactStoreReader,
+    pipeline: u64,
+) -> std::io::Result<CandidateDirectory> {
+    let hit = reader
+        .get(CANDIDATE_DIRECTORY_KEY)
+        .map_err(map_factstore_io)?
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "retrieval candidate directory missing",
+            )
+        })?;
+    validate_retrieval_payload_hash(&hit, "candidate directory")?;
+    let directory: CandidateDirectory = wire::decode(&hit.payload).map_err(invalid_data)?;
+    validate_snapshot_version(directory.schema_version, directory.pipeline_fingerprint, pipeline)?;
+    if directory.files.windows(2).any(|pair| pair[0] >= pair[1])
+        || directory.page_keys.windows(2).any(|pair| pair[0] >= pair[1])
+        || directory
+            .page_keys
+            .iter()
+            .enumerate()
+            .any(|(ordinal, key)| *key != CANDIDATE_PAGE_KEY_BASE | ordinal as u64)
+    {
+        return Err(invalid_message(
+            "retrieval candidate page directory is not canonical",
+        ));
+    }
+    Ok(directory)
+}
+
+fn decode_candidate_page(
+    reader: &FactStoreReader,
+    key: u64,
+    directory: &CandidateDirectory,
+) -> std::io::Result<CandidateBloomPage> {
+    let hit = reader.get(key).map_err(map_factstore_io)?.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "retrieval candidate page missing")
+    })?;
+    validate_retrieval_payload_hash(&hit, "candidate page")?;
+    let decoder = zstd::stream::Decoder::new(std::io::Cursor::new(&hit.payload))?;
+    let page: CandidateBloomPage = wire::decode_from_reader(decoder).map_err(invalid_data)?;
+    if page.entries.windows(2).any(|pair| pair[0].file >= pair[1].file)
+        || page.entries.iter().any(|candidate| {
+            candidate.file as usize >= directory.files.len()
+                || candidate.bit_len < 256
+                || !candidate.bit_len.is_power_of_two()
+                || candidate.bits.len() != (candidate.bit_len as usize).div_ceil(64)
+        })
+    {
+        return Err(invalid_message("retrieval candidate Bloom page is not canonical"));
+    }
+    Ok(page)
+}
+
+fn validate_candidate_directory_layout(reader: &FactStoreReader, pipeline: u64) -> std::io::Result<usize> {
+    let directory = decode_candidate_directory(reader, pipeline)?;
+    if !reader.contains_key(SNAPSHOT_KEY)
+        || reader.len() != directory.page_keys.len().saturating_add(2)
+        || directory.page_keys.iter().any(|key| !reader.contains_key(*key))
+    {
+        return Err(invalid_message("retrieval sidecar entry layout mismatch"));
+    }
+    Ok(directory.doc_count)
+}
+
+fn validate_retrieval_payload_hash(hit: &LookupHit, label: &'static str) -> std::io::Result<()> {
+    let actual = fnv1a_bytes64(&hit.payload);
+    if hit.body_hash != actual {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "retrieval {label} body hash mismatch: file={:016x} actual={actual:016x}",
+                hit.body_hash
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn save_docs_snapshot(
     schema_version: u32,
     pipeline: u64,
@@ -1487,10 +1773,42 @@ fn save_compact_snapshot(snapshot: CompactFactSnapshot, path: &Path) -> std::io:
     let body_hash = fnv1a_bytes64(&bytes);
     let writer = FactStoreWriter::create(path, RETRIEVAL_TABLE_ID, pipeline).map_err(map_factstore_io)?;
     writer
-        .add(SNAPSHOT_KEY, body_hash, &bytes)
+        .add_owned(SNAPSHOT_KEY, body_hash, bytes)
+        .map_err(map_factstore_io)?;
+    let directory = write_candidate_pages(&snapshot, &writer)?;
+    let directory_bytes = wire::encode(&directory).map_err(invalid_data)?;
+    writer
+        .add_owned(
+            CANDIDATE_DIRECTORY_KEY,
+            fnv1a_bytes64(&directory_bytes),
+            directory_bytes,
+        )
         .map_err(map_factstore_io)?;
     writer.finish().map_err(map_factstore_io)?;
+    // A completed current-schema artifact supersedes older retrieval
+    // factstores. Keep migration cleanup best-effort so a read-only cache
+    // directory cannot turn a successful index build into a command failure.
+    let _ = prune_obsolete_retrieval_sidecars(path);
     Ok(doc_count)
+}
+
+fn prune_obsolete_retrieval_sidecars(current_path: &Path) -> std::io::Result<()> {
+    let Some(parent) = current_path.parent() else {
+        return Ok(());
+    };
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path == current_path || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("retrieval.v") && name.ends_with(".factstore") {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
 
 fn save_snapshot(snapshot: &FactSnapshot, path: &Path) -> std::io::Result<usize> {
@@ -2231,6 +2549,22 @@ fn trigrams(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn trigram_hashes(value: &str) -> Vec<u64> {
+    let chars = value.chars().collect::<Vec<_>>();
+    chars
+        .windows(3)
+        .map(|window| {
+            let mut bytes = [0_u8; 12];
+            let mut len = 0usize;
+            for ch in window {
+                let encoded = ch.encode_utf8(&mut bytes[len..]);
+                len += encoded.len();
+            }
+            fnv1a_bytes64(&bytes[..len])
+        })
+        .collect()
+}
+
 fn prefix_key(value: &str) -> String {
     value.to_lowercase().chars().take(3).collect()
 }
@@ -2400,6 +2734,10 @@ fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
 
 fn invalid_data(err: impl std::error::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+}
+
+fn invalid_message(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
 }
 
 fn file_path_matches_query(path: &str, filter: &str, workspace_root: Option<&Path>) -> bool {
@@ -3055,7 +3393,7 @@ mod tests {
         .expect("query compact candidate sidecar directly");
         assert_eq!(direct_paths, vec![hits[0].file_path.clone()]);
 
-        let filtered_out = query_sidecar_file_paths_with_pipeline(
+        let conservative_paths = query_sidecar_file_paths_with_pipeline(
             dir.path(),
             pipeline,
             &RetrievalQuery {
@@ -3066,7 +3404,19 @@ mod tests {
             },
         )
         .expect("query compact candidate sidecar with kind filter");
-        assert!(filtered_out.is_empty());
+        assert_eq!(
+            conservative_paths, direct_paths,
+            "disk lookup is a no-false-negative file prefilter; canonical hydration owns fact-kind rejection"
+        );
+        let canonical_filtered = index
+            .query(&RetrievalQuery {
+                text: "host=endpoint",
+                kind: Some("class"),
+                workspace_root: Some(dir.path()),
+                ..RetrievalQuery::default()
+            })
+            .expect("query canonical retrieval docs with kind filter");
+        assert!(canonical_filtered.is_empty());
 
         let regex_error = query_sidecar_file_paths_with_pipeline(
             dir.path(),
@@ -3079,6 +3429,40 @@ mod tests {
         )
         .expect_err("compact candidate query must reject regex lookup");
         assert_eq!(regex_error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn persisted_candidates_include_complete_nested_qualified_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("HttpServerTransport.java"),
+            r#"
+package org.example;
+interface HttpServerTransport {
+    interface Dispatcher {
+        void dispatchRequest(String request);
+    }
+}
+"#,
+        )
+        .expect("write source");
+        let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+        ws.ingest_dir(dir.path()).expect("ingest");
+
+        save_sidecar(&ws, dir.path()).expect("save candidate sidecar");
+        let paths = query_sidecar_file_paths_with_pipeline(
+            dir.path(),
+            pipeline_hash_for_workspace(&ws),
+            &RetrievalQuery {
+                text: "HttpServerTransport.Dispatcher.dispatchRequest",
+                workspace_root: Some(dir.path()),
+                ..RetrievalQuery::default()
+            },
+        )
+        .expect("query nested qualified endpoint");
+
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("HttpServerTransport.java"));
     }
 
     #[test]
@@ -3296,6 +3680,32 @@ mod tests {
             validate_sidecar_file(&path).is_err(),
             "same-size corrupt retrieval factstore must not validate"
         );
+    }
+
+    #[test]
+    fn successful_schema_migration_prunes_only_older_retrieval_sidecars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let current = dir
+            .path()
+            .join(format!("retrieval.v{RETRIEVAL_SCHEMA_VERSION}.factstore"));
+        let old = dir.path().join(format!(
+            "retrieval.v{}.factstore",
+            RETRIEVAL_SCHEMA_VERSION.saturating_sub(1)
+        ));
+        let unrelated = dir.path().join("callgraph.v20.factstore");
+        std::fs::write(&old, b"old").expect("write old retrieval sidecar");
+        std::fs::write(&unrelated, b"keep").expect("write unrelated sidecar");
+
+        let snapshot = FactSnapshot {
+            schema_version: RETRIEVAL_SCHEMA_VERSION,
+            pipeline_fingerprint: 101,
+            docs: vec![sample_doc("handle_request", "function", 1)],
+        };
+        save_snapshot(&snapshot, &current).expect("save current retrieval sidecar");
+
+        assert!(current.exists());
+        assert!(!old.exists());
+        assert!(unrelated.exists());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use bonsai_common::{FuncId, Span};
 use bonsai_lang_api::{Decl, FlowEvent};
 use bonsai_workspace::Workspace;
+use std::sync::Arc;
 
 /// Why downstream call-path expansion returned fewer paths than the
 /// resolved call graph may contain.
@@ -42,6 +43,7 @@ impl CallPathTruncation {
 /// render for that hop.
 pub struct CallEdgeResolver<'a> {
     workspace: &'a Workspace,
+    resolved: Option<Arc<bonsai_callgraph::ResolvedCallGraph>>,
     edge_spans: ahash::AHashMap<(FuncId, FuncId), Option<Span>>,
 }
 
@@ -50,6 +52,22 @@ impl<'a> CallEdgeResolver<'a> {
     pub fn new(workspace: &'a Workspace) -> Self {
         Self {
             workspace,
+            resolved: None,
+            edge_spans: ahash::AHashMap::new(),
+        }
+    }
+
+    /// Resolve call-site spans against the same exact query-scoped graph used
+    /// for chain enumeration. A presentation verifier must never replace a
+    /// compiler-proven corridor with a whole-workspace graph build.
+    #[must_use]
+    pub fn with_resolved_graph(
+        workspace: &'a Workspace,
+        resolved: Arc<bonsai_callgraph::ResolvedCallGraph>,
+    ) -> Self {
+        Self {
+            workspace,
+            resolved: Some(resolved),
             edge_spans: ahash::AHashMap::new(),
         }
     }
@@ -58,9 +76,14 @@ impl<'a> CallEdgeResolver<'a> {
         if let Some(hit) = self.edge_spans.get(&(caller_func, target_func)) {
             return *hit;
         }
-        if let Some(span) = self
-            .workspace
-            .cached_resolved_call_graph()
+        let workspace_graph;
+        let graph = if let Some(resolved) = self.resolved.as_deref() {
+            resolved
+        } else {
+            workspace_graph = self.workspace.cached_resolved_call_graph();
+            workspace_graph.as_ref()
+        };
+        if let Some(span) = graph
             .callees_of(caller_func)
             .find(|edge| edge.to == target_func && edge.precision.is_semantic())
             .map(|edge| edge.span)

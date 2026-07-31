@@ -251,6 +251,18 @@ pub struct RuleTarget {
     /// name alone is common, e.g. GraphQL resolver `(parent, args, ...)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_index_in: Vec<u32>,
+    /// Restrict a `kind: param` rule to declarations with one of these
+    /// adapter-emitted parameter types at the matched index. The matcher
+    /// reads `Decl.type_aliases`; it never infers a type from the parameter
+    /// spelling. Both qualified and short type names are accepted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_type_in: Vec<String>,
+    /// Restrict a `kind: param` rule to declarations with one of these
+    /// grammar-declared parameter counts. This models runtime entry
+    /// signatures without depending on conventional names such as `args`
+    /// or `argv`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_count_in: Vec<u32>,
     /// Restrict receiver/base-shaped targets such as `args.filter` to
     /// cases where the base identifier is a formal parameter at one of
     /// these zero-based indexes in the enclosing declaration.
@@ -289,6 +301,8 @@ impl RuleTarget {
             && self.in_method.is_empty()
             && self.in_method_prefix.is_empty()
             && self.param_index_in.is_empty()
+            && self.param_type_in.is_empty()
+            && self.param_count_in.is_empty()
             && self.base_param_index_in.is_empty()
             && self.receiver_type_in.is_empty()
             && self.decl_kind_in.is_empty()

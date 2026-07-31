@@ -162,11 +162,12 @@ Use `inspect` for the combined view:
 
 Choose scope deliberately:
 
-- `--syntax-only` returns indexed syntax facts without flow evidence.
-- `--taint-flow` requests raw taint paths when the default result window would
-  otherwise omit them.
-- `--graph-flow` requests structural source-body flow evidence for large
-  result sets.
+- The default is a rulepack-free syntax/index view. It does not run taint
+  analysis.
+- `--graph-flow` adds structural call-graph paths and source-body evidence.
+- `--taint-flow` explicitly adds rulepack-free raw taint-engine paths.
+- Use `--compact` with graph flows when you need path steps without inlined
+  source bodies.
 
 Use focused commands when you need one relation:
 

@@ -48,6 +48,18 @@ pub struct SyntaxFlowSession {
     _lease: Arc<tempfile::TempDir>,
 }
 
+impl SyntaxFlowSession {
+    /// Exact query-local IDG compiled for this session.
+    ///
+    /// The service is deliberately borrowed through the session so the
+    /// temporary factstore that pages its graph remains alive for the whole
+    /// query.
+    #[must_use]
+    pub fn idg(&self) -> &bonsai_idg::IdgQueryService {
+        self.idg.as_ref()
+    }
+}
+
 impl std::fmt::Debug for SyntaxFlowSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -137,29 +149,226 @@ pub struct SyntaxFlowGraph {
 }
 
 impl Workspace {
-    /// Compile one exact semantic session for a targeted syntax-flow source
-    /// batch.
+    fn reopen_query_workspace_for_graph(
+        &self,
+        graph: bonsai_callgraph::ResolvedCallGraph,
+        diagnostic_label: &str,
+    ) -> Option<Workspace> {
+        let graph = Arc::new(graph);
+        let mut reached_files = graph.nodes().iter().map(|node| node.file).collect::<Vec<_>>();
+        // Preserve endpoint candidate files even when the exact relation has
+        // no source-to-target path. The resulting empty seeded graph then
+        // answers "no path" without falling back to a whole-workspace build.
+        if reached_files.is_empty() {
+            reached_files.extend(self.vfs().all_files());
+        }
+        reached_files.sort_unstable_by_key(|file| file.raw());
+        reached_files.dedup();
+        let root = self.root_path()?;
+        let source_inputs = match self.sidecar_source_inputs() {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "{} source generation unavailable: {}",
+                    diagnostic_label,
+                    error
+                );
+                return None;
+            }
+        };
+        let mut files = Vec::with_capacity(reached_files.len());
+        for file in reached_files {
+            let Ok(position) = source_inputs.binary_search_by_key(&file.raw(), |(raw, _, _)| *raw) else {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "{} file {} is absent from source generation",
+                    diagnostic_label,
+                    file.raw()
+                );
+                return None;
+            };
+            files.push((file, std::path::PathBuf::from(&source_inputs[position].1)));
+        }
+        match Workspace::open_query_exact_files_with_source_inputs_and_events(
+            &root,
+            Arc::clone(&self.inner.registry),
+            &files,
+            source_inputs.as_ref().clone(),
+            crate::WorkspaceOpenOptions::lazy_query(),
+            &|_| {},
+        ) {
+            Ok(workspace) => {
+                // The reopened VFS contains a subset of full-workspace
+                // FileIds. Seed its declaration cache from the partitioned
+                // header generation before any exact declaration lookup;
+                // rebuilding headers from the subset would renumber SymbolIds
+                // and make persisted callgraph endpoints impossible to
+                // hydrate.
+                let header_files = files.iter().map(|(file, _)| *file).collect::<Vec<_>>();
+                let headers = workspace.compiler_header_index_for_files(&header_files);
+                *workspace.inner.compiler_headers.write() = Some(headers);
+                workspace.seed_resolved_call_graph(graph);
+                Some(workspace)
+            }
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "{} hydration failed: {}",
+                    diagnostic_label,
+                    error
+                );
+                None
+            }
+        }
+    }
+
+    /// Reopen only the exact source files reachable from `source_funcs`.
     ///
-    /// Resolver reachability is a finite least fixed point over compiler
-    /// symbols. The corridor is narrowed only by the request's source and
-    /// target functions; no depth, file-count, or work budget changes which
-    /// syntax facts are admitted.
+    /// Retrieval-scoped CLI workspaces initially contain the source
+    /// declaration candidates only. The persisted compiler callgraph carries
+    /// stable full-workspace FileIds, so this method can hydrate the complete
+    /// uncapped reachable file set without ingesting unrelated source text.
+    /// `None` means the current workspace is already complete or a validated
+    /// partitioned source generation is unavailable.
     #[must_use]
-    pub fn syntax_flow_session(
+    pub fn source_reachable_query_workspace(
         &self,
         source_funcs: &[FuncId],
-        target_funcs: &AHashSet<FuncId>,
-    ) -> Option<SyntaxFlowSession> {
-        if self.db().idg_service().is_some() || source_funcs.is_empty() || target_funcs.is_empty() {
+        max_precision: Option<bonsai_common::Precision>,
+    ) -> Option<Workspace> {
+        if self.is_complete_workspace_index() || source_funcs.is_empty() {
             return None;
         }
-        let mut targets: Vec<FuncId> = target_funcs.iter().copied().collect();
-        targets.sort_unstable_by_key(|func| func.raw());
-        let corridor = if source_funcs.iter().all(|func| target_funcs.contains(func)) {
-            self.target_emission_resolved_call_graph(source_funcs, &targets, None)
-        } else {
-            self.source_reachable_resolved_call_graph(source_funcs, &targets, None)
+        let graph = match self.persisted_resolved_call_graph_reachable_from(source_funcs, max_precision)? {
+            Ok(graph) => graph,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "source-flow workspace callgraph partitions rejected: {}",
+                    error
+                );
+                return None;
+            }
         };
+        self.reopen_query_workspace_for_graph(graph, "source-flow workspace")
+    }
+
+    /// Reopen only the exact compiler corridor lying on a source-to-target
+    /// path and seed that resolved relation into the scoped workspace.
+    ///
+    /// Both reverse and forward reachability are finite uncapped worklists
+    /// over persisted resolver edges. `None` means no validated partitioned
+    /// graph is available; callers must use their canonical full-workspace
+    /// fallback rather than treating cache absence as "no path."
+    #[must_use]
+    pub fn source_target_query_workspace(
+        &self,
+        source_funcs: &[FuncId],
+        target_funcs: &[FuncId],
+        max_precision: Option<bonsai_common::Precision>,
+    ) -> Option<Workspace> {
+        if self.is_complete_workspace_index() || source_funcs.is_empty() || target_funcs.is_empty() {
+            return None;
+        }
+        let graph = match self.persisted_resolved_call_graph_between_with_max_precision(
+            source_funcs,
+            target_funcs,
+            max_precision,
+        )? {
+            Ok(graph) => graph,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "source-target workspace callgraph partitions rejected: {}",
+                    error
+                );
+                return None;
+            }
+        };
+        self.reopen_query_workspace_for_graph(graph, "source-target workspace")
+    }
+
+    fn persisted_source_flow_corridor(
+        &self,
+        source_funcs: &[FuncId],
+        max_precision: Option<bonsai_common::Precision>,
+    ) -> Option<crate::SourceReachableCallGraph> {
+        let started = std::time::Instant::now();
+        let graph = match self.persisted_resolved_call_graph_reachable_from(source_funcs, max_precision)? {
+            Ok(graph) => Arc::new(graph),
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "source-flow callgraph partitions rejected: {}",
+                    error
+                );
+                return None;
+            }
+        };
+        bonsai_diagnostics::debug_log!(
+            "compiler-cache",
+            "source-flow reachable graph: funcs={} edges={} elapsed={:.3}s",
+            graph.nodes().len(),
+            graph.inner().edges.len(),
+            started.elapsed().as_secs_f64()
+        );
+        let mut funcs = graph.nodes().iter().map(|node| node.func).collect::<Vec<_>>();
+        funcs.sort_unstable_by_key(|func| func.raw());
+        funcs.dedup();
+        if funcs.is_empty() {
+            return None;
+        }
+        let mut files = graph.nodes().iter().map(|node| node.file).collect::<Vec<_>>();
+        files.sort_unstable_by_key(|file| file.raw());
+        files.dedup();
+
+        // Header partitions preserve workspace-global SymbolIds without
+        // hydrating unrelated declarations. Project compact call/return
+        // linkage from the same exact Tree-sitter bodies the scoped IDG will
+        // consume; this retains callback, receiver, out-param, and return
+        // semantics without opening the workspace-wide linkage payload.
+        let headers = self.compiler_header_index_for_files(&files);
+        bonsai_diagnostics::debug_log!(
+            "compiler-cache",
+            "source-flow header partitions: files={} decls={} elapsed={:.3}s",
+            files.len(),
+            headers.len(),
+            started.elapsed().as_secs_f64()
+        );
+        let mut projected_linkage = Vec::new();
+        for file in &files {
+            if let Some(index) = self.db().decl_index_remapped_to_headers(headers.as_ref(), *file) {
+                projected_linkage.extend(headers.project_linkage_from_remapped_file(&index));
+            }
+        }
+        bonsai_diagnostics::debug_log!(
+            "compiler-cache",
+            "source-flow exact bodies projected: files={} linkage={} elapsed={:.3}s",
+            files.len(),
+            projected_linkage.len(),
+            started.elapsed().as_secs_f64()
+        );
+        let mut headers = Arc::try_unwrap(headers).unwrap_or_else(|headers| headers.as_ref().clone());
+        headers.install_projected_linkage(projected_linkage);
+        let headers = Arc::new(headers);
+        if !self.is_complete_workspace_index() {
+            *self.inner.compiler_headers.write() = Some(Arc::clone(&headers));
+        }
+
+        Some(crate::SourceReachableCallGraph {
+            graph,
+            linkage_index: headers,
+            files,
+            funcs,
+            reached_targets: 0,
+        })
+    }
+
+    fn compile_syntax_flow_session(
+        &self,
+        corridor: crate::SourceReachableCallGraph,
+    ) -> Option<SyntaxFlowSession> {
         if corridor.funcs.is_empty() {
             return None;
         }
@@ -230,6 +439,54 @@ impl Workspace {
                 None
             }
         }
+    }
+
+    /// Compile the complete source-reachable semantic region for an exact
+    /// source-seeded flow query.
+    ///
+    /// Reachability is the compiler call-relation least fixed point. There is
+    /// no depth, file-count, edge-count, or time budget that can remove facts.
+    /// The resulting IDG is query-local and cannot contaminate whole-workspace
+    /// security or export state.
+    #[must_use]
+    pub fn source_flow_session(
+        &self,
+        source_funcs: &[FuncId],
+        max_precision: Option<bonsai_common::Precision>,
+    ) -> Option<SyntaxFlowSession> {
+        if self.db().idg_service().is_some() || source_funcs.is_empty() {
+            return None;
+        }
+        let corridor = self
+            .persisted_source_flow_corridor(source_funcs, max_precision)
+            .unwrap_or_else(|| self.source_reachable_resolved_call_graph(source_funcs, &[], max_precision));
+        self.compile_syntax_flow_session(corridor)
+    }
+
+    /// Compile one exact semantic session for a targeted syntax-flow source
+    /// batch.
+    ///
+    /// Resolver reachability is a finite least fixed point over compiler
+    /// symbols. The corridor is narrowed only by the request's source and
+    /// target functions; no depth, file-count, or work budget changes which
+    /// syntax facts are admitted.
+    #[must_use]
+    pub fn syntax_flow_session(
+        &self,
+        source_funcs: &[FuncId],
+        target_funcs: &AHashSet<FuncId>,
+    ) -> Option<SyntaxFlowSession> {
+        if self.db().idg_service().is_some() || source_funcs.is_empty() || target_funcs.is_empty() {
+            return None;
+        }
+        let mut targets: Vec<FuncId> = target_funcs.iter().copied().collect();
+        targets.sort_unstable_by_key(|func| func.raw());
+        let corridor = if source_funcs.iter().all(|func| target_funcs.contains(func)) {
+            self.target_emission_resolved_call_graph(source_funcs, &targets, None)
+        } else {
+            self.source_reachable_resolved_call_graph(source_funcs, &targets, None)
+        };
+        self.compile_syntax_flow_session(corridor)
     }
 
     /// Return the canonical syntax-shaped taint graph for `query`.

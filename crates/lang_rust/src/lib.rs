@@ -4,7 +4,7 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, CallKind, CapabilityLevel, DeclIndex, FieldWrite, FlowEvent,
+    AdapterContext, AdapterError, CallKind, CapabilityLevel, DeclIndex, DeclKind, FieldWrite, FlowEvent,
     GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
     TypeAliasVocabulary, Visibility, NO_CONSTRUCTOR_METHOD_NAMES,
 };
@@ -88,10 +88,18 @@ const RUST_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
 ];
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    nested_type_ownership: true,
     fn_kinds: &["function_item"],
     class_kinds: &["struct_item", "enum_item", "trait_item", "union_item"],
+    class_decl_kinds: &[
+        ("struct_item", DeclKind::Struct),
+        ("union_item", DeclKind::Struct),
+        ("enum_item", DeclKind::Enum),
+        ("trait_item", DeclKind::Trait),
+    ],
     method_kinds: &[],
     method_context_kinds: &["impl_item", "trait_item"],
+    method_owner_barrier_kinds: &[],
     constructor_method_kinds: &[],
     constructor_names: NO_CONSTRUCTOR_METHOD_NAMES,
     // `if_expression` is the canonical conditional. `match_expression`

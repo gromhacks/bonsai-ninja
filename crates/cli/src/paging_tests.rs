@@ -83,7 +83,7 @@ fn bytes_to_tokens_matches_footer_heuristic() {
 fn paginate_all_returns_everything() {
     let rows: Vec<&str> = vec!["a", "b", "c"];
     let cfg = PagingConfig::new(None, PageArg::First, None, true, FormatClass::Text);
-    let (slice, info) = paginate(&rows, &cfg, "t", 0, cost_bytes_ascii);
+    let (slice, info) = paginate(&rows, &cfg, "t", 0, cost_bytes_ascii).unwrap();
     assert_eq!(slice, rows);
     assert!(info.is_last);
     assert_eq!(info.total_pages, 1);
@@ -102,7 +102,7 @@ fn paginate_fits_rows_under_budget() {
         false,
         FormatClass::Text,
     );
-    let (slice, info) = paginate(&rows, &cfg, "t", 0, cost_bytes_ascii);
+    let (slice, info) = paginate(&rows, &cfg, "t", 0, cost_bytes_ascii).unwrap();
     assert!(slice.len() <= 8, "slice len {} exceeds budget", slice.len());
     assert!(!slice.is_empty());
     assert!(!info.is_last);
@@ -120,7 +120,7 @@ fn paginate_walks_pages_losslessly() {
     loop {
         page_count += 1;
         let cfg = PagingConfig::new(Some(budget_bytes), cursor.clone(), None, false, FormatClass::Text);
-        let (slice, info) = paginate(&rows, &cfg, "t", 0, per_row_bytes);
+        let (slice, info) = paginate(&rows, &cfg, "t", 0, per_row_bytes).unwrap();
         seen.extend(slice);
         assert!(page_count <= 200, "infinite loop");
         if let Some(nc) = info.next_cursor {
@@ -137,7 +137,7 @@ fn paginate_page_number_and_cursor_resolve_to_same_slice() {
     let rows: Vec<String> = (0..30).map(|i| format!("row-{i}")).collect();
     let per_row_bytes = |r: &String| r.len() as u64;
     let cfg_num = PagingConfig::new(Some(40), PageArg::Number(3), None, false, FormatClass::Text);
-    let (slice_num, info_num) = paginate(&rows, &cfg_num, "t", 7, per_row_bytes);
+    let (slice_num, info_num) = paginate(&rows, &cfg_num, "t", 7, per_row_bytes).unwrap();
     let cfg_cursor = PagingConfig::new(
         Some(40),
         PageArg::Cursor(info_num.cursor.clone()),
@@ -145,10 +145,29 @@ fn paginate_page_number_and_cursor_resolve_to_same_slice() {
         false,
         FormatClass::Text,
     );
-    let (slice_cursor, info_cursor) = paginate(&rows, &cfg_cursor, "t", 7, per_row_bytes);
+    let (slice_cursor, info_cursor) = paginate(&rows, &cfg_cursor, "t", 7, per_row_bytes).unwrap();
     assert_eq!(slice_num, slice_cursor);
     assert_eq!(info_num.page_number, info_cursor.page_number);
     assert_eq!(info_num.cursor, info_cursor.cursor);
+}
+
+#[test]
+fn paginate_rejects_a_well_formed_cursor_from_another_result_set() {
+    let rows: Vec<String> = (0..30).map(|i| format!("row-{i}")).collect();
+    let cfg = PagingConfig::new(
+        Some(40),
+        PageArg::Cursor("P:deadbeef".to_string()),
+        None,
+        false,
+        FormatClass::Text,
+    );
+
+    let error = paginate(&rows, &cfg, "calls", 7, |row| row.len() as u64)
+        .expect_err("an unknown opaque cursor must not silently replay page one");
+
+    assert!(error
+        .to_string()
+        .contains("does not belong to this command result"));
 }
 
 #[test]
@@ -157,11 +176,11 @@ fn page_next_uses_last_rendered_cursor() {
     let rows: Vec<String> = (0..30).map(|i| format!("row-{i}")).collect();
     let per_row_bytes = |r: &String| r.len() as u64;
     let first_cfg = PagingConfig::new(Some(40), PageArg::First, None, false, FormatClass::Text);
-    let (_first, first_info) = paginate(&rows, &first_cfg, "t-next", 11, per_row_bytes);
+    let (_first, first_info) = paginate(&rows, &first_cfg, "t-next", 11, per_row_bytes).unwrap();
     assert_eq!(first_info.page_number, 1);
 
     let next_cfg = PagingConfig::new(Some(40), PageArg::Next, None, false, FormatClass::Text);
-    let (next_slice, next_info) = paginate(&rows, &next_cfg, "t-next", 11, per_row_bytes);
+    let (next_slice, next_info) = paginate(&rows, &next_cfg, "t-next", 11, per_row_bytes).unwrap();
     let cursor_cfg = PagingConfig::new(
         Some(40),
         PageArg::Cursor(first_info.next_cursor.expect("next cursor")),
@@ -169,7 +188,7 @@ fn page_next_uses_last_rendered_cursor() {
         false,
         FormatClass::Text,
     );
-    let (cursor_slice, cursor_info) = paginate(&rows, &cursor_cfg, "t-next", 11, per_row_bytes);
+    let (cursor_slice, cursor_info) = paginate(&rows, &cursor_cfg, "t-next", 11, per_row_bytes).unwrap();
 
     assert_eq!(next_info.page_number, 2);
     assert_eq!(next_slice, cursor_slice);
@@ -242,7 +261,7 @@ fn paginate_page_size_overrides_context() {
         false,
         FormatClass::Text,
     );
-    let (slice, info) = paginate(&rows, &cfg, "t", 0, cost_bytes_ascii);
+    let (slice, info) = paginate(&rows, &cfg, "t", 0, cost_bytes_ascii).unwrap();
     assert_eq!(slice.len(), 5);
     assert_eq!(info.total_pages, 6);
 }
@@ -251,7 +270,7 @@ fn paginate_page_size_overrides_context() {
 fn paginate_handles_empty_input() {
     let rows: Vec<&str> = Vec::new();
     let cfg = PagingConfig::new(Some(1024), PageArg::First, None, false, FormatClass::Text);
-    let (slice, info) = paginate(&rows, &cfg, "t", 0, cost_bytes_ascii);
+    let (slice, info) = paginate(&rows, &cfg, "t", 0, cost_bytes_ascii).unwrap();
     assert!(slice.is_empty());
     assert!(info.is_last);
     assert_eq!(info.total_rows, 0);
@@ -265,7 +284,7 @@ fn paginate_fits_single_oversized_row() {
     // breaks the loss-free guarantee.
     let rows: Vec<&str> = vec!["huge_row_bigger_than_budget"];
     let cfg = PagingConfig::new(Some(4), PageArg::First, None, false, FormatClass::Text);
-    let (slice, info) = paginate(&rows, &cfg, "t", 0, cost_bytes_ascii);
+    let (slice, info) = paginate(&rows, &cfg, "t", 0, cost_bytes_ascii).unwrap();
     assert_eq!(slice.len(), 1);
     assert!(info.tokens_used > info.budget.unwrap_or(0));
 }

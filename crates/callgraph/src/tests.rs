@@ -1,6 +1,6 @@
 use super::*;
 use bonsai_common::{FileId, Span, SymbolId};
-use bonsai_lang_api::{CallKind, DeclIndex, ModulePath, Visibility};
+use bonsai_lang_api::{CallKind, DeclIndex, ModulePath, Visibility, NO_CONSTRUCTOR_METHOD_NAMES};
 
 #[test]
 fn compact_callgraph_wire_rebuilds_adjacency_and_provenance() {
@@ -740,6 +740,64 @@ fn resolved_path_enumeration_exact_path_cap_is_not_truncated() {
 
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0].funcs, vec![entry, sink]);
+    assert_eq!(truncation, PathTruncation::None);
+}
+
+#[test]
+fn resolved_path_enumeration_prunes_branches_that_cannot_reach_target() {
+    let file = FileId::new(1);
+    let entry = FuncId::new(1);
+    let sink = FuncId::new(10_000);
+    let mut graph = CallGraph::new();
+    for raw in 2..1_000 {
+        graph.add_edge(CallEdge {
+            from: entry,
+            to: FuncId::new(raw),
+            span: Span::new(file, u64::from(raw), u64::from(raw) + 1),
+            kind: EdgeKind::Direct,
+            precision: Precision::Exact,
+            provenance: EdgeProvenance::direct_symbol(),
+        });
+    }
+    graph.add_edge(CallEdge {
+        from: entry,
+        to: sink,
+        span: Span::new(file, 20_000, 20_001),
+        kind: EdgeKind::Direct,
+        precision: Precision::Exact,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+
+    let resolved = ResolvedCallGraph::from_call_graph(graph);
+    let (paths, truncation) = enumerate_paths_resolved(&resolved, entry, sink, 1, 0, 2);
+
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].funcs, vec![entry, sink]);
+    assert_eq!(truncation, PathTruncation::None);
+}
+
+#[test]
+fn resolved_path_zero_depth_and_probe_limits_mean_uncapped() {
+    let file = FileId::new(1);
+    let funcs: Vec<FuncId> = (1..=32).map(FuncId::new).collect();
+    let mut graph = CallGraph::new();
+    for pair in funcs.windows(2) {
+        graph.add_edge(CallEdge {
+            from: pair[0],
+            to: pair[1],
+            span: Span::new(file, u64::from(pair[0].raw()), u64::from(pair[0].raw()) + 1),
+            kind: EdgeKind::Direct,
+            precision: Precision::Exact,
+            provenance: EdgeProvenance::direct_symbol(),
+        });
+    }
+
+    let resolved = ResolvedCallGraph::from_call_graph(graph);
+    let (paths, truncation) =
+        enumerate_paths_resolved(&resolved, funcs[0], *funcs.last().expect("sink"), 1, 0, 0);
+
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].funcs, funcs);
     assert_eq!(truncation, PathTruncation::None);
 }
 
@@ -2595,6 +2653,95 @@ fn module_qualified_receiver_method_resolves_by_module_path_without_bare_fanout(
 }
 
 #[test]
+fn instance_field_chain_is_not_reinterpreted_as_a_module_qualified_call() {
+    let caller_file = FileId::new(1);
+    let context_file = FileId::new(2);
+    let mut global = GlobalIndex::new();
+    let mut caller = with_module_path(
+        decl(
+            caller_file,
+            0,
+            "stashContextPreservingRequestHeaders",
+            vec![method_call(
+                caller_file,
+                "context.transientHeaders.get",
+                "context.transientHeaders",
+                &[],
+            )],
+        ),
+        &["org", "elasticsearch", "common", "util", "concurrent"],
+    );
+    caller.type_aliases = vec![
+        bonsai_lang_api::TypeAliasBinding {
+            name: "context".to_string(),
+            type_name: "ThreadContextStruct".to_string(),
+        },
+        bonsai_lang_api::TypeAliasBinding {
+            name: "transientHeaders".to_string(),
+            type_name: "Map".to_string(),
+        },
+    ];
+    let class = with_module_path(
+        decl_with(
+            context_file,
+            0,
+            "ContextMappings",
+            DeclKind::Class,
+            None,
+            Vec::new(),
+        ),
+        &[
+            "org",
+            "elasticsearch",
+            "search",
+            "suggest",
+            "completion",
+            "context",
+        ],
+    );
+    let method = with_module_path(
+        decl_with(context_file, 1, "get", DeclKind::Method, Some(0), Vec::new()),
+        &[
+            "org",
+            "elasticsearch",
+            "search",
+            "suggest",
+            "completion",
+            "context",
+        ],
+    );
+    insert_file(&mut global, caller_file, vec![caller]);
+    insert_file(&mut global, context_file, vec![class, method]);
+
+    let context_method = global
+        .decls_in(context_file)
+        .iter()
+        .find(|decl| decl.name == "get")
+        .expect("ContextMappings.get");
+    assert!(
+        !receiver_matches_decl_module(
+            "context.transientHeaders",
+            context_method,
+            context_file,
+            &|file| (file == context_file).then(|| {
+                "/repo/org/elasticsearch/search/suggest/completion/context/ContextMappings.java".to_string()
+            }),
+            bonsai_lang_api::ModulePathSyntax::none(),
+        ),
+        "an AST field chain cannot use the import-only terminal-trailer match"
+    );
+
+    let graph = build_graph(&global, |_| Some("java"));
+    let caller = FuncId::new(global.find_by_name("stashContextPreservingRequestHeaders")[0].raw());
+
+    assert_eq!(
+        graph.callees_of(caller).count(),
+        0,
+        "a field-chain receiver needs type/import evidence; package suffix coincidence is not resolution"
+    );
+}
+
+#[test]
 fn java_package_local_static_calls_do_not_fan_out_to_sibling_packages() {
     let mut global = GlobalIndex::new();
     let caller_file = FileId::new(1);
@@ -3652,6 +3799,116 @@ fn constructor_call_resolves_by_kind_and_class_parent_not_method_spelling() {
     let constructor = func_id_by_name_and_parent(&global, "forge", "Box");
     assert_eq!(
         graph.callees_of(entry).map(|edge| edge.to).collect::<Vec<_>>(),
+        vec![constructor]
+    );
+}
+
+#[test]
+fn unresolved_external_constructor_does_not_fall_back_to_enclosing_class() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let class = decl_with(file, 1, "ThreadContext", DeclKind::Class, None, Vec::new());
+    let constructor = decl_with(
+        file,
+        2,
+        "ThreadContext",
+        DeclKind::Constructor,
+        Some(1),
+        Vec::new(),
+    );
+    let caller = decl_with(
+        file,
+        3,
+        "getRequestHeadersToCopy",
+        DeclKind::Method,
+        Some(1),
+        vec![FlowEvent::Call {
+            span: Span::new(file, 100, 120),
+            name: "HashSet<>".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Constructor,
+            args: Vec::new(),
+        }],
+    );
+    insert_file(&mut global, file, vec![class, constructor, caller]);
+
+    let caller_decl = global
+        .find_by_name("getRequestHeadersToCopy")
+        .first()
+        .and_then(|symbol| global.decl_of(*symbol))
+        .expect("caller declaration");
+    let resolve_ctx = ResolveContext::new(file, &caller_decl.module_path);
+    assert!(global.find_by_name("HashSet<>").is_empty());
+    assert!(resolve_callable_with_context(&global, "HashSet<>", &resolve_ctx).is_empty());
+    assert!(collect_constructor_targets_for_class_call(
+        &ConstructorResolutionContext {
+            global: &global,
+            caller_decl,
+            alias_targets: &AHashMap::new(),
+            path_for_file: &|_| None,
+            constructor_index: None,
+        },
+        "HashSet<>",
+        None,
+        &[],
+        false,
+    )
+    .is_empty());
+
+    let graph = build_graph_with_capabilities(
+        &global,
+        |_| Some("java"),
+        |_| LanguageCapabilities {
+            constructor_method_names: NO_CONSTRUCTOR_METHOD_NAMES,
+            ..LanguageCapabilities::partial_baseline()
+        },
+    );
+    let caller = FuncId::new(global.find_by_name("getRequestHeadersToCopy")[0].raw());
+
+    let edges = graph.callees_of(caller).collect::<Vec<_>>();
+    assert!(
+        edges.is_empty(),
+        "an unresolved Java `new External(...)` is not construction of the lexical class: {edges:#?}"
+    );
+}
+
+#[test]
+fn adapter_declared_constructor_method_can_target_enclosing_class() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let class = decl_with(file, 1, "Repository", DeclKind::Class, None, Vec::new());
+    let constructor = decl_with(file, 2, "initialize", DeclKind::Constructor, Some(1), Vec::new());
+    let caller = decl_with(
+        file,
+        3,
+        "factory",
+        DeclKind::Method,
+        Some(1),
+        vec![FlowEvent::Call {
+            span: Span::new(file, 100, 110),
+            name: "new".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Constructor,
+            args: Vec::new(),
+        }],
+    );
+    insert_file(&mut global, file, vec![class, constructor, caller]);
+
+    let graph = build_graph_with_capabilities(
+        &global,
+        |_| Some("ruby"),
+        |_| LanguageCapabilities {
+            constructor_method_names: &["initialize", "new"],
+            ..LanguageCapabilities::partial_baseline()
+        },
+    );
+    let caller = FuncId::new(global.find_by_name("factory")[0].raw());
+    let constructor = func_id_by_name_and_parent(&global, "initialize", "Repository");
+
+    assert_eq!(
+        graph.callees_of(caller).map(|edge| edge.to).collect::<Vec<_>>(),
         vec![constructor]
     );
 }

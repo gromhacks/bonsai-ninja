@@ -60,6 +60,21 @@ const JAVA_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
 
 const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    class_kinds: &[
+        "class_declaration",
+        "interface_declaration",
+        "enum_declaration",
+        "annotation_type_declaration",
+        "record_declaration",
+    ],
+    class_decl_kinds: &[
+        ("interface_declaration", DeclKind::Interface),
+        ("annotation_type_declaration", DeclKind::Interface),
+        ("enum_declaration", DeclKind::Enum),
+        ("record_declaration", DeclKind::Class),
+        ("class_declaration", DeclKind::Class),
+    ],
+    method_owner_barrier_kinds: &["object_creation_expression"],
     // Java try-with-resources binds `try (T r = expr) { .. }` as a
     // `resource` node, which exposes the same `name`/`value` fields the
     // generic assignment branch reads. Marking it an assignment emits the
@@ -241,6 +256,7 @@ impl LanguageAdapter for JavaAdapter {
         // no nodes for these, so without synthesis `new R(..)` and
         // `r.comp()` are opaque and taint can't thread through a record.
         bonsai_lang_api::kit::synthesize_record_members(&mut index, &tree, src, file);
+        bonsai_lang_api::kit::apply_lexical_member_qualified_names(&mut index, ".");
         bonsai_lang_api::kit::qualify_bare_hierarchy_member_calls(&mut index);
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -1540,10 +1556,9 @@ fn java_node_visibility(node: &Node<'_>, src: &[u8]) -> Visibility {
 /// default (unnamed) package.
 /// True for class-like decls whose `bases:` we should populate.
 /// Java emits `interface_declaration`, `enum_declaration`,
-/// `record_declaration`, `class_declaration`,
-/// `annotation_type_declaration` — all surface as `DeclKind::Class`
-/// at the kit's pass-3 (no separate Interface/Enum/Record kinds in
-/// the kit's classification). See `kit.rs::class_nodes` pass 3.
+/// `record_declaration`, `class_declaration`, and
+/// `annotation_type_declaration`. The adapter maps those Tree-sitter node
+/// kinds to the corresponding compiler declaration kind in `HANDLER`.
 fn is_class_like(kind: DeclKind) -> bool {
     matches!(
         kind,

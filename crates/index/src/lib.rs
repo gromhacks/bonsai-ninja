@@ -232,6 +232,80 @@ impl GlobalIndex {
         Self::default()
     }
 
+    /// Reconstruct a stable-symbol header index from independently decoded
+    /// file partitions.
+    ///
+    /// Persisted header declarations already carry workspace-global
+    /// `SymbolId`s, so query-time partition assembly must preserve those ids
+    /// rather than feeding the files through [`Self::insert_header_preprocessed`]
+    /// and renumbering them. Missing files remain tombstoned slots; exact body
+    /// replay only requires the complete declaration header for each admitted
+    /// file plus the workspace-wide receiver ancestry.
+    pub fn from_persisted_header_files(
+        files: Vec<DeclIndex>,
+        ancestry: ReceiverAncestry,
+    ) -> Result<Self, String> {
+        let max_symbol = files
+            .iter()
+            .flat_map(|index| index.defs.iter())
+            .map(|decl| decl.symbol.raw())
+            .max();
+        let mut out = Self {
+            finalized_bases_by_type: ancestry.by_type,
+            ..Self::default()
+        };
+        if let Some(max_symbol) = max_symbol {
+            let len = usize::try_from(max_symbol)
+                .map_err(|_| "persisted symbol id does not fit usize".to_string())?
+                .checked_add(1)
+                .ok_or_else(|| "persisted symbol table length overflow".to_string())?;
+            out.entries.resize(len, None);
+        }
+        for index in files {
+            let file = index.file;
+            if out.by_file.contains_key(&file) {
+                return Err(format!("duplicate persisted header file {}", file.raw()));
+            }
+            let mut slots = Vec::with_capacity(index.defs.len());
+            for (local_index, decl) in index.defs.iter().enumerate() {
+                if decl.span.file != file || decl.name_span.file != file {
+                    return Err(format!(
+                        "persisted header declaration {} belongs to a different file",
+                        decl.symbol.raw()
+                    ));
+                }
+                let symbol_index = usize::try_from(decl.symbol.raw())
+                    .map_err(|_| "persisted symbol id does not fit usize".to_string())?;
+                let Some(slot) = out.entries.get_mut(symbol_index) else {
+                    return Err("persisted symbol id exceeds allocated table".to_string());
+                };
+                if slot.replace((file, local_index)).is_some() {
+                    return Err(format!("duplicate persisted symbol {}", decl.symbol.raw()));
+                }
+                slots.push(symbol_index);
+                out.by_name
+                    .entry(decl.name.clone())
+                    .or_default()
+                    .push(decl.symbol);
+                if let Some(qualified) = &decl.qualified_name {
+                    if qualified != &decl.name {
+                        out.by_name
+                            .entry(qualified.clone())
+                            .or_default()
+                            .push(decl.symbol);
+                    }
+                }
+            }
+            out.slots_by_file.insert(file, slots);
+            out.by_file.insert(file, index);
+        }
+        for symbols in out.by_name.values_mut() {
+            symbols.sort_unstable_by_key(|symbol| symbol.raw());
+            symbols.dedup();
+        }
+        Ok(out)
+    }
+
     /// Opaque identity of this exact compiler-header snapshot.
     ///
     /// The token is stable across immutable clones and changes whenever
@@ -813,6 +887,20 @@ impl GlobalIndex {
     #[must_use]
     pub fn header_projection(&self) -> GlobalIndexHeaderProjection<'_> {
         GlobalIndexHeaderProjection(self)
+    }
+
+    /// Consume a complete linkage index and retain only declaration/type
+    /// headers.
+    ///
+    /// Whole-workspace compiler phases call this after the last resolver/IDG
+    /// build use. Consuming the allocation lets the following query service
+    /// keep stable symbol identities and source spans without retaining every
+    /// AST call-linkage row beside the compiled graph.
+    #[must_use]
+    pub fn into_header_index(mut self) -> Self {
+        self.linkage_by_symbol.clear();
+        self.linkage_by_symbol.shrink_to_fit();
+        self
     }
 }
 

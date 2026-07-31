@@ -19,7 +19,7 @@
 //! tests still do not need a workspace.
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_callgraph::ResolvedCallGraph;
+use bonsai_callgraph::{CallEdge, ResolvedCallGraph};
 use bonsai_common::{callable_reference_variants, FileId, FuncId};
 use bonsai_index::{CallLinkageFact, GlobalIndex};
 use bonsai_lang_api::{DeclKind, FlowEvent, ModulePath};
@@ -37,6 +37,46 @@ use crate::transfer::{
     TransferOutput,
 };
 use crate::workspace::{IdgWorkspace, SegmentId};
+
+/// Exact resolved-call relation consumed by IDG compilation.
+///
+/// Resident compiler graphs and partition-backed sidecars implement the same
+/// visitor contract. The latter can hydrate one source-file partition at a
+/// time without changing any resolution, stitching, or fixed-point semantics.
+pub trait CallGraphRelation: Sync {
+    /// Visit every resolved edge whose caller is `caller`.
+    fn visit_callees(&self, caller: FuncId, visit: &mut dyn FnMut(&CallEdge));
+    /// Visit every resolved edge whose callee is `callee`.
+    fn visit_callers(&self, callee: FuncId, visit: &mut dyn FnMut(&CallEdge));
+    /// Visit every compiler-proven caller-local callable alias.
+    fn visit_local_callable_bindings(&self, visit: &mut dyn FnMut(FuncId, &str, FuncId));
+
+    /// Surface a deferred partition read/validation error after compiler
+    /// visitors finish. Resident graphs are infallible.
+    fn check_error(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl CallGraphRelation for ResolvedCallGraph {
+    fn visit_callees(&self, caller: FuncId, visit: &mut dyn FnMut(&CallEdge)) {
+        for edge in self.callees_of(caller) {
+            visit(edge);
+        }
+    }
+
+    fn visit_callers(&self, callee: FuncId, visit: &mut dyn FnMut(&CallEdge)) {
+        for edge in self.callers_of(callee) {
+            visit(edge);
+        }
+    }
+
+    fn visit_local_callable_bindings(&self, visit: &mut dyn FnMut(FuncId, &str, FuncId)) {
+        for (caller, alias, target) in self.local_callable_bindings() {
+            visit(caller, alias, target);
+        }
+    }
+}
 
 type FieldReadNodesByFunc = AHashMap<FuncId, AHashMap<String, Vec<crate::WsNodeId>>>;
 type RecvNodesByFunc = AHashMap<FuncId, Vec<crate::WsNodeId>>;
@@ -210,15 +250,15 @@ fn add_callback_name_index_entry(index: &mut AHashMap<String, Vec<FuncId>>, func
     }
 }
 
-/// Resolves a call site against the [`ResolvedCallGraph`].
+/// Resolves a call site against the exact [`CallGraphRelation`].
 ///
 /// For caller `f` with a flow-event call to "g", this walks
-/// `call_graph.callees_of(f)` and returns every edge whose target
+/// the relation's callees for `f` and returns every edge whose target
 /// has the declared name "g". The edge's `(kind, precision)` are
 /// passed through verbatim — this is **not** a re-resolution, just
 /// a filter over already-resolved candidates.
 struct WorkspaceCalleeResolver<'a> {
-    call_graph: &'a ResolvedCallGraph,
+    call_graph: &'a dyn CallGraphRelation,
     global: &'a GlobalIndex,
     /// Per-callee alternate call names. Built from each file's
     /// import alias map so a callee like `persist` aliased as
@@ -335,7 +375,7 @@ fn caller_call_site_edge_sort_key(row: &IndexedCallSiteEdge) -> (u32, u64, u64, 
 }
 
 fn call_edges_for_caller(
-    call_graph: &ResolvedCallGraph,
+    call_graph: &dyn CallGraphRelation,
     global: &GlobalIndex,
     included_funcs: Option<&AHashMap<FuncId, SegmentId>>,
     caller: FuncId,
@@ -351,9 +391,9 @@ fn call_edges_for_caller(
     let caller_symbol = bonsai_common::SymbolId::new(caller.raw());
     let caller_decl = global.decl_of(caller_symbol);
     let linkage_facts = global.linkage_facts(caller_symbol);
-    for edge in call_graph.callees_of(caller) {
+    call_graph.visit_callees(caller, &mut |edge| {
         if included_funcs.is_some_and(|funcs| !funcs.contains_key(&edge.to)) {
-            continue;
+            return;
         }
         let indexed = IndexedCallEdge {
             to: edge.to,
@@ -401,7 +441,7 @@ fn call_edges_for_caller(
                     .map(|site| IndexedCallSiteEdge { site, edge: indexed }),
             );
         }
-    }
+    });
     out.finish();
     out
 }
@@ -662,15 +702,15 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
             true
         });
         if !had_exact_edges {
-            for edge in self.call_graph.callees_of(caller) {
+            self.call_graph.visit_callees(caller, &mut |edge| {
                 if !call_site_spans_match(edge.span, site) {
-                    continue;
+                    return;
                 }
                 if !edge.precision.is_semantic() {
-                    continue;
+                    return;
                 }
                 if !self.funcs_share_language(caller, edge.to) {
-                    continue;
+                    return;
                 }
                 if edge.kind == bonsai_callgraph::EdgeKind::Indirect {
                     Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind, edge.precision);
@@ -684,7 +724,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                         callee_name,
                     );
                 }
-            }
+            });
         }
         // Constructor fallback: when `callee_name` resolves to a
         // class decl but no callgraph edge points at a callable in
@@ -839,7 +879,7 @@ impl WorkspaceCalleeResolver<'_> {
     ) -> Vec<ResolvedCallee> {
         let mut out = Vec::new();
         let mut seen = ahash::AHashSet::new();
-        for edge in self.call_graph.callees_of(caller) {
+        self.call_graph.visit_callees(caller, &mut |edge| {
             if edge.kind != bonsai_callgraph::EdgeKind::Indirect
                 || edge.span.file != arg_span.file
                 || edge.span.start < arg_span.start
@@ -847,10 +887,10 @@ impl WorkspaceCalleeResolver<'_> {
                 || !edge.precision.is_semantic()
                 || !self.funcs_share_language(caller, edge.to)
             {
-                continue;
+                return;
             }
             Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind, edge.precision);
-        }
+        });
         out
     }
 }
@@ -1091,14 +1131,14 @@ impl WorkspaceCalleeResolver<'_> {
         let mut out: Vec<ResolvedCallee> = Vec::new();
         let mut seen: ahash::AHashSet<FuncId> = ahash::AHashSet::new();
         let mut seen_callers = ahash::AHashSet::new();
-        for edge in self.call_graph.callers_of(host) {
+        self.call_graph.visit_callers(host, &mut |edge| {
             let caller = edge.from;
             if !seen_callers.insert(caller) {
-                continue;
+                return;
             }
             let caller_symbol = bonsai_common::SymbolId::new(caller.raw());
             let Some(caller_decl) = self.global.decl_of(caller_symbol) else {
-                continue;
+                return;
             };
             let caller_edges = self.call_edges_for_caller(caller);
             let site_targets_host = |span| caller_edges.edges(span).any(|edge| edge.to == host);
@@ -1125,7 +1165,7 @@ impl WorkspaceCalleeResolver<'_> {
                     }
                 }
             }
-        }
+        });
         let mut cache = self.callback_cache.write();
         if cache.as_ref().is_none_or(|cache| cache.caller != host) {
             *cache = Some(CallerCallbackBindings {
@@ -2417,6 +2457,34 @@ where
     S: IdgFileSemanticsProvider,
     D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
 {
+    build_for_persistence_streaming_with_callgraph_relation_and_file_semantics_and_options(
+        global,
+        call_graph,
+        semantics,
+        transfer_options,
+        sidecar_path,
+        body_for_file,
+    )
+}
+
+/// Build the same complete persistence IDG from an exact call relation that
+/// may page compiler partitions on demand.
+///
+/// This is the cold-prewarm entry point for large workspaces. Relation
+/// storage affects only residency: every resolved edge, local callable
+/// binding, transfer segment, and stitch step follows the canonical builder.
+pub fn build_for_persistence_streaming_with_callgraph_relation_and_file_semantics_and_options<S, D>(
+    global: &GlobalIndex,
+    call_graph: &dyn CallGraphRelation,
+    semantics: S,
+    transfer_options: &TransferOptions,
+    sidecar_path: &std::path::Path,
+    body_for_file: D,
+) -> crate::IdgResult<IdgWorkspace>
+where
+    S: IdgFileSemanticsProvider,
+    D: Fn(FileId) -> Option<bonsai_lang_api::DeclIndex> + Sync,
+{
     build_with_file_info_and_options_scoped(
         global,
         call_graph,
@@ -2699,7 +2767,7 @@ fn expect_queryable_idg(result: crate::IdgResult<IdgWorkspace>) -> IdgWorkspace 
 
 fn build_with_file_info_and_options_scoped<S>(
     global: &GlobalIndex,
-    call_graph: &ResolvedCallGraph,
+    call_graph: &dyn CallGraphRelation,
     mut semantics: S,
     transfer_options: &TransferOptions,
     scope: IdgBuildScope<'_>,
@@ -2827,12 +2895,12 @@ where
     // surfaced anywhere in the workspace contributes its lhs as an
     // additional call-name for the callable's FuncId.
     let mut local_callable_bindings: AHashMap<FuncId, AHashMap<String, FuncId>> = AHashMap::new();
-    for (caller, alias, target) in call_graph.local_callable_bindings() {
+    call_graph.visit_local_callable_bindings(&mut |caller, alias, target| {
         local_callable_bindings
             .entry(caller)
             .or_default()
             .insert(alias.to_string(), target);
-    }
+    });
     // Graphs assembled directly by tests/importers predate the compact
     // binding table. Preserve the resident API contract there; production
     // compiler graphs always carry the exact bindings resolved while their
@@ -3028,6 +3096,12 @@ where
             ws.field_flow().len()
         ));
     }
+    call_graph.check_error().map_err(|message| {
+        crate::IdgError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("callgraph relation read failed during IDG compilation: {message}"),
+        ))
+    })?;
     idg_build_log(format_args!(
         "total: {:.3}s segments={} funcs={} total_edges={} field_links={}",
         total_started.elapsed().as_secs_f64(),
@@ -3379,7 +3453,7 @@ impl SegmentOffsets {
 fn stitch_receiver_method_propagation(
     ws: &mut IdgWorkspace,
     global: &GlobalIndex,
-    call_graph: &ResolvedCallGraph,
+    call_graph: &dyn CallGraphRelation,
     resolver: &WorkspaceCalleeResolver<'_>,
     maps: &WorkspaceMaps,
 ) {
@@ -3588,10 +3662,10 @@ fn stitch_receiver_method_propagation(
             // is bare, find the receiver-bridge `CallArg{site,
             // idx=u32::MAX}` ws_node in the caller's segment and
             // emit edges into each field-Read of the callee.
-            for edge in call_graph.callers_of(callee) {
+            call_graph.visit_callers(callee, &mut |edge| {
                 let caller = edge.from;
                 if !funcs_share_language(global, file_to_language, caller, callee) {
-                    continue;
+                    return;
                 }
                 let recv_slots = recv_slots_by_call
                     .entry((caller, edge.span))
@@ -3648,7 +3722,7 @@ fn stitch_receiver_method_propagation(
                         emitted_link_for_call = true;
                     }
                 }
-            }
+            });
         }
     }
 }
@@ -3916,7 +3990,7 @@ fn function_returns_accessor_named(events: &[bonsai_lang_api::FlowEvent], field_
 /// spelling is intentionally irrelevant: language adapters/call resolution
 /// already interpreted that syntax before the IDG sees it.
 fn callee_body_delegates_to_ancestor(
-    call_graph: &ResolvedCallGraph,
+    call_graph: &dyn CallGraphRelation,
     resolver: &WorkspaceCalleeResolver<'_>,
     callee: FuncId,
 ) -> bool {
@@ -3930,8 +4004,9 @@ fn callee_body_delegates_to_ancestor(
     let linkage = resolver
         .global
         .linkage_facts(bonsai_common::SymbolId::new(callee.raw()));
-    call_graph.callees_of(callee).any(|edge| {
-        resolver.is_ancestor_dispatch(callee, edge.to)
+    let mut delegates = false;
+    call_graph.visit_callees(callee, &mut |edge| {
+        delegates |= resolver.is_ancestor_dispatch(callee, edge.to)
             && linkage.map_or_else(
                 || call_site_uses_declared_receiver(&decl.flow_events, edge.span, &receiver_names),
                 |facts| {
@@ -3940,8 +4015,9 @@ fn callee_body_delegates_to_ancestor(
                         .iter()
                         .any(|call| linkage_call_uses_declared_receiver(call, edge.span, &receiver_names))
                 },
-            )
-    })
+            );
+    });
+    delegates
 }
 
 fn linkage_call_uses_declared_receiver(

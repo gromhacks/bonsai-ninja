@@ -77,6 +77,22 @@ impl ReachabilityIndex {
         }
     }
 
+    /// Construct the exact forward relation without an unused transpose.
+    ///
+    /// Function-summary compilation performs forward closures exclusively.
+    /// Interactive target-relevance queries continue to use
+    /// [`Self::from_pair_visitor`] and retain both directions.
+    pub(crate) fn from_forward_pair_visitor<F>(n_nodes: usize, visit_pairs: F) -> Self
+    where
+        F: Fn(&mut dyn FnMut(u32, u32)),
+    {
+        Self {
+            forward: EdgeCsr::forward_from_pair_visitor(n_nodes, visit_pairs),
+            backward: EdgeCsr::empty(n_nodes),
+            n_nodes,
+        }
+    }
+
     /// Construct the index from compact `(from, to, precision)` edge
     /// records. Reachability ignores precision; precision-scoped
     /// traversals keep their own side adjacency.

@@ -3486,6 +3486,8 @@ fn scan_params_batch(
                     // requested name (case-insensitive prefix-tolerant
                     // — `RequestParam` matches `@RequestParam`).
                     param_anns.iter().any(|a| annotation_name_matches(a, want))
+                } else if target.is_some_and(param_target_is_context_only) {
+                    true
                 } else {
                     callee_matches(param, prepared.name, prepared.attribute, prepared.regex.as_ref())
                 };
@@ -3563,6 +3565,8 @@ fn decl_target_context_allows(
         && target.in_method.is_empty()
         && target.in_method_prefix.is_empty()
         && (param_index.is_none() || target.param_index_in.is_empty())
+        && (param_index.is_none() || target.param_type_in.is_empty())
+        && target.param_count_in.is_empty()
     {
         return true;
     }
@@ -3588,6 +3592,31 @@ fn decl_target_context_allows(
         if !target.param_index_in.is_empty() && !target.param_index_in.contains(&(idx as u32)) {
             return false;
         }
+        if !target.param_type_in.is_empty() {
+            let Some(param_name) = decl.params.get(idx) else {
+                return false;
+            };
+            let type_allowed = decl
+                .type_aliases
+                .iter()
+                .filter(|binding| &binding.name == param_name)
+                .any(|binding| {
+                    target
+                        .param_type_in
+                        .iter()
+                        .any(|want| semantic_type_names_match(&binding.type_name, want))
+                });
+            if !type_allowed {
+                return false;
+            }
+        }
+    }
+    if !target.param_count_in.is_empty()
+        && !target
+            .param_count_in
+            .contains(&u32::try_from(decl.params.len()).unwrap_or(u32::MAX))
+    {
+        return false;
     }
     if target.in_class.is_empty() {
         return true;
@@ -3610,6 +3639,15 @@ fn decl_target_context_allows(
             .bases
             .iter()
             .any(|base| target.in_class.iter().any(|want| want == base))
+}
+
+fn param_target_is_context_only(target: &RuleTarget) -> bool {
+    target.name.is_none() && target.attribute.is_none() && target.regex.is_none()
+}
+
+fn semantic_type_names_match(actual: &str, expected: &str) -> bool {
+    actual == expected
+        || bonsai_common::short_qualified_tail(actual) == bonsai_common::short_qualified_tail(expected)
 }
 
 fn decl_modifier_names(ws: &Workspace, file: FileId, decl: &Decl) -> Vec<String> {

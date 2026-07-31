@@ -48,6 +48,31 @@ pub fn make_name_filter(needle: Option<&str>, is_regex: bool) -> Result<NameFilt
     }
 }
 
+/// Build a matcher for adapter-emitted callable names.
+///
+/// Call-site IR commonly stores the source spelling (`client.execute`) while
+/// declarations and search results expose a compiler-qualified name
+/// (`pkg.Service.execute`). A non-regex filter therefore admits either the
+/// complete requested spelling or its parser-independent callable tail.
+/// This is candidate matching for syntax inventories; semantic commands
+/// continue to resolve exact symbol identities through the call graph.
+pub(crate) fn make_callable_name_filter(
+    needle: Option<&str>,
+    is_regex: bool,
+) -> Result<NameFilter, regex::Error> {
+    let Some(pattern) = needle else {
+        return Ok(Box::new(|_| true));
+    };
+    if is_regex {
+        return make_name_filter(Some(pattern), true);
+    }
+    let qualified = pattern.to_string();
+    let tail = bonsai_common::short_qualified_tail(pattern).to_string();
+    Ok(Box::new(move |candidate: &str| {
+        candidate.contains(&qualified) || (!tail.is_empty() && candidate.contains(&tail))
+    }))
+}
+
 /// Match a user-facing file/path filter against the path relative to
 /// the selected workspace. Explicit absolute filters are still
 /// accepted for callers that pass a full path.

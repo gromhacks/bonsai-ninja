@@ -34,7 +34,7 @@ pub use flow_id::{
     compute_flow_id, compute_flow_labels_from, compute_group_id, compute_taint_flow_id, fnv1a_names64,
     fnv1a_names_low32, TaintFlowIdentityStep,
 };
-pub use query::{matching_decls, matching_func_ids, Matcher};
+pub use query::{matching_decls, matching_func_ids, matching_func_ids_in_headers, Matcher};
 
 /// Display name for a [`bonsai_common::FuncId`]. Returns the decl's
 /// short name (the FuncId itself is the disambiguator) or

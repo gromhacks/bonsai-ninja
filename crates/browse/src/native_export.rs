@@ -8,7 +8,6 @@
 use crate::ClassOut;
 use bonsai_common::{FileId, FuncId, Precision, Span, SpanMap, SymbolId};
 use bonsai_idg::CrossCallEdge;
-use bonsai_inspect::ChainCache;
 use bonsai_lang_api::{AssignValueKind, CallArg, CallKind, DeclKind, ExpressionFlow, FlowEvent, LoopKind};
 use bonsai_workspace::{decl_decorator_names, Workspace};
 use serde::ser::{SerializeMap, SerializeSeq};
@@ -856,45 +855,11 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     writer: &mut W,
 ) -> serde_json::Result<()> {
     let total_started = Instant::now();
-    // Native export starts with the compact numeric IDG summary, releases it,
-    // and only then materializes callgraph/presentation projections. Reset any
-    // service inherited from an SDK query so the phase owns one exact sidecar
-    // working set and no stale derived indexes.
+    // Export owns one compiler representation at a time. A prior SDK query
+    // may have left an IDG service resident; release it before rendering the
+    // structural graph and file-local compiler objects.
     ws.release_idg_service_cache();
-    let global = ws.compiler_linkage_index();
-
-    // Compile the complete numeric return-summary relation before materializing
-    // presentation-heavy structural rows, entry-point strings, and resolved
-    // callgraph projections. The relation is independent of JSON order and
-    // names; phase ordering therefore changes only allocation lifetimes. On a
-    // large workspace this prevents the compiler's transient function layouts
-    // from overlapping hundreds of thousands of rendered export records.
-    let summary_funcs: Vec<FuncId> = global
-        .all_files()
-        .flat_map(|file| {
-            global.decls_in(file).iter().filter_map(|decl| {
-                matches!(
-                    decl.kind,
-                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                )
-                .then(|| FuncId::new(decl.symbol.raw()))
-            })
-        })
-        .collect();
-    let summary_idg = export_projection_idg_service(ws);
-    let return_taint_by_func = summary_idg.return_taint_param_indices_for_funcs_with_max_precision(
-        &summary_funcs,
-        Some(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
-    );
-    summary_idg.release_query_indexes();
-    drop(summary_idg);
-    ws.release_idg_service_cache();
-    export_phase_log(format_args!(
-        "taint.numeric_function_summaries: funcs={} rows={}",
-        summary_funcs.len(),
-        return_taint_by_func.len()
-    ));
-    drop(summary_funcs);
+    let global = ws.compiler_header_index();
     let spans = ExportSpanCache::new(ws);
 
     let mut serializer = serde_json::Serializer::new(writer);
@@ -909,7 +874,6 @@ fn write_native_export_streaming<W: Write + ?Sized>(
 
     let structural = build_export_structural_metadata(ws, global.as_ref(), &spans, &total_started)?;
     map.serialize_entry("summary", &structural.summary)?;
-    map.serialize_entry("files", &ExportFilesStreaming { ws, spans: &spans })?;
     map.serialize_entry("classes", &structural.classes)?;
     map.serialize_entry(
         "callgraph",
@@ -921,7 +885,6 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     )?;
     drop(structural);
 
-    let chain_cache = ChainCache::new(ws);
     let phase_started = Instant::now();
     let flow_sections = build_export_flow_sections();
     export_phase_log(format_args!(
@@ -944,8 +907,8 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     map.serialize_entry(
         "flow_graph",
         &ExportFlowGraphStreaming {
+            ws,
             global: global.as_ref(),
-            chain_cache: &chain_cache,
         },
     )?;
     drop(flow_sections);
@@ -963,14 +926,17 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let entry_points = export_entry_points(ws, &spans);
 
     let phase_started = Instant::now();
-    let functions = export_taint_functions(ws, &spans);
+    let functions = export_taint_functions(global.as_ref(), &spans);
     let chain_rows = export_taint_chains_and_flow_labels();
     let completeness = export_analysis_completeness(config, &workspace_incomplete_reasons);
-    drop(chain_cache);
+
+    // Structural graph projections are complete. Release the partition reader
+    // before opening adapter-lowered bodies; the numeric taint relation is
+    // streamed from the same exact sidecar later instead of retaining another
+    // multi-million-edge vector.
+    ws.release_resolved_call_graph_cache();
+    map.serialize_entry("files", &ExportFilesStreaming { ws, spans: &spans })?;
     drop(global);
-    // Flow labels and entry points now own every name they render. Release the
-    // standalone compiler linkage table immediately; call-edge serialization
-    // below needs only the canonical numeric callgraph.
     ws.release_compiler_linkage_cache();
     map.serialize_entry("analysis_complete", &completeness.complete)?;
     map.serialize_entry("analysis_incomplete_reasons", &completeness.incomplete_reasons)?;
@@ -980,7 +946,6 @@ fn write_native_export_streaming<W: Write + ?Sized>(
         functions,
         entry_points: RefCell::new(Some(entry_points)),
         chain_rows: RefCell::new(Some(chain_rows)),
-        return_taint_by_func: RefCell::new(Some(return_taint_by_func)),
         config,
     };
     map.serialize_entry("taint_graph", &taint_graph)?;
@@ -1386,8 +1351,8 @@ fn build_export_flow_sections() -> ExportFlowSections {
 /// and callee names remain canonical linkage facts and are never duplicated
 /// for the whole workspace in memory.
 struct ExportFlowGraphStreaming<'a> {
+    ws: &'a Workspace,
     global: &'a bonsai_index::GlobalIndex,
-    chain_cache: &'a ChainCache<'a>,
 }
 
 impl Serialize for ExportFlowGraphStreaming<'_> {
@@ -1395,7 +1360,7 @@ impl Serialize for ExportFlowGraphStreaming<'_> {
     where
         S: Serializer,
     {
-        let mut funcs: Vec<FuncId> = self
+        let function_count = self
             .global
             .all_files()
             .flat_map(|file| {
@@ -1403,47 +1368,100 @@ impl Serialize for ExportFlowGraphStreaming<'_> {
                     .functions_in(file)
                     .map(|decl| FuncId::new(decl.symbol.raw()))
             })
-            .collect();
-        funcs.sort_by(|left, right| {
-            let left_name = self
-                .global
-                .decl_of(SymbolId::new(left.raw()))
-                .map(|decl| decl.name.as_str())
-                .unwrap_or_default();
-            let right_name = self
-                .global
-                .decl_of(SymbolId::new(right.raw()))
-                .map(|decl| decl.name.as_str())
-                .unwrap_or_default();
-            left_name.cmp(right_name)
-        });
-
-        let graph = self.chain_cache.resolved_graph();
-        let mut sequence = serializer.serialize_seq(Some(funcs.len()))?;
-        for func in funcs {
-            let mut callers: Vec<&str> = graph
-                .callers_of(func)
-                .map(|edge| linkage_func_display_name(self.global, edge.from))
-                .collect();
-            callers.sort_unstable();
-            callers.dedup();
-            let mut outgoing: Vec<&str> = graph
-                .callees_of(func)
-                .map(|edge| linkage_func_display_name(self.global, edge.to))
-                .collect();
-            outgoing.sort_unstable();
-            outgoing.dedup();
-            let function = self
-                .global
-                .decl_of(SymbolId::new(func.raw()))
-                .map(|decl| decl.name.as_str())
-                .unwrap_or_default();
-            sequence.serialize_element(&ExportFlowNode {
-                entry_point: callers.is_empty(),
-                function,
-                callers,
-                outgoing,
-            })?;
+            .count();
+        let mut sequence = serializer.serialize_seq(Some(function_count))?;
+        let mut serialization_error = None;
+        let partition_result = self.ws.visit_persisted_callgraph_partitions(
+            |file, _nodes, outgoing_edges, incoming_edges, _unresolved| {
+                if serialization_error.is_some() {
+                    return;
+                }
+                let mut funcs = self
+                    .global
+                    .functions_in(file)
+                    .map(|decl| FuncId::new(decl.symbol.raw()))
+                    .collect::<Vec<_>>();
+                funcs.sort_by(|left, right| {
+                    linkage_func_display_name(self.global, *left)
+                        .cmp(linkage_func_display_name(self.global, *right))
+                        .then_with(|| left.raw().cmp(&right.raw()))
+                });
+                let mut callers_by_func = ahash::AHashMap::<FuncId, Vec<&str>>::new();
+                for edge in incoming_edges {
+                    callers_by_func
+                        .entry(edge.to)
+                        .or_default()
+                        .push(linkage_func_display_name(self.global, edge.from));
+                }
+                let mut outgoing_by_func = ahash::AHashMap::<FuncId, Vec<&str>>::new();
+                for edge in outgoing_edges {
+                    outgoing_by_func
+                        .entry(edge.from)
+                        .or_default()
+                        .push(linkage_func_display_name(self.global, edge.to));
+                }
+                for func in funcs {
+                    let mut callers = callers_by_func.remove(&func).unwrap_or_default();
+                    callers.sort_unstable();
+                    callers.dedup();
+                    let mut outgoing = outgoing_by_func.remove(&func).unwrap_or_default();
+                    outgoing.sort_unstable();
+                    outgoing.dedup();
+                    if let Err(error) = sequence.serialize_element(&ExportFlowNode {
+                        entry_point: callers.is_empty(),
+                        function: linkage_func_display_name(self.global, func),
+                        callers,
+                        outgoing,
+                    }) {
+                        serialization_error = Some(error);
+                        break;
+                    }
+                }
+            },
+        );
+        if let Some(error) = serialization_error {
+            return Err(error);
+        }
+        match partition_result {
+            Some(Ok(())) => {}
+            Some(Err(error)) => return Err(<S::Error as serde::ser::Error>::custom(error)),
+            None => {
+                let graph = self.ws.cached_resolved_call_graph();
+                let mut funcs = self
+                    .global
+                    .all_files()
+                    .flat_map(|file| {
+                        self.global
+                            .functions_in(file)
+                            .map(|decl| FuncId::new(decl.symbol.raw()))
+                    })
+                    .collect::<Vec<_>>();
+                funcs.sort_by(|left, right| {
+                    linkage_func_display_name(self.global, *left)
+                        .cmp(linkage_func_display_name(self.global, *right))
+                        .then_with(|| left.raw().cmp(&right.raw()))
+                });
+                for func in funcs {
+                    let mut callers = graph
+                        .callers_of(func)
+                        .map(|edge| linkage_func_display_name(self.global, edge.from))
+                        .collect::<Vec<_>>();
+                    callers.sort_unstable();
+                    callers.dedup();
+                    let mut outgoing = graph
+                        .callees_of(func)
+                        .map(|edge| linkage_func_display_name(self.global, edge.to))
+                        .collect::<Vec<_>>();
+                    outgoing.sort_unstable();
+                    outgoing.dedup();
+                    sequence.serialize_element(&ExportFlowNode {
+                        entry_point: callers.is_empty(),
+                        function: linkage_func_display_name(self.global, func),
+                        callers,
+                        outgoing,
+                    })?;
+                }
+            }
         }
         SerializeSeq::end(sequence)
     }
@@ -1462,7 +1480,6 @@ struct ExportTaintGraphStreaming<'a> {
     functions: Vec<ExportTaintFunction>,
     entry_points: RefCell<Option<Vec<ExportEntryPoint>>>,
     chain_rows: RefCell<Option<ExportTaintChainsAndFlowLabels>>,
-    return_taint_by_func: RefCell<Option<ahash::AHashMap<FuncId, Vec<u32>>>>,
     config: NativeExportConfig,
 }
 
@@ -1477,25 +1494,6 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
         map.serialize_entry("functions", functions)?;
 
         map.serialize_entry("call_edges", &ExportTaintCallEdgesStreaming { ws: self.ws })?;
-
-        // The remaining sections consume the canonical IDG and no longer
-        // need the resolved callgraph or its standalone linkage table. Drop
-        // those complete compiler artifacts before restoring the IDG so peak
-        // memory follows the largest phase instead of their sum.
-        self.ws.release_resolved_call_graph_cache();
-        self.ws.release_compiler_linkage_cache();
-
-        {
-            let return_taint = self.return_taint_by_func.borrow();
-            let function_summaries = export_function_summaries(
-                return_taint
-                    .as_ref()
-                    .expect("native export return summaries are serialized once"),
-                functions,
-            );
-            map.serialize_entry("function_summaries", &function_summaries)?;
-        }
-        self.return_taint_by_func.borrow_mut().take();
 
         // Chain rows are presentation projections computed from the complete
         // callgraph. Serialize and release them before opening the multi-
@@ -1562,8 +1560,27 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
             self.entry_points.borrow_mut().take();
         }
         self.ws.release_exact_body_cache();
+        self.ws.release_compiler_header_cache();
 
         let projection_idg = export_projection_idg_service(self.ws);
+        let summary_funcs: Vec<FuncId> = functions
+            .iter()
+            .map(|function| FuncId::new(function.func_id))
+            .collect();
+        let return_taint_by_func = projection_idg.return_taint_param_indices_for_funcs_with_max_precision(
+            &summary_funcs,
+            Some(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
+        );
+        export_phase_log(format_args!(
+            "taint.numeric_function_summaries: funcs={} rows={}",
+            summary_funcs.len(),
+            return_taint_by_func.len()
+        ));
+        let function_summaries = export_function_summaries(&return_taint_by_func, functions);
+        map.serialize_entry("function_summaries", &function_summaries)?;
+        drop(function_summaries);
+        drop(return_taint_by_func);
+        drop(summary_funcs);
         if !self.config.full_propagations {
             projection_idg.release_query_indexes();
         }
@@ -1593,6 +1610,7 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
         }
         self.entry_points.borrow_mut().take();
         drop(projection_idg);
+        self.ws.release_idg_service_cache();
 
         map.end()
     }
@@ -1621,7 +1639,7 @@ impl Serialize for ExportTaintPropagationsStreaming<'_> {
             return serde::ser::SerializeSeq::end(seq);
         }
 
-        let global = self.ws.compiler_linkage_index();
+        let global = self.idg.global_linkage_index();
         let mut render_cache = ExportTaintRecordRenderCache::default();
         let mut seq = serializer.serialize_seq(None)?;
         let mut count = 0usize;
@@ -1689,9 +1707,10 @@ struct ExportTaintChainsAndFlowLabels {
     flow_id_labels_incomplete_reason: Option<String>,
 }
 
-fn export_taint_functions(ws: &Workspace, spans: &ExportSpanCache) -> Vec<ExportTaintFunction> {
-    let global = ws.compiler_linkage_index();
-
+fn export_taint_functions(
+    global: &bonsai_index::GlobalIndex,
+    spans: &ExportSpanCache,
+) -> Vec<ExportTaintFunction> {
     // ---- functions: FuncId → display name mapping (the single
     // authoritative table other sections reference by `func_id`). ----
     let mut functions: Vec<ExportTaintFunction> = Vec::new();
@@ -1726,59 +1745,22 @@ fn export_taint_functions(ws: &Workspace, spans: &ExportSpanCache) -> Vec<Export
     functions
 }
 
-fn export_structural_callgraph_indices(
-    ws: &Workspace,
-    global: &bonsai_index::GlobalIndex,
-    spans: &ExportSpanCache,
-) -> Vec<usize> {
-    let resolved = ws.cached_resolved_call_graph();
-    let mut indices: Vec<usize> = resolved
-        .inner()
-        .edges
-        .iter()
-        .enumerate()
-        .filter(|(_, edge)| edge.precision.is_semantic())
-        .filter_map(|(index, edge)| {
-            (global.decl_of(SymbolId::new(edge.from.raw())).is_some()
-                && global.decl_of(SymbolId::new(edge.to.raw())).is_some())
-            .then_some(index)
-        })
-        .collect();
-    indices.sort_by(|left, right| {
-        let left = &resolved.inner().edges[*left];
-        let right = &resolved.inner().edges[*right];
-        let left_caller = global
-            .decl_of(SymbolId::new(left.from.raw()))
-            .expect("filtered structural caller");
-        let right_caller = global
-            .decl_of(SymbolId::new(right.from.raw()))
-            .expect("filtered structural caller");
-        let left_callee = global
-            .decl_of(SymbolId::new(left.to.raw()))
-            .expect("filtered structural callee");
-        let right_callee = global
-            .decl_of(SymbolId::new(right.to.raw()))
-            .expect("filtered structural callee");
-        let (left_line, left_column) = spans.line_col(left.span);
-        let (right_line, right_column) = spans.line_col(right.span);
-        spans
-            .path(left_caller.name_span.file)
-            .cmp(spans.path(right_caller.name_span.file))
-            .then_with(|| {
-                spans
-                    .line_col(left_caller.name_span)
-                    .0
-                    .cmp(&spans.line_col(right_caller.name_span).0)
-            })
-            .then_with(|| left_line.cmp(&right_line))
-            .then_with(|| left_column.cmp(&right_column))
-            .then_with(|| left_caller.name.cmp(&right_caller.name))
-            .then_with(|| left_callee.name.cmp(&right_callee.name))
-    });
-    indices
-}
-
 fn export_structural_callgraph_count(ws: &Workspace, global: &bonsai_index::GlobalIndex) -> usize {
+    let mut count = 0usize;
+    if let Some(Ok(())) =
+        ws.visit_persisted_callgraph_partitions(|_file, _nodes, outgoing, _incoming, _unresolved| {
+            count += outgoing
+                .iter()
+                .filter(|edge| edge.precision.is_semantic())
+                .filter(|edge| {
+                    global.decl_of(SymbolId::new(edge.from.raw())).is_some()
+                        && global.decl_of(SymbolId::new(edge.to.raw())).is_some()
+                })
+                .count();
+        })
+    {
+        return count;
+    }
     ws.cached_resolved_call_graph()
         .inner()
         .edges
@@ -1803,40 +1785,84 @@ impl Serialize for ExportStructuralCallgraphStreaming<'_> {
         S: Serializer,
     {
         let phase_started = Instant::now();
-        let resolved = self.ws.cached_resolved_call_graph();
-        let indices = export_structural_callgraph_indices(self.ws, self.global, self.spans);
-        let mut sequence = serializer.serialize_seq(Some(indices.len()))?;
-        for index in &indices {
-            let edge = &resolved.inner().edges[*index];
-            let caller_decl = self
-                .global
-                .decl_of(SymbolId::new(edge.from.raw()))
-                .expect("filtered structural caller");
-            let callee_decl = self
-                .global
-                .decl_of(SymbolId::new(edge.to.raw()))
-                .expect("filtered structural callee");
-            let caller_file = self.spans.path(caller_decl.name_span.file);
-            let (caller_line, _) = self.spans.line_col(caller_decl.name_span);
-            let (call_site_line, call_site_column) = self.spans.line_col(edge.span);
-            sequence.serialize_element(&CallEdgeOut {
-                caller: caller_decl.name.as_str(),
-                caller_file,
-                caller_line,
-                callee: callee_decl.name.as_str(),
-                callee_kind: export_decl_kind_label(callee_decl.kind),
-                call_site_line,
-                call_site_column,
-                precision: export_precision_label(edge.precision),
-                resolver_stage: edge.provenance.resolver_stage(),
-                evidence: edge.provenance.evidence(),
-                confidence: edge.provenance.confidence(),
-            })?;
+        let count = export_structural_callgraph_count(self.ws, self.global);
+        let mut sequence = serializer.serialize_seq(Some(count))?;
+        let mut serialization_error = None;
+        let partition_result = self.ws.visit_persisted_callgraph_partitions(
+            |_file, _nodes, outgoing, _incoming, _unresolved| {
+                if serialization_error.is_some() {
+                    return;
+                }
+                for edge in outgoing.iter().filter(|edge| edge.precision.is_semantic()) {
+                    let Some(caller_decl) = self.global.decl_of(SymbolId::new(edge.from.raw())) else {
+                        continue;
+                    };
+                    let Some(callee_decl) = self.global.decl_of(SymbolId::new(edge.to.raw())) else {
+                        continue;
+                    };
+                    let (caller_line, _) = self.spans.line_col(caller_decl.name_span);
+                    let (call_site_line, call_site_column) = self.spans.line_col(edge.span);
+                    if let Err(error) = sequence.serialize_element(&CallEdgeOut {
+                        caller: caller_decl.name.as_str(),
+                        caller_file: self.spans.path(caller_decl.name_span.file),
+                        caller_line,
+                        callee: callee_decl.name.as_str(),
+                        callee_kind: export_decl_kind_label(callee_decl.kind),
+                        call_site_line,
+                        call_site_column,
+                        precision: export_precision_label(edge.precision),
+                        resolver_stage: edge.provenance.resolver_stage(),
+                        evidence: edge.provenance.evidence(),
+                        confidence: edge.provenance.confidence(),
+                    }) {
+                        serialization_error = Some(error);
+                        break;
+                    }
+                }
+            },
+        );
+        if let Some(error) = serialization_error {
+            return Err(error);
+        }
+        match partition_result {
+            Some(Ok(())) => {}
+            Some(Err(error)) => return Err(<S::Error as serde::ser::Error>::custom(error)),
+            None => {
+                let resolved = self.ws.cached_resolved_call_graph();
+                for edge in resolved
+                    .inner()
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.precision.is_semantic())
+                {
+                    let Some(caller_decl) = self.global.decl_of(SymbolId::new(edge.from.raw())) else {
+                        continue;
+                    };
+                    let Some(callee_decl) = self.global.decl_of(SymbolId::new(edge.to.raw())) else {
+                        continue;
+                    };
+                    let (caller_line, _) = self.spans.line_col(caller_decl.name_span);
+                    let (call_site_line, call_site_column) = self.spans.line_col(edge.span);
+                    sequence.serialize_element(&CallEdgeOut {
+                        caller: caller_decl.name.as_str(),
+                        caller_file: self.spans.path(caller_decl.name_span.file),
+                        caller_line,
+                        callee: callee_decl.name.as_str(),
+                        callee_kind: export_decl_kind_label(callee_decl.kind),
+                        call_site_line,
+                        call_site_column,
+                        precision: export_precision_label(edge.precision),
+                        resolver_stage: edge.provenance.resolver_stage(),
+                        evidence: edge.provenance.evidence(),
+                        confidence: edge.provenance.confidence(),
+                    })?;
+                }
+            }
         }
         export_phase_log(format_args!(
             "structural.callgraph: {:.3}s count={}",
             phase_started.elapsed().as_secs_f64(),
-            indices.len()
+            count
         ));
         SerializeSeq::end(sequence)
     }
@@ -1846,46 +1872,89 @@ struct ExportTaintCallEdgesStreaming<'a> {
     ws: &'a Workspace,
 }
 
-fn export_taint_call_edge_indices(resolved: &bonsai_callgraph::ResolvedCallGraph) -> Vec<usize> {
-    let mut indices: Vec<usize> = resolved
-        .inner()
-        .edges
-        .iter()
-        .enumerate()
-        .filter_map(|(index, edge)| edge.precision.is_semantic().then_some(index))
-        .collect();
-    indices.sort_by_key(|index| {
-        let edge = &resolved.inner().edges[*index];
-        (edge.from.raw(), edge.to.raw())
-    });
-    indices
-}
-
 impl Serialize for ExportTaintCallEdgesStreaming<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         let phase_started = Instant::now();
-        let resolved = self.ws.cached_resolved_call_graph();
-        let indices = export_taint_call_edge_indices(&resolved);
-        let mut sequence = serializer.serialize_seq(Some(indices.len()))?;
-        for index in &indices {
-            let edge = &resolved.inner().edges[*index];
-            sequence.serialize_element(&ExportCallEdge {
-                from: edge.from.raw(),
-                to: edge.to.raw(),
-                kind: export_edge_kind_label(edge.kind),
-                precision: export_taint_precision_label(edge.precision),
-                resolver_stage: edge.provenance.resolver_stage(),
-                evidence: edge.provenance.evidence(),
-                confidence: edge.provenance.confidence(),
-            })?;
+        let mut count = 0usize;
+        let count_result = self.ws.visit_persisted_callgraph_partitions(
+            |_file, _nodes, outgoing, _incoming, _unresolved| {
+                count += outgoing
+                    .iter()
+                    .filter(|edge| edge.precision.is_semantic())
+                    .count();
+            },
+        );
+        let persisted = matches!(count_result, Some(Ok(())));
+        let fallback_graph = (!persisted).then(|| self.ws.cached_resolved_call_graph());
+        if let Some(graph) = fallback_graph.as_ref() {
+            count = graph
+                .inner()
+                .edges
+                .iter()
+                .filter(|edge| edge.precision.is_semantic())
+                .count();
+        }
+        let mut sequence = serializer.serialize_seq(Some(count))?;
+        let mut serialization_error = None;
+        if persisted {
+            let visit_result = self.ws.visit_persisted_callgraph_partitions(
+                |_file, _nodes, outgoing, _incoming, _unresolved| {
+                    if serialization_error.is_some() {
+                        return;
+                    }
+                    for edge in outgoing.iter().filter(|edge| edge.precision.is_semantic()) {
+                        if let Err(error) = sequence.serialize_element(&ExportCallEdge {
+                            from: edge.from.raw(),
+                            to: edge.to.raw(),
+                            kind: export_edge_kind_label(edge.kind),
+                            precision: export_taint_precision_label(edge.precision),
+                            resolver_stage: edge.provenance.resolver_stage(),
+                            evidence: edge.provenance.evidence(),
+                            confidence: edge.provenance.confidence(),
+                        }) {
+                            serialization_error = Some(error);
+                            break;
+                        }
+                    }
+                },
+            );
+            if let Some(error) = serialization_error {
+                return Err(error);
+            }
+            match visit_result {
+                Some(Ok(())) => {}
+                Some(Err(error)) => return Err(<S::Error as serde::ser::Error>::custom(error)),
+                None => {
+                    return Err(<S::Error as serde::ser::Error>::custom(
+                        "persisted callgraph disappeared during native export",
+                    ));
+                }
+            }
+        } else if let Some(graph) = fallback_graph.as_ref() {
+            for edge in graph
+                .inner()
+                .edges
+                .iter()
+                .filter(|edge| edge.precision.is_semantic())
+            {
+                sequence.serialize_element(&ExportCallEdge {
+                    from: edge.from.raw(),
+                    to: edge.to.raw(),
+                    kind: export_edge_kind_label(edge.kind),
+                    precision: export_taint_precision_label(edge.precision),
+                    resolver_stage: edge.provenance.resolver_stage(),
+                    evidence: edge.provenance.evidence(),
+                    confidence: edge.provenance.confidence(),
+                })?;
+            }
         }
         export_phase_log(format_args!(
             "taint.call_edges: {:.3}s count={}",
             phase_started.elapsed().as_secs_f64(),
-            indices.len()
+            count
         ));
         SerializeSeq::end(sequence)
     }
@@ -2692,14 +2761,18 @@ fn export_taint_chains_and_flow_labels() -> ExportTaintChainsAndFlowLabels {
 fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec<ExportEntryPoint> {
     type EntryParamMap = std::collections::BTreeMap<u32, (String, String, u32, Vec<String>, &'static str)>;
 
-    let callees_seen: ahash::AHashSet<bonsai_common::SymbolId> = ws
-        .cached_resolved_call_graph()
-        .inner()
-        .edges
-        .iter()
-        .filter(|edge| edge.precision.is_semantic())
-        .map(|edge| bonsai_common::SymbolId::new(edge.to.raw()))
-        .collect();
+    let headers = ws.compiler_header_index();
+    let functions = headers
+        .all_files()
+        .flat_map(|file| {
+            headers
+                .functions_in(file)
+                .map(|decl| FuncId::new(decl.symbol.raw()))
+        })
+        .collect::<Vec<_>>();
+    let callees_seen = ws.functions_with_semantic_callers(&functions);
+    drop(functions);
+    drop(headers);
 
     let class_field_writes = collect_class_field_taints_for_entries(ws);
     let mut entry_params: EntryParamMap = std::collections::BTreeMap::new();
@@ -2718,7 +2791,7 @@ fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec
             if is_generated_callable_name(&decl.name) {
                 continue;
             }
-            let has_callers = callees_seen.contains(&decl.symbol);
+            let has_callers = callees_seen.contains(&FuncId::new(decl.symbol.raw()));
             let decorator_entry = detect_framework_decorator(ws, &index, file, decl.span, decl.name_span);
             let entry_kind = if decorator_entry {
                 Some("decorator")

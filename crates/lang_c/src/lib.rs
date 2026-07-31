@@ -15,6 +15,12 @@ pub const LANG_ID: LanguageId = LanguageId::new("c");
 const PACK_NAME: &str = "c";
 const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    class_kinds: &["struct_specifier", "union_specifier"],
+    class_decl_kinds: &[
+        ("struct_specifier", bonsai_lang_api::DeclKind::Struct),
+        ("union_specifier", bonsai_lang_api::DeclKind::Struct),
+    ],
+    nested_type_ownership: false,
     ..with_fn_kinds(&["function_definition"])
 };
 

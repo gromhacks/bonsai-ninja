@@ -16,9 +16,11 @@ use anyhow::Result;
 
 use super::browse::{effective_limit, truncate};
 use super::{
-    apply_text_limit, emit_json_paged_cached, emit_json_value_paged_cached, nearest_names,
-    open_project_index_only as open_project, open_project_index_only_with_rulepack, page_info_to_json,
-    paged_json_incomplete_reasons, short_file,
+    apply_text_limit, bonsai_for_cli, emit_json_paged_cached, emit_json_value_paged_cached, nearest_names,
+    open_project_index_matching_literal, open_project_index_matching_path,
+    open_project_index_only as open_project, open_project_index_only_with_rulepack,
+    open_project_index_retrieval_candidates_with_rulepack, page_info_to_json, paged_json_incomplete_reasons,
+    short_file,
 };
 
 pub(crate) fn cmd_dump_callgraph(
@@ -27,12 +29,32 @@ pub(crate) fn cmd_dump_callgraph(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
     let stage = progress::ScopedSpinner::new("collecting call graph");
-    let rows = project.dump().callgraph();
+    let cached_rows = bonsai_for_cli().callgraph_summary_from_cache(root)?;
+    let fallback_project = if cached_rows.is_none() {
+        Some(open_project(root)?)
+    } else {
+        None
+    };
+    let rows = match cached_rows {
+        Some(rows) => rows,
+        None => fallback_project
+            .as_ref()
+            .expect("fallback project opened for a callgraph cache miss")
+            .0
+            .dump()
+            .callgraph(),
+    };
     stage.finish();
     let filters_hash = 0;
-    let cost = |r: &bonsai_sdk::CallgraphRow| (r.function.len() + 8) as u64 + paging::TABLE_ROW_CHROME_BYTES;
+    let cost = |r: &bonsai_sdk::CallgraphRow| {
+        let rendered_name_len = if matches!(format, BrowseFormat::Json) {
+            r.display_name().len()
+        } else {
+            r.function.len()
+        };
+        (rendered_name_len + r.file.len() + 24) as u64 + paging::TABLE_ROW_CHROME_BYTES
+    };
     match format {
         BrowseFormat::Json => {
             emit_json_paged_cached(root, &rows, &paging_cfg, "dump-callgraph", filters_hash, cost)?;
@@ -48,10 +70,15 @@ pub(crate) fn cmd_dump_callgraph(
                 |paged, info, cfg| {
                     let (shown, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
-                    let mut t = u.table(&["function", "callers", "outgoing"]);
+                    let mut t = u.table(&["function", "location", "callers", "outgoing"]);
                     for row in &shown {
                         t.add_row(vec![
                             comfy_table::Cell::new(u.name(&row.function)),
+                            comfy_table::Cell::new(u.path(&format!(
+                                "{}:@{}",
+                                short_file(&row.file),
+                                row.name_start
+                            ))),
                             comfy_table::Cell::new(u.dim(&row.callers.to_string())),
                             comfy_table::Cell::new(u.dim(&row.outgoing.to_string())),
                         ]);
@@ -357,7 +384,13 @@ pub(crate) fn cmd_dump_ast(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root_dir)?;
+    let (project, _footer) = if let Some(file) = file_filter {
+        open_project_index_matching_path(root_dir, std::path::Path::new(file))?
+    } else if let Some(function) = function_filter {
+        open_project_index_matching_literal(root_dir, function)?
+    } else {
+        open_project(root_dir)?
+    };
     let filters = bonsai_sdk::AstFilters {
         file: file_filter,
         function: function_filter,
@@ -373,6 +406,23 @@ pub(crate) fn cmd_dump_ast(
              output and in `node_id` on each object in `--format json`.",
             node_id_filter.unwrap_or("")
         ),
+        bonsai_sdk::AstOutcome::FunctionAmbiguous { function, candidates } => {
+            let choices = candidates
+                .iter()
+                .map(|candidate| {
+                    format!(
+                        "  {}:{}:{} {} ({})",
+                        candidate.path, candidate.line, candidate.column, candidate.node_id, candidate.kind
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::bail!(
+                "AST function `{function}` is overloaded in the selected file. \
+                 Choose one candidate by rerunning with --file <path> --node <N:id> \
+                 and omit --function:\n{choices}"
+            )
+        }
     };
     stage.finish();
     let filters_hash = paging::hash_filters(&[
@@ -413,7 +463,11 @@ pub(crate) fn cmd_dump_ast(
                 &paging_cfg,
                 "dump-ast",
                 filters_hash,
-                |line| line.len() as u64 + 128,
+                // `render_ast_text_lines` has already produced the exact
+                // visible line, including indentation and styling. Charge
+                // its actual bytes plus the newline; fixed per-line padding
+                // made small scoped ASTs consume only ~10% of each page.
+                |line| line.len() as u64 + 1,
                 |paged, info, _cfg| {
                     for line in paged {
                         cli_println!("{line}");
@@ -761,7 +815,19 @@ pub(crate) fn cmd_dump_taint(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project_index_only_with_rulepack(root, None)?;
+    let (retrieval_query, retrieval_file) = dump_taint_retrieval_query(source_name);
+    let (project, _footer) = match open_project_index_retrieval_candidates_with_rulepack(
+        root,
+        retrieval_query,
+        bonsai_sdk::SearchFilters {
+            file: retrieval_file,
+            ..Default::default()
+        },
+        None,
+    )? {
+        Some(project) => project,
+        None => open_project_index_only_with_rulepack(root, None)?,
+    };
     let filters = bonsai_sdk::TaintFilters {
         source: source_name,
         seeds: seeds.to_vec(),
@@ -816,6 +882,20 @@ pub(crate) fn cmd_dump_taint(
         },
     }
     Ok(())
+}
+
+fn dump_taint_retrieval_query(source: &str) -> (&str, Option<&str>) {
+    let Some((head, name)) = source.rsplit_once(':') else {
+        return (source, None);
+    };
+    if head.is_empty() || name.is_empty() || name.contains(['/', '\\']) {
+        return (source, None);
+    }
+    let file = match head.rsplit_once(':') {
+        Some((path, line)) if !path.is_empty() && line.parse::<u32>().is_ok() => path,
+        _ => head,
+    };
+    (name, Some(file))
 }
 
 fn render_taint_report_json_paged(

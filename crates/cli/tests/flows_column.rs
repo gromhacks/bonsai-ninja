@@ -180,9 +180,7 @@ fn is_lower_hex(bytes: &[u8]) -> bool {
 fn assert_flows_header(lang: &str, cmd: &str, extra: &[&str]) {
     let Some(ws) = ws_for(lang) else { return };
     let ws_str = ws.to_str().unwrap();
-    // Column is on by default — no explicit `--flows` needed (that
-    // flag was retired in favour of `--no-flows` as opt-out).
-    let mut args = vec![cmd, ws_str];
+    let mut args = vec![cmd, ws_str, "--flows"];
     args.extend_from_slice(extra);
     let Some(out) = run(&args) else { return };
     assert!(
@@ -276,7 +274,7 @@ fn flows_column_present_for_every_language_search() {
 fn defs_flows_column_populated_for_every_language() {
     for &lang in LANGUAGES {
         let Some(ws) = ws_for(lang) else { continue };
-        let Some(out) = run(&["defs", ws.to_str().unwrap()]) else {
+        let Some(out) = run(&["defs", ws.to_str().unwrap(), "--flows"]) else {
             return;
         };
         let found = count_flow_ids(&out);
@@ -314,7 +312,7 @@ fn flows_flag_does_not_break_json_output() {
         ] {
             // JSON output should parse regardless of whether flows
             // is on or off — test both paths.
-            for extra in &[vec!["--format", "json"], vec!["--no-flows", "--format", "json"]] {
+            for extra in &[vec!["--format", "json"], vec!["--flows", "--format", "json"]] {
                 let mut args = vec![cmd, ws_str];
                 args.extend_from_slice(extra);
                 let Some(out) = run(&args) else { return };
@@ -326,41 +324,42 @@ fn flows_flag_does_not_break_json_output() {
 }
 
 // -----------------------------------------------------------------------------
-// Default-on: the `flows` column renders without passing `--flows`,
-// and `--no-flows` suppresses it. These guard the one-line surface
-// flip that made the column the default — a regression here would
-// silently put us back in opt-in mode without failing any other
-// test.
+// Syntax inventory is the lightweight default. Semantic flow hydration is
+// explicit and adds the flow column only when requested.
 // -----------------------------------------------------------------------------
 
 #[test]
-fn flows_column_is_on_by_default() {
+fn flows_column_is_off_by_default() {
     for &lang in LANGUAGES {
         let Some(ws) = ws_for(lang) else { continue };
         let Some(out) = run(&["calls", ws.to_str().unwrap()]) else {
             return;
         };
+        let header = out
+            .lines()
+            .find(|line| line.contains("caller") && line.contains("callee"))
+            .unwrap_or("");
         assert!(
-            out.contains("flows"),
-            "{lang} calls: `flows` column should be on by default: {out}"
+            !header.contains("flows"),
+            "{lang} calls: `flows` column should be off by default: {out}"
         );
     }
 }
 
 #[test]
-fn no_flows_flag_suppresses_column() {
+fn flows_flag_enables_column() {
     for &lang in LANGUAGES {
         let Some(ws) = ws_for(lang) else { continue };
-        let Some(out) = run(&["calls", ws.to_str().unwrap(), "--no-flows"]) else {
+        let Some(out) = run(&["calls", ws.to_str().unwrap(), "--flows"]) else {
             return;
         };
-        // Header row is the first separator-bounded line; a stray
-        // "flows" later in the body (e.g. inside a `code` cell) is
-        // not a failure. We assert the header doesn't contain it.
-        let header_line = out.lines().next().unwrap_or("");
+        let header_line = out
+            .lines()
+            .find(|line| line.contains("caller") && line.contains("callee"))
+            .unwrap_or("");
         assert!(
-            !header_line.contains("flows"),
-            "{lang} calls --no-flows: header still includes flows: {header_line}"
+            header_line.contains("flows"),
+            "{lang} calls --flows: header is missing flows: {header_line}"
         );
     }
 }
@@ -410,7 +409,7 @@ fn browse_flow_ids_match_inspect_flow_ids() {
     // Python fixture always has `handle_request` (the entry point),
     // so the chain `[handle_request → get_user → verify_token → …]`
     // shows up here and again in inspect's output.
-    let Some(calls_out) = run(&["calls", ws_str]) else {
+    let Some(calls_out) = run(&["calls", ws_str, "--flows"]) else {
         return;
     };
     let browse_ids: Vec<String> = extract_flow_ids(&calls_out);
@@ -465,7 +464,7 @@ fn inspect_flow_standalone_resolves() {
     let Some(ws) = ws_for("python") else { return };
     let ws_str = ws.to_str().unwrap();
     // Pick any flow id browse emits for the fixture.
-    let Some(calls_out) = run(&["calls", ws_str]) else {
+    let Some(calls_out) = run(&["calls", ws_str, "--flows"]) else {
         return;
     };
     let Some(target_id) = extract_flow_ids(&calls_out).into_iter().next() else {
@@ -578,7 +577,7 @@ fn inspect_folds_occurrence_hits_sharing_a_flow() {
 fn assert_browse_cmd_has_flow_ids(cmd: &str, extra: &[&str]) {
     let Some(ws) = ws_for("python") else { return };
     let ws_str = ws.to_str().unwrap();
-    let mut args = vec![cmd, ws_str];
+    let mut args = vec![cmd, ws_str, "--flows"];
     args.extend_from_slice(extra);
     let Some(out) = run(&args) else { return };
     let found = count_flow_ids(&out);
@@ -640,7 +639,7 @@ fn classes_flows_column_populated() {
     // tolerate zero flow ids (empty column is valid when no class
     // spans a taint chain).
     let Some(ws) = ws_for("python") else { return };
-    let Some(_out) = run(&["classes", ws.to_str().unwrap()]) else {
+    let Some(_out) = run(&["classes", ws.to_str().unwrap(), "--flows"]) else {
         return;
     };
 }
@@ -666,7 +665,7 @@ fn flows_column_warns_when_label_set_is_capped() {
     let root = tempdir_for_test("bonsai-flow-column-capped-labels");
     write_flow_label_fan_in_workspace(&root, 40);
 
-    let Some(out) = run(&["defs", root.to_str().unwrap(), "--name", "sink"]) else {
+    let Some(out) = run(&["defs", root.to_str().unwrap(), "--name", "sink", "--flows"]) else {
         return;
     };
     assert!(

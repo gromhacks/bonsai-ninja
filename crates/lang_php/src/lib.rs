@@ -44,6 +44,18 @@ pub const LANG_ID: LanguageId = LanguageId::new("php");
 const PACK_NAME: &str = "php";
 const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: &["__construct"],
+    class_kinds: &[
+        "class_declaration",
+        "interface_declaration",
+        "trait_declaration",
+        "enum_declaration",
+    ],
+    class_decl_kinds: &[
+        ("class_declaration", DeclKind::Class),
+        ("interface_declaration", DeclKind::Interface),
+        ("trait_declaration", DeclKind::Trait),
+        ("enum_declaration", DeclKind::Enum),
+    ],
     ..with_fn_kinds_and_implicit_receivers(
         &["function_definition", "method_declaration"],
         &["$this", "this"],

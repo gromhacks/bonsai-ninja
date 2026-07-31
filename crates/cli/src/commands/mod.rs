@@ -145,6 +145,19 @@ pub(crate) fn open_project_index_matching_literal(
     Ok((project, footer))
 }
 
+pub(crate) fn open_project_index_matching_any_literal(
+    root: &std::path::Path,
+    literals: &[&str],
+) -> Result<(Project, WorkspaceFooter)> {
+    let progress = workspace_open_progress();
+    let project = bonsai_for_cli()
+        .open_query_matching_any_literal_with_progress(root, literals, progress)?
+        .with_auto_refresh(false);
+    crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
+    let footer = WorkspaceFooter::new();
+    Ok((project, footer))
+}
+
 pub(crate) fn open_project_index_filtered_paths(
     root: &std::path::Path,
     include_filters: &[String],
@@ -157,6 +170,54 @@ pub(crate) fn open_project_index_filtered_paths(
     crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
     let footer = WorkspaceFooter::new();
     Ok((project, footer))
+}
+
+pub(crate) fn open_project_index_retrieval_candidates(
+    root: &std::path::Path,
+    query: &str,
+    filters: bonsai_sdk::SearchFilters<'_>,
+) -> Result<Option<(Project, WorkspaceFooter)>> {
+    let progress = workspace_open_progress();
+    let Some(project) =
+        bonsai_for_cli().open_query_retrieval_candidates_with_progress(root, query, filters, progress)?
+    else {
+        return Ok(None);
+    };
+    crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
+    Ok(Some((project, WorkspaceFooter::new())))
+}
+
+pub(crate) fn open_project_index_retrieval_candidates_with_rulepack(
+    root: &std::path::Path,
+    query: &str,
+    filters: bonsai_sdk::SearchFilters<'_>,
+    rules_dir: Option<&std::path::Path>,
+) -> Result<Option<(Project, WorkspaceFooter)>> {
+    let progress = workspace_open_progress();
+    let bonsai = bonsai_with_rulepack(root, rules_dir)?;
+    let Some(project) =
+        bonsai.open_query_retrieval_candidates_with_progress(root, query, filters, progress)?
+    else {
+        return Ok(None);
+    };
+    let project = project.with_auto_refresh(false);
+    crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
+    Ok(Some((project, WorkspaceFooter::new())))
+}
+
+pub(crate) fn open_project_index_retrieval_candidate_union(
+    root: &std::path::Path,
+    queries: &[&str],
+    filters: bonsai_sdk::SearchFilters<'_>,
+) -> Result<Option<(Project, WorkspaceFooter)>> {
+    let progress = workspace_open_progress();
+    let Some(project) = bonsai_for_cli()
+        .open_query_retrieval_candidate_union_with_progress(root, queries, filters, progress)?
+    else {
+        return Ok(None);
+    };
+    crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
+    Ok(Some((project, WorkspaceFooter::new())))
 }
 
 pub(crate) fn open_project_index_matching_path(
@@ -174,12 +235,6 @@ pub(crate) fn open_project_index_matching_path(
 
 pub(crate) fn open_project_parse_only(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
     open_project_with_options(root, bonsai_sdk::OpenOptions::parse_only())
-}
-
-pub(crate) fn open_project_streaming_parse_only(
-    root: &std::path::Path,
-) -> Result<(Project, WorkspaceFooter)> {
-    open_project_with_options(root, bonsai_sdk::OpenOptions::streaming_parse_only())
 }
 
 /// Open only the compact workspace snapshot needed to validate or build one

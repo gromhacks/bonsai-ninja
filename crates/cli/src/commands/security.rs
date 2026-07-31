@@ -1600,7 +1600,7 @@ where
         "security/taint-analysis",
         filters_hash,
         cost,
-    );
+    )?;
     let current_page = current_info.page_number;
     let mut pages = Vec::new();
     let page_numbers: Vec<u64> = if eager_pages {
@@ -1616,7 +1616,7 @@ where
             page_cfg.page = paging::PageArg::Number(page_number);
         }
         let (paged_idx, info) =
-            paging::paginate(&indexed, &page_cfg, "security/taint-analysis", filters_hash, cost);
+            paging::paginate(&indexed, &page_cfg, "security/taint-analysis", filters_hash, cost)?;
         let text = page_cache::capture(|| render_page(&paged_idx, &info, &page_cfg))?;
         pages.push(page_cache::CachedPage {
             number: page_number,
@@ -1693,7 +1693,7 @@ fn build_taint_text_pages(
 
     let units = build_taint_text_units(render_workspace, pack, report, unit_target_bytes)?;
     let page_bounds = taint_text_page_bounds(&units, page_payload_budget_bytes);
-    let current_page = resolve_taint_text_page(&page_bounds, paging_cfg, filters_hash);
+    let current_page = resolve_taint_text_page(&page_bounds, paging_cfg, filters_hash)?;
     let page_numbers: Vec<u64> = page_cache::eager_window(current_page, page_bounds.len() as u64)
         .into_iter()
         .collect();
@@ -1940,18 +1940,24 @@ fn resolve_taint_text_page(
     bounds: &[(usize, usize)],
     paging_cfg: &paging::PagingConfig,
     filters_hash: u64,
-) -> u64 {
+) -> Result<u64> {
     let total_pages = bounds.len().max(1) as u64;
     let target = match &paging_cfg.page {
         paging::PageArg::First => 1,
         paging::PageArg::Number(n) => *n,
-        paging::PageArg::Cursor(cursor) => bounds
-            .iter()
-            .position(|(start, _)| {
-                paging::cursor_id("security/taint-analysis", filters_hash, *start as u64) == *cursor
-            })
-            .map(|idx| idx as u64 + 1)
-            .unwrap_or(1),
+        paging::PageArg::Cursor(cursor) => {
+            let offset = paging::resolve_cursor_offset(
+                cursor,
+                "security/taint-analysis",
+                filters_hash,
+                bounds.iter().map(|(start, _)| *start as u64),
+            )?;
+            bounds
+                .iter()
+                .position(|(start, _)| *start as u64 == offset)
+                .map(|idx| idx as u64 + 1)
+                .expect("resolved cursor offset must belong to page bounds")
+        }
         paging::PageArg::Next => paging::last_cursor("security/taint-analysis", filters_hash)
             .and_then(|cursor| {
                 bounds
@@ -1963,7 +1969,7 @@ fn resolve_taint_text_page(
             })
             .unwrap_or(1),
     };
-    target.clamp(1, total_pages)
+    Ok(target.clamp(1, total_pages))
 }
 
 fn split_security_flow_for_context(
@@ -2826,7 +2832,7 @@ fn cmd_source_analysis(
                 "security/source-analysis",
                 filters_hash,
                 text_cost,
-            );
+            )?;
             let total_pages = current_info.total_pages;
             let current_page = current_info.page_number;
             pagination_progress.finish();
@@ -2841,7 +2847,7 @@ fn cmd_source_analysis(
                     "security/source-analysis",
                     filters_hash,
                     text_cost,
-                );
+                )?;
                 let text = page_cache::capture(|| {
                     render_source_analysis_text_page(
                         ws,
@@ -2869,7 +2875,7 @@ fn cmd_source_analysis(
                 "security/source-analysis",
                 filters_hash,
                 text_cost,
-            );
+            )?;
             let cache_progress = ScopedProgress::new("saving source page cache");
             if let Err(e) = page_cache::save_pages(
                 workspace,

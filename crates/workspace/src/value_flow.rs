@@ -31,11 +31,13 @@ use std::sync::Arc;
 /// sidecars are rejected. The workspace-interned factstore format is
 /// produced by [`bonsai_factstore`], whose header and pipeline hash reject
 /// incompatible payloads before decoding.
+// v12 (2026-07-30): invalidate derived graphs after compiler-object v13
+// changed nested lexical identities and resolver endpoints.
 // v10 (2026-07-16): MessagePack replaces the retired binary codec.
 // v9 (2026-07-16): remove the retired saturation field.
 // v8 (2026-05-27): the value-flow graph derives from the IDG, whose
 // construction and seeding changed enough to reject older sidecars.
-pub const VALUE_FLOW_CACHE_VERSION: u32 = 10;
+pub const VALUE_FLOW_CACHE_VERSION: u32 = 12;
 
 /// Caller-defined table id stamped into the factstore header. Lets
 /// the reader detect "this is the value-flow store" vs other

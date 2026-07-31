@@ -59,6 +59,20 @@ const PACK_NAME: &str = "csharp";
 // `destructor_declaration` join the set so RAII / dtor flows surface.
 const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    class_kinds: &[
+        "class_declaration",
+        "struct_declaration",
+        "interface_declaration",
+        "enum_declaration",
+        "record_declaration",
+    ],
+    class_decl_kinds: &[
+        ("class_declaration", DeclKind::Class),
+        ("record_declaration", DeclKind::Class),
+        ("struct_declaration", DeclKind::Struct),
+        ("interface_declaration", DeclKind::Interface),
+        ("enum_declaration", DeclKind::Enum),
+    ],
     ..with_fn_kinds_and_implicit_receivers(
         &[
             "method_declaration",

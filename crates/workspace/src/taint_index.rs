@@ -38,6 +38,8 @@ use std::sync::Arc;
 /// On-disk snapshot version for the workspace-wide taint graph.
 /// Disk format is the streaming factstore; bumping this invalidates
 /// every cached sidecar so consumers get a fresh build on next open.
+// v14 (2026-07-30): nested lexical endpoint identities changed with
+// compiler-object v13; cached reachability must use the rebuilt IDG.
 // v12 (2026-07-25): Security source graphs now execute against the exact
 // source-to-sink corridor's backward target-demand relation. Older graphs
 // were built with workspace-global sink demand and are not semantically
@@ -48,7 +50,7 @@ use std::sync::Arc;
 // RHS call spans for assignment-derived terminal calls.
 // v9 (2026-05-27): taint graph derives from the IDG, whose construction
 // and seeding changed enough that old graphs are no longer equivalent.
-pub const TAINT_GRAPH_CACHE_VERSION: u32 = 12;
+pub const TAINT_GRAPH_CACHE_VERSION: u32 = 14;
 
 /// Caller-defined table id stamped into the factstore header. 4 is
 /// the next slot after dataflow (2), value-flow (1), flow-ids (3).
@@ -179,6 +181,9 @@ pub struct PersistStartReport {
     pub started: bool,
     /// Abandoned temp files removed while holding their target locks.
     pub temp_files_removed: usize,
+    /// Finalized sidecars from older, incompatible schemas removed while
+    /// holding their target locks.
+    pub obsolete_sidecars_removed: usize,
 }
 
 fn persistence_lock_path(path: &Path) -> PathBuf {
@@ -665,6 +670,7 @@ impl TaintGraphIndex {
         // Ownership is established before cleanup: another process's active
         // target remains locked and its unique temp is never unlinked.
         let temp_files_removed = cleanup_abandoned_taint_graph_temp_files(path)?;
+        let obsolete_sidecars_removed = prune_obsolete_taint_graph_sidecars(path)?;
         let writer = FactStoreWriter::create(
             path,
             TAINT_GRAPH_TABLE_ID,
@@ -682,6 +688,7 @@ impl TaintGraphIndex {
         Ok(PersistStartReport {
             started: true,
             temp_files_removed,
+            obsolete_sidecars_removed,
         })
     }
 
@@ -815,11 +822,25 @@ pub fn cleanup_sidecar_temp_files(path: &Path) -> std::io::Result<usize> {
     cleanup_valid_sidecar_temp_files(path)
 }
 
+pub(crate) fn maintain_sidecar_cache(workspace_root: &Path) -> std::io::Result<()> {
+    let current = TaintGraphIndex::sidecar_path(workspace_root);
+    let lock_file = acquire_persistence_lock(&current)?;
+    let cleanup_result = cleanup_abandoned_taint_graph_temp_files(&current)
+        .and_then(|_| prune_obsolete_taint_graph_sidecars(&current))
+        .map(|_| ());
+    let unlock_result = FileExt::unlock(&lock_file);
+    cleanup_result.and(unlock_result)
+}
+
 fn cleanup_abandoned_taint_graph_temp_files(owned_path: &Path) -> std::io::Result<usize> {
     let Some(parent) = owned_path.parent() else {
         return Ok(0);
     };
-    let current_prefix = format!("taint_graph.v{TAINT_GRAPH_CACHE_VERSION}.");
+    let current_version = owned_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(taint_graph_sidecar_version)
+        .unwrap_or(TAINT_GRAPH_CACHE_VERSION);
     let mut targets = BTreeSet::new();
     let entries = match std::fs::read_dir(parent) {
         Ok(entries) => entries,
@@ -840,8 +861,7 @@ fn cleanup_abandoned_taint_graph_temp_files(owned_path: &Path) -> std::io::Resul
             continue;
         };
         if factstore_writer_suffix_is_valid(writer_suffix)
-            && target_name.starts_with(&current_prefix)
-            && target_name.ends_with(".factstore")
+            && taint_graph_sidecar_version(target_name).is_some_and(|version| version <= current_version)
         {
             targets.insert(parent.join(target_name));
         }
@@ -883,6 +903,91 @@ fn cleanup_abandoned_taint_graph_temp_files(owned_path: &Path) -> std::io::Resul
         }
     }
     Ok(removed)
+}
+
+fn prune_obsolete_taint_graph_sidecars(current_path: &Path) -> std::io::Result<usize> {
+    let Some(parent) = current_path.parent() else {
+        return Ok(0);
+    };
+    let Some(current_version) = current_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(taint_graph_sidecar_version)
+    else {
+        return Ok(0);
+    };
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut obsolete = BTreeSet::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if taint_graph_sidecar_version(name).is_some_and(|version| version < current_version) {
+            obsolete.insert(entry.path());
+        }
+    }
+
+    let mut removed = 0usize;
+    for target in obsolete {
+        let lock_file = match acquire_persistence_lock(&target) {
+            Ok(lock_file) => lock_file,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => {
+                tracing::warn!(
+                    path = %target.display(),
+                    error = %error,
+                    "skipping superseded taint-graph sidecar cleanup"
+                );
+                continue;
+            }
+        };
+        match std::fs::remove_file(&target) {
+            Ok(()) => removed = removed.saturating_add(1),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %target.display(),
+                    error = %error,
+                    "superseded taint-graph sidecar cleanup failed"
+                );
+            }
+        }
+        if let Err(error) = FileExt::unlock(&lock_file) {
+            tracing::warn!(
+                path = %target.display(),
+                error = %error,
+                "superseded taint-graph sidecar cleanup lock release failed"
+            );
+        }
+    }
+    Ok(removed)
+}
+
+fn taint_graph_sidecar_version(name: &str) -> Option<u32> {
+    let stem = name.strip_suffix(".factstore")?;
+    let suffix = stem.strip_prefix("taint_graph.v")?;
+    let version = suffix.split('.').next()?;
+    (!version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| version.parse().ok())
+        .flatten()
 }
 
 fn disk_snapshot_is_current(inner: &Inner, reader: &Arc<FactStoreReader>, config_fingerprint: u64) -> bool {

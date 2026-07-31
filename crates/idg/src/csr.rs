@@ -122,6 +122,53 @@ impl EdgeCsr {
         )
     }
 
+    /// Build only the forward CSR from a repeatable exact pair visitor.
+    ///
+    /// Forward-only compiler phases must not allocate a reverse relation they
+    /// cannot query. The same pair visitor and canonical numeric endpoints are
+    /// used; omitting the unused transpose changes allocation lifetime only.
+    pub(crate) fn forward_from_pair_visitor<F>(n_nodes: usize, visit_pairs: F) -> Self
+    where
+        F: Fn(&mut dyn FnMut(u32, u32)),
+    {
+        let mut offsets = vec![0_u32; n_nodes + 1];
+        visit_pairs(&mut |from, to| {
+            if (from as usize) >= n_nodes || (to as usize) >= n_nodes {
+                return;
+            }
+            offsets[from as usize + 1] += 1;
+        });
+        for index in 1..offsets.len() {
+            offsets[index] += offsets[index - 1];
+        }
+
+        let mut targets = vec![0_u32; *offsets.last().unwrap_or(&0) as usize];
+        let mut cursor = offsets.clone();
+        visit_pairs(&mut |from, to| {
+            if (from as usize) >= n_nodes || (to as usize) >= n_nodes {
+                return;
+            }
+            let position = cursor[from as usize] as usize;
+            targets[position] = to;
+            cursor[from as usize] += 1;
+        });
+        Self {
+            offsets,
+            targets,
+            n_nodes,
+        }
+    }
+
+    /// Empty adjacency over an existing numeric node address space.
+    #[must_use]
+    pub(crate) fn empty(n_nodes: usize) -> Self {
+        Self {
+            offsets: vec![0; n_nodes.saturating_add(1)],
+            targets: Vec::new(),
+            n_nodes,
+        }
+    }
+
     /// Build a backward CSR from compact `(from, to, precision)` edge records.
     #[must_use]
     pub fn backward_precision(n_nodes: usize, edges: &[(u32, u32, Precision)]) -> Self {

@@ -7,8 +7,10 @@
   match:
     kind: param
     target:
-      name: args
       in_method: [main]
+      param_index_in: [0]
+      param_type_in: [String]
+      param_count_in: [1]
   constraints:
     - enclosing_modifier_in: [static]
   match_examples:
@@ -26,7 +28,7 @@
           }
         }
       expect_no_match: true
-  description: "String[] args on Java main(...) - command-line arguments supplied by the local invoker."
+  description: "The String[] parameter of static Java main(...) - command-line arguments supplied by the local invoker. Matched from signature position/type, independent of the parameter name."
 
 - id: java.source.system_getenv
   enabled: true

@@ -145,9 +145,9 @@ pub(crate) fn build_workspace_semantic_context(
 
     let toolchain_manifests = collect_toolchain_manifests(root, files);
     for manifest in &toolchain_manifests {
-        add_context_root(
+        annotate_module_roots_for_manifest(
             &mut module_roots,
-            manifest.scope.clone(),
+            &manifest.scope,
             format!("toolchain_manifest:{}", manifest.kind),
             count_files_under_context_path(&relative_files, &manifest.scope),
         );
@@ -202,6 +202,36 @@ fn add_context_root(
         .or_default();
     entry.reasons.insert(reason.into());
     entry.indexed_files = entry.indexed_files.saturating_add(indexed_files);
+}
+
+/// Attach another reason to an already-counted source root without counting
+/// its files a second time. Toolchain manifests describe the same source
+/// files classified above; they are evidence for the root, not another copy
+/// of the root.
+fn annotate_module_roots_for_manifest(
+    roots: &mut BTreeMap<String, ContextRootAccumulator>,
+    scope: &str,
+    reason: impl Into<String>,
+    indexed_files: usize,
+) {
+    let reason = reason.into();
+    let scope = if scope.is_empty() { "." } else { scope };
+    let mut matched = false;
+    for (path, entry) in roots.iter_mut() {
+        let same_or_nested = scope == "."
+            || path == scope
+            || path.starts_with(&format!("{scope}/"))
+            || scope.starts_with(&format!("{path}/"));
+        if same_or_nested {
+            entry.reasons.insert(reason.clone());
+            matched = true;
+        }
+    }
+    if !matched {
+        let entry = roots.entry(scope.to_string()).or_default();
+        entry.reasons.insert(reason);
+        entry.indexed_files = indexed_files;
+    }
 }
 
 fn finish_context_roots(
@@ -533,5 +563,30 @@ mod tests {
             "deep dependency roots after more than 4096 source directories must be discovered: {context:?}"
         );
         assert!(context.incomplete_reasons.is_empty(), "{context:?}");
+    }
+
+    #[test]
+    fn toolchain_manifest_annotation_does_not_double_count_source_files() {
+        let temp = tempfile::tempdir().expect("temporary workspace");
+        fs::write(temp.path().join("pom.xml"), "<project/>").expect("manifest");
+        let first = temp.path().join("src/A.java");
+        let second = temp.path().join("src/B.java");
+        fs::create_dir_all(first.parent().expect("source parent")).expect("source directory");
+        fs::write(&first, "class A {}").expect("first source");
+        fs::write(&second, "class B {}").expect("second source");
+
+        let context =
+            build_workspace_semantic_context(Some(temp.path()), &[first.clone(), second.clone()], false);
+
+        assert_eq!(context.summary.indexed_files, 2);
+        assert_eq!(
+            context
+                .module_roots
+                .iter()
+                .map(|root| root.indexed_files)
+                .sum::<usize>(),
+            2,
+            "manifest evidence must not turn two indexed files into four"
+        );
     }
 }

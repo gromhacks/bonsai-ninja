@@ -2,7 +2,8 @@
 //!
 //! This command deliberately delegates to the owning renderer for each
 //! id family instead of re-implementing flow/finding formatting:
-//! F/G/raw-inspect T -> inspect, structured dump-taint T -> dump-taint,
+//! F/G security ids -> security, structural fallback -> inspect,
+//! raw-inspect T -> inspect, structured dump-taint T -> dump-taint,
 //! E -> dump-edges, N -> dump-ast, R -> dump-resolve, S/security G ->
 //! security taint-analysis. SDK structural-chain fallback is used only
 //! for structural F/G ids that the SDK exposes but the downstream
@@ -47,8 +48,8 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
         );
     }
     match prefix {
-        "F" => show_structural_or_security_flow(&args, id, paging_cfg),
-        "G" => show_structural_or_security_group(&args, id, paging_cfg),
+        "F" => show_security_or_structural_flow(&args, id, paging_cfg),
+        "G" => show_security_or_structural_group(&args, id, paging_cfg),
         "T" if args.has_dump_taint_context() => show_dump_taint_propagation(args, id, paging_cfg),
         "T" => {
             show_raw_taint_flow(args.workspace, id, args.compact, paging_cfg, args.format).map_err(|err| {
@@ -144,24 +145,33 @@ fn show_structural_flow(
     )
 }
 
-fn show_structural_or_security_flow(
+fn show_security_or_structural_flow(
     args: &ShowArgs<'_>,
     id: &str,
     paging_cfg: paging::PagingConfig,
 ) -> Result<()> {
-    match show_structural_flow(args.workspace, id, args.compact, paging_cfg.clone(), args.format) {
+    // Security and structural flows historically share the F: namespace.
+    // Probe the exact flow-filtered security facade first: production output
+    // is the most common source of pasted F: ids, and the sparse IDG query is
+    // bounded by that id. Starting with unfiltered structural inspect used to
+    // enumerate an entire large-repository graph before discovering that the
+    // id belonged to security (eight minutes on Elasticsearch).
+    match show_security_flow(args, id) {
         Ok(()) => Ok(()),
-        Err(err) if err.to_string().contains("no flow matching") => {
-            match show_sdk_structural_flow(args.workspace, id, args.format) {
+        Err(security_err) => {
+            match show_structural_flow(args.workspace, id, args.compact, paging_cfg.clone(), args.format) {
                 Ok(()) => Ok(()),
-                Err(sdk_err) => show_security_flow(args, id).map_err(|security_err| {
-                    anyhow::anyhow!(
-                        "flow id `{id}` was not found by inspect render, SDK structural chains, or security taint flow: {err}; {sdk_err}; {security_err}"
-                    )
-                }),
+                Err(err) if err.to_string().contains("no flow matching") => {
+                    match show_sdk_structural_flow(args.workspace, id, args.format) {
+                        Ok(()) => Ok(()),
+                        Err(sdk_err) => Err(anyhow::anyhow!(
+                            "flow id `{id}` was not found by security taint flow, inspect render, or SDK structural chains: {security_err}; {err}; {sdk_err}"
+                        )),
+                    }
+                }
+                Err(err) => Err(err),
             }
         }
-        Err(err) => Err(err),
     }
 }
 
@@ -198,26 +208,42 @@ fn show_flow_group(
     )
 }
 
-fn show_structural_or_security_group(
+fn show_security_or_structural_group(
     args: &ShowArgs<'_>,
     id: &str,
     paging_cfg: paging::PagingConfig,
 ) -> Result<()> {
-    match show_flow_group(args.workspace, id, args.compact, paging_cfg.clone(), args.format) {
+    match show_security_group(args, id) {
         Ok(()) => Ok(()),
-        Err(err) if err.to_string().contains("no flow group matching") => {
-            match show_sdk_structural_group(args.workspace, id, args.format) {
+        Err(security_err) => {
+            match show_flow_group(
+                args.workspace,
+                id,
+                args.compact,
+                paging_cfg.clone(),
+                args.format,
+            ) {
                 Ok(()) => Ok(()),
-                Err(sdk_err) => show_security_group(args, id).map_err(|security_err| {
-                    anyhow::anyhow!(
-                        "group id `{id}` was not found by inspect render, SDK structural chains, or security taint group: {err}; {sdk_err}; {security_err}"
-                    )
-                }),
+                Err(err) if err.to_string().contains("no flow group matching") => {
+                    match show_sdk_structural_group(args.workspace, id, args.format) {
+                        Ok(()) => Ok(()),
+                        Err(sdk_err) => Err(anyhow::anyhow!(
+                            "group id `{id}` was not found by security taint group, inspect render, or SDK structural chains: {security_err}; {err}; {sdk_err}"
+                        )),
+                    }
+                }
+                Err(err) => Err(err),
             }
         }
-        Err(err) => Err(err),
     }
 }
+
+/*
+ * Keep the structural renderers below independent of routing. The F:/G:
+ * namespace predates security flow ids, so compatibility still requires both
+ * owners; the router above only changes probe order and never changes result
+ * semantics.
+ */
 
 fn show_sdk_structural_flow(workspace: &Path, id: &str, format: BrowseFormat) -> Result<()> {
     let (project, _footer) = open_project_index_only(workspace)?;

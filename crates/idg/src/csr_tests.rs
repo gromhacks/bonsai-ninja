@@ -107,6 +107,23 @@ fn bidirectional_factory_matches_independent_csrs() {
 }
 
 #[test]
+fn forward_visitor_matches_independent_csr_without_a_reverse_relation() {
+    let pairs = vec![(0, 1), (0, 2), (2, 1), (2, 1), (9, 0)];
+    let expected = EdgeCsr::forward_pairs(3, &pairs);
+    let forward = EdgeCsr::forward_from_pair_visitor(3, |visit| {
+        for &(from, to) in &pairs {
+            visit(from, to);
+        }
+    });
+
+    assert_eq!(forward, expected);
+    let empty = EdgeCsr::empty(3);
+    assert_eq!(empty.node_count(), 3);
+    assert_eq!(empty.edge_count(), 0);
+    assert!(empty.neighbours(NodeId(0)).is_empty());
+}
+
+#[test]
 fn bidirectional_visitor_matches_independent_csrs() {
     let pairs = vec![(0, 1), (0, 2), (2, 1), (2, 1), (9, 0)];
     let expected_forward = EdgeCsr::forward_pairs(3, &pairs);

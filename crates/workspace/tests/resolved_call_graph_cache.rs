@@ -404,6 +404,89 @@ fn complete_lazy_semantic_miss_publishes_reusable_compiler_phases() {
 }
 
 #[test]
+fn disconnected_persisted_endpoints_reopen_as_an_exact_empty_query_workspace() {
+    let root = tempdir("disconnected-endpoint-query");
+    std::fs::write(
+        root.join("source.py"),
+        "def source_endpoint(first):\n    return first\n\ndef source_endpoint(first, second):\n    return second\n",
+    )
+        .expect("write source endpoint");
+    std::fs::write(root.join("target.py"), "def target_endpoint():\n    return 2\n")
+        .expect("write target endpoint");
+    std::fs::write(root.join("unrelated.py"), "def unrelated():\n    return 3\n")
+        .expect("write unrelated declaration");
+
+    let complete = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::lazy_query())
+        .expect("open complete workspace");
+    assert!(
+        complete.cached_resolved_call_graph().inner().edges.is_empty(),
+        "fixture endpoints must be disconnected"
+    );
+    complete
+        .save_callgraph_sidecar(&root)
+        .expect("persist disconnected callgraph");
+    complete
+        .save_compiler_object_sidecar(&root)
+        .expect("persist compiler objects");
+    complete
+        .save_compiler_linkage_sidecar(&root)
+        .expect("persist compiler linkage");
+    drop(complete);
+
+    let candidates = Workspace::open_query_matching_any_literal_with_options_and_events(
+        &root,
+        registry(),
+        &["source_endpoint", "target_endpoint"],
+        WorkspaceOpenOptions::lazy_query(),
+        &|_| {},
+    )
+    .expect("open endpoint candidates");
+    let candidate_files = candidates.vfs().all_files();
+    let sources = candidates
+        .lookup_functions_in_persisted_headers("source_endpoint", &candidate_files)
+        .expect("persisted source overloads");
+    let targets = candidates
+        .lookup_functions_in_persisted_headers("target_endpoint", &candidate_files)
+        .expect("persisted target");
+    assert_eq!(
+        sources.len(),
+        2,
+        "a source-level name must retain every exact overload"
+    );
+    assert_eq!(targets.len(), 1);
+
+    let scoped = candidates
+        .source_target_query_workspace(&sources, &targets, Some(bonsai_common::Precision::Narrowed))
+        .expect("a fresh empty corridor is an exact answer, not a cache miss");
+
+    assert_eq!(scoped.stats().files, 2);
+    assert_eq!(
+        scoped
+            .lookup_functions_in_persisted_headers("source_endpoint", &scoped.vfs().all_files())
+            .expect("scoped persisted overloads")
+            .len(),
+        2
+    );
+    assert!(scoped.lookup_function("target_endpoint").is_some());
+    let scoped_paths = scoped
+        .vfs()
+        .all_files()
+        .into_iter()
+        .map(|file| scoped.vfs().path(file).expect("scoped path"))
+        .collect::<Vec<_>>();
+    assert!(
+        scoped_paths.iter().all(|path| !path.ends_with("unrelated.py")),
+        "an empty endpoint corridor must not hydrate unrelated files"
+    );
+    assert!(
+        scoped.cached_resolved_call_graph().inner().edges.is_empty(),
+        "disconnected endpoints must seed an exact empty graph"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn editing_a_file_drops_cached_graph() {
     let ws = ws_with(
         "app.py",

@@ -45,6 +45,87 @@ fn long_minified_named_source_is_parsed_by_single_file_and_parallel_ingest() {
 }
 
 #[test]
+fn multi_literal_candidate_open_ingests_the_union_only() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::write(
+        root.path().join("source.py"),
+        "def first_endpoint():\n    return 1\n",
+    )
+    .expect("write source endpoint");
+    std::fs::write(
+        root.path().join("target.py"),
+        "def second_endpoint():\n    return 2\n",
+    )
+    .expect("write target endpoint");
+    std::fs::write(
+        root.path().join("unrelated.py"),
+        "def unrelated():\n    return 3\n",
+    )
+    .expect("write unrelated source");
+
+    let workspace = Workspace::open_query_matching_any_literal_with_options_and_events(
+        root.path(),
+        python_registry(),
+        &["first_endpoint", "second_endpoint"],
+        WorkspaceOpenOptions::parse_only(),
+        &|_| {},
+    )
+    .expect("multi-literal candidate open");
+
+    assert_eq!(workspace.stats().files, 2);
+    assert!(workspace.lookup_function("first_endpoint").is_some());
+    assert!(workspace.lookup_function("second_endpoint").is_some());
+    assert!(workspace.lookup_function("unrelated").is_none());
+}
+
+#[test]
+fn exact_query_worklist_preserves_global_file_identity_without_opening_siblings() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    let alpha = root.path().join("alpha.py");
+    let beta = root.path().join("beta.py");
+    let alpha_text = "def alpha():\n    return 1\n";
+    let beta_text = "def beta():\n    return 2\n";
+    std::fs::write(&alpha, alpha_text).expect("write alpha");
+    std::fs::write(&beta, beta_text).expect("write beta");
+    let alpha = alpha.canonicalize().expect("canonical alpha");
+    let beta = beta.canonicalize().expect("canonical beta");
+    let source_inputs = vec![
+        (
+            0,
+            alpha.to_string_lossy().into_owned(),
+            bonsai_hash::fnv1a_bytes64(alpha_text.as_bytes()),
+        ),
+        (
+            1,
+            beta.to_string_lossy().into_owned(),
+            bonsai_hash::fnv1a_bytes64(beta_text.as_bytes()),
+        ),
+    ];
+
+    let workspace = Workspace::open_query_exact_files_with_source_inputs_and_events(
+        root.path(),
+        python_registry(),
+        &[(FileId::new(1), beta.clone())],
+        source_inputs,
+        WorkspaceOpenOptions::parse_only(),
+        &|_| {},
+    )
+    .expect("exact candidate open");
+
+    assert_eq!(workspace.stats().files, 1);
+    assert!(workspace.lookup_function("alpha").is_none());
+    assert!(workspace.lookup_function("beta").is_some());
+    assert_eq!(
+        workspace
+            .vfs()
+            .path(FileId::new(1))
+            .expect("global beta id")
+            .as_path(),
+        beta.as_path()
+    );
+}
+
+#[test]
 fn streaming_ingest_parses_delimiter_text_in_strings_and_comments() {
     let root = tempfile::tempdir().expect("workspace tempdir");
     let string_delimiters = "(".repeat(2_100);
@@ -79,6 +160,26 @@ fn sidecar_validation_open_ingests_without_parsing() {
         0,
         "freshness and adapter-capability probes must not lower or retain syntax IR"
     );
+}
+
+#[test]
+fn metadata_context_discovers_sources_without_ingesting_or_parsing_them() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::create_dir(root.path().join("src")).expect("source dir");
+    std::fs::write(root.path().join("src/app.py"), "def main():\n    return 1\n").expect("write source");
+    std::fs::write(root.path().join("pyproject.toml"), "[project]\nname='fixture'\n")
+        .expect("write manifest");
+
+    let workspace = Workspace::new(python_registry());
+    let context = workspace
+        .semantic_context_for_root(root.path())
+        .expect("metadata context");
+
+    assert_eq!(context.summary.indexed_files, 1);
+    assert_eq!(context.summary.toolchain_manifests, 1);
+    assert_eq!(workspace.stats().files, 0);
+    assert_eq!(workspace.stats().reparsed_files, 0);
+    assert_eq!(workspace.stats().cached_decl_indexes, 0);
 }
 
 #[test]

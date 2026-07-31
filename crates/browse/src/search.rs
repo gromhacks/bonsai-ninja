@@ -385,14 +385,18 @@ fn search_canonical(
     });
     hits.dedup_by(|a, b| a.name == b.name && a.file == b.file && a.line == b.line && a.column == b.column);
 
-    // Deterministic ranking: prefix match first, then shorter
-    // names, then (file, line). Same discipline as the old decl-
-    // only path so existing tests keep their ordering semantics.
+    // Deterministic ranking: exact name, prefix, semantic fact richness,
+    // then shorter names and source order. A symbol query should lead with
+    // its declaration instead of an arbitrary earlier call/reference site;
+    // those occurrences remain immediately below it.
     hits.sort_by(|a, b| {
-        let aprefix = a.name.to_lowercase().starts_with(&q_lower);
-        let bprefix = b.name.to_lowercase().starts_with(&q_lower);
-        bprefix
-            .cmp(&aprefix)
+        let a_lower = a.name.to_lowercase();
+        let b_lower = b.name.to_lowercase();
+        let a_quality = (a_lower != q_lower, !a_lower.starts_with(&q_lower));
+        let b_quality = (b_lower != q_lower, !b_lower.starts_with(&q_lower));
+        a_quality
+            .cmp(&b_quality)
+            .then(kind_rank(&a.kind).cmp(&kind_rank(&b.kind)))
             .then(a.name.len().cmp(&b.name.len()))
             .then(a.file.cmp(&b.file))
             .then(a.line.cmp(&b.line))
@@ -409,7 +413,8 @@ fn search_canonical(
 /// ranks last.
 fn kind_rank(kind: &str) -> u8 {
     match kind {
-        "function" | "method" | "class" | "struct" | "trait" | "interface" | "enum" | "constructor" => 0,
+        "module" | "namespace" | "function" | "method" | "constructor" | "class" | "struct" | "trait"
+        | "interface" | "enum" | "enumvariant" | "typealias" | "global" | "const" | "static" | "field" => 0,
         "call" | "var" | "arg" | "string" | "comment" | "import" | "import-alias" | "file" => 1,
         k if k.starts_with("ref-") => 2,
         _ => 3,

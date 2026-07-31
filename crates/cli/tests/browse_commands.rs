@@ -772,10 +772,23 @@ fn index_default_stays_structural_and_does_not_write_semantic_sidecars() {
         return;
     };
     assert!(out.contains("files"), "index summary missing: {out}");
+    let first: serde_json::Value = serde_json::from_str(&out).expect("first index summary JSON");
+    assert_eq!(first["compiler_cache"], "rebuilt", "{out}");
+    assert_eq!(first["parsed_files"], first["files"], "{out}");
+    let Some(warm_out) = run(&["index", tmp.to_str().unwrap()]) else {
+        return;
+    };
+    let warm: serde_json::Value = serde_json::from_str(&warm_out).expect("warm index summary JSON");
+    assert_eq!(warm["compiler_cache"], "hit", "{warm_out}");
+    assert_eq!(warm["parsed_files"], 0, "{warm_out}");
     let Some(stats_out) = run(&["cache", "stats", tmp.to_str().unwrap(), "--format", "json"]) else {
         return;
     };
     let stats: serde_json::Value = serde_json::from_str(&stats_out).expect("cache stats JSON");
+    assert_eq!(
+        stats["compiler_object_sidecar_exists"], true,
+        "`index` should persist reusable AST-lowered compiler objects: {stats_out}"
+    );
     assert_eq!(
         stats["callgraph_sidecar_exists"], false,
         "`index` should stay structural by default and avoid the semantic callgraph sidecar: {stats_out}"

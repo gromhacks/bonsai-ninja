@@ -3919,6 +3919,9 @@ fn finding_has_excluded_path(
         || finding.sanitizers_seen.iter().any(|sanitizer| {
             path_is_excluded_with_root(root.as_deref(), &sanitizer.file, exclude_files, exclude_tests)
         })
+        || finding.taint_transforms_seen.iter().any(|transform| {
+            path_is_excluded_with_root(root.as_deref(), &transform.file, exclude_files, exclude_tests)
+        })
 }
 
 fn workspace_relative_filter_path(root: Option<&Path>, path: &str) -> String {
@@ -4763,6 +4766,7 @@ fn extend_implicit_context_findings(
                     source: producer_flow.finding.source.clone(),
                     sink: sink_match,
                     sanitizers_seen: producer_flow.finding.sanitizers_seen.clone(),
+                    taint_transforms_seen: producer_flow.finding.taint_transforms_seen.clone(),
                     group_id: Some(group_id),
                     representative_flow_id: Some(flow_id),
                     analysis_complete: producer_flow.finding.analysis_complete,
@@ -4852,6 +4856,7 @@ fn merge_finding_into_group(group: &mut CombinedFindingWithChain, mut incoming: 
         source: incoming.source.clone(),
         sink_tainted_args: incoming.sink.tainted_args.clone(),
         sanitizers_seen: incoming.sanitizers_seen.clone(),
+        taint_transforms_seen: incoming.taint_transforms_seen.clone(),
         flow_id: incoming.representative_flow_id.clone(),
         chain_display: incoming.chain_display.clone(),
         taint_path: incoming.taint_path.clone(),
@@ -4974,6 +4979,7 @@ fn finalize_combined_finding(group: &mut CombinedFindingWithChain) {
         source: group.finding.source.clone(),
         sink_tainted_args: group.finding.sink.tainted_args.clone(),
         sanitizers_seen: group.finding.sanitizers_seen.clone(),
+        taint_transforms_seen: group.finding.taint_transforms_seen.clone(),
         flow_id: group.finding.representative_flow_id.clone(),
         chain_display: group.finding.chain_display.clone(),
         taint_path: group.finding.taint_path.clone(),

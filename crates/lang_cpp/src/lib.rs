@@ -85,6 +85,12 @@ const CPP_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
 
 const HANDLER: GrammarHandler = GrammarHandler {
     call_kinds: CPP_CALL_KINDS,
+    class_kinds: &["class_specifier", "struct_specifier", "union_specifier"],
+    class_decl_kinds: &[
+        ("class_specifier", DeclKind::Class),
+        ("struct_specifier", DeclKind::Struct),
+        ("union_specifier", DeclKind::Struct),
+    ],
     // `this` for instance methods; C++ has no `super` keyword, but
     // `Base::method()` is a qualified call that the resolver
     // already narrows by qualified-name matching, so the explicit

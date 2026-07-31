@@ -1,4 +1,6 @@
-use super::{best_textual_relevance_key, file_path_matches_filter, textual_relevance_key};
+use super::{
+    best_textual_relevance_key, file_path_matches_filter, make_callable_name_filter, textual_relevance_key,
+};
 use bonsai_workspace::Workspace;
 use std::sync::Arc;
 
@@ -32,6 +34,22 @@ fn textual_relevance_preserves_deterministic_sort_for_regex_or_empty_query() {
 fn best_textual_relevance_uses_best_candidate_in_row() {
     let key = best_textual_relevance_key(["user", "request.token", "session"], Some("token"), false);
     assert_eq!(key, textual_relevance_key("request.token", Some("token"), false));
+}
+
+#[test]
+fn callable_filter_accepts_compiler_qualified_name_for_source_spelling() {
+    let filter = make_callable_name_filter(Some("pkg.Service.execute"), false).expect("callable filter");
+    assert!(filter("client.execute"));
+    assert!(filter("pkg.Service.execute"));
+    assert!(!filter("client.run"));
+
+    let regex =
+        make_callable_name_filter(Some("^pkg\\.Service\\.execute$"), true).expect("regex callable filter");
+    assert!(regex("pkg.Service.execute"));
+    assert!(
+        !regex("client.execute"),
+        "an explicit regex must not be rewritten to its lexical tail"
+    );
 }
 
 #[test]

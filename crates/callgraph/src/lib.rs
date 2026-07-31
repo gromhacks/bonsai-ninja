@@ -25,12 +25,13 @@ use bonsai_lang_api::{
 use bonsai_resolve::{
     build_shared_peer_class_index, callee_without_call_args, collect_method_candidates_for_class_cached,
     enclosing_class_for_decl, export_name_variants, extend_alias_targets_with_declared_types,
-    is_super_receiver_with_tokens, module_path_parts, module_target_matches_decl_module_path_with_syntax,
-    module_target_matches_path, module_target_parts, module_target_parts_match_path_parts,
-    namespace_alias_target_tail, prune_receiver_type_names_for_dispatch, push_unique_func,
-    push_unique_string, qualified_module_alias_call, resolve_callable_with_context, resolve_class,
-    split_qualified_head_tail, strip_module_path_prefix, visibility_allows, MethodCandidateCache,
-    PeerClassIndex, ResolveContext,
+    is_super_receiver_with_tokens, module_path_parts,
+    module_target_exactly_matches_decl_module_path_with_syntax,
+    module_target_matches_decl_module_path_with_syntax, module_target_matches_path, module_target_parts,
+    module_target_parts_match_path_parts, namespace_alias_target_tail,
+    prune_receiver_type_names_for_dispatch, push_unique_func, push_unique_string,
+    qualified_module_alias_call, resolve_callable_with_context, resolve_class, split_qualified_head_tail,
+    strip_module_path_prefix, visibility_allows, MethodCandidateCache, PeerClassIndex, ResolveContext,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -579,6 +580,7 @@ struct WorkspaceModuleTargetKey {
     alias_tail: String,
     caller_file: FileId,
     caller_module: ModulePath,
+    allow_terminal_trailer: bool,
 }
 
 #[derive(Debug, Default)]
@@ -682,12 +684,19 @@ impl CallableTargetKey {
 }
 
 impl WorkspaceModuleTargetKey {
-    fn new(alias_target: &str, alias_tail: &str, caller_file: FileId, caller_module: &ModulePath) -> Self {
+    fn new(
+        alias_target: &str,
+        alias_tail: &str,
+        caller_file: FileId,
+        caller_module: &ModulePath,
+        allow_terminal_trailer: bool,
+    ) -> Self {
         Self {
             alias_target: alias_target.to_string(),
             alias_tail: alias_tail.to_string(),
             caller_file,
             caller_module: caller_module.clone(),
+            allow_terminal_trailer,
         }
     }
 }
@@ -1034,23 +1043,35 @@ pub struct ResolvedCallGraph {
     unresolved_workspace_sites: Vec<UnresolvedWorkspaceCallSite>,
 }
 
+/// Compact declaration identity retained beside partitioned callgraph edges.
+///
+/// It is compiler metadata, not a browse result: consumers use it to select
+/// the exact file partition for a symbol before hydrating declaration bodies.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct CallGraphNode {
-    func: FuncId,
-    name: Box<str>,
+pub struct CallGraphNode {
+    pub func: FuncId,
+    pub name: Box<str>,
+    pub qualified_name: Option<Box<str>>,
+    pub kind: DeclKind,
+    pub file: FileId,
+    pub name_span: Span,
 }
 
+/// Compiler-resolved file-local callable alias persisted with its caller
+/// partition.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-struct CallGraphLocalBinding {
-    caller: FuncId,
-    name: Box<str>,
-    target: FuncId,
+pub struct CallGraphLocalBinding {
+    pub caller: FuncId,
+    pub name: Box<str>,
+    pub target: FuncId,
 }
 
+/// Exact workspace call site for which candidates existed but no semantic
+/// edge could be selected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-struct UnresolvedWorkspaceCallSite {
-    caller: FuncId,
-    span: Span,
+pub struct UnresolvedWorkspaceCallSite {
+    pub caller: FuncId,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -1139,6 +1160,30 @@ impl ResolvedCallGraph {
             nodes: Vec::new(),
             local_bindings: Vec::new(),
             unresolved_workspace_sites: Vec::new(),
+        }
+    }
+
+    /// Reconstruct the canonical graph from independently decoded compiler
+    /// partitions. The edge set is the outgoing union; incoming adjacency is
+    /// rebuilt deterministically by [`CallGraph::from_unique_edges`].
+    #[must_use]
+    pub fn from_persisted_parts(
+        mut nodes: Vec<CallGraphNode>,
+        edges: Vec<CallEdge>,
+        mut local_bindings: Vec<CallGraphLocalBinding>,
+        mut unresolved_workspace_sites: Vec<UnresolvedWorkspaceCallSite>,
+    ) -> Self {
+        nodes.sort_unstable_by_key(|node| node.func.raw());
+        nodes.dedup_by_key(|node| node.func.raw());
+        local_bindings.sort();
+        local_bindings.dedup();
+        unresolved_workspace_sites.sort_unstable();
+        unresolved_workspace_sites.dedup();
+        Self {
+            cg: CallGraph::from_unique_edges(edges),
+            nodes,
+            local_bindings,
+            unresolved_workspace_sites,
         }
     }
 
@@ -1568,6 +1613,24 @@ impl ResolvedCallGraph {
             .map(|index| self.nodes[index].name.as_ref())
     }
 
+    /// Deterministic callable declaration table used by partitioned sidecars.
+    #[must_use]
+    pub fn nodes(&self) -> &[CallGraphNode] {
+        &self.nodes
+    }
+
+    /// Exact local callable bindings in canonical order.
+    #[must_use]
+    pub fn local_binding_records(&self) -> &[CallGraphLocalBinding] {
+        &self.local_bindings
+    }
+
+    /// Exact unresolved workspace call sites in canonical order.
+    #[must_use]
+    pub fn unresolved_workspace_site_records(&self) -> &[UnresolvedWorkspaceCallSite] {
+        &self.unresolved_workspace_sites
+    }
+
     /// Iterate compiler-resolved local callable aliases in deterministic
     /// `(caller, name, target)` order.
     pub fn local_callable_bindings(&self) -> impl Iterator<Item = (FuncId, &str, FuncId)> {
@@ -1727,25 +1790,32 @@ where
     out
 }
 
-fn callgraph_nodes(global: &GlobalIndex, graph: &CallGraph) -> Vec<CallGraphNode> {
-    let mut funcs = Vec::with_capacity(graph.edges.len().saturating_mul(2));
-    for edge in &graph.edges {
-        funcs.push(edge.from);
-        funcs.push(edge.to);
+fn callgraph_nodes(global: &GlobalIndex, _graph: &CallGraph) -> Vec<CallGraphNode> {
+    let mut nodes = Vec::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if !matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) {
+                continue;
+            }
+            nodes.push(CallGraphNode {
+                func: FuncId::new(decl.symbol.raw()),
+                name: decl.name.clone().into_boxed_str(),
+                qualified_name: decl
+                    .qualified_name
+                    .as_deref()
+                    .map(|name| name.to_string().into_boxed_str()),
+                kind: decl.kind,
+                file: decl.name_span.file,
+                name_span: decl.name_span,
+            });
+        }
     }
-    funcs.sort_unstable_by_key(|func| func.raw());
-    funcs.dedup();
-    funcs
-        .into_iter()
-        .filter_map(|func| {
-            global
-                .decl_of(SymbolId::new(func.raw()))
-                .map(|decl| CallGraphNode {
-                    func,
-                    name: decl.name.clone().into_boxed_str(),
-                })
-        })
-        .collect()
+    nodes.sort_unstable_by_key(|node| node.func.raw());
+    nodes.dedup_by_key(|node| node.func.raw());
+    nodes
 }
 
 fn callgraph_resolver_worker_count() -> usize {
@@ -1868,7 +1938,7 @@ fn add_call_event_edges(
     );
     let short = short_callee(name);
     let alias_qualified = qualified_module_alias_call(name, context.aliases)
-        || qualified_alias_target_entry_tail(name, context.alias_targets).is_some();
+        || module_alias_target_qualified_name(name, context.alias_targets);
     let folded_receiver = receiver_name_from_call_name(name).filter(|candidate| {
         folded_call_name_receiver_is_instance(
             candidate,
@@ -1931,12 +2001,17 @@ fn collect_ast_bound_call_candidates(
             collect_constructor_targets_for_class_call(&constructor_context, facts.name, None, &[], false);
     }
     if values.is_empty() && facts.call_kind == CallKind::Constructor {
+        let constructor_tail = short_callee(facts.name);
+        let implicit_enclosing_constructor = context
+            .caller_capabilities
+            .effective_constructor_method_names()
+            .contains(&constructor_tail);
         values = collect_constructor_targets_for_class_call(
             &constructor_context,
             facts.name,
             facts.receiver,
             facts.receiver_types,
-            true,
+            implicit_enclosing_constructor,
         );
     }
     if values.is_empty() {
@@ -2054,6 +2129,7 @@ fn collect_workspace_call_candidates(
                 context.caller_decl,
                 context.alias_targets,
                 state.workspace_module_cache,
+                true,
             );
         }
     }
@@ -2421,7 +2497,7 @@ fn add_assignment_call_edges(
     }
     if !candidates.is_empty() && assign_source_call_member_like(name) && !source_call_from_callable_binding {
         let receiver = receiver_name_from_call_name(name);
-        let alias_qualified_call = qualified_alias_target_entry_tail(name, alias_targets).is_some();
+        let alias_qualified_call = module_alias_target_qualified_name(name, alias_targets);
         retain_semantic_receiver_evidenced_candidates(
             global,
             caller_decl,
@@ -2706,6 +2782,7 @@ fn collect_assign_source_call_targets(
                 caller_decl,
                 alias_targets,
                 workspace_module_cache,
+                true,
             );
         }
     }
@@ -4286,6 +4363,18 @@ fn alias_target_qualified_name(name: &str, alias_targets: &AHashMap<String, Alia
     qualified_alias_target_entry_tail(name, alias_targets).is_some()
 }
 
+/// True only when the first qualifier is an imported module/member alias.
+///
+/// `AliasTarget::Type` represents an AST value binding (`context:
+/// ThreadContextStruct`), not a module namespace. Treating it as a module
+/// alias disables unresolved-receiver protection and lets a field chain fall
+/// through to unrelated workspace callables that merely share its leaf name.
+fn module_alias_target_qualified_name(name: &str, alias_targets: &AHashMap<String, AliasTarget>) -> bool {
+    qualified_alias_target_entry_tail(name, alias_targets).is_some_and(|(target, _)| {
+        matches!(target, AliasTarget::Namespace { .. } | AliasTarget::Member { .. })
+    })
+}
+
 fn fast_local_callable_reference_name(name: &str) -> bool {
     let trimmed = name.trim();
     !trimmed.is_empty()
@@ -5391,10 +5480,13 @@ fn receiver_matches_decl_module(
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     module_path_syntax: bonsai_lang_api::ModulePathSyntax,
 ) -> bool {
-    module_target_matches_decl_module_path_with_syntax(receiver, &decl.module_path, module_path_syntax)
-        || path_for_file(file).is_some_and(|path| {
-            module_target_matches_path(strip_module_path_prefix(receiver, module_path_syntax), &path)
-        })
+    module_target_exactly_matches_decl_module_path_with_syntax(
+        receiver,
+        &decl.module_path,
+        module_path_syntax,
+    ) || path_for_file(file).is_some_and(|path| {
+        module_target_matches_path(strip_module_path_prefix(receiver, module_path_syntax), &path)
+    })
 }
 
 fn receiver_class_ancestors(global: &GlobalIndex, receiver_class: SymbolId) -> AHashSet<SymbolId> {
@@ -5894,6 +5986,7 @@ fn collect_workspace_module_targets(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     workspace_module_cache: &mut WorkspaceModuleTargetCache,
+    allow_terminal_trailer: bool,
 ) -> Vec<FuncId> {
     if alias_target.is_empty() || alias_tail.is_empty() {
         return Vec::new();
@@ -5901,8 +5994,13 @@ fn collect_workspace_module_targets(
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
         return Vec::new();
     };
-    let cache_key =
-        WorkspaceModuleTargetKey::new(alias_target, alias_tail, caller_file, &caller_decl.module_path);
+    let cache_key = WorkspaceModuleTargetKey::new(
+        alias_target,
+        alias_tail,
+        caller_file,
+        &caller_decl.module_path,
+        allow_terminal_trailer,
+    );
     if let Some(cached) = workspace_module_cache.targets.get(&cache_key) {
         return cached.clone();
     }
@@ -5934,11 +6032,19 @@ fn collect_workspace_module_targets(
         // file-path match would silently miss the cross-module
         // edge. The semantic match is always sufficient when
         // adapters populate `module_path`.
-        let semantic_match = module_target_matches_decl_module_path_with_syntax(
-            alias_target,
-            &decl.module_path,
-            caller_capabilities.module_path_syntax,
-        );
+        let semantic_match = if allow_terminal_trailer {
+            module_target_matches_decl_module_path_with_syntax(
+                alias_target,
+                &decl.module_path,
+                caller_capabilities.module_path_syntax,
+            )
+        } else {
+            module_target_exactly_matches_decl_module_path_with_syntax(
+                alias_target,
+                &decl.module_path,
+                caller_capabilities.module_path_syntax,
+            )
+        };
         let path_target = strip_module_path_prefix(alias_target, caller_capabilities.module_path_syntax);
         let in_target_file = semantic_match
             || workspace_module_cache.path_matches(path_target, file, file_path_parts, path_for_file);
@@ -5976,6 +6082,7 @@ fn collect_workspace_targets_for_alias_entry(
             caller_decl,
             alias_targets,
             workspace_module_cache,
+            true,
         ),
         AliasTarget::Member { module, member } => {
             let mut targets = collect_workspace_module_targets(
@@ -5988,6 +6095,7 @@ fn collect_workspace_targets_for_alias_entry(
                 caller_decl,
                 alias_targets,
                 workspace_module_cache,
+                true,
             );
             if targets.is_empty() {
                 targets = collect_workspace_module_targets(
@@ -6000,6 +6108,7 @@ fn collect_workspace_targets_for_alias_entry(
                     caller_decl,
                     alias_targets,
                     workspace_module_cache,
+                    true,
                 );
             }
             targets
@@ -6056,6 +6165,7 @@ fn collect_qualified_workspace_targets(
             caller_decl,
             alias_targets,
             workspace_module_cache,
+            true,
         );
         if !candidates.is_empty() {
             return candidates;
@@ -6090,6 +6200,7 @@ fn collect_qualified_workspace_targets(
             caller_decl,
             alias_targets,
             workspace_module_cache,
+            true,
         );
         if !candidates.is_empty() {
             return candidates;
@@ -6106,6 +6217,7 @@ fn collect_qualified_workspace_targets(
             caller_decl,
             alias_targets,
             workspace_module_cache,
+            false,
         );
         if !candidates.is_empty() {
             return candidates;
@@ -6454,7 +6566,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             name,
             receiver,
             receiver_types,
-            true,
+            false,
         );
     }
     if targets.is_empty() {
@@ -6753,7 +6865,7 @@ fn call_resolves_to_func_with_receiver(
     target_func: FuncId,
 ) -> bool {
     let short = short_qualified_tail(call_name);
-    let alias_qualified_call = qualified_alias_target_entry_tail(call_name, aliases).is_some();
+    let alias_qualified_call = module_alias_target_qualified_name(call_name, aliases);
     if collect_local_callable_binding_targets(local_bindings, call_name, receiver, alias_qualified_call)
         .into_iter()
         .any(|func| func == target_func)

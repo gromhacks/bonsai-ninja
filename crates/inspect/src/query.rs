@@ -76,8 +76,21 @@ pub fn matching_decls(ws: &Workspace, matcher: &Matcher) -> Vec<Decl> {
     let mut hits: Vec<Decl> = Vec::new();
     for entry in entries.iter() {
         let matches = match matcher {
-            Matcher::Contains(needle) => entry.lowercased_name.contains(needle),
-            Matcher::Regex(re) => re.is_match(&entry.decl.name),
+            Matcher::Contains(needle) => {
+                entry.lowercased_name.contains(needle)
+                    || entry
+                        .lowercased_qualified_name
+                        .as_ref()
+                        .is_some_and(|name| name.contains(needle))
+            }
+            Matcher::Regex(re) => {
+                re.is_match(&entry.decl.name)
+                    || entry
+                        .decl
+                        .qualified_name
+                        .as_ref()
+                        .is_some_and(|name| re.is_match(name))
+            }
             Matcher::MatchAll => true,
         };
         if matches {
@@ -108,4 +121,46 @@ pub fn matching_func_ids(ws: &Workspace, matcher: &Matcher) -> Vec<FuncId> {
         })
         .map(|d| FuncId::new(d.symbol.raw()))
         .collect()
+}
+
+/// Match callable ids against an explicitly selected compiler-header
+/// projection. Query planners use this for complete endpoint lookup while a
+/// scoped compiler session keeps its own canonical header index file-local.
+pub fn matching_func_ids_in_headers(
+    ws: &Workspace,
+    headers: &bonsai_index::GlobalIndex,
+    matcher: &Matcher,
+) -> Vec<FuncId> {
+    let entries = ws.decl_name_index().entries(headers);
+    let mut hits = entries
+        .iter()
+        .filter(|entry| match matcher {
+            Matcher::Contains(needle) => {
+                entry.lowercased_name.contains(needle)
+                    || entry
+                        .lowercased_qualified_name
+                        .as_ref()
+                        .is_some_and(|name| name.contains(needle))
+            }
+            Matcher::Regex(re) => {
+                re.is_match(&entry.decl.name)
+                    || entry
+                        .decl
+                        .qualified_name
+                        .as_ref()
+                        .is_some_and(|name| re.is_match(name))
+            }
+            Matcher::MatchAll => true,
+        })
+        .filter(|entry| {
+            matches!(
+                entry.decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            )
+        })
+        .map(|entry| FuncId::new(entry.decl.symbol.raw()))
+        .collect::<Vec<_>>();
+    hits.sort_unstable_by_key(|func| func.raw());
+    hits.dedup();
+    hits
 }

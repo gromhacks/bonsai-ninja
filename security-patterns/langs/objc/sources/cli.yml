@@ -52,17 +52,30 @@
   description: "NSProcessInfo.processInfo.environment - env vars. Local trust but crosses boundaries when spawned from untrusted parent."
 
 - id: objc.source.cli_argv
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: objc
   trust: local
   tag: cli-input
   match:
     kind: param
     target:
-      name: argv
-  description: "Disabled - `argv` parameter name is also used by unrelated C functions; flag only when main()'s argv crosses a trust boundary."
+      in_method: [main]
+      param_index_in: [1]
+      param_type_in: [char]
+      param_count_in: [2, 3]
+  match_examples:
+    - name: Objective-C main argv can use any binding name
+      code: |
+        int main(int count, const char *values[]) {
+          return 0;
+        }
+      expect_match_text: [values]
+    - name: unrelated char array parameter is not process input
+      code: |
+        void helper(int count, const char *values[]) {
+        }
+      expect_no_match: true
+  description: "The char** parameter at argv's runtime position in Objective-C/C main(...) - matched from the grammar-declared signature, independent of the binding name."
 
 - id: objc.source.env_getenv
   enabled: false

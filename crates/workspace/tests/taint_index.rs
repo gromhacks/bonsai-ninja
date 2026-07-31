@@ -323,14 +323,29 @@ fn write_through_prunes_only_lock_proven_abandoned_taint_temps() {
     let stale_a = PathBuf::from(format!("{}.tmp.12345.0", path_a.display()));
     let stale_c = PathBuf::from(format!("{}.tmp.23456.1", path_c.display()));
     let malformed = PathBuf::from(format!("{}.tmp.not-a-pid.0", path_c.display()));
+    let old_version = path_a
+        .parent()
+        .expect("cache dir")
+        .join("taint_graph.v12.taint-analysis.deadbeef.factstore.tmp.34567.2");
     let other_version = path_a
         .parent()
         .expect("cache dir")
         .join("taint_graph.v110.taint-analysis.deadbeef.factstore.tmp.34567.2");
+    let old_final = path_a
+        .parent()
+        .expect("cache dir")
+        .join("taint_graph.v12.taint-analysis.deadbeef.factstore");
+    let newer_final = path_a
+        .parent()
+        .expect("cache dir")
+        .join("taint_graph.v110.taint-analysis.deadbeef.factstore");
     std::fs::write(&stale_a, b"partial").expect("write current-target stale temp");
     std::fs::write(&stale_c, b"partial").expect("write other-target stale temp");
     std::fs::write(&malformed, b"partial").expect("write malformed temp");
+    std::fs::write(&old_version, b"partial").expect("write old-version temp");
     std::fs::write(&other_version, b"partial").expect("write other-version temp");
+    std::fs::write(&old_final, b"old sidecar").expect("write old-version sidecar");
+    std::fs::write(&newer_final, b"new sidecar").expect("write newer-version sidecar");
 
     let owner = TaintGraphIndex::new();
     owner.clear_for_config(0xAA);
@@ -338,14 +353,18 @@ fn write_through_prunes_only_lock_proven_abandoned_taint_temps() {
         .begin_persist_to_disk_report(&path_a, ws.db(), 0xAA)
         .expect("begin owner with cleanup");
     assert!(report.started);
-    assert_eq!(report.temp_files_removed, 2);
+    assert_eq!(report.temp_files_removed, 3);
+    assert_eq!(report.obsolete_sidecars_removed, 1);
     assert!(!stale_a.exists());
     assert!(!stale_c.exists());
+    assert!(!old_version.exists());
+    assert!(!old_final.exists());
     assert!(malformed.exists(), "unrecognized filenames must not be swept");
     assert!(
         other_version.exists(),
         "another taint-sidecar schema version must not be swept"
     );
+    assert!(newer_final.exists(), "newer finalized schemas must not be swept");
     assert!(
         active_temp.exists(),
         "another process/session's locked temp must remain"

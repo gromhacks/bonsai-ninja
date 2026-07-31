@@ -203,39 +203,67 @@ fn split_source_spec(spec: &str) -> SourceSpec<'_> {
 /// `filters.source` with the given seeds, applying the
 /// configured filters to the result.
 pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
-    let db = ws.db();
-    let global = ws.compiler_linkage_index();
-
     let spec = split_source_spec(f.source);
-    let candidates = bonsai_resolve::resolve_callable(&global, spec.name);
-    let mut source_candidates: Vec<(bonsai_common::FuncId, TaintSourceCandidate)> = candidates
-        .into_iter()
-        .filter_map(|func| {
-            let symbol = bonsai_common::SymbolId::new(func.raw());
-            let decl = global.decl_of(symbol)?;
-            let (file, line, column) = format_span(&decl.name_span, ws);
-            if let Some(qualifier) = spec.file {
-                if !file_matches_qualifier(&file, qualifier) {
-                    return None;
-                }
-            }
-            if let Some(want_line) = spec.line {
-                if line != want_line {
-                    return None;
-                }
-            }
-            Some((
-                func,
-                TaintSourceCandidate {
-                    name: decl.name.clone(),
-                    file,
-                    line,
-                    column,
-                    func_id: func.raw(),
-                },
-            ))
-        })
-        .collect();
+    let persisted_candidates = ws.persisted_callable_nodes_named(spec.name).and_then(Result::ok);
+    let mut source_candidates: Vec<(bonsai_common::FuncId, TaintSourceCandidate)> =
+        if let Some(candidates) = persisted_candidates {
+            candidates
+                .into_iter()
+                .filter_map(|node| {
+                    let (file, line, column) = format_span(&node.name_span, ws);
+                    if let Some(qualifier) = spec.file {
+                        if !file_matches_qualifier(&file, qualifier) {
+                            return None;
+                        }
+                    }
+                    if let Some(want_line) = spec.line {
+                        if line != want_line {
+                            return None;
+                        }
+                    }
+                    Some((
+                        node.func,
+                        TaintSourceCandidate {
+                            name: node.name.into(),
+                            file,
+                            line,
+                            column,
+                            func_id: node.func.raw(),
+                        },
+                    ))
+                })
+                .collect()
+        } else {
+            let global = ws.compiler_linkage_index();
+            bonsai_resolve::resolve_callable(&global, spec.name)
+                .into_iter()
+                .filter_map(|func| {
+                    let symbol = bonsai_common::SymbolId::new(func.raw());
+                    let decl = global.decl_of(symbol)?;
+                    let (file, line, column) = format_span(&decl.name_span, ws);
+                    if let Some(qualifier) = spec.file {
+                        if !file_matches_qualifier(&file, qualifier) {
+                            return None;
+                        }
+                    }
+                    if let Some(want_line) = spec.line {
+                        if line != want_line {
+                            return None;
+                        }
+                    }
+                    Some((
+                        func,
+                        TaintSourceCandidate {
+                            name: decl.name.clone(),
+                            file,
+                            line,
+                            column,
+                            func_id: func.raw(),
+                        },
+                    ))
+                })
+                .collect()
+        };
     if source_candidates.is_empty() {
         return TaintOutcome::SourceNotFound;
     }
@@ -256,16 +284,25 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         };
     }
     let source_func = source_candidates[0].0;
+    let expanded_workspace =
+        ws.source_reachable_query_workspace(&[source_func], Some(SEMANTIC_FLOW_MAX_PRECISION));
+    let ws = expanded_workspace.as_ref().unwrap_or(ws);
+    let db = ws.db();
     let source_symbol = bonsai_common::SymbolId::new(source_func.raw());
     let exact_source = ws.exact_decl(source_symbol);
-    let source_decl = exact_source.as_deref().or_else(|| global.decl_of(source_symbol));
+    let header_source = exact_source
+        .is_none()
+        .then(|| ws.compiler_header_index().decl_of(source_symbol).cloned());
+    let source_decl = exact_source
+        .as_deref()
+        .cloned()
+        .or_else(|| header_source.flatten());
 
     let effective_seed: bonsai_taint::TokenSet = if f.seeds.is_empty() {
-        bonsai_taint::default_entry_taint_seed(source_decl)
+        bonsai_taint::default_entry_taint_seed(source_decl.as_ref())
     } else {
         f.seeds.iter().cloned().collect()
     };
-
     // IDG-driven path. The legacy interprocedural engine has been
     // replaced by an IDG forward-closure walk: each
     // `(CallArg{site, idx} → Param{idx})` cross-call edge whose
@@ -274,15 +311,33 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     // demand when running through `open_query`, which intentionally
     // skips open-time prewarm; the closure itself still runs to
     // completion for the requested source.
-    let idg = db
-        .idg_service()
-        .unwrap_or_else(|| ws.build_and_seed_idg_service());
-    let global = ws.compiler_linkage_index();
+    let scoped_session = if db.idg_service().is_none() {
+        ws.source_flow_session(&[source_func], Some(SEMANTIC_FLOW_MAX_PRECISION))
+    } else {
+        None
+    };
+    let resident_idg = db.idg_service();
+    let idg = resident_idg.as_deref().or_else(|| {
+        scoped_session
+            .as_ref()
+            .map(bonsai_workspace::flow_query::SyntaxFlowSession::idg)
+    });
+    let fallback_idg;
+    let idg = if let Some(idg) = idg {
+        idg
+    } else {
+        // Synthetic/scoped workspaces without a root can fail to allocate the
+        // temporary query factstore. Preserve exact semantics with the
+        // canonical resident builder; never return a partial result.
+        fallback_idg = ws.build_and_seed_idg_service();
+        fallback_idg.as_ref()
+    };
+    let global = idg.global_linkage_index();
     let mut seed_nodes = bonsai_taint::compose_idg_seed_nodes_with_decl(
         bonsai_taint::IdgSeedRequest::token_api(source_func, &effective_seed),
         global.as_ref(),
-        idg.as_ref(),
-        source_decl,
+        idg,
+        source_decl.as_ref(),
     );
     bonsai_taint::apply_configured_transfer_fixpoint(
         &mut seed_nodes,
@@ -290,7 +345,7 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         &f.call_result_passthroughs,
         &f.output_arg_flows,
         global.as_ref(),
-        idg.as_ref(),
+        idg,
         Some(SEMANTIC_FLOW_MAX_PRECISION),
         None,
     );

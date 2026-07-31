@@ -28,6 +28,7 @@ const PACK_NAME: &str = "objc";
 // `using` (resource-managed scope) since `body` then runs under the
 // managed lock / pool.
 const HANDLER: GrammarHandler = GrammarHandler {
+    nested_type_ownership: true,
     fn_kinds: &[
         "function_definition",
         "method_definition",
@@ -41,8 +42,16 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "category_implementation",
         "protocol_declaration",
     ],
+    class_decl_kinds: &[
+        ("class_interface", DeclKind::Class),
+        ("class_implementation", DeclKind::Class),
+        ("category_interface", DeclKind::Class),
+        ("category_implementation", DeclKind::Class),
+        ("protocol_declaration", DeclKind::Interface),
+    ],
     method_kinds: &["method_definition"],
     method_context_kinds: &["class_implementation", "category_implementation"],
+    method_owner_barrier_kinds: &[],
     constructor_method_kinds: &[],
     constructor_names: &["init"],
     if_kinds: &["if_statement"],

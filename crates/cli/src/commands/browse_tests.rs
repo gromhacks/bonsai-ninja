@@ -1,6 +1,7 @@
 use super::{
-    collect_callees, format_flow_labels_for_cell, retrieval_prefilter_for_browse_literal_with_limit,
-    retrieval_prefilter_for_search_with_limit, truncate, FlowColumnStatus, SearchFilters,
+    collect_callees, exact_identifier_regex_literal, format_flow_labels_for_cell, rendered_table_row_cost,
+    retrieval_prefilter_for_browse_literal_with_limit, retrieval_prefilter_for_search_with_limit, truncate,
+    FlowColumnStatus, SearchFilters,
 };
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{CallKind, FlowEvent};
@@ -17,9 +18,27 @@ fn span() -> Span {
 }
 
 #[test]
+fn rendered_table_row_cost_tracks_physical_output_lines() {
+    assert_eq!(rendered_table_row_cost(&[20, 20, 20]), 160);
+    assert_eq!(rendered_table_row_cost(&[60, 60, 60]), 320);
+}
+
+#[test]
 fn truncate_zero_chars_keeps_only_ellipsis() {
     assert_eq!(truncate("abcdef", 0), "…");
     assert_eq!(truncate("éclair", 0), "…");
+}
+
+#[test]
+fn exact_identifier_regex_is_safe_for_literal_candidate_lookup() {
+    assert_eq!(
+        exact_identifier_regex_literal("^ThreadContext$"),
+        Some("ThreadContext")
+    );
+    assert_eq!(exact_identifier_regex_literal("^_Node42$"), Some("_Node42"));
+    assert_eq!(exact_identifier_regex_literal("ThreadContext"), None);
+    assert_eq!(exact_identifier_regex_literal("^Thread.*$"), None);
+    assert_eq!(exact_identifier_regex_literal("^pkg.Class$"), None);
 }
 
 #[test]
@@ -194,6 +213,17 @@ fn retrieval_browse_prefilter_narrows_call_commands_from_warmed_sidecar() {
     .expect("warmed sidecar should provide call candidates");
 
     assert_eq!(filters, vec!["service.py"]);
+    let exact_regex_filters = retrieval_prefilter_for_browse_literal_with_limit(
+        &root,
+        "^run_admin_command$",
+        Some("call"),
+        None,
+        true,
+        1,
+    )
+    .expect("exact regex prefilter")
+    .expect("an anchored identifier regex has an exact literal candidate phase");
+    assert_eq!(exact_regex_filters, vec!["service.py"]);
     let _ = std::fs::remove_dir_all(root);
 }
 

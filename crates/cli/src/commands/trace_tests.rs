@@ -1,36 +1,60 @@
-use super::load_trace_taint_graph;
-use bonsai_sdk::Workspace;
-use std::sync::Arc;
+use super::trace_page_rows;
+use bonsai_common::Precision;
+use bonsai_sdk::{PathSummary, PathTermination, TraceResult, TraceStep, TraceStepKind};
 
-fn python_workspace(source: &str) -> Workspace {
-    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
-    ws.vfs().write("fixture.py".to_string(), Arc::<str>::from(source));
-    for file in ws.vfs().all_files() {
-        let _ = ws.db().decl_index(file);
+fn step(id: u64, path_id: u64, code: &str) -> TraceStep {
+    TraceStep {
+        id,
+        path_id,
+        order: id + 1,
+        kind: TraceStepKind::Call,
+        message: "call target".to_string(),
+        function: "target".to_string(),
+        module: "fixture".to_string(),
+        file: "fixture.py".to_string(),
+        span: Default::default(),
+        code: code.to_string(),
+        state_before: None,
+        state_after: None,
+        precision: Precision::Exact,
+        notes: Vec::new(),
     }
-    ws
 }
 
 #[test]
-fn trace_preload_populates_seed_taint_graph() {
-    let ws = python_workspace(
-        r"
-def sink(payload):
-os.system(payload)
+fn programmatic_trace_pages_retain_the_steps_for_each_path() {
+    let mut trace = TraceResult::default();
+    trace.paths = vec![
+        PathSummary {
+            path_id: 7,
+            first_step: 0,
+            last_step: 1,
+            path_constraints: Vec::new(),
+            terminated_by: PathTermination::Return,
+            precision: Precision::Exact,
+        },
+        PathSummary {
+            path_id: 9,
+            first_step: 2,
+            last_step: 2,
+            path_constraints: Vec::new(),
+            terminated_by: PathTermination::Throw,
+            precision: Precision::Exact,
+        },
+    ];
+    trace.steps = vec![
+        step(0, 7, "first()"),
+        step(1, 7, "second()"),
+        step(2, 9, "other()"),
+    ];
 
-def entry(user_input):
-sink(user_input)
-",
-    );
-    let before = ws.dataflow().pending_count(ws.db());
-    assert!(before >= 2, "fixture should expose at least two callables");
-
-    load_trace_taint_graph(&ws, Some("entry"));
-
-    let after = ws.dataflow().pending_count(ws.db());
+    let rows = trace_page_rows(&trace);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].path.path_id, 7);
     assert_eq!(
-        after + 1,
-        before,
-        "trace must load the indexed taint graph for the trace seed"
+        rows[0].steps.iter().map(|step| step.id).collect::<Vec<_>>(),
+        [0, 1]
     );
+    assert_eq!(rows[1].steps[0].id, 2);
+    assert!(rows[0].cost > rows[1].cost);
 }

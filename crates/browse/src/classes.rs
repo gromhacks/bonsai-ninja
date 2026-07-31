@@ -55,7 +55,10 @@ pub struct ClassOut {
 /// Sorted by `(file, line, name)` for deterministic output.
 pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, regex::Error> {
     use rayon::prelude::*;
-    let global = ws.compiler_linkage_index();
+    // Class inventory needs declaration ownership only. Loading call linkage
+    // here made a one-name query inflate the complete Elasticsearch semantic
+    // index even though no call edge can affect the result.
+    let global = ws.compiler_header_index();
     let name_match = make_name_filter(f.name, f.regex)?;
     let files: Vec<_> = global.all_files().collect();
     let mut out: Vec<ClassOut> = files

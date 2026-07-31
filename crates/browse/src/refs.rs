@@ -1,6 +1,7 @@
 //! `bonsai-ninja refs` data layer.
 
 use crate::common::{file_path_matches_filter, format_span, textual_relevance_key};
+use bonsai_common::short_qualified_tail;
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -51,9 +52,12 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
         Box::new(move |s: &str| compiled.is_match(s))
     } else {
         let needle = symbol.to_string();
-        let dotted_suffix = format!(".{needle}");
-        let dotted_prefix = format!("{needle}.");
-        Box::new(move |s: &str| s == needle || s.ends_with(&dotted_suffix) || s.starts_with(&dotted_prefix))
+        let lexical_name = short_qualified_tail(symbol).to_string();
+        let dotted_suffix = format!(".{lexical_name}");
+        let dotted_prefix = format!("{lexical_name}.");
+        Box::new(move |s: &str| {
+            s == needle || s == lexical_name || s.ends_with(&dotted_suffix) || s.starts_with(&dotted_prefix)
+        })
     };
     let files = ws.vfs().all_files();
     let mut out: Vec<RefOut> = files
@@ -379,4 +383,29 @@ fn bounded_snippet(raw: &str) -> String {
         snippet.push('…');
     }
     snippet
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qualified_symbol_query_matches_adapter_emitted_short_reference() {
+        let root = tempfile::tempdir().expect("workspace tempdir");
+        std::fs::write(
+            root.path().join("service.py"),
+            "def target(value):\n    return value\n\ndef caller(value):\n    return target(value)\n",
+        )
+        .expect("write fixture");
+        let workspace =
+            Workspace::index(root.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+
+        let rows = refs(&workspace, "package.service.target", &RefsFilters::default())
+            .expect("qualified refs query");
+
+        assert!(
+            rows.iter().any(|row| row.symbol == "target"),
+            "a compiler-qualified query must still match the adapter's short call reference"
+        );
+    }
 }

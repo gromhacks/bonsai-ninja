@@ -379,6 +379,18 @@ pub(crate) enum Cmd {
     Context {
         /// Workspace root to analyze.
         workspace: PathBuf,
+        /// Token-budget ceiling for the typed context rows. Shorthand:
+        /// `4k`, `32k`, `128k`, `1m`; `0` / `all` / `uncapped`
+        /// disables paging.
+        #[arg(long)]
+        context: Option<String>,
+        /// Page to render — 1-based number, `P:xxxxxxxx` cursor, or
+        /// `next`.
+        #[arg(long)]
+        page: Option<String>,
+        /// Emit the complete canonical SDK context object without paging.
+        #[arg(long, default_value_t = false)]
+        all: bool,
         #[command(flatten)]
         output: OutputPathArg,
     },
@@ -456,7 +468,7 @@ pub(crate) enum Cmd {
     /// Ranked structural call paths between two functions.
     #[command(
         display_order = 3,
-        long_about = themed_subcommand_long_about("Find bounded, ranked call paths from one callable to another \
+        long_about = themed_subcommand_long_about("Find ranked shortest call paths from one callable to another \
                       using only syntax-derived, resolver-backed semantic callgraph \
                       edges. The command does not search raw text or invent missing \
                       edges. If unresolved call sites or traversal caps mean absence \
@@ -484,14 +496,14 @@ pub(crate) enum Cmd {
         /// Interpret `--from` and `--to` as regexes instead of substring matches.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Maximum paths to emit after ranking.
-        #[arg(long, default_value_t = 10)]
+        /// Optional maximum paths to emit after ranking. `0` is uncapped.
+        #[arg(long, default_value_t = 0)]
         max_paths: usize,
-        /// Maximum semantic call edges in one path.
-        #[arg(long, default_value_t = 12)]
+        /// Optional maximum semantic call edges in one path. `0` is uncapped.
+        #[arg(long, default_value_t = 0)]
         max_depth: usize,
-        /// Maximum graph states to probe before marking analysis incomplete.
-        #[arg(long, default_value_t = 4096)]
+        /// Optional graph-state probe ceiling. `0` is uncapped.
+        #[arg(long, default_value_t = 0)]
         max_probes: usize,
         /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
         #[arg(long)]
@@ -1178,17 +1190,15 @@ pub(crate) enum Cmd {
     #[command(
         display_order = 20,
         long_about = themed_subcommand_long_about("List every definition found in the workspace. Columns: \
-                      name, kind, location, signature, callees (top 3 \
-                      outgoing), flows (`F:<16-hex>` ids whose chain reaches \
-                      the decl — paste into `inspect --flow` to expand).\n\
+                      name, kind, location, signature, and callees (top 3 \
+                      outgoing). Pass `--flows` to add `F:<16-hex>` structural \
+                      flow ids that can be expanded with `inspect --flow`.\n\
                       \n\
                       Supports filters by kind (`function`, `class`, \
                       `method`, …), workspace-relative file filter, name substring / \
                       regex, has-callee / has-decorator / has-param \
-                      narrowers for decl-shape queries. `--no-flows` \
-                      suppresses the `flows` column on very large \
-                      workspaces where chain enumeration adds noticeable \
-                      time."),
+                      narrowers for declaration-shape queries. Semantic flow \
+                      hydration is never implicit."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Every decl in the workspace\n  \
                       $ bonsai-ninja defs ./src\n  \
@@ -1231,15 +1241,11 @@ pub(crate) enum Cmd {
         /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Suppress the `flows` column. The column is ON by default
-        /// and lists the taint-flow IDs (`F:<16-hex>`) whose
-        /// upstream call chains reach the row's enclosing function;
-        /// paste any ID into `inspect --flow F:<16-hex>` to expand
-        /// the chain. Pass `--no-flows` on very large workspaces
-        /// where chain enumeration adds a few seconds you don't
-        /// want to pay.
-        #[arg(long = "no-flows", default_value_t = false)]
-        no_flows: bool,
+        /// Include structural flow IDs. This explicitly hydrates semantic
+        /// graph facts and is off by default so the command remains a light
+        /// syntax inventory.
+        #[arg(long, default_value_t = false)]
+        flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
         /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
@@ -1331,8 +1337,8 @@ pub(crate) enum Cmd {
         display_order = 22,
         long_about = themed_subcommand_long_about("Every call site in the workspace, with the caller function, \
                       location, and a syntax-highlighted source-line \
-                      snippet. The `flows` column (on by default) \
-                      lists every `F:<16-hex>` whose upstream chain \
+                      snippet. Pass `--flows` to add every `F:<16-hex>` \
+                      whose upstream chain \
                       reaches the call's enclosing function — paste \
                       any id into `inspect --flow F:<16-hex>` to \
                       expand. `--callee` accepts a substring or regex \
@@ -1386,15 +1392,11 @@ pub(crate) enum Cmd {
         /// `--context 0`.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Suppress the `flows` column. The column is ON by default
-        /// and lists the taint-flow IDs (`F:<16-hex>`) whose
-        /// upstream call chains reach the row's enclosing function;
-        /// paste any ID into `inspect --flow F:<16-hex>` to expand
-        /// the chain. Pass `--no-flows` on very large workspaces
-        /// where chain enumeration adds a few seconds you don't
-        /// want to pay.
-        #[arg(long = "no-flows", default_value_t = false)]
-        no_flows: bool,
+        /// Include structural flow IDs. This explicitly hydrates semantic
+        /// graph facts and is off by default so the command remains a light
+        /// syntax inventory.
+        #[arg(long, default_value_t = false)]
+        flows: bool,
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
@@ -1408,9 +1410,9 @@ pub(crate) enum Cmd {
         long_about = themed_subcommand_long_about("Every import / use / include statement in the workspace. \
                       Columns: module, symbol (`from x import y` → `y`), \
                       alias (`as X`), kind (named / wildcard), location, \
-                      source-line snippet, and the `flows` column listing \
-                      every `F:<16-hex>` whose chain reaches a function \
-                      brought into scope by the import.\n\
+                      and source-line snippet. Pass `--flows` to add \
+                      `F:<16-hex>` ids for chains reaching functions brought \
+                      into scope by the import.\n\
                       \n\
                       Supported forms: Python `import x [as y]`, `from x \
                       import y [as z]`, `from . import x`, `from x import \
@@ -1468,15 +1470,11 @@ pub(crate) enum Cmd {
         /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Suppress the `flows` column. The column is ON by default
-        /// and lists the taint-flow IDs (`F:<16-hex>`) whose
-        /// upstream call chains reach the row's enclosing function;
-        /// paste any ID into `inspect --flow F:<16-hex>` to expand
-        /// the chain. Pass `--no-flows` on very large workspaces
-        /// where chain enumeration adds a few seconds you don't
-        /// want to pay.
-        #[arg(long = "no-flows", default_value_t = false)]
-        no_flows: bool,
+        /// Include structural flow IDs. This explicitly hydrates semantic
+        /// graph facts and is off by default so the command remains a light
+        /// syntax inventory.
+        #[arg(long, default_value_t = false)]
+        flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
         /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
@@ -1542,15 +1540,11 @@ pub(crate) enum Cmd {
         /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Suppress the `flows` column. The column is ON by default
-        /// and lists the taint-flow IDs (`F:<16-hex>`) whose
-        /// upstream call chains reach the row's enclosing function;
-        /// paste any ID into `inspect --flow F:<16-hex>` to expand
-        /// the chain. Pass `--no-flows` on very large workspaces
-        /// where chain enumeration adds a few seconds you don't
-        /// want to pay.
-        #[arg(long = "no-flows", default_value_t = false)]
-        no_flows: bool,
+        /// Include structural flow IDs. This explicitly hydrates semantic
+        /// graph facts and is off by default so the command remains a light
+        /// syntax inventory.
+        #[arg(long, default_value_t = false)]
+        flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
         /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
@@ -1609,15 +1603,11 @@ pub(crate) enum Cmd {
         /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Suppress the `flows` column. The column is ON by default
-        /// and lists the taint-flow IDs (`F:<16-hex>`) whose
-        /// upstream call chains reach the row's enclosing function;
-        /// paste any ID into `inspect --flow F:<16-hex>` to expand
-        /// the chain. Pass `--no-flows` on very large workspaces
-        /// where chain enumeration adds a few seconds you don't
-        /// want to pay.
-        #[arg(long = "no-flows", default_value_t = false)]
-        no_flows: bool,
+        /// Include structural flow IDs. This explicitly hydrates semantic
+        /// graph facts and is off by default so the command remains a light
+        /// syntax inventory.
+        #[arg(long, default_value_t = false)]
+        flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
         /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
@@ -1760,15 +1750,11 @@ pub(crate) enum Cmd {
         /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Suppress the `flows` column. The column is ON by default
-        /// and lists the taint-flow IDs (`F:<16-hex>`) whose
-        /// upstream call chains reach the row's enclosing function;
-        /// paste any ID into `inspect --flow F:<16-hex>` to expand
-        /// the chain. Pass `--no-flows` on very large workspaces
-        /// where chain enumeration adds a few seconds you don't
-        /// want to pay.
-        #[arg(long = "no-flows", default_value_t = false)]
-        no_flows: bool,
+        /// Include structural flow IDs. This explicitly hydrates semantic
+        /// graph facts and is off by default so the command remains a light
+        /// syntax inventory.
+        #[arg(long, default_value_t = false)]
+        flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
         /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
@@ -1830,15 +1816,11 @@ pub(crate) enum Cmd {
         /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Suppress the `flows` column. The column is ON by default
-        /// and lists the taint-flow IDs (`F:<16-hex>`) whose
-        /// upstream call chains reach the row's enclosing function;
-        /// paste any ID into `inspect --flow F:<16-hex>` to expand
-        /// the chain. Pass `--no-flows` on very large workspaces
-        /// where chain enumeration adds a few seconds you don't
-        /// want to pay.
-        #[arg(long = "no-flows", default_value_t = false)]
-        no_flows: bool,
+        /// Include structural flow IDs. This explicitly hydrates semantic
+        /// graph facts and is off by default so the command remains a light
+        /// syntax inventory.
+        #[arg(long, default_value_t = false)]
+        flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
         /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
@@ -1862,8 +1844,8 @@ pub(crate) enum Cmd {
     #[command(
         display_order = 27,
         long_about = themed_subcommand_long_about("Every class / struct / trait / interface / enum decl, with \
-                      method count and (up to 8) method names per row. The \
-                      `flows` column unions the flow-ids reaching every \
+                      method count and (up to 8) method names per row. With \
+                      `--flows`, the flow column unions ids reaching every \
                       method the class declares, so a single row captures \
                       every chain that lands anywhere inside the class."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
@@ -1902,15 +1884,11 @@ pub(crate) enum Cmd {
         /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Suppress the `flows` column. The column is ON by default
-        /// and lists the taint-flow IDs (`F:<16-hex>`) whose
-        /// upstream call chains reach the row's enclosing function;
-        /// paste any ID into `inspect --flow F:<16-hex>` to expand
-        /// the chain. Pass `--no-flows` on very large workspaces
-        /// where chain enumeration adds a few seconds you don't
-        /// want to pay.
-        #[arg(long = "no-flows", default_value_t = false)]
-        no_flows: bool,
+        /// Include structural flow IDs. This explicitly hydrates semantic
+        /// graph facts and is off by default so the command remains a light
+        /// syntax inventory.
+        #[arg(long, default_value_t = false)]
+        flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
         /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
@@ -1937,7 +1915,7 @@ pub(crate) enum Cmd {
                       Columns: symbol, kind, enclosing fn, location, code.\n\
                       \n\
                       A symbol is required — either as the positional \
-                      argument or via `--symbol`. The `flows` column shows \
+                      argument or via `--symbol`. Pass `--flows` to show \
                       every `F:<16-hex>` whose upstream chain reaches the \
                       ref's enclosing function; paste into \
                       `inspect --flow F:<16-hex>` to expand the chain."),
@@ -1980,15 +1958,11 @@ pub(crate) enum Cmd {
         /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Suppress the `flows` column. The column is ON by default
-        /// and lists the taint-flow IDs (`F:<16-hex>`) whose
-        /// upstream call chains reach the row's enclosing function;
-        /// paste any ID into `inspect --flow F:<16-hex>` to expand
-        /// the chain. Pass `--no-flows` on very large workspaces
-        /// where chain enumeration adds a few seconds you don't
-        /// want to pay.
-        #[arg(long = "no-flows", default_value_t = false)]
-        no_flows: bool,
+        /// Include structural flow IDs. This explicitly hydrates semantic
+        /// graph facts and is off by default so the command remains a light
+        /// syntax inventory.
+        #[arg(long, default_value_t = false)]
+        flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
         /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
@@ -2020,8 +1994,8 @@ pub(crate) enum Cmd {
                       A query is required — either as the positional \
                       argument or via `--query`. Use `--regex` to treat the \
                       query as a regex; `--kind` to filter by fact kind; \
-                      `--file` to scope to a workspace-relative path. The `flows` \
-                      column (on by default) lists every `F:<16-hex>` that \
+                      `--file` to scope to a workspace-relative path. Pass \
+                      `--flows` to list every `F:<16-hex>` that \
                       reaches each hit — paste into `inspect --flow` to \
                       expand the chain."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
@@ -2056,11 +2030,10 @@ pub(crate) enum Cmd {
         regex: bool,
         #[arg(long, default_value_t = 20)]
         limit: usize,
-        /// Suppress the `flows` column. On by default; pass
-        /// `--no-flows` when chain enumeration would slow things
-        /// down on a very large workspace.
-        #[arg(long = "no-flows", default_value_t = false)]
-        no_flows: bool,
+        /// Include structural flow IDs. This explicitly hydrates semantic
+        /// graph facts and is off by default.
+        #[arg(long, default_value_t = false)]
+        flows: bool,
         /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
         #[arg(long)]
         context: Option<String>,
@@ -2086,18 +2059,14 @@ pub(crate) enum Cmd {
                       \n\
                       By default inspect surfaces matching declarations / \
                       occurrences, indexed rulepack-free taint paths, and \
-                      source-body flow evidence when the query is bounded \
-                      enough to fit the active context budget. It does not \
-                      load source / sink / sanitizer YAML. Pass `--graph-flow` \
-                      to request structural callgraph source bodies for large \
-                      result sets that would otherwise render syntax/index \
-                      facts only; pass `--syntax-only` to deliberately omit \
-                      flow evidence from the output. These flags change output \
-                      scope, not analysis accuracy: emitted graph facts still \
-                      use the same exact/narrowed static evidence contract. \
-                      Taint previews are capped; very large result sets skip \
-                      the default taint preview with an explicit warning unless \
-                      `--taint-flow` is supplied.\n\
+                      syntax/index facts and source excerpts by default. It \
+                      does not load source / sink / sanitizer YAML or hydrate \
+                      a whole-workspace semantic graph. Pass `--graph-flow` \
+                      when you intentionally need structural callgraph source \
+                      bodies, or `--taint-flow` for rulepack-free raw taint \
+                      paths. These flags change output scope, not analysis \
+                      accuracy: emitted graph facts still use the same \
+                      exact/narrowed static evidence contract.\n\
                       \n\
                       Graph-flow chains that share the same entry + sink but take \
                       different intermediate paths get letter-suffixed labels \
@@ -2111,14 +2080,13 @@ pub(crate) enum Cmd {
                       indexed taint graph `export` ships; `security taint-analysis` \
                       applies rulepack source / sink / sanitizer matches with \
                       exact source seeds. `--taint-flow` requests the bounded \
-                      raw taint preview for large result sets and when \
-                      `--syntax-only` is also present."),
+                      raw taint preview explicitly."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Syntax hits plus rulepack-free taint paths and code evidence\n  \
+                      # Syntax hits and code evidence\n  \
                       $ bonsai-ninja inspect ./src --query os.system\n  \
                       \n  \
-                      # Pure indexed syntax hits only\n  \
-                      $ bonsai-ninja inspect ./src --query os.system --syntax-only\n  \
+                      # Add rulepack-free raw taint paths explicitly\n  \
+                      $ bonsai-ninja inspect ./src --query os.system --taint-flow\n  \
                       \n  \
                       # Request structural source-body evidence for a large result set\n  \
                       $ bonsai-ninja inspect ./src --query os.system --graph-flow\n  \
@@ -2253,17 +2221,11 @@ pub(crate) enum Cmd {
         /// not lower the resolver's exact/narrowed evidence contract.
         #[arg(long = "graph-flow", default_value_t = false)]
         graph_flow: bool,
-        /// Explicit flag for raw taint-engine paths. Query/filter-scoped
-        /// taint paths are shown by default unless `--syntax-only` is
-        /// set, but very large result sets skip the default preview
-        /// for latency; this flag forces the bounded raw preview.
+        /// Add rulepack-free raw taint-engine paths. Off by default so
+        /// a navigation query never silently performs whole-workspace
+        /// dataflow analysis.
         #[arg(long = "taint-flow", default_value_t = false)]
         taint_flow: bool,
-        /// Pure indexed syntax search: omit the default rulepack-free
-        /// taint paths. This changes output scope only; it is not a
-        /// lower-accuracy analysis mode.
-        #[arg(long = "syntax-only", default_value_t = false)]
-        syntax_only: bool,
         /// Token-budget ceiling for rendered output. Paging unit is
         /// one FLOW block (never mid-flow). Shorthand `4k`, `32k`,
         /// `128k`, `1m`; `0` / `all` / `uncapped` disables.

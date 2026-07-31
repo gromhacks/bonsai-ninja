@@ -31,11 +31,7 @@ pub fn to_text(trace: &TraceResult) -> String {
         reasons.extend(trace.summary.analysis_incomplete_reasons.iter().cloned());
         reasons.sort();
         reasons.dedup();
-        let reasons = if reasons.is_empty() {
-            "unknown".to_string()
-        } else {
-            reasons.join(", ")
-        };
+        let reasons = crate::summarize_incomplete_reasons(&reasons, 8);
         let _ = writeln!(out, "Analysis incomplete: {reasons}\n");
     }
     for path in &trace.paths {

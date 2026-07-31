@@ -48,6 +48,52 @@ fn idg_pipeline_hash_tracks_dependency_metadata() {
 }
 
 #[test]
+fn root_only_idg_validation_reconstructs_the_exact_compiler_pipeline() {
+    let root = tempdir_for_test("bonsai-idg-root-only-validation");
+    let source_path = root.join("app.py");
+    let source = "def entry(x):\n    return x\n";
+    std::fs::write(&source_path, source).expect("write source");
+    let vfs = Arc::new(Vfs::new());
+    vfs.write(source_path.display().to_string(), Arc::<str>::from(source));
+    let db = AnalyzerDb::new(vfs, Arc::new(LanguageRegistry::new()));
+    let pipeline = idg_workspace_pipeline_hash(&db, Some(&root));
+    let sidecar = root.join("idg.factstore");
+    bonsai_idg::workspace::IdgWorkspace::new()
+        .save_to_disk(&sidecar, pipeline)
+        .expect("save exact pipeline");
+    let source_hash = bonsai_hash::fnv1a_bytes64(source.as_bytes());
+
+    assert!(validate_idg_sidecar_layout_with_source_fingerprints(
+        &sidecar,
+        &root,
+        [(&source_path, source_hash)],
+        Vec::<String>::new(),
+    )
+    .is_ok());
+    assert!(
+        validate_idg_sidecar_layout_with_source_fingerprints(
+            &sidecar,
+            &root,
+            [(&source_path, source_hash ^ 1)],
+            Vec::<String>::new(),
+        )
+        .is_err(),
+        "source content changes must reject the sidecar without parsing"
+    );
+    assert!(
+        validate_idg_sidecar_layout_with_source_fingerprints(
+            &sidecar,
+            &root,
+            [(&source_path, source_hash)],
+            ["java"],
+        )
+        .is_err(),
+        "adapter capability changes must reject the sidecar without parsing"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn workspace_generation_reuses_pipeline_identity_until_an_edit() {
     let root = tempdir_for_test("bonsai-idg-pipeline-generation");
     std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"demo\"\n").expect("write pyproject");

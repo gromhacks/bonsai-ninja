@@ -75,8 +75,23 @@ fn text_renderer_reports_unresolved_calls_as_incomplete_metadata() {
         "trace render must not expose non-semantic analysis evidence:\n{rendered}"
     );
     assert!(
-        rendered.contains("Analysis incomplete: unresolved-call:missing"),
+        rendered.contains("Analysis incomplete: unresolved calls: 1 (missing)"),
         "semantic gap should still be surfaced in the summary:\n{rendered}"
+    );
+}
+
+#[test]
+fn incomplete_reason_summary_groups_exact_counts_and_samples() {
+    let mut reasons = (0..20)
+        .map(|index| format!("unresolved-call:callee_{index:02}"))
+        .collect::<Vec<_>>();
+    reasons.push("ambiguous-call:dispatch:3".to_string());
+    reasons.push("max-depth:4".to_string());
+    let summary = crate::summarize_incomplete_reasons(&reasons, 3);
+    assert_eq!(
+        summary,
+        "unresolved calls: 20 (callee_00, callee_01, callee_02, … +17); \
+         ambiguous calls: 1 (dispatch); other reasons: 1 (max-depth:4)"
     );
 }
 

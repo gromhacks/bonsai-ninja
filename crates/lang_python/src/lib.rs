@@ -56,10 +56,13 @@ const PYTHON_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
 ];
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    nested_type_ownership: true,
     fn_kinds: &["function_definition"],
     class_kinds: &["class_definition"],
+    class_decl_kinds: GENERIC_HANDLER.class_decl_kinds,
     method_kinds: GENERIC_HANDLER.method_kinds,
     method_context_kinds: &["class_definition"],
+    method_owner_barrier_kinds: GENERIC_HANDLER.method_owner_barrier_kinds,
     constructor_method_kinds: GENERIC_HANDLER.constructor_method_kinds,
     constructor_names: &["__init__"],
     if_kinds: GENERIC_HANDLER.if_kinds,

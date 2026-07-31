@@ -24,6 +24,12 @@ const PACK_NAME: &str = "kotlin";
 // (audit task #131).
 const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    class_kinds: &["class_declaration", "object_declaration", "interface_declaration"],
+    class_decl_kinds: &[
+        ("class_declaration", DeclKind::Class),
+        ("object_declaration", DeclKind::Class),
+        ("interface_declaration", DeclKind::Interface),
+    ],
     ..with_fn_kinds_and_implicit_receivers(
         &["function_declaration", "getter", "setter"],
         &["this", "super"],

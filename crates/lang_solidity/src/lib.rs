@@ -52,6 +52,7 @@ const PACK_NAME: &str = "solidity";
 // fallback/receive functions. Solidity uses `revert` (and `require`)
 // as throw-equivalents — we surface revert_statement explicitly.
 const HANDLER: GrammarHandler = GrammarHandler {
+    nested_type_ownership: true,
     fn_kinds: &[
         "function_definition",
         "constructor_definition",
@@ -63,12 +64,18 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "interface_declaration",
         "library_declaration",
     ],
+    class_decl_kinds: &[
+        ("contract_declaration", DeclKind::Class),
+        ("interface_declaration", DeclKind::Interface),
+        ("library_declaration", DeclKind::Module),
+    ],
     method_kinds: &["function_definition"],
     method_context_kinds: &[
         "contract_declaration",
         "interface_declaration",
         "library_declaration",
     ],
+    method_owner_barrier_kinds: &[],
     constructor_method_kinds: &["constructor_definition"],
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     if_kinds: &["if_statement"],

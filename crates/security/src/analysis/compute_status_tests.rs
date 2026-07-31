@@ -1275,6 +1275,7 @@ fn finding_with_flow_for_grouping(
             source,
             sink,
             sanitizers_seen: Vec::new(),
+            taint_transforms_seen: Vec::new(),
             group_id: Some("G:sharedtail".to_string()),
             representative_flow_id: Some(flow_id.to_string()),
             analysis_complete: true,
