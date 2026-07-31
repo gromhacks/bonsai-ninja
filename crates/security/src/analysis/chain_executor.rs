@@ -264,7 +264,7 @@ impl SourceGroupExecutor<'_> {
                 source.rule_id,
                 sink.rule_id,
                 source_func.raw(),
-                func_id_for_match(self.ws, sink).map(|func| func.raw()).unwrap_or_default(),
+                call.caller.raw(),
                 call.caller.raw(),
                 call.name,
                 source.span,
@@ -395,6 +395,7 @@ impl SourceGroupExecutor<'_> {
                 &current_call_taint_view,
                 endpoint_identity_proven,
                 self.factory_returns,
+                self.global,
                 self.receiver_base_map_cell,
             ) {
                 bonsai_diagnostics::debug_log!(
@@ -637,6 +638,7 @@ impl SourceGroupExecutor<'_> {
                             chain_names: evidence.chain_names.clone(),
                             san_by_func,
                             ws,
+                            global: self.global,
                             tainted_call_spans: &tainted_call_spans,
                             sink_tainted_args: evidence.sink_tainted_args.clone(),
                             taint_path,

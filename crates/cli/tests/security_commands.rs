@@ -2283,6 +2283,52 @@ def handle():
 }
 
 #[test]
+fn taint_analysis_text_labels_passthrough_as_transform_not_sanitizer() {
+    let ws = temp_workspace("taint-transform-label");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+import json
+import os
+from flask import request
+
+def handle():
+    document = json.loads(request.args.get("payload"))
+    os.system(document["command"])
+"#,
+    )
+    .expect("write passthrough fixture");
+
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--all",
+    ])
+    .unwrap();
+
+    assert!(
+        out.contains("TAINT TRANSFORM:") && out.contains("python.passthrough.json_loads"),
+        "taint-preserving rule must be visible with its own semantic label:\n{out}"
+    );
+    assert!(
+        out.contains("taint preserved by —") && out.contains("preserves taint"),
+        "transform narrative must explain that taint survives:\n{out}"
+    );
+    assert!(
+        !out.contains("SANITIZER:  python.passthrough.json_loads")
+            && !out.contains("sanitized via — json.loads"),
+        "passthrough must never be presented as a taint-clearing sanitizer:\n{out}"
+    );
+    assert!(
+        out.contains("status: unsanitized"),
+        "a transform-only chain must remain unsanitized:\n{out}"
+    );
+}
+
+#[test]
 fn taint_analysis_all_text_reuses_cached_render_payload() {
     let ws = temp_workspace("all-text-cache-taint");
     std::fs::write(

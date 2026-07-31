@@ -54,9 +54,45 @@ impl Matcher {
         }
     }
 
+    /// Match one declaration while preserving qualified owner identity.
+    ///
+    /// Ordinary names remain fuzzy. For `Owner.member`, however, the member
+    /// portion must match the declaration's own name as well as the complete
+    /// qualified spelling. This prevents newly-correct nested identities such
+    /// as `Owner.member.<lambda>` from becoming extra hits for `Owner.member`.
+    #[must_use]
+    pub fn is_declaration_match(&self, decl: &Decl) -> bool {
+        match self {
+            Self::Contains(needle) => contains_declaration_name(
+                needle,
+                &decl.name.to_lowercase(),
+                decl.qualified_name.as_deref().map(str::to_lowercase).as_deref(),
+            ),
+            Self::Regex(re) => {
+                re.is_match(&decl.name)
+                    || decl
+                        .qualified_name
+                        .as_deref()
+                        .is_some_and(|name| re.is_match(name))
+            }
+            Self::MatchAll => true,
+        }
+    }
+
     #[must_use]
     pub fn is_universal(&self) -> bool {
         matches!(self, Self::MatchAll)
+    }
+}
+
+fn contains_declaration_name(needle: &str, name: &str, qualified_name: Option<&str>) -> bool {
+    let tail = bonsai_common::short_qualified_tail(needle);
+    if tail != needle {
+        !tail.is_empty()
+            && name.contains(tail)
+            && qualified_name.is_some_and(|qualified| qualified.contains(needle))
+    } else {
+        name.contains(needle) || qualified_name.is_some_and(|qualified| qualified.contains(needle))
     }
 }
 
@@ -76,13 +112,11 @@ pub fn matching_decls(ws: &Workspace, matcher: &Matcher) -> Vec<Decl> {
     let mut hits: Vec<Decl> = Vec::new();
     for entry in entries.iter() {
         let matches = match matcher {
-            Matcher::Contains(needle) => {
-                entry.lowercased_name.contains(needle)
-                    || entry
-                        .lowercased_qualified_name
-                        .as_ref()
-                        .is_some_and(|name| name.contains(needle))
-            }
+            Matcher::Contains(needle) => contains_declaration_name(
+                needle,
+                &entry.lowercased_name,
+                entry.lowercased_qualified_name.as_deref(),
+            ),
             Matcher::Regex(re) => {
                 re.is_match(&entry.decl.name)
                     || entry
@@ -135,13 +169,11 @@ pub fn matching_func_ids_in_headers(
     let mut hits = entries
         .iter()
         .filter(|entry| match matcher {
-            Matcher::Contains(needle) => {
-                entry.lowercased_name.contains(needle)
-                    || entry
-                        .lowercased_qualified_name
-                        .as_ref()
-                        .is_some_and(|name| name.contains(needle))
-            }
+            Matcher::Contains(needle) => contains_declaration_name(
+                needle,
+                &entry.lowercased_name,
+                entry.lowercased_qualified_name.as_deref(),
+            ),
             Matcher::Regex(re) => {
                 re.is_match(&entry.decl.name)
                     || entry

@@ -141,6 +141,84 @@ fn inspect_qualified_call_name_preserved() {
 }
 
 #[test]
+fn inspect_owner_qualified_declaration_name_matches() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let root = tempdir_for_test("inspect-qualified-decl");
+    std::fs::write(
+        root.join("RestSearchAction.java"),
+        r#"
+package org.elasticsearch.rest;
+class RestSearchAction {
+    void prepareRequest(String request) {
+        Runnable deferred = () -> helper(request);
+    }
+    void helper(String request) {}
+}
+"#,
+    )
+    .expect("write Java qualified-name fixture");
+
+    let out = run(&[
+        "inspect",
+        root.to_str().unwrap(),
+        "RestSearchAction.prepareRequest",
+        "--format",
+        "json",
+        "--no-progress",
+    ]);
+    let report: serde_json::Value = serde_json::from_str(&out).expect("qualified inspect JSON");
+    assert!(
+        report["decl_hits"]
+            .as_array()
+            .is_some_and(|hits| { hits.len() == 1 && hits[0]["symbol"] == "prepareRequest" }),
+        "owner-qualified inspect query must match the compiler-qualified declaration: {out}"
+    );
+}
+
+#[test]
+fn exact_file_graph_flow_does_not_expand_to_a_cold_workspace_graph() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let root = tempdir_for_test("inspect-cold-file-graph");
+    std::fs::write(
+        root.join("entry.py"),
+        "def entry(value):\n    return target(value)\n\ndef target(value):\n    return value\n",
+    )
+    .expect("write selected source");
+    std::fs::write(
+        root.join("unrelated.py"),
+        "def unrelated(value):\n    return value\n",
+    )
+    .expect("write unrelated source");
+
+    let out = run(&[
+        "inspect",
+        root.to_str().unwrap(),
+        "target",
+        "--file",
+        "entry.py",
+        "--graph-flow",
+        "--format",
+        "json",
+        "--no-progress",
+    ]);
+    let report: serde_json::Value = serde_json::from_str(&out).expect("cold graph inspect JSON");
+    assert_eq!(report["summary"]["total_decl_hits"], 1);
+    assert_eq!(report["analysis_complete"], false);
+    assert!(
+        report["analysis_incomplete_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.iter().any(|reason| reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("reverse-call index is not warmed")))),
+        "cold exact-file graph query must disclose unavailable upstream coverage: {out}"
+    );
+}
+
+#[test]
 fn inspect_json_no_matches_keeps_report_shape() {
     if require_binary_built().is_none() {
         return;

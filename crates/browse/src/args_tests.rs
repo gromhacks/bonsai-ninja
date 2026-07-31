@@ -1,5 +1,6 @@
 use super::*;
 use bonsai_common::FileId;
+use bonsai_workspace::Workspace;
 
 #[test]
 fn drops_assignment_args_shadowed_by_real_call_args() {
@@ -54,6 +55,41 @@ fn drops_multiline_assignment_args_by_span_containment() {
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].origin, ArgOrigin::RealCall);
     assert_eq!(facts[0].out.line, 43);
+}
+
+#[test]
+fn in_fn_includes_calls_owned_by_nested_lambda_declarations() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::write(
+        root.path().join("Service.java"),
+        r#"class Service {
+    void outer(String value) {
+        Runnable task = () -> sink(value);
+    }
+    static void sink(String value) {}
+}
+"#,
+    )
+    .expect("write Java fixture");
+    let workspace =
+        Workspace::index(root.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+
+    let rows = args(
+        &workspace,
+        &ArgsFilters {
+            callee: Some("sink"),
+            in_fn: Some("outer"),
+            ..ArgsFilters::default()
+        },
+    )
+    .expect("argument query");
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "the lambda remains lexically inside outer: {rows:?}"
+    );
+    assert_eq!(rows[0].value, "value");
 }
 
 fn fact(callee: &str, position: usize, value: &str, column: u32, origin: ArgOrigin) -> ArgFact {

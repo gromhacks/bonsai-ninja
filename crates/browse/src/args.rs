@@ -8,7 +8,8 @@
 //! refactor scoping.
 
 use crate::common::{
-    file_path_matches_filter, format_span, make_callable_name_filter, make_name_filter, textual_relevance_key,
+    decl_or_ancestor_name_matches, file_path_matches_filter, format_span, make_callable_name_filter,
+    make_name_filter, textual_relevance_key,
 };
 use bonsai_common::Span;
 use bonsai_lang_api::FlowEvent;
@@ -118,8 +119,15 @@ pub fn args(ws: &Workspace, f: &ArgsFilters<'_>) -> Result<Vec<ArgOut>, regex::E
             let Some(index) = ws.db().decl_index_uncached(file) else {
                 return acc;
             };
+            let defs_by_symbol = index
+                .defs
+                .iter()
+                .map(|decl| (decl.symbol, decl))
+                .collect::<ahash::AHashMap<_, _>>();
             for decl in &index.defs {
-                if f.in_fn.is_some_and(|needle| !decl.name.contains(needle)) {
+                if f.in_fn.is_some_and(|needle| {
+                    !decl_or_ancestor_name_matches(decl, &defs_by_symbol, &|name| name.contains(needle))
+                }) {
                     continue;
                 }
                 walk_args(&decl.flow_events, ws, &*callee_match, &*value_match, f, &mut acc);

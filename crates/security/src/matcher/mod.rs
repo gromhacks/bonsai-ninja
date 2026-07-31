@@ -13,6 +13,7 @@ use crate::rule::{
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{qualified_names_match, FileId, Span, SymbolId};
 use bonsai_hash::Hasher as StableHasher;
+use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
     AliasTarget, AssignmentValueIndex, CallArg, CallKind, CallTextPrefilter, CompilerAssignmentAlias,
     CompilerSyntaxHeader, Decl, DeclIndex, DeclKind, FlowEvent, ImportSpec, ModulePath, RefKind,
@@ -551,6 +552,7 @@ pub(crate) fn match_rules_against_facts_with_factory(
             factory,
             dedup_file_matches: false,
             retention: FactRetention::Transient,
+            global_headers: None,
         },
     )
 }
@@ -577,12 +579,13 @@ where
         rules,
         &mut on_file_done,
         MatchRunConfig {
-            mode: ConstraintMode::Inventory,
+            mode: ConstraintMode::Strict,
             taint_view: None,
             scan_files: None,
             factory: &empty_factory_returns(),
             dedup_file_matches: false,
             retention: FactRetention::Transient,
+            global_headers: None,
         },
     )
 }
@@ -611,6 +614,7 @@ where
             factory,
             dedup_file_matches: false,
             retention: FactRetention::Transient,
+            global_headers: None,
         },
     )
 }
@@ -636,6 +640,7 @@ where
             factory,
             dedup_file_matches: false,
             retention: FactRetention::Transient,
+            global_headers: None,
         },
     )
 }
@@ -661,6 +666,7 @@ where
             factory,
             dedup_file_matches: true,
             retention: FactRetention::Transient,
+            global_headers: None,
         },
     )
 }
@@ -673,6 +679,7 @@ pub(crate) fn match_rule_against_facts_with_taint_view(
     ws: &Workspace,
     rule: &Rule,
     taint_view: &InterTaintView<'_>,
+    global_headers: &Arc<GlobalIndex>,
 ) -> Vec<RuleMatch> {
     let mut on_file_done = || {};
     match_rules_against_facts_with_progress_and_mode(
@@ -686,6 +693,7 @@ pub(crate) fn match_rule_against_facts_with_taint_view(
             factory: &empty_factory_returns(),
             dedup_file_matches: false,
             retention: FactRetention::Transient,
+            global_headers: Some(global_headers),
         },
     )
 }
@@ -701,6 +709,7 @@ pub(crate) fn rule_match_passes_constraints_with_taint_view(
     taint_view: &InterTaintView<'_>,
     endpoint_identity_proven: bool,
     factory: &FactoryReturns,
+    global_headers: &Arc<GlobalIndex>,
     // Run-scoped memo for the workspace-wide receiver→base-type map. This
     // function is called once per sink candidate; `workspace_receiver_base_map`
     // scans every decl in the workspace, so rebuilding it per candidate is a
@@ -748,11 +757,12 @@ pub(crate) fn rule_match_passes_constraints_with_taint_view(
         expected,
         taint_view,
         factory,
+        global_headers,
         receiver_base_map_cell,
     ) {
         return verdict;
     }
-    match_rule_against_facts_with_taint_view(ws, rule, taint_view)
+    match_rule_against_facts_with_taint_view(ws, rule, taint_view, global_headers)
         .into_iter()
         .any(|hit| hit.rule_id == expected.rule_id && hit.span == expected.span)
 }
@@ -807,6 +817,7 @@ fn exact_rule_match_passes_constraints_at_expected_hit(
     expected: &RuleMatch,
     taint_view: &InterTaintView<'_>,
     factory: &FactoryReturns,
+    global_headers: &Arc<GlobalIndex>,
     receiver_base_map_cell: &OnceLock<AHashMap<String, Vec<String>>>,
 ) -> Option<bool> {
     // Taint-analysis already has the exact endpoint span from the
@@ -823,10 +834,15 @@ fn exact_rule_match_passes_constraints_at_expected_hit(
             expected,
             taint_view,
             factory,
+            global_headers,
             receiver_base_map_cell,
         )),
         MatchKind::Write => Some(write_rule_match_passes_constraints_at_expected_hit(
-            ws, prepared, expected, taint_view,
+            ws,
+            prepared,
+            expected,
+            taint_view,
+            global_headers,
         )),
         MatchKind::Read | MatchKind::Return | MatchKind::Param | MatchKind::Missing => None,
     }
@@ -838,6 +854,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
     expected: &RuleMatch,
     taint_view: &InterTaintView<'_>,
     factory: &FactoryReturns,
+    global_headers: &Arc<GlobalIndex>,
     receiver_base_map_cell: &OnceLock<AHashMap<String, Vec<String>>>,
 ) -> bool {
     let file = expected.span.file;
@@ -847,8 +864,10 @@ fn call_rule_match_passes_constraints_at_expected_hit(
         prepared.needs_workspace_package_context(),
         FactRetention::Transient,
     );
-    let global = streaming_global_headers(ws);
-    let Some(file_index) = ws.db().decl_index_remapped_to_headers(global.as_ref(), file) else {
+    let Some(file_index) = ws
+        .db()
+        .decl_index_remapped_to_headers(global_headers.as_ref(), file)
+    else {
         return false;
     };
     let bundle = decl_match_facts_for_retention(
@@ -865,12 +884,12 @@ fn call_rule_match_passes_constraints_at_expected_hit(
     // whose rule doesn't consult receiver types skip the scan entirely.
     let receiver_base_map: &AHashMap<String, Vec<String>> = if prepared_rule_needs_receiver_base_map(prepared)
     {
-        receiver_base_map_cell.get_or_init(|| workspace_receiver_base_map(global.as_ref()))
+        receiver_base_map_cell.get_or_init(|| workspace_receiver_base_map(global_headers.as_ref()))
     } else {
         &empty_receiver_base_map
     };
     let constructor_names = if prepared.rule.match_spec.kind == MatchKind::New {
-        collect_constructor_names(global.as_ref())
+        collect_constructor_names(global_headers.as_ref())
     } else {
         AHashSet::new()
     };
@@ -956,10 +975,13 @@ fn write_rule_match_passes_constraints_at_expected_hit(
     prepared: &PreparedRule<'_>,
     expected: &RuleMatch,
     taint_view: &InterTaintView<'_>,
+    global_headers: &Arc<GlobalIndex>,
 ) -> bool {
     let file = expected.span.file;
-    let global = streaming_global_headers(ws);
-    let Some(file_index) = ws.db().decl_index_remapped_to_headers(global.as_ref(), file) else {
+    let Some(file_index) = ws
+        .db()
+        .decl_index_remapped_to_headers(global_headers.as_ref(), file)
+    else {
         return false;
     };
     let nested_ast_values = NestedAstValueIndex::new(&file_index.defs);
@@ -1144,6 +1166,7 @@ where
             factory,
             dedup_file_matches: false,
             retention: FactRetention::Transient,
+            global_headers: None,
         },
     )
 }
@@ -1173,6 +1196,7 @@ where
             factory,
             dedup_file_matches: true,
             retention: FactRetention::Transient,
+            global_headers: None,
         },
     )
 }
@@ -1193,6 +1217,7 @@ where
         factory,
         dedup_file_matches,
         retention,
+        global_headers,
     } = config;
     if taint_view.is_none() {
         prepare_matcher_fact_caches_for_broad_scan();
@@ -1253,8 +1278,9 @@ where
     // and does not perform receiver-ancestry or cross-file missing-call
     // traversal. Local compiler symbols are already internally consistent, so
     // loading/remapping the workspace symbol table here would be pure cost.
-    let global_file_indexes =
-        (!matches!(mode, ConstraintMode::Inventory)).then(|| matcher_global_headers(ws, retention));
+    let global_file_indexes = global_headers.cloned().or_else(|| {
+        (!matches!(mode, ConstraintMode::Inventory)).then(|| matcher_global_headers(ws, retention))
+    });
     let inventory_receiver_ancestry =
         matches!(mode, ConstraintMode::Inventory).then(|| ws.compiler_receiver_ancestry());
     if let Some(started) = headers_started {
@@ -1736,6 +1762,12 @@ struct MatchRunConfig<'a, 'taint> {
     factory: &'a Arc<FactoryReturns>,
     dedup_file_matches: bool,
     retention: FactRetention,
+    /// Borrow an analysis run's already-materialized compiler symbol table.
+    /// Source groups execute on Rayon; recursively building this table while
+    /// a worker owns its cache write lock can otherwise deadlock through
+    /// work-stealing. The immutable compiler headers are the authoritative
+    /// identity projection for both the planner and endpoint rechecks.
+    global_headers: Option<&'a Arc<GlobalIndex>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -8444,6 +8476,7 @@ fn receiver_origin_callback_proof(
 /// member write. This avoids inventing a value edge into the callback RHS.
 pub(crate) fn callback_extension_attribution_match(
     ws: &Workspace,
+    global: &GlobalIndex,
     sink: &RuleMatch,
     rule: &Rule,
 ) -> Option<RuleMatch> {
@@ -8459,10 +8492,7 @@ pub(crate) fn callback_extension_attribution_match(
         };
         Some(receiver_origin_callback_param_reaches_call)
     })?;
-    let global = streaming_global_headers(ws);
-    let file_index = ws
-        .db()
-        .decl_index_remapped_to_headers(global.as_ref(), sink.span.file)?;
+    let file_index = ws.db().decl_index_remapped_to_headers(global, sink.span.file)?;
     let current_decl = file_index
         .defs
         .iter()

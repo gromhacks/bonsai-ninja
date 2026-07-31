@@ -181,7 +181,7 @@
   constraints:
   - arg_matches_regex:
       index: 0
-      regex: '^"(?:/bin/)?(?:sh|bash)"$'
+      regex: "^[\"'](?:/bin/)?(?:sh|bash)[\"']$"
   - arg_tainted:
       index: 1
   match_examples:
@@ -209,7 +209,7 @@
   constraints:
   - arg_matches_regex:
       index: 0
-      regex: '^"(?:/bin/)?(?:sh|bash)"$'
+      regex: "^[\"'](?:/bin/)?(?:sh|bash)[\"']$"
   - arg_tainted:
       index: 1
   match_examples:
@@ -237,7 +237,7 @@
   constraints:
   - arg_matches_regex:
       index: 0
-      regex: '^"(?:/bin/)?(?:sh|bash)"$'
+      regex: "^[\"'](?:/bin/)?(?:sh|bash)[\"']$"
   - arg_tainted:
       index: 1
   match_examples:
@@ -245,9 +245,19 @@
     code: |
       import 'dart:io';
       void test(List<String> args) { Process.runSync("sh", args); }
+  - name: single quoted sh c with tainted command
+    code: |
+      import 'dart:io';
+      void test(String host) { Process.runSync('sh', ['-c', 'ping ' + host]); }
+    expect_match_text: [Process.runSync]
   - name: literal explicit shell args negative
     code: |
       import 'dart:io';
       void test() { Process.runSync("sh", ["-c", "whoami"]); }
+    expect_no_match: true
+  - name: single quoted literal shell args negative
+    code: |
+      import 'dart:io';
+      void test() { Process.runSync('sh', ['-c', 'whoami']); }
     expect_no_match: true
   description: "Process.runSync(\"sh\", tainted_argv) - synchronous explicit shell invocation interprets attacker-controlled command strings."

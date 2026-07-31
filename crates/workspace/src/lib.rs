@@ -1339,7 +1339,32 @@ impl Workspace {
     /// compiler fallback. Treating local symbols from a retrieval workspace
     /// as globally stable can silently target unrelated callgraph nodes.
     fn persisted_compiler_header_index_for_files(&self, files: &[FileId]) -> Option<Arc<GlobalIndex>> {
-        let mut files = files.to_vec();
+        let source_inputs = (!self.is_complete_workspace_index())
+            .then(|| self.sidecar_source_inputs().ok())
+            .flatten();
+        let mut files = if let Some(inputs) = source_inputs.as_deref() {
+            // Scoped syntax workspaces may use dense local FileIds (the
+            // one-file navigation path intentionally does). Convert their
+            // canonical VFS paths back to the stable complete-workspace ids
+            // before opening linkage partitions. Retrieval workspaces that
+            // already carry global ids pass through the same path mapping.
+            let ids_by_path = inputs
+                .iter()
+                .map(|(raw, path, _)| (std::path::PathBuf::from(path), FileId::new(*raw)))
+                .collect::<ahash::AHashMap<_, _>>();
+            files
+                .iter()
+                .map(|file| {
+                    self.inner
+                        .vfs
+                        .path(*file)
+                        .ok()
+                        .and_then(|path| ids_by_path.get(path.as_path()).copied())
+                })
+                .collect::<Option<Vec<_>>>()?
+        } else {
+            files.to_vec()
+        };
         files.sort_unstable_by_key(|file| file.raw());
         files.dedup();
         if let Some(root) = self.root_path() {
@@ -1347,13 +1372,20 @@ impl Workspace {
             let loaded = if self.is_complete_workspace_index() {
                 linkage_sidecar::load_header_partitions_checked(&path, &self.inner.db, &files)
             } else {
-                self.sidecar_source_inputs().and_then(|inputs| {
-                    linkage_sidecar::load_header_partitions_checked_with_source_inputs(
-                        &path,
-                        inputs.as_slice(),
-                        &files,
-                    )
-                })
+                source_inputs
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "complete source generation is unavailable for scoped headers",
+                        )
+                    })
+                    .and_then(|inputs| {
+                        linkage_sidecar::load_header_partitions_checked_with_source_inputs(
+                            &path,
+                            inputs.as_slice(),
+                            &files,
+                        )
+                    })
             };
             match loaded {
                 Ok(headers) => return Some(Arc::new(headers)),
@@ -1513,7 +1545,7 @@ impl Workspace {
             (file, snapshot.version),
             estimated_exact_body_bytes(snapshot.text.len()),
             || {
-                let headers = self.compiler_header_index();
+                let headers = self.compiler_index_for_exact_bodies();
                 self.inner
                     .db
                     .decl_index_remapped_to_headers(headers.as_ref(), file)
@@ -1535,8 +1567,28 @@ impl Workspace {
     /// materializing a workspace-wide body index.
     #[must_use]
     pub fn exact_decl(&self, symbol: SymbolId) -> Option<ExactDecl> {
-        let headers = self.compiler_header_index();
+        let headers = self.compiler_index_for_exact_bodies();
         self.exact_decl_with_headers(symbol, headers)
+    }
+
+    /// Reuse an already-materialized compiler identity table before building
+    /// another one solely to replay an exact body.
+    ///
+    /// Semantic analysis deliberately retains the linkage projection while
+    /// releasing the independent header-cache owner. Exact body consumers can
+    /// use either table because both carry the same stable symbols. Falling
+    /// straight through to `compiler_header_index` in that state duplicated
+    /// memory and, inside a Rayon compiler pass, could deadlock when the
+    /// header builder stole another exact-body job and recursively requested
+    /// its own write-locked cache.
+    fn compiler_index_for_exact_bodies(&self) -> Arc<GlobalIndex> {
+        if let Some(linkage) = self.inner.compiler_linkage.read().clone() {
+            return linkage;
+        }
+        if let Some(headers) = self.inner.compiler_headers.read().clone() {
+            return headers;
+        }
+        self.compiler_header_index()
     }
 
     /// Return one exact declaration using an already-selected stable header
@@ -5129,7 +5181,12 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // v53 (2026-07-30): nested class-like declarations retain the complete
     // AST lexical-parent chain. Rebuild resolver/IDG/taint facts so nested
     // interface and class members cannot reuse truncated owner identities.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 53;
+    // v54 (2026-07-31): standalone lambdas/local callables retain their
+    // Tree-sitter lexical parent, Perl package calls use static identity, and
+    // adapter-declared implicit class receivers resolve inherited
+    // constructors. Rebuild linkage, callgraph, IDG, and taint facts whose
+    // identities or attribution depend on those compiler semantics.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 54;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
@@ -5555,6 +5612,7 @@ fn read_supported_source_file_at_path(
     if registry.adapter_for_extension(ext).is_none() {
         return Err(WorkspaceError::NoAdapter(ext.to_string()));
     }
+
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) => return Err(WorkspaceError::Io(error)),

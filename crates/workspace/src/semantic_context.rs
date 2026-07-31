@@ -269,6 +269,7 @@ fn context_path_string(path: &Path) -> String {
 
 fn classify_context_path(relative: &Path) -> Option<(WorkspaceContextRootKind, &'static str, PathBuf)> {
     let mut prefix = PathBuf::new();
+    let mut source_layout_depth = None;
     for component in relative.components() {
         let std::path::Component::Normal(segment) = component else {
             continue;
@@ -277,8 +278,25 @@ fn classify_context_path(relative: &Path) -> Option<(WorkspaceContextRootKind, &
         let Some(segment) = segment.to_str() else {
             continue;
         };
+        // Once a path has crossed `src/<source-set>/<language-or-resource>`,
+        // later directory names are compiler/package namespace, not workspace
+        // roles. Real code such as `org.elasticsearch.env`, a package named
+        // `gradle`, or a package named `deps` must remain first party.
+        // Dot metadata and package-manager cache directories stay structural
+        // even when nested inside a source tree.
+        if source_layout_depth.is_some_and(|depth| depth >= 2) {
+            if let Some((kind, reason)) = classify_intrinsic_source_metadata_segment(segment) {
+                return Some((kind, reason, prefix));
+            }
+            continue;
+        }
         if let Some((kind, reason)) = classify_context_segment(segment) {
             return Some((kind, reason, prefix));
+        }
+        if segment.eq_ignore_ascii_case("src") {
+            source_layout_depth = Some(0);
+        } else if let Some(depth) = source_layout_depth.as_mut() {
+            *depth += 1;
         }
     }
     let name = relative.file_name().and_then(|s| s.to_str())?;
@@ -295,6 +313,19 @@ fn classify_context_path(relative: &Path) -> Option<(WorkspaceContextRootKind, &
         ));
     }
     None
+}
+
+fn classify_intrinsic_source_metadata_segment(
+    segment: &str,
+) -> Option<(WorkspaceContextRootKind, &'static str)> {
+    match segment.to_ascii_lowercase().as_str() {
+        "node_modules" | "bower_components" | "site-packages" => {
+            Some((WorkspaceContextRootKind::Dependency, "dependency_root"))
+        }
+        ".bonsai" | ".git" | ".hg" | ".svn" | ".gradle" | ".tox" | ".mypy_cache" | ".pytest_cache"
+        | "__pycache__" | ".venv" => Some((WorkspaceContextRootKind::Excluded, "excluded_tooling_root")),
+        _ => None,
+    }
 }
 
 fn classify_context_segment(segment: &str) -> Option<(WorkspaceContextRootKind, &'static str)> {
@@ -587,6 +618,46 @@ mod tests {
                 .sum::<usize>(),
             2,
             "manifest evidence must not turn two indexed files into four"
+        );
+    }
+
+    #[test]
+    fn compiler_package_names_are_not_misclassified_as_workspace_roots() {
+        assert_eq!(
+            classify_context_path(Path::new(
+                "server/src/main/java/org/elasticsearch/env/Environment.java"
+            )),
+            None
+        );
+        assert_eq!(
+            classify_context_path(Path::new(
+                "build-conventions/src/main/java/org/elasticsearch/gradle/Plugin.java"
+            )),
+            None
+        );
+        assert_eq!(
+            classify_context_path(Path::new(
+                "server/src/test/java/org/elasticsearch/deps/DependencyTests.java"
+            )),
+            None
+        );
+        assert_eq!(
+            classify_context_path(Path::new("server/src/main/generated/Generated.java")),
+            Some((
+                WorkspaceContextRootKind::Generated,
+                "generated_source_root",
+                PathBuf::from("server/src/main/generated")
+            ))
+        );
+        assert_eq!(
+            classify_context_path(Path::new(
+                "server/src/main/java/org/elasticsearch/.bonsai/state.java"
+            )),
+            Some((
+                WorkspaceContextRootKind::Excluded,
+                "excluded_tooling_root",
+                PathBuf::from("server/src/main/java/org/elasticsearch/.bonsai")
+            ))
         );
     }
 }

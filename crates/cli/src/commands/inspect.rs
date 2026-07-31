@@ -261,6 +261,12 @@ struct InspectReportSummary {
     /// flow planner.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     semantic_flow_incomplete_reasons: Vec<String>,
+    /// Explicit incompleteness reasons for structural graph evidence.
+    /// This is distinct from output truncation: no partial graph is ever
+    /// presented as complete merely because a reusable reverse index is
+    /// unavailable.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    graph_flow_incomplete_reasons: Vec<String>,
     /// Present when default inspect intentionally skipped the raw
     /// taint overlay to keep a large, broad syntax query bounded.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -635,7 +641,7 @@ fn collect_decl_hits(
     let mut matched_decls = Vec::new();
     for file in options.files_in_path_order.iter().copied() {
         for decl in global.decls_in(file) {
-            if options.matcher.is_match(&decl.name) {
+            if options.matcher.is_declaration_match(decl) {
                 matched_decls.push(decl.clone());
             }
         }
@@ -1626,6 +1632,7 @@ struct InspectFinish<'a> {
     syntax_fast_path: bool,
     large_syntax_scan: bool,
     graph_flows_enabled: bool,
+    graph_flow_incomplete_reason: Option<&'a str>,
     occurrence_scan_skipped_for_id_lookup: bool,
     taint_flow_cap: usize,
 }
@@ -1652,6 +1659,7 @@ fn finish_inspect(
         syntax_fast_path,
         large_syntax_scan,
         graph_flows_enabled,
+        graph_flow_incomplete_reason,
         occurrence_scan_skipped_for_id_lookup,
         taint_flow_cap,
     } = options;
@@ -1719,6 +1727,10 @@ fn finish_inspect(
         semantic_flow_target_cut_size: None,
         semantic_flow_fallback_reasons: Vec::new(),
         semantic_flow_incomplete_reasons: Vec::new(),
+        graph_flow_incomplete_reasons: graph_flow_incomplete_reason
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         taint_overlay_skipped_reason: None,
     };
 
@@ -2000,6 +2012,40 @@ fn finish_inspect(
     Ok(())
 }
 
+/// Pick a source-literal candidate for a semantic inspect name.
+///
+/// Qualified declaration identities are compiler products: source contains
+/// `class RestSearchAction { ... prepareRequest(...) ... }`, not the joined
+/// string `RestSearchAction.prepareRequest`. Candidate lookup therefore uses
+/// the AST name tail and canonical declaration matching applies the complete
+/// qualified identity after the scoped files are hydrated.
+fn inspect_literal_candidate(pattern: &str) -> &str {
+    bonsai_common::short_qualified_tail(pattern)
+}
+
+#[cfg(test)]
+mod inspect_literal_candidate_tests {
+    use super::inspect_literal_candidate;
+
+    #[test]
+    fn semantic_qualified_names_prefilter_by_source_level_tail() {
+        assert_eq!(
+            inspect_literal_candidate("RestSearchAction.prepareRequest"),
+            "prepareRequest"
+        );
+        assert_eq!(
+            inspect_literal_candidate("crate::module::Dispatcher::dispatch"),
+            "dispatch"
+        );
+        assert_eq!(inspect_literal_candidate("prepareRequest"), "prepareRequest");
+    }
+
+    #[test]
+    fn short_qualified_tails_do_not_search_for_a_synthesized_identity() {
+        assert_eq!(inspect_literal_candidate("pkg.io"), "io");
+    }
+}
+
 pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions<'_>) -> Result<()> {
     let InspectCommandOptions {
         pattern,
@@ -2058,7 +2104,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // graph evidence is part of that command's job. A plain query remains a
     // syntax/index lookup unless the caller opts into graph or taint facts.
     let graph_flows_enabled = graph_flow || structural_flow_lookup || explicit_endpoint_graph_flow;
-    let literal_prefilter = pattern.filter(|p| {
+    let literal_prefilter = pattern.map(inspect_literal_candidate).filter(|p| {
         !is_regex
             && p.len() >= 3
             && !taint_flow_explicit
@@ -2106,7 +2152,9 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         None
     };
     let endpoint_retrieval_used = endpoint_retrieval_project.is_some();
-    let direct_file_scope = exact_file_path.is_some() && !taint_flow_explicit && !graph_flows_enabled;
+    let direct_file_scope = exact_file_path.is_some() && !taint_flow_explicit;
+    let target_inspect_scope =
+        direct_file_scope && graph_flows_enabled && !explicit_endpoint_graph_flow && pattern.is_some();
     let partial_workspace = direct_file_scope
         || retrieval_project.is_some()
         || endpoint_retrieval_used
@@ -2130,6 +2178,37 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     };
     let prepare_stage = progress::ScopedSpinner::new("preparing inspect query");
     let initial_ws = project.workspace();
+    let target_inspect_funcs = if target_inspect_scope {
+        let matcher = Matcher::build(pattern, is_regex)?;
+        let candidate_files = initial_ws.vfs().all_files();
+        let headers = initial_ws.compiler_header_index_for_files(&candidate_files);
+        let mut targets = headers
+            .all_files()
+            .flat_map(|file| headers.decls_in(file))
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) && matcher.is_declaration_match(decl)
+            })
+            .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
+            .collect::<Vec<_>>();
+        targets.sort_unstable_by_key(|func| func.raw());
+        targets.dedup();
+        Some(targets)
+    } else {
+        None
+    };
+    let target_inspect_workspace = target_inspect_funcs.as_ref().and_then(|targets| {
+        initial_ws.target_inspect_query_workspace(targets, Some(bonsai_common::Precision::Narrowed))
+    });
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect target scope: requested={} matches={} scoped={}",
+        target_inspect_scope,
+        target_inspect_funcs.as_ref().map_or(0, Vec::len),
+        target_inspect_workspace.is_some()
+    );
     let endpoint_funcs = if explicit_endpoint_graph_flow && partial_workspace {
         let candidate_files = initial_ws.vfs().all_files();
         let from = filters
@@ -2162,7 +2241,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     let exact_endpoint_absent = endpoint_funcs
         .as_ref()
         .is_some_and(|(from, to)| from.is_empty() || to.is_empty());
-    let fallback_project = if explicit_endpoint_graph_flow
+    let endpoint_fallback_project = if explicit_endpoint_graph_flow
         && endpoint_workspace.is_none()
         && endpoint_retrieval_used
         && !exact_endpoint_absent
@@ -2171,14 +2250,16 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     } else {
         None
     };
-    let ws = endpoint_workspace.as_ref().map_or_else(
-        || {
-            fallback_project
-                .as_ref()
-                .map_or(initial_ws, |(project, _)| project.workspace())
-        },
-        |workspace| workspace,
-    );
+    let target_graph_index_unavailable = target_inspect_scope && target_inspect_workspace.is_none();
+    let ws = if let Some(workspace) = target_inspect_workspace.as_ref() {
+        workspace
+    } else if let Some(workspace) = endpoint_workspace.as_ref() {
+        workspace
+    } else if let Some((project, _)) = endpoint_fallback_project.as_ref() {
+        project.workspace()
+    } else {
+        initial_ws
+    };
     // A missing/stale partitioned callgraph is an acceleration miss, not a
     // reason to hydrate the complete resident graph. Compile the exact
     // uncapped source-reachable worklist and seed only this invocation's
@@ -2213,6 +2294,20 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     } else {
         None
     };
+    // A target-oriented graph query needs the complete reverse caller
+    // relation. If no validated partitioned callgraph exists, opening the
+    // whole workspace here makes an exact-file request compile every body in
+    // the repository. On Elasticsearch that accidental fallback consumed
+    // multiple GiB before producing its first row. Keep the syntax result
+    // available, seed an explicitly incomplete empty relation, and report the
+    // missing reverse index instead of silently doing unrelated broad work.
+    // `index --semantic` persists the uncapped reverse relation; a subsequent
+    // query then materializes only the exact target cut.
+    let target_fallback_graph = target_graph_index_unavailable
+        .then(|| std::sync::Arc::new(bonsai_callgraph::ResolvedCallGraph::default()));
+    let query_graph = endpoint_fallback_graph
+        .clone()
+        .or_else(|| target_fallback_graph.clone());
     if endpoint_workspace.is_some() || endpoint_fallback_graph.is_some() {
         // The compiler corridor already resolved both qualified endpoints to
         // exact FuncIds. Inspect's presentation matcher operates on short
@@ -2231,7 +2326,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // single-shot lookups after the first hit on each function.
     // `--no-cache` / `BONSAI_NO_CACHE` swaps this for a pass-through
     // variant that always takes the cold path.
-    let chain_cache = build_chain_cache(ws, endpoint_fallback_graph.clone());
+    let chain_cache = build_chain_cache(ws, query_graph.clone());
     let (downstream_max_extra, downstream_max_paths) = if paging_cfg.all {
         (usize::MAX, usize::MAX)
     } else {
@@ -2242,7 +2337,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // per-file alias maps and per-edge span lookups for this invocation;
     // otherwise hub queries such as Redis's `--query system` repeatedly
     // rescan the same parse trees while checking the same edges.
-    let mut edge_resolver = endpoint_fallback_graph.map_or_else(
+    let mut edge_resolver = query_graph.map_or_else(
         || CallEdgeResolver::new(ws),
         |graph| CallEdgeResolver::with_resolved_graph(ws, graph),
     );
@@ -2472,6 +2567,9 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             syntax_fast_path,
             large_syntax_scan,
             graph_flows_enabled,
+            graph_flow_incomplete_reason: target_graph_index_unavailable.then_some(
+                "the complete reverse-call index is not warmed; run `bonsai-ninja index <workspace> --semantic`",
+            ),
             occurrence_scan_skipped_for_id_lookup,
             taint_flow_cap,
         },
@@ -3534,6 +3632,9 @@ fn refresh_inspect_completeness(report: &mut InspectReport) {
     }
     for reason in &report.summary.semantic_flow_incomplete_reasons {
         reasons.push(format!("inspect semantic flow query incomplete: {reason}"));
+    }
+    for reason in &report.summary.graph_flow_incomplete_reasons {
+        reasons.push(format!("inspect graph flow query incomplete: {reason}"));
     }
     if let Some(reason) = report.summary.taint_overlay_skipped_reason.as_deref() {
         reasons.push(format!("inspect taint flow overlay skipped: {reason}"));

@@ -438,3 +438,77 @@ fn method_call_emits_single_call_event() {
         entry.flow_events
     );
 }
+
+#[test]
+fn package_subroutine_calls_are_static_functions_not_method_dispatch() {
+    let app = r#"
+require "./pipeline.pl";
+sub entry {
+    my ($obj, $value) = @_;
+    Pipeline::orchestrate($value);
+    $obj->orchestrate($value);
+}
+"#;
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[
+            ("app.pl", app),
+            (
+                "pipeline.pl",
+                "package Pipeline; sub orchestrate { my ($value) = @_; return $value; }\n",
+            ),
+        ],
+    );
+    let global = ws.db().global_index();
+    let entry = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .expect("entry decl");
+
+    assert!(
+        entry.flow_events.iter().any(|event| {
+            matches!(
+                event,
+                FlowEvent::Call {
+                    name,
+                    receiver: None,
+                    call_kind: CallKind::Function,
+                    ..
+                } if name == "Pipeline::orchestrate"
+            )
+        }),
+        "qualified Perl subroutine calls must use static function semantics: {:#?}",
+        entry.flow_events
+    );
+    assert!(
+        entry.flow_events.iter().any(|event| {
+            matches!(
+                event,
+                FlowEvent::Call {
+                    name,
+                    call_kind: CallKind::Method,
+                    ..
+                } if name == "obj->orchestrate"
+            )
+        }),
+        "arrow dispatch must remain a Perl method call: {:#?}",
+        entry.flow_events
+    );
+
+    let target = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "orchestrate")
+        .expect("target decl");
+    let call_graph = ws.resolved_call_graph();
+    assert!(
+        call_graph
+            .callees_of(bonsai_common::FuncId::new(entry.symbol.raw()))
+            .any(|edge| edge.to == bonsai_common::FuncId::new(target.symbol.raw())),
+        "the static package call must resolve to the declared Perl subroutine; target={target:#?}; events={:#?}",
+        entry.flow_events
+    );
+}

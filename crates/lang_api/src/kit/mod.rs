@@ -4875,6 +4875,60 @@ fn lower_lambda_declarations(lowering: &CallableLowering<'_>, defs: &mut Vec<cra
     }
 }
 
+/// Connect nested callable declarations to their nearest lexical callable.
+///
+/// Tree-sitter spans are the ownership source of truth. Anonymous lambdas and
+/// named local functions are lowered in separate passes, so assigning parents
+/// after both passes avoids order dependence and keeps every language adapter
+/// on the same compiler contract.
+fn assign_lexical_callable_parents(defs: &mut [crate::Decl]) {
+    let is_callable = |kind: crate::DeclKind| {
+        matches!(
+            kind,
+            crate::DeclKind::Function | crate::DeclKind::Method | crate::DeclKind::Constructor
+        )
+    };
+    let mut callables = defs
+        .iter()
+        .enumerate()
+        .filter(|(_, decl)| is_callable(decl.kind))
+        .map(|(index, decl)| (index, decl.body_span.unwrap_or(decl.span)))
+        .collect::<Vec<_>>();
+    // AST declaration/body intervals are laminar. Put enclosing intervals
+    // first when two declarations begin at the same byte, then maintain the
+    // active lexical owner chain as a stack. This is O(n log n), unlike a
+    // per-child scan across every declaration in a generated source file.
+    callables.sort_unstable_by_key(|(index, region)| {
+        (
+            region.file.raw(),
+            region.start,
+            std::cmp::Reverse(region.end),
+            *index,
+        )
+    });
+    let mut active: Vec<(usize, Span)> = Vec::new();
+    let mut parents = Vec::new();
+    for (index, region) in callables {
+        while active.last().is_some_and(|(_, candidate)| {
+            candidate.file != region.file
+                || candidate.start > region.start
+                || region.end > candidate.end
+                || (candidate.start == region.start && candidate.end == region.end)
+        }) {
+            active.pop();
+        }
+        if defs[index].parent.is_none() {
+            if let Some((parent_index, _)) = active.last() {
+                parents.push((index, defs[*parent_index].symbol));
+            }
+        }
+        active.push((index, region));
+    }
+    for (index, parent) in parents {
+        defs[index].parent = Some(parent);
+    }
+}
+
 /// Lower class nodes and connect methods to their nearest syntactic owner.
 fn lower_class_declarations(
     lowering: &CallableLowering<'_>,
@@ -5340,6 +5394,7 @@ pub fn decl_index_with_handler(
         &mut defs,
         &mut next,
     );
+    assign_lexical_callable_parents(&mut defs);
 
     // Pass 4: top-level / module-scope code. PHP request handlers,
     // Python single-file scripts, Ruby Sinatra DSL apps, and Node

@@ -3914,6 +3914,56 @@ fn adapter_declared_constructor_method_can_target_enclosing_class() {
 }
 
 #[test]
+fn implicit_class_receiver_constructor_uses_lexical_class_and_inherited_initializer() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let base = decl_with(file, 1, "BaseRepository", DeclKind::Class, None, Vec::new());
+    let mut repository = decl_with(file, 2, "Repository", DeclKind::Class, None, Vec::new());
+    repository.bases = vec!["BaseRepository".to_string()];
+    let constructor = decl_with(
+        file,
+        3,
+        "__construct",
+        DeclKind::Constructor,
+        Some(base.symbol.raw()),
+        Vec::new(),
+    );
+    let factory = decl_with(
+        file,
+        4,
+        "wrap",
+        DeclKind::Method,
+        Some(repository.symbol.raw()),
+        vec![FlowEvent::Call {
+            span: Span::new(file, 100, 110),
+            name: "static".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Constructor,
+            args: Vec::new(),
+        }],
+    );
+    insert_file(&mut global, file, vec![base, repository, constructor, factory]);
+
+    let graph = build_graph_with_capabilities(
+        &global,
+        |_| Some("php"),
+        |_| LanguageCapabilities {
+            constructor_method_names: &["__construct"],
+            implicit_receiver_tokens: &["$this", "self", "static"],
+            ..LanguageCapabilities::partial_baseline()
+        },
+    );
+    let factory = FuncId::new(global.find_by_name("wrap")[0].raw());
+    let constructor = func_id_by_name_and_parent(&global, "__construct", "BaseRepository");
+
+    assert_eq!(
+        graph.callees_of(factory).map(|edge| edge.to).collect::<Vec<_>>(),
+        vec![constructor]
+    );
+}
+
+#[test]
 fn receiverless_qualified_factory_constructor_uses_adapter_receiver_type() {
     let file = FileId::new(1);
     let mut global = GlobalIndex::new();

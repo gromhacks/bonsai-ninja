@@ -60,7 +60,9 @@ use std::path::{Path, PathBuf};
 /// v14 rebuilds declaration candidate terms after nested class-like owners
 /// gained their complete AST lexical-parent chain. Qualified endpoint lookup
 /// must never reuse a sidecar containing the former truncated identities.
-pub const RETRIEVAL_SCHEMA_VERSION: u32 = 14;
+/// v15 rebuilds nested lambda/local-function and Perl package terms after
+/// compiler-object v15 corrected their lexical and package ownership.
+pub const RETRIEVAL_SCHEMA_VERSION: u32 = 15;
 
 /// Factstore table id for retrieval snapshots.
 pub const RETRIEVAL_TABLE_ID: u32 = 0x5254_5631;

@@ -902,8 +902,10 @@ tag: cli-input
 match:
   kind: param
   target:
-    name: args
     in_method: [main]
+    param_index_in: [0]
+    param_type_in: [String]
+    param_count_in: [1]
 constraints:
   - enclosing_modifier_in: [static]
 description: Java main args.
@@ -913,6 +915,10 @@ description: Java main args.
     let prepared = PreparedRule::new(&main_args).expect("rule prepares");
     assert!(!prepared.text_possible_in("void mainForTest(String args) {}", None));
     assert!(prepared.text_possible_in("public static void main(String[] args) {}", None));
+    assert!(
+        prepared.text_possible_in("public static void main(String[] commandLine) {}", None),
+        "the prefilter must follow the Java entry-point signature, not a conventional parameter name"
+    );
 }
 
 #[test]

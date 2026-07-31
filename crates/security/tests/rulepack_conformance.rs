@@ -556,6 +556,120 @@ fn c_and_cpp_argv_sources_are_only_main_argv() {
 }
 
 #[test]
+fn managed_and_objc_argv_sources_follow_entrypoint_signatures_not_binding_names() {
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+
+    for (lang, file, rule_id, expected_binding, main_code, helper_code) in [
+        (
+            "java",
+            "App.java",
+            "java.source.main_args",
+            "commandLine",
+            "class App { public static void main(String[] commandLine) {} }\n",
+            "class App { static void helper(String[] commandLine) {} }\n",
+        ),
+        (
+            "kotlin",
+            "App.kt",
+            "kotlin.source.main_args",
+            "commandLine",
+            "fun main(commandLine: Array<String>) {}\n",
+            "fun helper(commandLine: Array<String>) {}\n",
+        ),
+        (
+            "objc",
+            "main.m",
+            "objc.source.cli_argv",
+            "values",
+            "int main(int count, const char *values[]) { return count; }\n",
+            "int helper(int count, const char *values[]) { return count; }\n",
+        ),
+    ] {
+        let rule = pack.find_rule_by_id(rule_id).expect("argv source rule");
+        let main_ws = example_workspace(lang, Some(file), main_code);
+        let main_hits = match_rule_against_facts(&main_ws, rule);
+        assert_eq!(
+            main_hits.len(),
+            1,
+            "{rule_id} must match the runtime argv position regardless of its binding name: {main_hits:#?}"
+        );
+        assert_eq!(main_hits[0].match_text, expected_binding);
+
+        let helper_ws = example_workspace(lang, Some(file), helper_code);
+        assert!(
+            match_rule_against_facts(&helper_ws, rule).is_empty(),
+            "{rule_id} must not taint an ordinary same-typed helper parameter"
+        );
+    }
+}
+
+#[test]
+fn dart_single_quoted_shell_wrapper_reports_only_tainted_command_lists() {
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    let vulnerable = example_workspace(
+        "dart",
+        Some("main.dart"),
+        r#"
+import 'dart:io';
+void main(List<String> arguments) {
+  Process.runSync('sh', ['-c', 'ping ' + arguments[0]]);
+}
+"#,
+    );
+    let report = run_taint_analysis(&vulnerable, &pack, TaintAnalysisOptions::default())
+        .expect("vulnerable taint analysis");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.finding.sink.rule_id == "dart.cmdi.process_runsync_shell_args"),
+        "single-quoted `sh -c` with a tainted command list must be reported: {:#?}",
+        report.findings
+    );
+
+    let safe = example_workspace(
+        "dart",
+        Some("main.dart"),
+        r#"
+import 'dart:io';
+void main(List<String> arguments) {
+  Process.runSync('sh', ['-c', 'whoami']);
+}
+"#,
+    );
+    let report =
+        run_taint_analysis(&safe, &pack, TaintAnalysisOptions::default()).expect("safe taint analysis");
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.finding.sink.rule_id != "dart.cmdi.process_runsync_shell_args"),
+        "literal shell command must remain a negative even when argv exists elsewhere: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn fast_xml_parser_external_entity_rules_stay_disabled() {
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    for rule_id in [
+        "javascript.xxe.fast_xml_parser_entities_enabled",
+        "typescript.xxe.fast_xml_parser_entities_enabled",
+        "typescript.xxe.fast_xml_parser_parse",
+    ] {
+        let rule = pack.find_rule_by_id(rule_id).expect("fast-xml-parser rule");
+        assert!(
+            !rule.enabled,
+            "{rule_id} must not claim CWE-611: fast-xml-parser rejects external SYSTEM entities"
+        );
+        assert!(
+            rule.description.contains("external SYSTEM entities"),
+            "{rule_id} disabled reason must preserve the security-model rationale"
+        );
+    }
+}
+
+#[test]
 fn c_main_argv_reachability_does_not_taint_sizeof_allocator_size() {
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
     let ws = example_workspace(
