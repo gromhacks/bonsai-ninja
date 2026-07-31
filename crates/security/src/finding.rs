@@ -250,6 +250,11 @@ pub struct Finding {
     pub sink: FindingMatch,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sanitizers_seen: Vec<FindingMatch>,
+    /// Taint-preserving transforms encountered on this route. These rules
+    /// describe identity-style operations such as decode/encode/normalise;
+    /// they are evidence that taint continued, not evidence of mitigation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taint_transforms_seen: Vec<FindingMatch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -313,6 +318,7 @@ impl Finding {
             source: &self.source,
             sink_tainted_args: &self.sink.tainted_args,
             sanitizers_seen: &self.sanitizers_seen,
+            taint_transforms_seen: &self.taint_transforms_seen,
             flow_id: self.representative_flow_id.as_deref(),
             chain_display: &self.chain_display,
             taint_path: &self.taint_path,
@@ -323,6 +329,7 @@ impl Finding {
             source: &flow.source,
             sink_tainted_args: &flow.sink_tainted_args,
             sanitizers_seen: &flow.sanitizers_seen,
+            taint_transforms_seen: &flow.taint_transforms_seen,
             flow_id: flow.flow_id.as_deref(),
             chain_display: &flow.chain_display,
             taint_path: &flow.taint_path,
@@ -352,6 +359,8 @@ pub struct AlternateTaintFlow {
     pub sink_tainted_args: Vec<TaintedArgInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sanitizers_seen: Vec<FindingMatch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taint_transforms_seen: Vec<FindingMatch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flow_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -377,6 +386,7 @@ pub struct TaintFlowRef<'a> {
     pub source: &'a FindingMatch,
     pub sink_tainted_args: &'a [TaintedArgInfo],
     pub sanitizers_seen: &'a [FindingMatch],
+    pub taint_transforms_seen: &'a [FindingMatch],
     pub flow_id: Option<&'a str>,
     pub chain_display: &'a [String],
     pub taint_path: &'a [TaintPropagationStep],

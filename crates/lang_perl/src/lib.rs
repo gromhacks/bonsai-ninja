@@ -21,10 +21,16 @@ const PACK_NAME: &str = "perl";
 const PERL_CLASS_KINDS: &[&str] = &["package_statement", "class_statement"];
 
 const HANDLER: GrammarHandler = GrammarHandler {
+    nested_type_ownership: true,
     fn_kinds: &["subroutine_declaration_statement"],
     class_kinds: PERL_CLASS_KINDS,
+    class_decl_kinds: &[
+        ("package_statement", DeclKind::Module),
+        ("class_statement", DeclKind::Class),
+    ],
     method_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.method_kinds,
     method_context_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.method_context_kinds,
+    method_owner_barrier_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.method_owner_barrier_kinds,
     constructor_method_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.constructor_method_kinds,
     constructor_names: &["new"],
     if_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.if_kinds,

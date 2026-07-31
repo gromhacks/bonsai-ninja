@@ -1296,6 +1296,35 @@ struct ContextBoundaryEdge {
     target: NodeId,
 }
 
+/// Compact exact `(caller, call site) -> callee` boundary relation.
+///
+/// Millions of call sites must not become one hash bucket plus one heap
+/// allocation each. Canonical sorted rows support logarithmic site lookup and
+/// contiguous callee iteration while retaining the same structural endpoint
+/// facts.
+struct StructuralBoundaryIndex {
+    rows: Vec<ContextBoundaryKey>,
+}
+
+impl StructuralBoundaryIndex {
+    fn new(mut rows: Vec<ContextBoundaryKey>) -> Self {
+        rows.sort_unstable_by_key(|key| (key.caller.raw(), key.span, key.callee.raw()));
+        rows.dedup_by_key(|key| (key.caller, key.span, key.callee));
+        Self { rows }
+    }
+
+    fn for_site(&self, caller: FuncId, span: Span) -> &[ContextBoundaryKey] {
+        let site = (caller.raw(), span);
+        let start = self
+            .rows
+            .partition_point(|key| (key.caller.raw(), key.span) < site);
+        let end = self
+            .rows
+            .partition_point(|key| (key.caller.raw(), key.span) <= site);
+        &self.rows[start..end]
+    }
+}
+
 struct SparseContextEdges {
     /// Boundaries grouped by the parallel source/offset directory. Source ids
     /// are not repeated in every retained edge.
@@ -2266,8 +2295,19 @@ impl IdgQueryService {
             summary_started.elapsed().as_secs_f64()
         );
         if self.workspace.has_symbolic_transforms() {
-            let contextual_runtime =
-                self.cache_contextual_summary_runtime(max_precision, &batch.contextual_edges);
+            // Return-summary compilation is a forward dataflow pass. Build
+            // its exact contextual relation without the reverse CSR and
+            // reverse contextual side index used only by later target-cut
+            // queries. Interactive consumers reconstruct the bidirectional
+            // runtime on demand; export releases query indexes after this
+            // phase.
+            let contextual_runtime = run_isolated_compiler_phase(|| {
+                Arc::new(self.build_contextual_summary_runtime_with_reverse(
+                    &batch.contextual_edges,
+                    max_precision,
+                    false,
+                ))
+            });
             bonsai_diagnostics::debug_log!(
                 "idg-summary",
                 "contextual compiler runtime elapsed={:.3}s",
@@ -4418,6 +4458,15 @@ impl IdgQueryService {
         summary_edges: &[crate::function_summary::ContextualSummaryEdge],
         max_precision: Option<Precision>,
     ) -> ContextualSummaryRuntime {
+        self.build_contextual_summary_runtime_with_reverse(summary_edges, max_precision, true)
+    }
+
+    fn build_contextual_summary_runtime_with_reverse(
+        &self,
+        summary_edges: &[crate::function_summary::ContextualSummaryEdge],
+        max_precision: Option<Precision>,
+        include_reverse: bool,
+    ) -> ContextualSummaryRuntime {
         let unified = self.ensure_unified();
 
         // The function-summary compiler already contributes every
@@ -4466,10 +4515,14 @@ impl IdgQueryService {
                 })
                 .expect("validated IDG cross-file relation remains readable");
         }
-        let mut reverse_contextual_rows = heap_rows
-            .iter()
-            .map(|(source, target)| (NodeId(target.0), WsNodeId(source.0)))
-            .collect::<Vec<_>>();
+        let mut reverse_contextual_rows = if include_reverse {
+            heap_rows
+                .iter()
+                .map(|(source, target)| (NodeId(target.0), WsNodeId(source.0)))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let heap_by_from = GroupedNodeIndex::from_rows(heap_rows);
 
         // Eager compatibility field edges can point at a canonical type-field
@@ -4477,8 +4530,7 @@ impl IdgQueryService {
         // the authoritative call-site relation from structural formal/return
         // places first, then attribute those synthetic edges to the exact
         // same-span compiler boundary.
-        let mut structural_boundaries: AHashMap<(FuncId, Span), Vec<ContextBoundaryKey>> =
-            AHashMap::default();
+        let mut structural_boundaries = Vec::new();
         {
             let mut record_structural_boundary =
                 |from_segment: SegmentId, to_segment: SegmentId, edge: &IdgEdge| {
@@ -4527,10 +4579,7 @@ impl IdgQueryService {
                         _ => None,
                     };
                     if let Some(key) = key {
-                        structural_boundaries
-                            .entry((key.caller, key.span))
-                            .or_default()
-                            .push(key);
+                        structural_boundaries.push(key);
                     }
                 };
             for (segment_id, segment) in self.workspace.segment_views() {
@@ -4546,10 +4595,7 @@ impl IdgQueryService {
                 })
                 .expect("validated IDG cross-file relation remains readable");
         }
-        for keys in structural_boundaries.values_mut() {
-            keys.sort_unstable_by_key(|key| (key.caller.0, key.callee.0, key.span));
-            keys.dedup();
-        }
+        let structural_boundaries = StructuralBoundaryIndex::new(structural_boundaries);
 
         let mut call_rows = Vec::new();
         let mut return_rows = Vec::new();
@@ -4588,12 +4634,9 @@ impl IdgQueryService {
                     callee: caller_callee.1,
                     span: edge.meta.via_span,
                 };
-                let structural = structural_boundaries.get(&(endpoint_key.caller, endpoint_key.span));
-                let keys: &[ContextBoundaryKey] = structural
-                    .filter(|keys| !keys.contains(&endpoint_key))
-                    .map(Vec::as_slice)
-                    .unwrap_or(std::slice::from_ref(&endpoint_key));
-                for &key in keys {
+                let structural = structural_boundaries.for_site(endpoint_key.caller, endpoint_key.span);
+                let endpoint_is_structural = structural.iter().any(|key| key.callee == endpoint_key.callee);
+                let mut push_boundary = |key| {
                     let boundary = ContextBoundaryEdge {
                         key,
                         target: NodeId(to.0),
@@ -4602,6 +4645,13 @@ impl IdgQueryService {
                         call_rows.push((NodeId(from.0), boundary));
                     } else {
                         return_rows.push((NodeId(from.0), boundary));
+                    }
+                };
+                if structural.is_empty() || endpoint_is_structural {
+                    push_boundary(endpoint_key);
+                } else {
+                    for &key in structural {
+                        push_boundary(key);
                     }
                 }
             };
@@ -4619,16 +4669,18 @@ impl IdgQueryService {
                 .expect("validated IDG cross-file relation remains readable");
         }
         drop(structural_boundaries);
-        reverse_contextual_rows.extend(
-            call_rows
-                .iter()
-                .chain(&return_rows)
-                .map(|(source, edge)| (edge.target, WsNodeId(source.0))),
-        );
+        if include_reverse {
+            reverse_contextual_rows.extend(
+                call_rows
+                    .iter()
+                    .chain(&return_rows)
+                    .map(|(source, edge)| (edge.target, WsNodeId(source.0))),
+            );
+        }
         let calls_by_from = SparseContextEdges::from_rows(call_rows);
         let returns_by_from = SparseContextEdges::from_rows(return_rows);
         let reverse_contextual = GroupedNodeIndex::from_rows(reverse_contextual_rows);
-        let reach = ReachabilityIndex::from_pair_visitor(Self::unified_node_count(&unified), |visit| {
+        let visit_pairs = |visit: &mut dyn FnMut(u32, u32)| {
             for edge in summary_edges {
                 let Some(from) = Self::ws_node_for(&unified, edge.segment, edge.from) else {
                     continue;
@@ -4662,7 +4714,13 @@ impl IdgQueryService {
                     }
                 })
                 .expect("validated IDG cross-file relation remains readable");
-        });
+        };
+        let node_count = Self::unified_node_count(&unified);
+        let reach = if include_reverse {
+            ReachabilityIndex::from_pair_visitor(node_count, visit_pairs)
+        } else {
+            ReachabilityIndex::from_forward_pair_visitor(node_count, visit_pairs)
+        };
         ContextualSummaryRuntime {
             reach,
             heap_by_from,
@@ -5402,25 +5460,6 @@ impl IdgQueryService {
         runtime
     }
 
-    fn cache_contextual_summary_runtime(
-        &self,
-        max_precision: Option<Precision>,
-        summary_edges: &[crate::function_summary::ContextualSummaryEdge],
-    ) -> Arc<ContextualSummaryRuntime> {
-        let unified = self.ensure_unified();
-        {
-            let read = unified.contextual_summaries.read();
-            if let Some(runtime) = read.get(&max_precision) {
-                return Arc::clone(runtime);
-            }
-        }
-        let runtime = run_isolated_compiler_phase(|| {
-            Arc::new(self.build_contextual_summary_runtime(summary_edges, max_precision))
-        });
-        let mut write = unified.contextual_summaries.write();
-        Arc::clone(write.entry(max_precision).or_insert(runtime))
-    }
-
     fn build_reach(
         &self,
         unified: &UnifiedAddressSpace,
@@ -5496,10 +5535,7 @@ impl IdgQueryService {
                 if let Some(row) =
                     lift_call_arg_edge(seg_id, &segment, seg_id, &segment, edge, &mut field_index)
                 {
-                    cross_calls_by_from
-                        .entry(from_ws)
-                        .or_default()
-                        .push(self.normalize_receiver_arg_index(row));
+                    cross_calls_by_from.entry(from_ws).or_default().push(row);
                 }
             }
         }
@@ -5545,47 +5581,12 @@ impl IdgQueryService {
                         &cfe.edge,
                         &mut field_index,
                     ) {
-                        cross_calls_by_from
-                            .entry(from_ws)
-                            .or_default()
-                            .push(self.normalize_receiver_arg_index(row));
+                        cross_calls_by_from.entry(from_ws).or_default().push(row);
                     }
                 }
             })
             .expect("validated IDG cross-file relation remains readable");
         cross_calls_by_from
-    }
-
-    /// Canonicalize older adapter receiver slots that were represented as
-    /// argument zero. The AST call shape is authoritative: an argument-less
-    /// call with an explicit receiver has no positional argument zero, so the
-    /// cross-call carrier is the receiver sentinel.
-    fn normalize_receiver_arg_index(&self, mut edge: CrossCallEdge) -> CrossCallEdge {
-        let caller_symbol = bonsai_common::SymbolId::new(edge.caller.raw());
-        if edge.arg_idx == 0
-            && matches!(
-                edge.relation,
-                CrossCallRelation::Argument | CrossCallRelation::Capture
-            )
-            && self.global.decl_of(caller_symbol).is_some_and(|decl| {
-                self.global.linkage_facts(caller_symbol).map_or_else(
-                    || call_event_is_argumentless_receiver(&decl.flow_events, edge.call_span),
-                    |facts| {
-                        facts.calls.iter().any(|call| {
-                            call.span == edge.call_span
-                                && call
-                                    .receiver
-                                    .as_deref()
-                                    .is_some_and(|receiver| !receiver.trim().is_empty())
-                                && call.arg_spans.is_empty()
-                        })
-                    },
-                )
-            })
-        {
-            edge.arg_idx = u32::MAX;
-        }
-        edge
     }
 
     /// Translate `(func, place)` to a [`PointRef`] by looking up the
@@ -5641,56 +5642,6 @@ impl IdgQueryService {
             kind,
         }
     }
-}
-
-fn call_event_is_argumentless_receiver(events: &[bonsai_lang_api::FlowEvent], span: Span) -> bool {
-    use bonsai_lang_api::FlowEvent;
-    for event in events {
-        match event {
-            FlowEvent::Call {
-                span: call_span,
-                receiver,
-                args,
-                ..
-            } if *call_span == span => {
-                return receiver
-                    .as_deref()
-                    .is_some_and(|receiver| !receiver.trim().is_empty())
-                    && args.is_empty();
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                if call_event_is_argumentless_receiver(then_events, span)
-                    || call_event_is_argumentless_receiver(else_events, span)
-                {
-                    return true;
-                }
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if call_event_is_argumentless_receiver(body, span) {
-                    return true;
-                }
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                if call_event_is_argumentless_receiver(body, span)
-                    || call_event_is_argumentless_receiver(catch_events, span)
-                    || call_event_is_argumentless_receiver(finally_events, span)
-                {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
 }
 
 /// Expand bare container seed names with their descendant wildcard:

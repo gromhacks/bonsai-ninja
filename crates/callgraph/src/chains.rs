@@ -225,6 +225,32 @@ pub fn enumerate_paths_resolved(
     if max_paths == 0 {
         return (Vec::new(), PathTruncation::MaxPaths);
     }
+    // Compile the exact reverse corridor once before enumerating concrete
+    // paths. A forward simple-path walk without this relation explores every
+    // unrelated branch reachable from `from` merely to discover that it can
+    // never reach `to`; on large callgraphs that is exponential work. The
+    // reverse fixed point is O(V+E), syntax-graph exact, and does not impose a
+    // repository-shaped search cap.
+    let mut can_reach_target = ahash::AHashSet::new();
+    let mut reverse_work = vec![to];
+    can_reach_target.insert(to);
+    while let Some(callee) = reverse_work.pop() {
+        let mut callers: Vec<FuncId> = cg
+            .callers_of(callee)
+            .filter(|edge| edge.precision.is_semantic())
+            .map(|edge| edge.from)
+            .collect();
+        callers.sort_unstable_by_key(|func| func.raw());
+        callers.dedup();
+        for caller in callers {
+            if can_reach_target.insert(caller) {
+                reverse_work.push(caller);
+            }
+        }
+    }
+    if !can_reach_target.contains(&from) {
+        return (Vec::new(), PathTruncation::None);
+    }
     let mut queue = std::collections::BinaryHeap::new();
     let mut initial_seen = ahash::AHashSet::new();
     initial_seen.insert(from);
@@ -243,7 +269,7 @@ pub fn enumerate_paths_resolved(
 
     while let Some(state) = queue.pop() {
         probes = probes.saturating_add(1);
-        if probes > max_probes {
+        if max_probes != 0 && probes > max_probes {
             truncation = PathTruncation::ProbeBudget;
             break;
         }
@@ -263,7 +289,7 @@ pub fn enumerate_paths_resolved(
             }
             continue;
         }
-        if state.edges.len() >= max_depth {
+        if max_depth != 0 && state.edges.len() >= max_depth {
             if truncation == PathTruncation::None {
                 truncation = PathTruncation::MaxDepth;
             }
@@ -272,7 +298,7 @@ pub fn enumerate_paths_resolved(
 
         let mut edges: Vec<&CallEdge> = cg
             .callees_of(current)
-            .filter(|edge| edge.precision.is_semantic())
+            .filter(|edge| edge.precision.is_semantic() && can_reach_target.contains(&edge.to))
             .collect();
         edges.sort_by_key(|edge| {
             (

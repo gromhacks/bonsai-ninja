@@ -16,7 +16,6 @@ use std::collections::BTreeSet;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::UNIX_EPOCH;
 
 static REMEMBERED_WORKSPACE_FINGERPRINT: OnceLock<
     Mutex<Option<(PathBuf, bonsai_sdk::WorkspaceContentFingerprint)>>,
@@ -35,19 +34,16 @@ thread_local! {
 }
 
 const EAGER_PAGE_LIMIT: u64 = 4;
-const RENDER_CACHE_VERSION: u32 = 8;
+// Page boundaries are part of the cached rendering contract. Version 10 uses
+// physical table-line costs instead of charging every cell as though it wraps
+// independently, preventing severe under-filled pages on wide inventories.
+const RENDER_CACHE_VERSION: u32 = 10;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CachedPage {
     pub number: u64,
     pub cursor: String,
     pub text: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-struct WorkspaceMetadataFingerprint {
-    files: usize,
-    digest: u64,
 }
 
 /// Hard ceiling on a serialized cache file. The cache is an optional
@@ -97,7 +93,6 @@ struct PageCacheFile {
     binary_version: String,
     matcher_policy_fingerprint: u128,
     workspace_fingerprint: bonsai_sdk::WorkspaceContentFingerprint,
-    workspace_metadata_fingerprint: WorkspaceMetadataFingerprint,
     dependency_metadata_fingerprint: u64,
     rulepack_fingerprint: Option<u64>,
     normalized_argv_hash: u64,
@@ -330,7 +325,10 @@ fn save_pages_value(
     filters_hash: u64,
     pages: Vec<CachedPage>,
 ) -> anyhow::Result<()> {
-    if cache_disabled() || pages.is_empty() {
+    // The rendered-page cache exists to make page 2+ cheap. Persisting a
+    // single terminal page adds dependency/rulepack freshness walks and disk
+    // I/O to narrow commands without any possible replay consumer.
+    if cache_disabled() || pages.len() <= 1 {
         return Ok(());
     }
     let dir = cache_dir(workspace);
@@ -343,7 +341,6 @@ fn save_pages_value(
             Some(fingerprint) => fingerprint,
             None => workspace_fingerprint(workspace)?,
         },
-        workspace_metadata_fingerprint: workspace_metadata_fingerprint(workspace)?,
         dependency_metadata_fingerprint: dependency_metadata_fingerprint(workspace)?,
         rulepack_fingerprint: rulepack_fingerprint_for_command(workspace)?,
         normalized_argv_hash: normalized_argv_hash(),
@@ -404,7 +401,7 @@ where
         kept
     });
     let rows: &[T] = filtered_storage.as_deref().unwrap_or(rows);
-    let (_, current_info) = paging::paginate(rows, cfg, command, filters_hash, &row_cost_bytes);
+    let (_, current_info) = paging::paginate(rows, cfg, command, filters_hash, &row_cost_bytes)?;
     let current_page = current_info.page_number;
     let mut cached_pages = Vec::new();
     let render_label = format!("rendering {command} page");
@@ -414,7 +411,7 @@ where
         if page_number != current_page {
             page_cfg.page = paging::PageArg::Number(page_number);
         }
-        let (slice, info) = paging::paginate(rows, &page_cfg, command, filters_hash, &row_cost_bytes);
+        let (slice, info) = paging::paginate(rows, &page_cfg, command, filters_hash, &row_cost_bytes)?;
         let text = capture(|| render_page(&slice, &info, &page_cfg))?;
         cached_pages.push(CachedPage {
             number: info.page_number,
@@ -533,11 +530,9 @@ fn current_exe_is_newer_than_cache(cache_metadata: &std::fs::Metadata) -> bool {
 }
 
 fn cache_is_fresh(workspace: &Path, cache: &PageCacheFile) -> anyhow::Result<bool> {
-    Ok(
-        cache.workspace_metadata_fingerprint == workspace_metadata_fingerprint(workspace)?
-            && cache.dependency_metadata_fingerprint == dependency_metadata_fingerprint(workspace)?
-            && cache.rulepack_fingerprint == rulepack_fingerprint_for_command(workspace)?,
-    )
+    Ok(cache.workspace_fingerprint == workspace_fingerprint(workspace)?
+        && cache.dependency_metadata_fingerprint == dependency_metadata_fingerprint(workspace)?
+        && cache.rulepack_fingerprint == rulepack_fingerprint_for_command(workspace)?)
 }
 
 fn cache_dir(workspace: &Path) -> PathBuf {
@@ -603,99 +598,10 @@ fn shell_quote_arg(arg: String) -> String {
 }
 
 fn workspace_fingerprint(root: &Path) -> anyhow::Result<bonsai_sdk::WorkspaceContentFingerprint> {
-    // Rendered CLI output is derived from indexed source files, dependency
-    // metadata, rulepacks, and command args. Use the SDK's supported-source
-    // fingerprint so first-page cache saves do not recursively re-read every
-    // file in large workspaces after analysis has already completed.
-    bonsai_sdk::workspace_source_fingerprint_from_disk(root)
-}
-
-fn workspace_metadata_fingerprint(root: &Path) -> anyhow::Result<WorkspaceMetadataFingerprint> {
-    let stable_root = stable_root_path(root);
-    let registry = bonsai_adapters::all_languages_registry();
-    let include_minified = include_minified_sources();
-    let mut builder = ignore::WalkBuilder::new(&stable_root);
-    builder
-        .follow_links(false)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .parents(true)
-        .ignore(true)
-        .add_custom_ignore_filename(".bonsaiignore");
-    builder.filter_entry(move |entry| include_minified || !path_looks_minified(entry.path()));
-
-    let mut entries = Vec::new();
-    for entry in builder.build() {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) if ignore_error_is_missing_or_denied(&error) => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let path = entry.path();
-        let Some(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-        let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
-            continue;
-        };
-        if registry.adapter_for_extension(ext).is_none() {
-            continue;
-        }
-        if !include_minified_sources() && path_looks_minified(path) {
-            continue;
-        }
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(error) if ignore_error_is_missing_or_denied(&error) => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let modified_ns = metadata_modified_nanos(&metadata);
-        let rel = stable_relative_path(&stable_root, path);
-        entries.push(format!("{rel}\0{:016x}\0{:032x}", metadata.len(), modified_ns));
-    }
-    let files = entries.len();
-    Ok(WorkspaceMetadataFingerprint {
-        files,
-        digest: fingerprint_entries(entries),
-    })
-}
-
-fn include_minified_sources() -> bool {
-    std::env::var("BONSAI_INCLUDE_MINIFIED")
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-}
-
-fn ignore_error_is_missing_or_denied(error: &ignore::Error) -> bool {
-    error.io_error().is_some_and(|io_error| {
-        matches!(
-            io_error.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-        )
-    })
-}
-
-fn path_looks_minified(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            let lower = name.to_ascii_lowercase();
-            lower.contains(".min.") || lower.ends_with(".min.js") || lower.ends_with(".min.css")
-        })
-}
-
-fn metadata_modified_nanos(metadata: &std::fs::Metadata) -> u128 {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
+    // Git is only an exact freshness proof for the manifest's previously
+    // content-hashed compiler inputs. Any mismatch falls back to the complete
+    // filesystem/content walk in the SDK.
+    bonsai_sdk::workspace_source_fingerprint_for_cache_validation(root)
 }
 
 /// FNV-1a 64-bit, the same digest the dataflow sidecar uses
@@ -707,9 +613,23 @@ fn page_cache_content_hash(bytes: &[u8]) -> u64 {
 }
 
 fn rulepack_fingerprint_for_command(workspace: &Path) -> anyhow::Result<Option<u64>> {
+    if !command_uses_rulepack() {
+        return Ok(None);
+    }
     let root = explicit_rules_dir_arg().or_else(|| bonsai_sdk::Bonsai::discover_rulepack_root(workspace));
     root.map(|path| content_tree_fingerprint(&path, rulepack_dir_skipped))
         .transpose()
+}
+
+fn command_uses_rulepack() -> bool {
+    #[cfg(test)]
+    {
+        true
+    }
+    #[cfg(not(test))]
+    {
+        std::env::args_os().any(|arg| arg == "security")
+    }
 }
 
 fn explicit_rules_dir_arg() -> Option<PathBuf> {

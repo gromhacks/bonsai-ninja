@@ -223,6 +223,10 @@ pub fn resolution_coverage(
 /// native export. This intentionally avoids retaining the detailed per-file
 /// and per-declaration rows produced by [`resolution_coverage`].
 pub(crate) fn resolution_incomplete_reasons(ws: &Workspace) -> Vec<String> {
+    if let Some(reasons) = persisted_resolution_incomplete_reasons(ws) {
+        return reasons;
+    }
+
     let global = ws.compiler_linkage_index();
     let index = ResolutionIndex::new(ws);
     let mut unresolved_call_sites = 0usize;
@@ -264,6 +268,232 @@ pub(crate) fn resolution_incomplete_reasons(ws: &Workspace) -> Vec<String> {
         reasons.push(format!("receiver-type-gaps:{receiver_type_gaps}"));
     }
     reasons
+}
+
+/// Aggregate exact workspace gaps from the persisted compiler relation while
+/// decoding one file partition at a time.
+///
+/// The sidecar already records the workspace call sites for which candidates
+/// existed but no semantic edge could be selected. Reconstructing the full
+/// multi-million-edge graph merely to rediscover that set made broad export
+/// needlessly expensive. Dynamic/macro syntax and receiver type gaps still
+/// come from adapter-lowered flow events, so the result remains a compiler
+/// fact rather than a cache approximation.
+fn persisted_resolution_incomplete_reasons(ws: &Workspace) -> Option<Vec<String>> {
+    let mut unresolved_sites = AHashSet::new();
+    match ws.visit_persisted_callgraph_partitions(|_file, _nodes, _outgoing, _incoming, unresolved| {
+        unresolved_sites.extend(
+            unresolved
+                .iter()
+                .map(|site| CallSiteKey::new(site.caller, site.span)),
+        );
+    }) {
+        Some(Ok(())) => {}
+        Some(Err(_)) | None => return None,
+    }
+
+    let headers = ws.compiler_header_index();
+    let mut seen_sites = AHashSet::new();
+    let mut dynamic_call_sites = 0usize;
+    let mut macro_call_sites = 0usize;
+    let mut receiver_type_gaps = 0usize;
+    for file in headers.all_files() {
+        let Some(file_index) = ws.exact_decl_index_shared(file) else {
+            continue;
+        };
+        for decl in &file_index.defs {
+            if !is_callable_decl(decl.kind) {
+                continue;
+            }
+            collect_persisted_incomplete_syntax(
+                FuncId::new(decl.symbol.raw()),
+                &decl.flow_events,
+                &unresolved_sites,
+                &mut seen_sites,
+                &mut dynamic_call_sites,
+                &mut macro_call_sites,
+                &mut receiver_type_gaps,
+            );
+        }
+    }
+
+    let mut reasons = Vec::new();
+    if !unresolved_sites.is_empty() {
+        reasons.push(format!("unresolved-call-sites:{}", unresolved_sites.len()));
+    }
+    if dynamic_call_sites > 0 {
+        reasons.push(format!("dynamic-call-sites:{dynamic_call_sites}"));
+    }
+    if macro_call_sites > 0 {
+        reasons.push(format!("macro-call-sites:{macro_call_sites}"));
+    }
+    if receiver_type_gaps > 0 {
+        reasons.push(format!("receiver-type-gaps:{receiver_type_gaps}"));
+    }
+    Some(reasons)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_persisted_incomplete_syntax(
+    caller: FuncId,
+    events: &[FlowEvent],
+    unresolved_sites: &AHashSet<CallSiteKey>,
+    seen_sites: &mut AHashSet<CallSiteKey>,
+    dynamic_call_sites: &mut usize,
+    macro_call_sites: &mut usize,
+    receiver_type_gaps: &mut usize,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                receiver,
+                receiver_types,
+                call_kind,
+                ..
+            } => {
+                let key = CallSiteKey::new(caller, *span);
+                if !seen_sites.insert(key) {
+                    continue;
+                }
+                if matches!(call_kind, CallKind::Indirect) {
+                    *dynamic_call_sites += 1;
+                }
+                if matches!(call_kind, CallKind::Macro) {
+                    *macro_call_sites += 1;
+                }
+                if unresolved_sites.contains(&key)
+                    && matches!(call_kind, CallKind::Method | CallKind::Constructor)
+                    && receiver.is_some()
+                    && receiver_types.is_empty()
+                {
+                    *receiver_type_gaps += 1;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_persisted_incomplete_syntax(
+                    caller,
+                    then_events,
+                    unresolved_sites,
+                    seen_sites,
+                    dynamic_call_sites,
+                    macro_call_sites,
+                    receiver_type_gaps,
+                );
+                collect_persisted_incomplete_syntax(
+                    caller,
+                    else_events,
+                    unresolved_sites,
+                    seen_sites,
+                    dynamic_call_sites,
+                    macro_call_sites,
+                    receiver_type_gaps,
+                );
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_persisted_incomplete_syntax(
+                    caller,
+                    body,
+                    unresolved_sites,
+                    seen_sites,
+                    dynamic_call_sites,
+                    macro_call_sites,
+                    receiver_type_gaps,
+                )
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_persisted_incomplete_syntax(
+                    caller,
+                    body,
+                    unresolved_sites,
+                    seen_sites,
+                    dynamic_call_sites,
+                    macro_call_sites,
+                    receiver_type_gaps,
+                );
+                collect_persisted_incomplete_syntax(
+                    caller,
+                    catch_events,
+                    unresolved_sites,
+                    seen_sites,
+                    dynamic_call_sites,
+                    macro_call_sites,
+                    receiver_type_gaps,
+                );
+                collect_persisted_incomplete_syntax(
+                    caller,
+                    finally_events,
+                    unresolved_sites,
+                    seen_sites,
+                    dynamic_call_sites,
+                    macro_call_sites,
+                    receiver_type_gaps,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Aggregate resolution gaps only for the callable set that participated in
+/// a scoped query. Path/trace drilldowns must not scan every unrelated
+/// workspace declaration—or report another language's unresolved call—as a
+/// reason their own result is incomplete.
+pub(crate) fn resolution_incomplete_reasons_for_funcs(
+    ws: &Workspace,
+    funcs: impl IntoIterator<Item = FuncId>,
+) -> Vec<String> {
+    let global = ws.compiler_linkage_index();
+    let index = ResolutionIndex::new(ws);
+    let mut unique = AHashSet::new();
+    let mut aliases_by_file: AHashMap<bonsai_common::FileId, AHashMap<String, AliasTarget>> = AHashMap::new();
+    let mut unresolved_call_sites = 0usize;
+    let mut dynamic_call_sites = 0usize;
+    let mut macro_call_sites = 0usize;
+    let mut receiver_type_gaps = 0usize;
+
+    for func in funcs {
+        if !unique.insert(func) {
+            continue;
+        }
+        let symbol = bonsai_common::SymbolId::new(func.raw());
+        let Some(header_decl) = global.decl_of(symbol) else {
+            continue;
+        };
+        let file = header_decl.span.file;
+        let Some(exact_index) = ws.exact_decl_index_shared(file) else {
+            continue;
+        };
+        let Some(decl) = exact_index.defs.iter().find(|decl| decl.symbol == symbol) else {
+            continue;
+        };
+        let alias_targets = aliases_by_file.entry(file).or_insert_with(|| {
+            bonsai_lang_api::alias_map_from_import_specs(&ws.db().imports_for(file))
+                .into_iter()
+                .collect()
+        });
+        let row = coverage_counts_for_decl(decl, &index, alias_targets);
+        unresolved_call_sites += row.unresolved_call_sites;
+        dynamic_call_sites += row.dynamic_call_sites;
+        macro_call_sites += row.macro_call_sites;
+        receiver_type_gaps += row.receiver_type_gaps;
+    }
+
+    incomplete_reasons(
+        unresolved_call_sites,
+        dynamic_call_sites,
+        macro_call_sites,
+        receiver_type_gaps,
+    )
 }
 
 fn coverage_for_decl(

@@ -785,6 +785,28 @@ pub fn module_target_matches_decl_module_path_with_syntax(
     decl_module: &bonsai_lang_api::ModulePath,
     syntax: ModulePathSyntax,
 ) -> bool {
+    module_target_matches_decl_module_path_impl(target_module, decl_module, syntax, true)
+}
+
+/// Match a source qualifier to a declaration module without dropping its
+/// final segment. Use this for a raw qualified call receiver: unlike a
+/// compiler-resolved import target, `value.field.method()` carries no evidence
+/// that `field` is a file extension or class-name trailer.
+#[must_use]
+pub fn module_target_exactly_matches_decl_module_path_with_syntax(
+    target_module: &str,
+    decl_module: &bonsai_lang_api::ModulePath,
+    syntax: ModulePathSyntax,
+) -> bool {
+    module_target_matches_decl_module_path_impl(target_module, decl_module, syntax, false)
+}
+
+fn module_target_matches_decl_module_path_impl(
+    target_module: &str,
+    decl_module: &bonsai_lang_api::ModulePath,
+    syntax: ModulePathSyntax,
+    allow_terminal_trailer: bool,
+) -> bool {
     if target_module.is_empty() || decl_module.is_empty() {
         return false;
     }
@@ -813,7 +835,7 @@ pub fn module_target_matches_decl_module_path_with_syntax(
     if try_suffix_match(&target_segments, decl_segments) {
         return true;
     }
-    if target_segments.len() > 1 {
+    if allow_terminal_trailer && target_segments.len() > 1 {
         let trimmed = &target_segments[..target_segments.len() - 1];
         if try_suffix_match(trimmed, decl_segments) {
             return true;

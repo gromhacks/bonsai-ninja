@@ -77,6 +77,7 @@ fn make_pattern_finding(
         source,
         sink,
         sanitizers_seen: Vec::new(),
+        taint_transforms_seen: Vec::new(),
         group_id: Some(group_id.clone()),
         representative_flow_id: Some(flow_id),
         analysis_complete: true,
@@ -182,6 +183,7 @@ pub(super) fn make_finding(
     let finding_id = compute_finding_id(&source_identity, &sink_identity, &group, &src.language);
 
     let mut sanitizers_seen: Vec<FindingMatch> = Vec::new();
+    let mut taint_transforms_seen: Vec<FindingMatch> = Vec::new();
     let mut seen_keys: AHashSet<(String, u32, u32)> = AHashSet::new();
     // Walk the actual `FuncId`s from the taint lineage (not their names) so
     // sanitizers in unrelated same-named functions can't cross-
@@ -271,7 +273,12 @@ pub(super) fn make_finding(
             );
             if seen_keys.insert(dedup_key) {
                 if let Some(rule) = sanitizer_rule {
-                    sanitizers_seen.push(FindingMatch::from_rule_match(sanitizer_match, rule));
+                    let matched = FindingMatch::from_rule_match(sanitizer_match, rule);
+                    if rule_is_taint_preserving_transform(rule) {
+                        taint_transforms_seen.push(matched);
+                    } else {
+                        sanitizers_seen.push(matched);
+                    }
                 }
             }
         }
@@ -559,6 +566,7 @@ pub(super) fn make_finding(
         source: src_match,
         sink: sink_match,
         sanitizers_seen,
+        taint_transforms_seen,
         group_id: Some(group),
         representative_flow_id: context.flow_id,
         analysis_complete: context.analysis_incomplete_reasons.is_empty(),
@@ -575,4 +583,15 @@ pub(super) fn make_finding(
         status,
         from_test,
     })
+}
+
+fn rule_is_taint_preserving_transform(rule: &Rule) -> bool {
+    let has_passthrough_semantics = rule.taint_semantics.as_ref().is_some_and(|semantics| {
+        !semantics.call_result_passthrough_args.is_empty() || semantics.call_result_passthrough_receiver
+    });
+    has_passthrough_semantics
+        && rule
+            .tag
+            .as_deref()
+            .is_some_and(sanitizer_tag_is_recognized_non_crediting)
 }

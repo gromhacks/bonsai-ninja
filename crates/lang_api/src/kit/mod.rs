@@ -950,6 +950,16 @@ pub struct GrammarHandler {
     pub fn_kinds: &'static [&'static str],
     /// Class-like declarations (struct, trait, enum, interface, ...).
     pub class_kinds: &'static [&'static str],
+    /// Exact declaration kind for each class-like grammar node. The
+    /// Tree-sitter adapter owns this mapping because `interface`, `trait`,
+    /// `struct`, and `enum` are language syntax, not names the shared
+    /// compiler should infer from a language id.
+    pub class_decl_kinds: &'static [(&'static str, crate::DeclKind)],
+    /// Whether a class-like declaration nested directly inside another
+    /// class-like declaration is a lexical member of that type. C tag
+    /// declarations opt out because they do not form `Outer::Inner`
+    /// identities.
+    pub nested_type_ownership: bool,
     /// Method declarations. Subset of `fn_kinds` for grammars that
     /// distinguish methods from free functions.
     pub method_kinds: &'static [&'static str],
@@ -959,6 +969,12 @@ pub struct GrammarHandler {
     /// specs as class-like declarations but they do not imply a
     /// receiver binding.
     pub method_context_kinds: &'static [&'static str],
+    /// Anonymous type-expression boundaries that must not leak method
+    /// ownership to an enclosing named type. Java anonymous classes are the
+    /// canonical example: methods inside `new Interface() { ... }` belong to
+    /// that anonymous object, not to the named class or interface surrounding
+    /// the expression.
+    pub method_owner_barrier_kinds: &'static [&'static str],
     /// Constructor-shaped method kinds (`__init__`, `constructor`,
     /// `__construct`, `new`, ...).
     pub constructor_method_kinds: &'static [&'static str],
@@ -1085,6 +1101,20 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "class",
         "module",
     ],
+    class_decl_kinds: &[
+        ("struct_item", crate::DeclKind::Struct),
+        ("struct_declaration", crate::DeclKind::Struct),
+        ("struct_specifier", crate::DeclKind::Struct),
+        ("union_item", crate::DeclKind::Struct),
+        ("union_specifier", crate::DeclKind::Struct),
+        ("trait_item", crate::DeclKind::Trait),
+        ("trait_definition", crate::DeclKind::Trait),
+        ("interface_declaration", crate::DeclKind::Interface),
+        ("enum_item", crate::DeclKind::Enum),
+        ("enum_definition", crate::DeclKind::Enum),
+        ("module", crate::DeclKind::Module),
+    ],
+    nested_type_ownership: true,
     method_kinds: &["method_declaration", "method_definition", "method_signature"],
     method_context_kinds: &[
         "class_definition",
@@ -1104,6 +1134,7 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         // handled by a Kotlin-adapter post-process.)
         "object_definition",
     ],
+    method_owner_barrier_kinds: &[],
     constructor_method_kinds: &["constructor_declaration", "init_declaration"],
     // Constructor method spellings belong to the language adapter. The
     // generic tree-sitter lowering recognizes constructor node kinds only.
@@ -4291,8 +4322,11 @@ pub const fn with_fn_kinds_and_implicit_receivers(
     GrammarHandler {
         fn_kinds,
         class_kinds: GENERIC_HANDLER.class_kinds,
+        class_decl_kinds: GENERIC_HANDLER.class_decl_kinds,
+        nested_type_ownership: GENERIC_HANDLER.nested_type_ownership,
         method_kinds: GENERIC_HANDLER.method_kinds,
         method_context_kinds: GENERIC_HANDLER.method_context_kinds,
+        method_owner_barrier_kinds: GENERIC_HANDLER.method_owner_barrier_kinds,
         constructor_method_kinds: GENERIC_HANDLER.constructor_method_kinds,
         constructor_names: GENERIC_HANDLER.constructor_names,
         if_kinds: GENERIC_HANDLER.if_kinds,
@@ -4868,10 +4902,21 @@ fn lower_class_declarations(
         let symbol = bonsai_common::SymbolId::new(*next);
         *next += 1;
         let class_span = span_of(lowering.file, class_node);
-        class_infos.push((symbol, class_span));
+        let lexical_owner_span = lowering
+            .handler
+            .nested_type_ownership
+            .then(|| nearest_class_owner_span(class_node, lowering.handler))
+            .flatten()
+            .map(|owner| span_of(lowering.file, &owner));
+        class_infos.push((symbol, class_span, lexical_owner_span));
         defs.push(crate::Decl {
             symbol,
-            kind: crate::DeclKind::Class,
+            kind: lowering
+                .handler
+                .class_decl_kinds
+                .iter()
+                .find_map(|(node_kind, decl_kind)| (*node_kind == class_node.kind()).then_some(*decl_kind))
+                .unwrap_or(crate::DeclKind::Class),
             name: name.to_string(),
             qualified_name: None,
             module_path: crate::ModulePath::default(),
@@ -4895,15 +4940,40 @@ fn lower_class_declarations(
         });
     }
 
+    // Class-like declarations can themselves be lexically nested. Preserve
+    // that AST ownership just as we do for methods: a nested interface,
+    // class, record, trait, or struct is owned by the nearest strictly
+    // enclosing named class-like declaration. This is source syntax, not a
+    // naming heuristic; the resulting parent chain is what later produces
+    // identities such as `Outer.Dispatcher.dispatchRequest`.
+    let class_parents = class_infos
+        .iter()
+        .map(|(symbol, _, lexical_owner_span)| {
+            let parent = lexical_owner_span.and_then(|owner_span| {
+                class_infos
+                    .iter()
+                    .find(|(_, candidate_span, _)| *candidate_span == owner_span)
+                    .map(|(candidate, _, _)| *candidate)
+            });
+            (*symbol, parent)
+        })
+        .collect::<Vec<_>>();
+    for (symbol, parent) in class_parents {
+        if let Some(decl) = defs.iter_mut().find(|decl| decl.symbol == symbol) {
+            decl.parent = parent;
+        }
+    }
+
     for (function_symbol, parent_span) in function_parent_spans {
-        let Some((class_symbol, _)) = class_infos
+        let Some(class_symbol) = class_infos
             .iter()
-            .find(|(_, class_span)| *class_span == *parent_span)
+            .find(|(_, class_span, _)| *class_span == *parent_span)
+            .map(|(symbol, _, _)| *symbol)
         else {
             continue;
         };
         if let Some(decl) = defs.iter_mut().find(|decl| decl.symbol == *function_symbol) {
-            decl.parent = Some(*class_symbol);
+            decl.parent = Some(class_symbol);
         }
     }
 }
@@ -7696,6 +7766,9 @@ fn nearest_class_owner_span<'tree>(node: &Node<'tree>, handler: &GrammarHandler)
         if handler.class_kinds.contains(&kind) {
             return Some(candidate);
         }
+        if handler.method_owner_barrier_kinds.contains(&kind) {
+            return None;
+        }
         if handler.fn_kinds.contains(&kind) || handler.lambda_kinds.contains(&kind) {
             return None;
         }
@@ -7898,6 +7971,7 @@ pub fn apply_file_stem_semantic_identity(idx: &mut crate::DeclIndex, ctx: &Adapt
             decl.module_path = module_path.clone();
         }
     }
+    apply_lexical_member_qualified_names(idx, "::");
 }
 
 fn file_module_segments(file: FileId, ctx: &AdapterContext<'_>) -> Option<Vec<String>> {
@@ -8038,6 +8112,74 @@ pub fn apply_module_path_semantic_identity(idx: &mut crate::DeclIndex, module_se
         }
         if decl.module_path.is_empty() {
             decl.module_path = module_path.clone();
+        }
+    }
+    apply_lexical_member_qualified_names(idx, ".");
+}
+
+/// Qualify callable/type members through their AST-declared lexical owner.
+///
+/// Module identity alone is insufficient for compiler navigation:
+/// `pkg.A.run` and `pkg.B.run` are different declarations even when their
+/// bare names and source module match. Ownership comes exclusively from
+/// `Decl.parent`; span containment and source-text naming conventions are not
+/// consulted.
+pub fn apply_lexical_member_qualified_names(idx: &mut crate::DeclIndex, separator: &str) {
+    let declarations = idx
+        .defs
+        .iter()
+        .map(|decl| {
+            (
+                decl.symbol,
+                (
+                    decl.parent,
+                    decl.name.clone(),
+                    decl.qualified_name.clone().unwrap_or_else(|| decl.name.clone()),
+                ),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut resolved = std::collections::HashMap::new();
+    let mut visiting = std::collections::HashSet::new();
+    fn resolve_name(
+        symbol: bonsai_common::SymbolId,
+        separator: &str,
+        declarations: &std::collections::HashMap<
+            bonsai_common::SymbolId,
+            (Option<bonsai_common::SymbolId>, String, String),
+        >,
+        resolved: &mut std::collections::HashMap<bonsai_common::SymbolId, String>,
+        visiting: &mut std::collections::HashSet<bonsai_common::SymbolId>,
+    ) -> Option<String> {
+        if let Some(name) = resolved.get(&symbol) {
+            return Some(name.clone());
+        }
+        let (parent, name, module_qualified) = declarations.get(&symbol)?;
+        if !visiting.insert(symbol) {
+            return Some(module_qualified.clone());
+        }
+        let qualified = parent
+            .and_then(|parent| resolve_name(parent, separator, declarations, resolved, visiting))
+            .map_or_else(
+                || module_qualified.clone(),
+                |owner| format!("{owner}{separator}{name}"),
+            );
+        visiting.remove(&symbol);
+        resolved.insert(symbol, qualified.clone());
+        Some(qualified)
+    }
+    for decl in &idx.defs {
+        let _ = resolve_name(
+            decl.symbol,
+            separator,
+            &declarations,
+            &mut resolved,
+            &mut visiting,
+        );
+    }
+    for decl in &mut idx.defs {
+        if decl.parent.is_some() {
+            decl.qualified_name = resolved.get(&decl.symbol).cloned();
         }
     }
 }
@@ -8794,12 +8936,23 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent], call_bearing_assignment
 /// security matching, inspect, and export consume the same receiver
 /// type evidence without receiver-name allowlists.
 pub fn apply_call_receiver_types(idx: &mut crate::DeclIndex) {
-    apply_call_receiver_types_with_super_tokens(idx, &[]);
+    apply_call_receiver_types_with_language_syntax(idx, &[], &[]);
 }
 
 pub fn apply_call_receiver_types_with_super_tokens(
     idx: &mut crate::DeclIndex,
     super_receiver_tokens: &[&str],
+) {
+    apply_call_receiver_types_with_language_syntax(idx, super_receiver_tokens, &[]);
+}
+
+/// Adapter-aware receiver typing. Constructor method spellings are syntax
+/// facts: only a language that declares a bare constructor form such as Ruby
+/// `new` may bind that receiver-less call to the enclosing class.
+pub fn apply_call_receiver_types_with_language_syntax(
+    idx: &mut crate::DeclIndex,
+    super_receiver_tokens: &[&str],
+    constructor_method_names: &[&str],
 ) {
     // Two parallel indexes over the file's class-like decls:
     //
@@ -8862,6 +9015,7 @@ pub fn apply_call_receiver_types_with_super_tokens(
             implicit_receiver_types.as_deref(),
             &class_facts,
             super_receiver_tokens,
+            constructor_method_names,
         );
     }
 }
@@ -8882,10 +9036,12 @@ fn apply_call_receiver_types_to_events(
     implicit_receiver_types: Option<&[String]>,
     class_facts: &ClassFactsIndex<'_>,
     super_receiver_tokens: &[&str],
+    constructor_method_names: &[&str],
 ) {
     for event in events {
         match event {
             FlowEvent::Call {
+                name,
                 receiver,
                 receiver_types,
                 call_kind,
@@ -8902,14 +9058,17 @@ fn apply_call_receiver_types_to_events(
                         push_unique_receiver_type(receiver_types, ty);
                     }
                 } else if matches!(call_kind, crate::CallKind::Constructor) {
-                    // A bare constructor call inside a class-like declaration
-                    // (`new(...)`, `Self(...)`) constructs the AST-declared
-                    // enclosing type. Preserve that parent-symbol fact on the
-                    // call so return/assignment typing never has to interpret
-                    // the constructor spelling.
-                    if let Some(types) = implicit_receiver_types {
-                        for ty in types {
-                            push_unique_receiver_type(receiver_types, ty.clone());
+                    if constructor_method_names.contains(&short_name_of(name)) {
+                        // A bare constructor call inside a class-like
+                        // declaration (`new(...)`, `Self(...)`) constructs
+                        // the AST-declared enclosing type only when the
+                        // adapter declares that exact syntax. Preserve the
+                        // parent-symbol fact on the call so return/assignment
+                        // typing never has to reinterpret the spelling.
+                        if let Some(types) = implicit_receiver_types {
+                            for ty in types {
+                                push_unique_receiver_type(receiver_types, ty.clone());
+                            }
                         }
                     }
                 } else {
@@ -8949,6 +9108,7 @@ fn apply_call_receiver_types_to_events(
                     implicit_receiver_types,
                     class_facts,
                     super_receiver_tokens,
+                    constructor_method_names,
                 );
                 apply_call_receiver_types_to_events(
                     else_events,
@@ -8956,6 +9116,7 @@ fn apply_call_receiver_types_to_events(
                     implicit_receiver_types,
                     class_facts,
                     super_receiver_tokens,
+                    constructor_method_names,
                 );
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
@@ -8965,6 +9126,7 @@ fn apply_call_receiver_types_to_events(
                     implicit_receiver_types,
                     class_facts,
                     super_receiver_tokens,
+                    constructor_method_names,
                 );
             }
             FlowEvent::Try {
@@ -8979,6 +9141,7 @@ fn apply_call_receiver_types_to_events(
                     implicit_receiver_types,
                     class_facts,
                     super_receiver_tokens,
+                    constructor_method_names,
                 );
                 apply_call_receiver_types_to_events(
                     catch_events,
@@ -8986,6 +9149,7 @@ fn apply_call_receiver_types_to_events(
                     implicit_receiver_types,
                     class_facts,
                     super_receiver_tokens,
+                    constructor_method_names,
                 );
                 apply_call_receiver_types_to_events(
                     finally_events,
@@ -8993,6 +9157,7 @@ fn apply_call_receiver_types_to_events(
                     implicit_receiver_types,
                     class_facts,
                     super_receiver_tokens,
+                    constructor_method_names,
                 );
             }
             FlowEvent::Assign { .. }

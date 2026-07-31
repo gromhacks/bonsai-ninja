@@ -11,7 +11,13 @@ use crate::paging;
 use crate::progress;
 use crate::{cli_println, ui};
 
-use super::{open_project_path_query, page_info_to_json, paged_json_incomplete_reasons, short_file};
+use super::{
+    browse::workspace_file_count_exceeds, open_project_index_matching_any_literal,
+    open_project_index_retrieval_candidate_union, open_project_path_query, page_info_to_json,
+    paged_json_incomplete_reasons, short_file,
+};
+
+const PATH_ENDPOINT_PREFILTER_FILE_LIMIT: usize = 5_000;
 
 pub(crate) struct PathCommandOptions<'a> {
     pub(crate) from: &'a str,
@@ -25,7 +31,6 @@ pub(crate) struct PathCommandOptions<'a> {
 }
 
 pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) -> Result<()> {
-    let (project, _footer) = open_project_path_query(root)?;
     let filters = PathFilters {
         from: options.from,
         to: options.to,
@@ -35,7 +40,43 @@ pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) 
         max_probes: options.max_probes,
     };
     let stage = progress::ScopedSpinner::new("enumerating semantic paths");
-    let outcome = project.browse().paths(filters)?;
+    let endpoint_prefilter = !options.regex
+        && options.from.trim().len() >= 3
+        && options.to.trim().len() >= 3
+        && workspace_file_count_exceeds(root, PATH_ENDPOINT_PREFILTER_FILE_LIMIT);
+    let mut outcome = if endpoint_prefilter {
+        let endpoint_queries = [options.from, options.to];
+        let retrieval_project = open_project_index_retrieval_candidate_union(
+            root,
+            &endpoint_queries,
+            bonsai_sdk::SearchFilters::default(),
+        )?;
+        let (project, _footer) = if let Some(project) = retrieval_project {
+            project
+        } else {
+            let literal_storage = endpoint_candidate_literals(options.from, options.to);
+            let literals = literal_storage.iter().map(String::as_str).collect::<Vec<_>>();
+            open_project_index_matching_any_literal(root, &literals)?
+        };
+        let scoped = project.browse().paths(filters)?;
+        if scoped.paths.is_empty() {
+            let (project, _footer) = open_project_path_query(root)?;
+            project.browse().paths(filters)?
+        } else if scoped
+            .backends
+            .iter()
+            .any(|backend| backend.starts_with("partitioned-resolved-callgraph-"))
+        {
+            scoped
+        } else {
+            mark_endpoint_candidate_scope(scoped)
+        }
+    } else {
+        let (project, _footer) = open_project_path_query(root)?;
+        project.browse().paths(filters)?
+    };
+    outcome.analysis_incomplete_reasons.sort();
+    outcome.analysis_incomplete_reasons.dedup();
     stage.finish();
     let max_paths_s = options.max_paths.to_string();
     let max_depth_s = options.max_depth.to_string();
@@ -64,6 +105,64 @@ pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) 
             },
         ),
     }
+}
+
+fn endpoint_candidate_literals(from: &str, to: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    for endpoint in [from, to] {
+        let endpoint = endpoint.trim();
+        if endpoint.len() >= 3 {
+            literals.push(endpoint.to_string());
+        }
+        literals.extend(
+            endpoint
+                .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                .filter(|part| part.len() >= 3)
+                .map(str::to_string),
+        );
+    }
+    literals.sort();
+    literals.dedup();
+    literals
+}
+
+fn mark_endpoint_candidate_scope(mut outcome: PathOutcome) -> PathOutcome {
+    outcome
+        .backends
+        .retain(|backend| backend != "warmed-idg-cross-call");
+    if !outcome
+        .backends
+        .iter()
+        .any(|backend| backend == "endpoint-candidate-resolved-callgraph")
+    {
+        outcome
+            .backends
+            .insert(0, "endpoint-candidate-resolved-callgraph".to_string());
+    }
+    if outcome.paths.iter().all(|path| path.hops == 1) {
+        // One semantic edge is the global lower bound for two distinct
+        // callable endpoints. The endpoint files contain every AST call made
+        // by those source declarations, so the scoped compiler has proved the
+        // complete shortest result; unrelated longer routes cannot outrank it.
+        outcome.analysis_complete = outcome.analysis_incomplete_reasons.is_empty();
+        for path in &mut outcome.paths {
+            path.analysis_complete = outcome.analysis_complete;
+        }
+        return outcome;
+    }
+    let reason = "ranked path found in endpoint-candidate files; an equal or shorter route through other files was not ruled out"
+        .to_string();
+    outcome.analysis_complete = false;
+    outcome.analysis_incomplete_reasons.push(reason.clone());
+    outcome.analysis_incomplete_reasons.sort();
+    outcome.analysis_incomplete_reasons.dedup();
+    for path in &mut outcome.paths {
+        path.analysis_complete = false;
+        path.analysis_incomplete_reasons.push(reason.clone());
+        path.analysis_incomplete_reasons.sort();
+        path.analysis_incomplete_reasons.dedup();
+    }
+    outcome
 }
 
 fn emit_path_json(
@@ -235,4 +334,51 @@ fn analysis_status(complete: bool) -> String {
 
 fn counted(count: usize, singular: &str, plural: &str) -> String {
     format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{endpoint_candidate_literals, mark_endpoint_candidate_scope};
+    use bonsai_sdk::{PathOutcome, PathRow};
+
+    #[test]
+    fn qualified_path_endpoints_retain_source_level_tokens() {
+        assert_eq!(
+            endpoint_candidate_literals(
+                "AbstractHttpServerTransport.dispatchRequest",
+                "server::RestController#dispatchRequest",
+            ),
+            vec![
+                "AbstractHttpServerTransport".to_string(),
+                "AbstractHttpServerTransport.dispatchRequest".to_string(),
+                "RestController".to_string(),
+                "dispatchRequest".to_string(),
+                "server".to_string(),
+                "server::RestController#dispatchRequest".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_endpoint_path_is_a_complete_shortest_path() {
+        let outcome = PathOutcome {
+            paths: vec![PathRow {
+                path_id: "PTH:test".to_string(),
+                hops: 1,
+                precision: "exact".to_string(),
+                functions: Vec::new(),
+                edges: Vec::new(),
+                terminal_call: None,
+                analysis_complete: false,
+                analysis_incomplete_reasons: Vec::new(),
+            }],
+            ..PathOutcome::default()
+        };
+
+        let outcome = mark_endpoint_candidate_scope(outcome);
+
+        assert!(outcome.analysis_complete);
+        assert!(outcome.paths[0].analysis_complete);
+        assert!(outcome.analysis_incomplete_reasons.is_empty());
+    }
 }

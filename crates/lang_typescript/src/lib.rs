@@ -58,6 +58,13 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "class_declaration",
         "abstract_class_declaration",
         "interface_declaration",
+        "enum_declaration",
+    ],
+    class_decl_kinds: &[
+        ("class_declaration", DeclKind::Class),
+        ("abstract_class_declaration", DeclKind::Class),
+        ("interface_declaration", DeclKind::Interface),
+        ("enum_declaration", DeclKind::Enum),
     ],
     ..with_fn_kinds_and_implicit_receivers(
         &[

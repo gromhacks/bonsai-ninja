@@ -1444,6 +1444,9 @@ fn facade_show_reopens_structured_stable_ids() {
     }) {
         bonsai_sdk::AstOutcome::Dumps(mut dumps) => dumps.pop().expect("AST dump"),
         bonsai_sdk::AstOutcome::NodeIdNotFound => panic!("function AST should exist"),
+        bonsai_sdk::AstOutcome::FunctionAmbiguous { .. } => {
+            panic!("fixture function should not be ambiguous")
+        }
     };
     match project
         .show()

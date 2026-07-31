@@ -246,6 +246,7 @@ dependencies = [
  "bonsai_adapters",
  "bonsai_callgraph",
  "bonsai_common",
+ "bonsai_diagnostics",
  "bonsai_hash",
  "bonsai_lang_api",
  "bonsai_retrieval",
@@ -382,6 +383,7 @@ dependencies = [
  "bonsai_callgraph",
  "bonsai_common",
  "bonsai_hash",
+ "bonsai_index",
  "bonsai_lang_api",
  "bonsai_lang_python",
  "bonsai_resolve",
@@ -484,6 +486,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_db",
  "bonsai_lang_api",
+ "bonsai_testkit",
  "bonsai_vfs",
  "tree-sitter",
 ]

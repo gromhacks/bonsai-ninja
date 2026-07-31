@@ -33,6 +33,7 @@ fn combined() -> CombinedFindingWithChain {
             source: site("python.flask.request_args", "request.args", "handle_request"),
             sink: site("python.cmdi.os_system", "os.system(cmd)", "run_admin_command"),
             sanitizers_seen: Vec::new(),
+            taint_transforms_seen: Vec::new(),
             group_id: Some("G:1".to_string()),
             representative_flow_id: Some("F:1".to_string()),
             analysis_complete: true,
@@ -107,6 +108,7 @@ fn read_file_filters_match_alternate_flow_sources_and_chains() {
         source: site("python.flask.request_json", "request.json", "json_handler"),
         sink_tainted_args: finding.finding.sink.tainted_args.clone(),
         sanitizers_seen: Vec::new(),
+        taint_transforms_seen: Vec::new(),
         flow_id: Some("F:2".to_string()),
         chain_display: vec!["json_handler".to_string(), "run_admin_command".to_string()],
         taint_path: vec![TaintPropagationStep {

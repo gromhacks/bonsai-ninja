@@ -107,6 +107,37 @@ impl<'a> ChainCache<'a> {
         Self::with_disabled(ws, true)
     }
 
+    /// Construct a cache around an exact query-scoped resolved graph.
+    ///
+    /// Large-workspace endpoint queries use this when no reusable
+    /// partitioned callgraph exists yet. The compiler worklist still reaches
+    /// a fixed point, but only from the requested source; presentation must
+    /// not replace that graph with the workspace-wide fallback merely to
+    /// enumerate chains.
+    #[must_use]
+    pub fn with_resolved_graph(ws: &'a Workspace, resolved: Arc<ResolvedCallGraph>) -> Self {
+        Self::with_disabled_and_resolved(ws, false, resolved)
+    }
+
+    /// Query-scoped counterpart to [`Self::without_cache`].
+    #[must_use]
+    pub fn without_cache_with_resolved_graph(ws: &'a Workspace, resolved: Arc<ResolvedCallGraph>) -> Self {
+        Self::with_disabled_and_resolved(ws, true, resolved)
+    }
+
+    fn with_disabled_and_resolved(
+        ws: &'a Workspace,
+        disabled: bool,
+        resolved: Arc<ResolvedCallGraph>,
+    ) -> Self {
+        let cache = Self::with_disabled(ws, disabled);
+        cache
+            .resolved
+            .set(resolved)
+            .expect("new chain cache has no resolved graph");
+        cache
+    }
+
     fn with_disabled(ws: &'a Workspace, disabled: bool) -> Self {
         Self {
             ws,

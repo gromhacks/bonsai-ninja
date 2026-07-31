@@ -77,6 +77,42 @@ fn c_adapter_populates_qualified_name_and_visibility() {
 }
 
 #[test]
+fn c_nested_tags_do_not_gain_cpp_style_type_ownership() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_c::CAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("types.c"),
+        "struct Outer { struct Inner { int value; } inner; };\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let index = adapter.extract_declarations(file, &ctx);
+    let outer = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Outer")
+        .expect("Outer tag");
+    let inner = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Inner")
+        .expect("Inner tag");
+
+    assert_ne!(inner.parent, Some(outer.symbol));
+    assert_eq!(inner.qualified_name.as_deref(), Some("types::Inner"));
+}
+
+#[test]
 fn c_adapter_does_not_index_function_pointer_api_declarations_as_int() {
     use bonsai_diagnostics::DiagnosticSink;
     use bonsai_lang_api::{AdapterContext, LanguageAdapter};

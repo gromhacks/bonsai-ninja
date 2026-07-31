@@ -40,10 +40,29 @@ impl IdgSidecarWriteGuard {
                 "removed abandoned IDG FactStore staging files"
             );
         }
-        Ok(Self {
+        let guard = Self {
             lock_file,
             target: target.to_path_buf(),
-        })
+        };
+        let obsolete = guard.prune_obsolete_versions()?;
+        if obsolete != 0 {
+            tracing::debug!(
+                path = %target.display(),
+                removed = obsolete,
+                "removed superseded IDG FactStore generations"
+            );
+        }
+        Ok(guard)
+    }
+
+    /// Remove finalized sidecars from older IDG schemas.
+    ///
+    /// The current target lock is already held. Each obsolete target gets its
+    /// own non-blocking lock before removal, so a concurrent older binary can
+    /// finish publishing without having its target unlinked. Newer schemas are
+    /// never touched.
+    fn prune_obsolete_versions(&self) -> std::io::Result<usize> {
+        prune_obsolete_idg_sidecars(&self.target)
     }
 }
 
@@ -72,9 +91,10 @@ fn open_lock_file(target: &Path) -> std::io::Result<File> {
         .open(lock_path)
 }
 
-/// Remove abandoned staging files for every target in the owned target's IDG
-/// format family. The caller already owns `owned_target`; every other target
-/// is cleaned only after a non-blocking target-lock acquisition succeeds.
+/// Remove abandoned staging files for every recognized IDG target in the
+/// cache directory. The caller already owns `owned_target`; every other
+/// target is cleaned only after a non-blocking target-lock acquisition
+/// succeeds.
 fn cleanup_abandoned_idg_sidecar_temp_files(owned_target: &Path) -> std::io::Result<usize> {
     let Some(parent) = owned_target.parent() else {
         return Ok(0);
@@ -82,7 +102,7 @@ fn cleanup_abandoned_idg_sidecar_temp_files(owned_target: &Path) -> std::io::Res
     let Some(owned_name) = owned_target.file_name().and_then(|name| name.to_str()) else {
         return cleanup_valid_sidecar_temp_files(owned_target);
     };
-    let Some(family) = idg_sidecar_family(owned_name) else {
+    let Some(current_version) = idg_sidecar_version(owned_name) else {
         return cleanup_valid_sidecar_temp_files(owned_target);
     };
     let entries = match std::fs::read_dir(parent) {
@@ -104,7 +124,8 @@ fn cleanup_abandoned_idg_sidecar_temp_files(owned_target: &Path) -> std::io::Res
         let Some((target_name, writer_suffix)) = name.rsplit_once(".tmp.") else {
             continue;
         };
-        if factstore_writer_suffix_is_valid(writer_suffix) && idg_sidecar_family(target_name) == Some(family)
+        if factstore_writer_suffix_is_valid(writer_suffix)
+            && idg_sidecar_version(target_name).is_some_and(|version| version <= current_version)
         {
             targets.insert(parent.join(target_name));
         }
@@ -151,6 +172,108 @@ fn cleanup_abandoned_idg_sidecar_temp_files(owned_target: &Path) -> std::io::Res
     Ok(removed)
 }
 
+/// Best-effort maintenance after a current sidecar was opened successfully.
+///
+/// Read paths call this only after they have validated and opened the current
+/// immutable generation. Failure to acquire the writer lock means another
+/// process is publishing; that is normal and maintenance is skipped.
+pub(crate) fn maintain_current_idg_sidecar(target: &Path) {
+    match maintain_idg_sidecar_cache(target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(error) => {
+            tracing::debug!(
+                path = %target.display(),
+                error = %error,
+                "IDG sidecar maintenance skipped"
+            );
+        }
+    }
+}
+
+pub(crate) fn maintain_idg_sidecar_cache(target: &Path) -> std::io::Result<()> {
+    let _guard = IdgSidecarWriteGuard::try_acquire(target)?;
+    Ok(())
+}
+
+fn prune_obsolete_idg_sidecars(current_target: &Path) -> std::io::Result<usize> {
+    let Some(parent) = current_target.parent() else {
+        return Ok(0);
+    };
+    let Some(current_name) = current_target.file_name().and_then(|name| name.to_str()) else {
+        return Ok(0);
+    };
+    let Some(current_version) = idg_sidecar_version(current_name) else {
+        return Ok(0);
+    };
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut obsolete = BTreeSet::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if idg_sidecar_version(name).is_some_and(|version| version < current_version) {
+            obsolete.insert(entry.path());
+        }
+    }
+
+    let mut removed = 0usize;
+    for target in obsolete {
+        let lock_file = match open_lock_file(&target).and_then(|file| {
+            file.try_lock_exclusive()?;
+            Ok(file)
+        }) {
+            Ok(lock_file) => lock_file,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => {
+                tracing::warn!(
+                    path = %target.display(),
+                    error = %error,
+                    "skipping superseded IDG sidecar cleanup"
+                );
+                continue;
+            }
+        };
+        match std::fs::remove_file(&target) {
+            Ok(()) => removed = removed.saturating_add(1),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %target.display(),
+                    error = %error,
+                    "superseded IDG sidecar cleanup failed"
+                );
+            }
+        }
+        if let Err(error) = FileExt::unlock(&lock_file) {
+            tracing::warn!(
+                path = %target.display(),
+                error = %error,
+                "superseded IDG sidecar cleanup lock release failed"
+            );
+        }
+    }
+    Ok(removed)
+}
+
 /// Return the versioned IDG family prefix for a final sidecar target.
 ///
 /// Both `idg.vN.factstore` and `idg.vN.transfer.<hash>.factstore` belong to
@@ -169,6 +292,10 @@ pub(crate) fn idg_sidecar_family(name: &str) -> Option<&str> {
     };
     let version = family.strip_prefix("idg.v")?;
     (!version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())).then_some(family)
+}
+
+fn idg_sidecar_version(name: &str) -> Option<u32> {
+    idg_sidecar_family(name)?.strip_prefix("idg.v")?.parse().ok()
 }
 
 fn lock_path(target: &Path) -> PathBuf {
@@ -204,7 +331,7 @@ mod tests {
         assert!(!stale.exists());
         assert!(!other_stale.exists());
         assert!(active_temp.exists());
-        assert!(old_version.exists());
+        assert!(!old_version.exists());
         assert!(unrelated.exists());
 
         let peer = OpenOptions::new()
@@ -236,5 +363,34 @@ mod tests {
         assert_eq!(idg_sidecar_family("idg.v.factstore"), None);
         assert_eq!(idg_sidecar_family("other.v12.factstore"), None);
         assert_eq!(idg_sidecar_family("idg.v13.bin"), None);
+    }
+
+    #[test]
+    fn current_owner_prunes_only_unowned_older_generations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let current = dir.path().join("idg.v13.factstore");
+        let current_transfer = dir.path().join("idg.v13.transfer.0123456789abcdef.factstore");
+        let newer = dir.path().join("idg.v14.factstore");
+        let old = dir.path().join("idg.v12.factstore");
+        let active_old = dir.path().join("idg.v11.transfer.fedcba9876543210.factstore");
+        for path in [&current, &current_transfer, &newer, &old, &active_old] {
+            std::fs::write(path, b"sidecar").expect("write sidecar");
+        }
+        let active_lock = open_lock_file(&active_old).expect("open active old lock");
+        active_lock
+            .try_lock_exclusive()
+            .expect("acquire active old writer");
+
+        let guard = IdgSidecarWriteGuard::acquire(&current).expect("acquire current owner");
+        assert!(current.exists());
+        assert!(current_transfer.exists());
+        assert!(newer.exists());
+        assert!(!old.exists());
+        assert!(active_old.exists());
+
+        drop(guard);
+        FileExt::unlock(&active_lock).expect("release active old writer");
+        let _guard = IdgSidecarWriteGuard::acquire(&current).expect("reacquire current owner");
+        assert!(!active_old.exists());
     }
 }

@@ -26,7 +26,16 @@ use std::sync::Arc;
 /// Bump this whenever adapter lowering, [`DeclIndex`], [`ImportIndex`],
 /// [`CompilerSyntaxHeader`], or the object validation contract changes in a
 /// way that can alter compiler facts.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 10;
+// v13: nested class-like declarations retain their exact lexical parent, so
+// member qualified identities include every enclosing AST owner.
+// v14: receiver-less constructor events inherit the enclosing declaration
+// type only when the language adapter declares that exact constructor syntax.
+// v12: independently decodable imports/syntax projections live in one
+// per-file factstore entry instead of the generation metadata. Opening a
+// 30k-file generation now retains only compact path/digest descriptors;
+// candidate queries hydrate headers and bodies for selected FileIds lazily.
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 14;
+const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;
 const METADATA_KEY: u64 = 0;
@@ -71,6 +80,13 @@ struct PreparedCompilerObject {
     compressed: Vec<u8>,
     payload_digest: [u8; 32],
     payload_len: u32,
+    header_compressed: Vec<u8>,
+    header_payload_digest: [u8; 32],
+    header_payload_len: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CompilerObjectHeader {
     imports: Option<ImportIndex>,
     imports_digest: [u8; 32],
     syntax: Option<CompilerSyntaxHeader>,
@@ -94,13 +110,36 @@ struct CompilerObjectFileMetadata {
     source_hash: u64,
     payload_digest: [u8; 32],
     payload_len: u32,
-    /// Independently decodable compiler header facts. Broad package/import
-    /// planning must not inflate the declaration/flow body for every file.
+    /// Digest/length of the independently decodable imports/syntax projection.
+    /// The projection itself is keyed by FileId in the factstore so opening a
+    /// generation is O(number of compact descriptors), not O(all header AST
+    /// facts).
+    header_payload_digest: [u8; 32],
+    header_payload_len: u32,
+}
+
+/// v11 stored every per-file import/syntax projection inside one monolithic
+/// metadata record. Retain only the decoder needed for an exact, one-time
+/// migration into v12's lazy per-file layout.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct LegacyCompilerObjectMetadataV11 {
+    version: u32,
+    semantic_fingerprint: u64,
+    generation_digest: [u8; 32],
+    files: Vec<LegacyCompilerObjectFileMetadataV11>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct LegacyCompilerObjectFileMetadataV11 {
+    file: u32,
+    path: String,
+    language: Option<String>,
+    source_digest: [u8; 32],
+    source_hash: u64,
+    payload_digest: [u8; 32],
+    payload_len: u32,
     imports: Option<ImportIndex>,
     imports_digest: [u8; 32],
-    /// Independently decodable call-target projection. Broad match planning
-    /// uses it only to reject impossible files; exact matches still hydrate
-    /// from the canonical declaration/flow body.
     syntax: Option<CompilerSyntaxHeader>,
     syntax_digest: [u8; 32],
 }
@@ -142,12 +181,6 @@ impl CompilerObjectStore {
         }
         if reader.header().pipeline_hash != metadata_pipeline_hash(&metadata) {
             return Err(invalid_data("compiler-object pipeline fingerprint mismatch"));
-        }
-        if metadata.files.iter().any(|file| {
-            import_index_digest(file.imports.as_ref()) != file.imports_digest
-                || compiler_syntax_header_digest(file.syntax.as_ref()) != file.syntax_digest
-        }) {
-            return Err(invalid_data("compiler-object independent-header digest mismatch"));
         }
         Ok(Self {
             reader,
@@ -210,51 +243,100 @@ impl CompilerObjectStore {
             compressed: hit.payload,
             payload_digest: metadata.payload_digest,
             payload_len: metadata.payload_len,
-            imports: metadata.imports.clone(),
-            imports_digest: metadata.imports_digest,
-            syntax: metadata.syntax.clone(),
-            syntax_digest: metadata.syntax_digest,
+            header_compressed: self.compressed_header_payload(metadata)?,
+            header_payload_digest: metadata.header_payload_digest,
+            header_payload_len: metadata.header_payload_len,
         }))
     }
 
-    fn load_imports(&self, descriptor: &SourceDescriptor) -> Option<ImportIndex> {
-        self.metadata_for(descriptor)?.imports.clone()
+    fn compressed_header_payload(&self, metadata: &CompilerObjectFileMetadata) -> std::io::Result<Vec<u8>> {
+        let hit = self
+            .reader
+            .get(header_key(FileId::new(metadata.file)))
+            .map_err(factstore_io)?
+            .ok_or_else(|| invalid_data("compiler-object header payload is missing"))?;
+        if hit.body_hash != header_body_hash_from_digest(metadata.source_digest) {
+            return Err(invalid_data("compiler-object header body fingerprint mismatch"));
+        }
+        if digest_bytes(&hit.payload) != metadata.header_payload_digest
+            || u32::try_from(hit.payload.len()).ok() != Some(metadata.header_payload_len)
+        {
+            return Err(invalid_data("compiler-object header payload digest mismatch"));
+        }
+        Ok(hit.payload)
     }
 
-    fn load_syntax(&self, descriptor: &SourceDescriptor) -> Option<CompilerSyntaxHeader> {
-        self.metadata_for(descriptor)?.syntax.clone()
+    fn load_header(&self, descriptor: &SourceDescriptor) -> std::io::Result<Option<CompilerObjectHeader>> {
+        let Some(metadata) = self.metadata_for(descriptor) else {
+            return Ok(None);
+        };
+        let compressed = self.compressed_header_payload(metadata)?;
+        let decoded = zstd::stream::decode_all(Cursor::new(compressed))?;
+        let header: CompilerObjectHeader = wire::decode(&decoded).map_err(invalid_wire)?;
+        if import_index_digest(header.imports.as_ref()) != header.imports_digest
+            || compiler_syntax_header_digest(header.syntax.as_ref()) != header.syntax_digest
+        {
+            return Err(invalid_data("compiler-object independent-header digest mismatch"));
+        }
+        Ok(Some(header))
+    }
+
+    fn load_imports(&self, descriptor: &SourceDescriptor) -> std::io::Result<Option<ImportIndex>> {
+        Ok(self.load_header(descriptor)?.and_then(|header| header.imports))
+    }
+
+    fn load_syntax(&self, descriptor: &SourceDescriptor) -> std::io::Result<Option<CompilerSyntaxHeader>> {
+        Ok(self.load_header(descriptor)?.and_then(|header| header.syntax))
     }
 
     fn validate_payload(&self, metadata: &CompilerObjectFileMetadata) -> std::io::Result<()> {
-        let mut payload = self
-            .reader
-            .payload_reader(u64::from(metadata.file) + 1)
-            .map_err(factstore_io)?
-            .ok_or_else(|| invalid_data("compiler-object payload is missing"))?;
-        if payload.body_hash != object_body_hash_from_digest(metadata.source_digest) {
-            return Err(invalid_data("compiler-object body fingerprint mismatch"));
-        }
-        let mut hasher = Sha256::new();
-        let mut total = 0_u64;
-        let mut buffer = [0_u8; 16 * 1024];
-        loop {
-            let read = payload.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-            total = total.saturating_add(read as u64);
-        }
-        if total != u64::from(metadata.payload_len)
-            || <[u8; 32]>::from(hasher.finalize()) != metadata.payload_digest
-        {
-            return Err(invalid_data("compiler-object payload digest mismatch"));
-        }
+        validate_streamed_payload(
+            &self.reader,
+            object_key(FileId::new(metadata.file)),
+            object_body_hash_from_digest(metadata.source_digest),
+            metadata.payload_len,
+            metadata.payload_digest,
+            "compiler-object",
+        )?;
+        validate_streamed_payload(
+            &self.reader,
+            header_key(FileId::new(metadata.file)),
+            header_body_hash_from_digest(metadata.source_digest),
+            metadata.header_payload_len,
+            metadata.header_payload_digest,
+            "compiler-object header",
+        )?;
         Ok(())
     }
 }
 
 impl AnalyzerDb {
+    /// Attach a complete immutable compiler-object generation to a scoped
+    /// query after the caller has validated the full source fingerprint set.
+    ///
+    /// Scoped workspaces normally compile their selected files directly
+    /// because renumbered local [`FileId`] values cannot address a
+    /// whole-workspace generation safely. Exact-worklist queries preserve the
+    /// original ids and pass every workspace source hash here, allowing lazy
+    /// per-file object reuse without loading unrelated payloads.
+    pub fn load_compiler_object_store_for_source_fingerprints<I, P>(
+        &self,
+        workspace_root: &Path,
+        fingerprints: I,
+    ) -> std::io::Result<usize>
+    where
+        I: IntoIterator<Item = (P, u64)>,
+        P: AsRef<Path>,
+    {
+        let store = compiler_object_store_for_source_fingerprints(workspace_root, fingerprints)?;
+        let files = store.metadata.files.len();
+        *self.inner.compiler_object_store.write() = Some(Arc::new(store));
+        self.inner
+            .compiler_object_store_requires_repair
+            .store(false, std::sync::atomic::Ordering::Release);
+        Ok(files)
+    }
+
     /// Load one exact compiler object from the current content-addressed
     /// generation, or compile it from Tree-sitter when no valid object exists.
     /// The result is not retained in the database: broad phases stream one
@@ -293,14 +375,22 @@ impl AnalyzerDb {
     #[must_use]
     pub fn compiler_import_index_uncached(&self, file: FileId) -> Option<ImportIndex> {
         let descriptor = source_descriptor(self, file)?;
-        if let Some(imports) = self
-            .inner
-            .compiler_object_store
-            .read()
-            .as_ref()
-            .and_then(|store| store.load_imports(&descriptor))
-        {
-            return Some(imports);
+        if let Some(store) = self.inner.compiler_object_store.read().as_ref().cloned() {
+            match store.load_imports(&descriptor) {
+                Ok(Some(imports)) => return Some(imports),
+                Ok(None) => {}
+                Err(error) => {
+                    self.inner
+                        .compiler_object_store_requires_repair
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-object",
+                        "compiler import header miss for {}: {}",
+                        descriptor.path,
+                        error
+                    );
+                }
+            }
         }
         self.compiler_file_object_uncached(file)?.imports
     }
@@ -312,14 +402,22 @@ impl AnalyzerDb {
     #[must_use]
     pub fn compiler_syntax_header_uncached(&self, file: FileId) -> Option<CompilerSyntaxHeader> {
         let descriptor = source_descriptor(self, file)?;
-        if let Some(syntax) = self
-            .inner
-            .compiler_object_store
-            .read()
-            .as_ref()
-            .and_then(|store| store.load_syntax(&descriptor))
-        {
-            return Some(syntax);
+        if let Some(store) = self.inner.compiler_object_store.read().as_ref().cloned() {
+            match store.load_syntax(&descriptor) {
+                Ok(Some(syntax)) => return Some(syntax),
+                Ok(None) => {}
+                Err(error) => {
+                    self.inner
+                        .compiler_object_store_requires_repair
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-object",
+                        "compiler syntax header miss for {}: {}",
+                        descriptor.path,
+                        error
+                    );
+                }
+            }
         }
         self.compiler_file_object_uncached(file)?
             .declarations
@@ -495,6 +593,16 @@ impl AnalyzerDb {
                     payload_offset,
                     payload_len: encoded.payload_len,
                 });
+                let (header_payload_offset, header_persisted_len) = prepared
+                    .append(&encoded.header_compressed)
+                    .map_err(factstore_io)?;
+                debug_assert_eq!(encoded.header_payload_len, header_persisted_len);
+                prepared_entries.push(PreparedFactStoreEntry {
+                    key: header_key(descriptor.file),
+                    body_hash: header_body_hash(descriptor),
+                    payload_offset: header_payload_offset,
+                    payload_len: encoded.header_payload_len,
+                });
                 files.push(CompilerObjectFileMetadata {
                     file: descriptor.file.raw(),
                     path: descriptor.path.clone(),
@@ -503,10 +611,8 @@ impl AnalyzerDb {
                     source_hash: descriptor.source_hash,
                     payload_digest: encoded.payload_digest,
                     payload_len: encoded.payload_len,
-                    imports: encoded.imports,
-                    imports_digest: encoded.imports_digest,
-                    syntax: encoded.syntax,
-                    syntax_digest: encoded.syntax_digest,
+                    header_payload_digest: encoded.header_payload_digest,
+                    header_payload_len: encoded.header_payload_len,
                 });
             }
         }
@@ -531,13 +637,14 @@ impl AnalyzerDb {
                 wire::encode_struct_map(&metadata).map_err(invalid_wire)?,
             )
             .map_err(factstore_io)?;
-        let entries = writer.finish().map_err(factstore_io)?;
+        let _entries = writer.finish().map_err(factstore_io)?;
+        let file_count = metadata.files.len();
         let store = CompilerObjectStore::open_at(path, temporary_root)?;
         *self.inner.compiler_object_store.write() = Some(Arc::new(store));
         self.inner
             .compiler_object_store_requires_repair
             .store(false, std::sync::atomic::Ordering::Release);
-        Ok(entries.saturating_sub(1))
+        Ok(file_count)
     }
 
     /// Cheap exact-generation check used before a complete compiler phase.
@@ -569,7 +676,7 @@ impl AnalyzerDb {
         descriptors.sort_unstable_by_key(|descriptor| descriptor.file.raw());
         store.metadata.generation_digest == generation_digest(&descriptors)
             && store.metadata.files.len() == descriptors.len()
-            && store.reader.len() == descriptors.len().saturating_add(1)
+            && store.reader.len() == compiler_object_entry_count(descriptors.len())
             && store.covers(&descriptors)
     }
 
@@ -590,7 +697,7 @@ impl AnalyzerDb {
         descriptors.sort_unstable_by_key(|descriptor| descriptor.file.raw());
         if store.metadata.generation_digest != generation_digest(&descriptors)
             || store.metadata.files.len() != descriptors.len()
-            || store.reader.len() != descriptors.len().saturating_add(1)
+            || store.reader.len() != compiler_object_entry_count(descriptors.len())
         {
             return false;
         }
@@ -668,13 +775,196 @@ pub fn compiler_object_sidecar_path(workspace_root: &Path) -> PathBuf {
     ))
 }
 
+/// Migrate the last monolithic-header compiler-object generation into the
+/// current lazy per-file layout without reparsing source files.
+///
+/// `fingerprints` must describe the complete current compiler input set.
+/// Missing/stale/corrupt legacy data returns an error and callers fall back to
+/// the canonical Tree-sitter rebuild. The destination is published atomically
+/// by `FactStoreWriter`; a failed migration cannot replace a valid generation.
+pub fn migrate_legacy_compiler_object_sidecar_v11_with_source_fingerprints<I, P>(
+    workspace_root: &Path,
+    fingerprints: I,
+) -> std::io::Result<Option<usize>>
+where
+    I: IntoIterator<Item = (P, u64)>,
+    P: AsRef<Path>,
+{
+    let destination = compiler_object_sidecar_path(workspace_root);
+    if destination.exists() {
+        return Ok(None);
+    }
+    let legacy_path = workspace_bonsai_dir(workspace_root).join(format!(
+        "compiler-objects.v{LEGACY_COMPILER_OBJECT_CACHE_VERSION}.factstore"
+    ));
+    if !legacy_path.exists() {
+        return Ok(None);
+    }
+    let reader = FactStoreReader::open_relaxed(&legacy_path).map_err(factstore_io)?;
+    if reader.header().table_id != COMPILER_OBJECT_TABLE_ID {
+        return Err(invalid_data("legacy compiler-object factstore table mismatch"));
+    }
+    let hit = reader
+        .get(METADATA_KEY)
+        .map_err(factstore_io)?
+        .ok_or_else(|| invalid_data("legacy compiler-object metadata is missing"))?;
+    if hit.body_hash != u64::from(LEGACY_COMPILER_OBJECT_CACHE_VERSION) {
+        return Err(invalid_data("legacy compiler-object metadata version mismatch"));
+    }
+    let legacy: LegacyCompilerObjectMetadataV11 = wire::decode(&hit.payload).map_err(invalid_wire)?;
+    if legacy.version != LEGACY_COMPILER_OBJECT_CACHE_VERSION
+        || legacy.semantic_fingerprint != legacy_compiler_frontend_semantic_fingerprint_v11()
+        || reader.header().pipeline_hash != legacy_metadata_pipeline_hash_v11(&legacy)
+        || reader.len() != legacy.files.len().saturating_add(1)
+    {
+        return Err(invalid_data("legacy compiler-object generation mismatch"));
+    }
+
+    let canonical_root = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let mut current = fingerprints
+        .into_iter()
+        .map(|(path, hash)| {
+            let path = path.as_ref();
+            let relative = path
+                .strip_prefix(&canonical_root)
+                .or_else(|_| path.strip_prefix(workspace_root))
+                .unwrap_or(path);
+            (relative.to_string_lossy().replace('\\', "/"), hash)
+        })
+        .collect::<Vec<_>>();
+    current.sort();
+    let mut recorded = legacy
+        .files
+        .iter()
+        .map(|file| (file.path.clone(), file.source_hash))
+        .collect::<Vec<_>>();
+    recorded.sort();
+    if current != recorded {
+        return Err(invalid_data("legacy compiler-object source fingerprint mismatch"));
+    }
+
+    let legacy_generation_digest = legacy.generation_digest;
+    let file_count = legacy.files.len();
+    let mut prepared = PreparedFactStorePayload::create_near(&destination).map_err(factstore_io)?;
+    let mut prepared_entries = Vec::with_capacity(file_count.saturating_mul(2));
+    let mut files = Vec::with_capacity(file_count);
+    let mut previous_file = None;
+    let mut descriptors = Vec::with_capacity(file_count);
+    for legacy_file in legacy.files {
+        if previous_file.is_some_and(|previous| previous >= legacy_file.file)
+            || import_index_digest(legacy_file.imports.as_ref()) != legacy_file.imports_digest
+            || compiler_syntax_header_digest(legacy_file.syntax.as_ref()) != legacy_file.syntax_digest
+        {
+            return Err(invalid_data("legacy compiler-object metadata is not canonical"));
+        }
+        previous_file = Some(legacy_file.file);
+        let file = FileId::new(legacy_file.file);
+        let legacy_payload = reader
+            .get(legacy_object_key_v11(file))
+            .map_err(factstore_io)?
+            .ok_or_else(|| invalid_data("legacy compiler-object payload is missing"))?;
+        if legacy_payload.body_hash != legacy_object_body_hash_from_digest_v11(legacy_file.source_digest)
+            || digest_bytes(&legacy_payload.payload) != legacy_file.payload_digest
+            || u32::try_from(legacy_payload.payload.len()).ok() != Some(legacy_file.payload_len)
+        {
+            return Err(invalid_data("legacy compiler-object payload mismatch"));
+        }
+        let (payload_offset, payload_len) = prepared.append(&legacy_payload.payload).map_err(factstore_io)?;
+        prepared_entries.push(PreparedFactStoreEntry {
+            key: object_key(file),
+            body_hash: object_body_hash_from_digest(legacy_file.source_digest),
+            payload_offset,
+            payload_len,
+        });
+
+        let header = CompilerObjectHeader {
+            imports: legacy_file.imports,
+            imports_digest: legacy_file.imports_digest,
+            syntax: legacy_file.syntax,
+            syntax_digest: legacy_file.syntax_digest,
+        };
+        let header_encoded = wire::encode_struct_map(&header).map_err(invalid_wire)?;
+        let header_compressed =
+            zstd::stream::encode_all(Cursor::new(header_encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)?;
+        let header_payload_digest = digest_bytes(&header_compressed);
+        let header_payload_len = u32::try_from(header_compressed.len())
+            .map_err(|_| invalid_data("compiler-object header payload exceeds 4 GiB"))?;
+        let (header_payload_offset, persisted_header_len) =
+            prepared.append(&header_compressed).map_err(factstore_io)?;
+        debug_assert_eq!(header_payload_len, persisted_header_len);
+        prepared_entries.push(PreparedFactStoreEntry {
+            key: header_key(file),
+            body_hash: header_body_hash_from_digest(legacy_file.source_digest),
+            payload_offset: header_payload_offset,
+            payload_len: header_payload_len,
+        });
+        descriptors.push(SourceDescriptor {
+            file,
+            path: legacy_file.path.clone(),
+            language: legacy_file.language.clone(),
+            source_digest: legacy_file.source_digest,
+            source_hash: legacy_file.source_hash,
+            source_bytes: 0,
+            version: 0,
+        });
+        files.push(CompilerObjectFileMetadata {
+            file: legacy_file.file,
+            path: legacy_file.path,
+            language: legacy_file.language,
+            source_digest: legacy_file.source_digest,
+            source_hash: legacy_file.source_hash,
+            payload_digest: legacy_file.payload_digest,
+            payload_len: legacy_file.payload_len,
+            header_payload_digest,
+            header_payload_len,
+        });
+    }
+    if legacy_generation_digest_v11(&descriptors) != legacy_generation_digest {
+        return Err(invalid_data("legacy compiler-object generation digest mismatch"));
+    }
+    let metadata = CompilerObjectMetadata {
+        version: COMPILER_OBJECT_CACHE_VERSION,
+        semantic_fingerprint: compiler_frontend_semantic_fingerprint(),
+        generation_digest: generation_digest(&descriptors),
+        files,
+    };
+    let writer = FactStoreWriter::create_from_prepared(
+        &destination,
+        COMPILER_OBJECT_TABLE_ID,
+        metadata_pipeline_hash(&metadata),
+        prepared,
+        prepared_entries,
+    )
+    .map_err(factstore_io)?;
+    writer
+        .add_owned(
+            METADATA_KEY,
+            u64::from(COMPILER_OBJECT_CACHE_VERSION),
+            wire::encode_struct_map(&metadata).map_err(invalid_wire)?,
+        )
+        .map_err(factstore_io)?;
+    let entries = writer.finish().map_err(factstore_io)?;
+    if entries != compiler_object_entry_count(file_count) {
+        return Err(invalid_data("migrated compiler-object entry count mismatch"));
+    }
+    let migrated = CompilerObjectStore::open_reusable(workspace_root)?;
+    if migrated.metadata.files.len() != file_count
+        || migrated.reader.len() != compiler_object_entry_count(file_count)
+    {
+        return Err(invalid_data("migrated compiler-object generation mismatch"));
+    }
+    Ok(Some(file_count))
+}
+
 /// Validate the compiler-object container and semantic ABI without opening a
 /// workspace or decoding every file payload. Exact source identity is checked
 /// separately by [`AnalyzerDb::compiler_object_sidecar_is_current`] whenever a
 /// workspace is available.
 pub fn validate_compiler_object_sidecar_layout(workspace_root: &Path) -> std::io::Result<usize> {
     let store = CompilerObjectStore::open_reusable(workspace_root)?;
-    if store.reader.len() != store.metadata.files.len().saturating_add(1) {
+    if store.reader.len() != compiler_object_entry_count(store.metadata.files.len()) {
         return Err(invalid_data("compiler-object entry count mismatch"));
     }
     let mut previous_file = None;
@@ -729,6 +1019,33 @@ where
     Ok(store.metadata.files.len())
 }
 
+/// Return the exact adapter languages recorded by a validated compiler-object
+/// generation without decoding any per-file header or declaration body.
+///
+/// Root-only cache validation uses this compact compiler metadata to recreate
+/// capability-dependent semantic fingerprints. It must not guess languages
+/// from extensions: ambiguous compiler extensions are resolved from the
+/// Tree-sitter parse when the object generation is built.
+pub fn compiler_object_languages_with_source_fingerprints<I, P>(
+    workspace_root: &Path,
+    fingerprints: I,
+) -> std::io::Result<Vec<String>>
+where
+    I: IntoIterator<Item = (P, u64)>,
+    P: AsRef<Path>,
+{
+    let store = compiler_object_store_for_source_fingerprints(workspace_root, fingerprints)?;
+    let mut languages = store
+        .metadata
+        .files
+        .iter()
+        .filter_map(|file| file.language.clone())
+        .collect::<Vec<_>>();
+    languages.sort();
+    languages.dedup();
+    Ok(languages)
+}
+
 fn compiler_object_store_for_source_fingerprints<I, P>(
     workspace_root: &Path,
     fingerprints: I,
@@ -738,7 +1055,7 @@ where
     P: AsRef<Path>,
 {
     let store = CompilerObjectStore::open_reusable(workspace_root)?;
-    if store.reader.len() != store.metadata.files.len().saturating_add(1) {
+    if store.reader.len() != compiler_object_entry_count(store.metadata.files.len()) {
         return Err(invalid_data("compiler-object entry count mismatch"));
     }
     let canonical_root = workspace_root
@@ -826,19 +1143,30 @@ fn prepare_compiler_object(
         .as_ref()
         .map(CompilerSyntaxHeader::from_decl_index);
     let syntax_digest = compiler_syntax_header_digest(syntax.as_ref());
+    let header = CompilerObjectHeader {
+        imports,
+        imports_digest,
+        syntax,
+        syntax_digest,
+    };
     let encoded = wire::encode_struct_map(&object).map_err(invalid_wire)?;
     let compressed = zstd::stream::encode_all(Cursor::new(encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)?;
     let payload_digest = digest_bytes(&compressed);
     let payload_len =
         u32::try_from(compressed.len()).map_err(|_| invalid_data("compiler-object payload exceeds 4 GiB"))?;
+    let header_encoded = wire::encode_struct_map(&header).map_err(invalid_wire)?;
+    let header_compressed =
+        zstd::stream::encode_all(Cursor::new(header_encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)?;
+    let header_payload_digest = digest_bytes(&header_compressed);
+    let header_payload_len = u32::try_from(header_compressed.len())
+        .map_err(|_| invalid_data("compiler-object header payload exceeds 4 GiB"))?;
     Ok(PreparedCompilerObject {
         compressed,
         payload_digest,
         payload_len,
-        imports,
-        imports_digest,
-        syntax,
-        syntax_digest,
+        header_compressed,
+        header_payload_digest,
+        header_payload_len,
     })
 }
 
@@ -899,9 +1227,23 @@ fn validate_object(object: &CompiledFileObject, descriptor: &SourceDescriptor) -
 }
 
 fn generation_digest(descriptors: &[SourceDescriptor]) -> [u8; 32] {
+    generation_digest_with_semantic_fingerprint(descriptors, compiler_frontend_semantic_fingerprint())
+}
+
+fn legacy_generation_digest_v11(descriptors: &[SourceDescriptor]) -> [u8; 32] {
+    generation_digest_with_semantic_fingerprint(
+        descriptors,
+        legacy_compiler_frontend_semantic_fingerprint_v11(),
+    )
+}
+
+fn generation_digest_with_semantic_fingerprint(
+    descriptors: &[SourceDescriptor],
+    semantic_fingerprint: u64,
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"bonsai-compiler-generation-v1\0");
-    hasher.update(compiler_frontend_semantic_fingerprint().to_le_bytes());
+    hasher.update(semantic_fingerprint.to_le_bytes());
     for descriptor in descriptors {
         hasher.update(descriptor.file.raw().to_le_bytes());
         hasher.update(descriptor.path.as_bytes());
@@ -938,6 +1280,14 @@ fn compiler_frontend_semantic_fingerprint() -> u64 {
         ^ 0x434F_4D50_494C_4552
 }
 
+fn legacy_compiler_frontend_semantic_fingerprint_v11() -> u64 {
+    let policy = MATCHER_POLICY_FINGERPRINT;
+    (policy as u64)
+        ^ ((policy >> 64) as u64)
+        ^ u64::from(LEGACY_COMPILER_OBJECT_CACHE_VERSION)
+        ^ 0x434F_4D50_494C_4552
+}
+
 fn metadata_pipeline_hash(metadata: &CompilerObjectMetadata) -> u64 {
     u64::from_le_bytes(
         metadata.generation_digest[..8]
@@ -947,8 +1297,29 @@ fn metadata_pipeline_hash(metadata: &CompilerObjectMetadata) -> u64 {
         ^ u64::from(metadata.version)
 }
 
+fn legacy_metadata_pipeline_hash_v11(metadata: &LegacyCompilerObjectMetadataV11) -> u64 {
+    u64::from_le_bytes(
+        metadata.generation_digest[..8]
+            .try_into()
+            .expect("fixed SHA-256 prefix"),
+    ) ^ metadata.semantic_fingerprint
+        ^ u64::from(metadata.version)
+}
+
 fn object_key(file: FileId) -> u64 {
-    u64::from(file.raw()) + 1
+    u64::from(file.raw()).saturating_mul(2).saturating_add(1)
+}
+
+fn legacy_object_key_v11(file: FileId) -> u64 {
+    u64::from(file.raw()).saturating_add(1)
+}
+
+fn header_key(file: FileId) -> u64 {
+    u64::from(file.raw()).saturating_mul(2).saturating_add(2)
+}
+
+fn compiler_object_entry_count(files: usize) -> usize {
+    files.saturating_mul(2).saturating_add(1)
 }
 
 fn object_body_hash(descriptor: &SourceDescriptor) -> u64 {
@@ -958,6 +1329,54 @@ fn object_body_hash(descriptor: &SourceDescriptor) -> u64 {
 fn object_body_hash_from_digest(source_digest: [u8; 32]) -> u64 {
     u64::from_le_bytes(source_digest[..8].try_into().expect("fixed SHA-256 prefix"))
         ^ compiler_frontend_semantic_fingerprint()
+}
+
+fn legacy_object_body_hash_from_digest_v11(source_digest: [u8; 32]) -> u64 {
+    u64::from_le_bytes(source_digest[..8].try_into().expect("fixed SHA-256 prefix"))
+        ^ legacy_compiler_frontend_semantic_fingerprint_v11()
+}
+
+fn header_body_hash(descriptor: &SourceDescriptor) -> u64 {
+    header_body_hash_from_digest(descriptor.source_digest)
+}
+
+fn header_body_hash_from_digest(source_digest: [u8; 32]) -> u64 {
+    object_body_hash_from_digest(source_digest) ^ 0x4845_4144_4552_5f31
+}
+
+fn validate_streamed_payload(
+    reader: &FactStoreReader,
+    key: u64,
+    body_hash: u64,
+    expected_len: u32,
+    expected_digest: [u8; 32],
+    label: &'static str,
+) -> std::io::Result<()> {
+    let mut payload = reader
+        .payload_reader(key)
+        .map_err(factstore_io)?
+        .ok_or_else(|| invalid_data("compiler-object payload is missing"))?;
+    if payload.body_hash != body_hash {
+        return Err(invalid_data("compiler-object body fingerprint mismatch"));
+    }
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = payload.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        total = total.saturating_add(read as u64);
+    }
+    if total != u64::from(expected_len) || <[u8; 32]>::from(hasher.finalize()) != expected_digest {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{label} payload digest mismatch"),
+        ));
+    }
+    Ok(())
 }
 
 fn invalid_wire(error: impl std::error::Error + Send + Sync + 'static) -> std::io::Error {
@@ -1135,5 +1554,107 @@ mod tests {
 
         assert!(validate_compiler_object_sidecar_layout(root.path()).is_err());
         assert!(!db.compiler_object_sidecar_is_current(root.path()));
+    }
+
+    #[test]
+    fn legacy_v11_generation_migrates_without_reparsing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("src/input.fixture");
+        std::fs::create_dir_all(source.parent().expect("source parent")).expect("source directory");
+        std::fs::write(&source, "source").expect("source file");
+        let vfs = Arc::new(Vfs::new());
+        let file = vfs.write(source.to_string_lossy().into_owned(), Arc::<str>::from("source"));
+        let db = AnalyzerDb::new(Arc::clone(&vfs), Arc::new(LanguageRegistry::new()));
+        db.set_workspace_root(root.path().to_path_buf());
+        let descriptor = source_descriptor(&db, file).expect("source descriptor");
+        let object = db.compile_fresh_file_object(descriptor.clone());
+        let encoded = wire::encode_struct_map(&object).expect("encode legacy object");
+        let compressed = zstd::stream::encode_all(Cursor::new(encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)
+            .expect("compress legacy object");
+        let payload_digest = digest_bytes(&compressed);
+        let payload_len = u32::try_from(compressed.len()).expect("legacy payload length");
+        let imports = object.imports.clone();
+        let syntax = object
+            .declarations
+            .as_ref()
+            .map(CompilerSyntaxHeader::from_decl_index);
+        let legacy_metadata = LegacyCompilerObjectMetadataV11 {
+            version: LEGACY_COMPILER_OBJECT_CACHE_VERSION,
+            semantic_fingerprint: legacy_compiler_frontend_semantic_fingerprint_v11(),
+            generation_digest: legacy_generation_digest_v11(std::slice::from_ref(&descriptor)),
+            files: vec![LegacyCompilerObjectFileMetadataV11 {
+                file: file.raw(),
+                path: descriptor.path.clone(),
+                language: descriptor.language.clone(),
+                source_digest: descriptor.source_digest,
+                source_hash: descriptor.source_hash,
+                payload_digest,
+                payload_len,
+                imports: imports.clone(),
+                imports_digest: import_index_digest(imports.as_ref()),
+                syntax: syntax.clone(),
+                syntax_digest: compiler_syntax_header_digest(syntax.as_ref()),
+            }],
+        };
+        let legacy_path = workspace_bonsai_dir(root.path()).join(format!(
+            "compiler-objects.v{LEGACY_COMPILER_OBJECT_CACHE_VERSION}.factstore"
+        ));
+        let mut prepared =
+            PreparedFactStorePayload::create_near(&legacy_path).expect("prepare legacy payload");
+        let (payload_offset, persisted_len) = prepared.append(&compressed).expect("append legacy object");
+        assert_eq!(persisted_len, payload_len);
+        let writer = FactStoreWriter::create_from_prepared(
+            &legacy_path,
+            COMPILER_OBJECT_TABLE_ID,
+            legacy_metadata_pipeline_hash_v11(&legacy_metadata),
+            prepared,
+            vec![PreparedFactStoreEntry {
+                key: legacy_object_key_v11(file),
+                body_hash: legacy_object_body_hash_from_digest_v11(descriptor.source_digest),
+                payload_offset,
+                payload_len,
+            }],
+        )
+        .expect("legacy writer");
+        writer
+            .add_owned(
+                METADATA_KEY,
+                u64::from(LEGACY_COMPILER_OBJECT_CACHE_VERSION),
+                wire::encode_struct_map(&legacy_metadata).expect("encode legacy metadata"),
+            )
+            .expect("legacy metadata");
+        assert_eq!(writer.finish().expect("finish legacy sidecar"), 2);
+
+        assert_eq!(
+            migrate_legacy_compiler_object_sidecar_v11_with_source_fingerprints(
+                root.path(),
+                [(&source, descriptor.source_hash)],
+            )
+            .expect("migrate legacy generation"),
+            Some(1)
+        );
+        assert_eq!(
+            validate_compiler_object_sidecar_file_with_source_fingerprints(
+                root.path(),
+                [(&source, descriptor.source_hash)],
+            )
+            .expect("validate migrated generation"),
+            1
+        );
+        let migrated = CompilerObjectStore::open_reusable(root.path()).expect("open migrated store");
+        assert_eq!(migrated.reader.len(), 3);
+        let replayed = migrated
+            .load(&descriptor)
+            .expect("load migrated object")
+            .expect("migrated object exists");
+        assert_eq!(replayed, object);
+        assert_eq!(
+            migrated.load_imports(&descriptor).expect("load migrated imports"),
+            imports
+        );
+        assert_eq!(
+            migrated.load_syntax(&descriptor).expect("load migrated syntax"),
+            syntax
+        );
     }
 }

@@ -10,6 +10,7 @@ use bonsai_abstract_interp::{RawStep, RawTrace, StepKind, TraceLimits};
 use bonsai_common::{FuncId, Precision, Span, SpanMap};
 use bonsai_vfs::Vfs;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// Top-level trace artifact. Stable across CLI / API / IDE / test goldens.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -23,6 +24,61 @@ pub struct TraceResult {
     pub states: Vec<StateSnapshot>,
     pub diagnostics: Vec<TraceDiagnostic>,
     pub metadata: TraceMetadata,
+}
+
+/// Compact exact incompleteness metadata for human renderers.
+///
+/// The JSON schema retains every reason. Text output groups the potentially
+/// thousands of resolver misses by reason class, reports exact counts, and
+/// includes a deterministic sample so metadata cannot consume the page before
+/// the trace itself appears.
+#[must_use]
+pub fn summarize_incomplete_reasons(reasons: &[String], sample_limit: usize) -> String {
+    let mut unresolved = BTreeSet::new();
+    let mut ambiguous = BTreeSet::new();
+    let mut other = BTreeSet::new();
+    for reason in reasons {
+        if let Some(name) = reason.strip_prefix("unresolved-call:") {
+            unresolved.insert(name.to_string());
+        } else if let Some(rest) = reason.strip_prefix("ambiguous-call:") {
+            ambiguous.insert(rest.rsplit_once(':').map_or(rest, |(name, _)| name).to_string());
+        } else {
+            other.insert(reason.clone());
+        }
+    }
+    let mut groups = Vec::new();
+    append_reason_group(&mut groups, "unresolved calls", &unresolved, sample_limit);
+    append_reason_group(&mut groups, "ambiguous calls", &ambiguous, sample_limit);
+    append_reason_group(&mut groups, "other reasons", &other, sample_limit);
+    if groups.is_empty() {
+        "unknown".to_string()
+    } else {
+        groups.join("; ")
+    }
+}
+
+fn append_reason_group(
+    groups: &mut Vec<String>,
+    label: &str,
+    values: &BTreeSet<String>,
+    sample_limit: usize,
+) {
+    if values.is_empty() {
+        return;
+    }
+    let sample_limit = sample_limit.max(1);
+    let sample = values
+        .iter()
+        .take(sample_limit)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remaining = values.len().saturating_sub(sample_limit);
+    if remaining == 0 {
+        groups.push(format!("{label}: {} ({sample})", values.len()));
+    } else {
+        groups.push(format!("{label}: {} ({sample}, … +{remaining})", values.len()));
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -43,7 +43,9 @@ pub(crate) mod taint;
 pub(crate) mod vars;
 
 pub use args::{args, ArgOut, ArgsFilters};
-pub use ast::{compute_node_id, dump_ast, AstFileDump, AstFilters, AstNode, AstOutcome};
+pub use ast::{
+    compute_node_id, dump_ast, AstFileDump, AstFilters, AstFunctionCandidate, AstNode, AstOutcome,
+};
 pub use bonsai_workspace::decl_decorator_names;
 pub use calls::{calls, CallOut, CallsFilters};
 pub use classes::{classes, ClassOut, ClassesFilters};
@@ -54,8 +56,8 @@ pub use common::{
 };
 pub use defs::{defs, DefOut, DefsFilters};
 pub use dumps::{
-    callgraph_summary, dump_callgraph, dump_cfg, dump_hir, CallgraphRow, DumpCallableCandidate,
-    DumpLookupError, HirDump,
+    callgraph_summary, dump_callable_file_qualifier, dump_callgraph, dump_cfg, dump_hir, CallgraphRow,
+    DumpCallableCandidate, DumpLookupError, HirDump,
 };
 pub use edges::{compute_edge_id, dump_edges, EdgeRecord, EdgesFilters, PrecisionClass};
 pub use entrypoints::{entrypoints, EntryPointOut, EntryPointsFilters};

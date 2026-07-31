@@ -5,8 +5,8 @@
 //! it is a deterministic callgraph root view for code navigation.
 
 use crate::common::{
-    best_textual_relevance_key, file_path_matches_filter, format_span, make_name_filter,
-    textual_relevance_key,
+    best_textual_relevance_key, collect_callee_names, file_path_matches_filter, format_span,
+    make_name_filter, textual_relevance_key,
 };
 use bonsai_common::FuncId;
 use bonsai_lang_api::DeclKind;
@@ -44,10 +44,23 @@ pub struct EntryPointOut {
 /// Collect callable declarations with no semantic caller in the
 /// resolved callgraph.
 pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<EntryPointOut>, regex::Error> {
-    let global = ws.compiler_linkage_index();
-    let graph = ws.cached_resolved_call_graph();
+    let global = if let Some(file_filter) = f.file {
+        let files = ws
+            .vfs()
+            .all_files()
+            .into_iter()
+            .filter(|file| {
+                ws.vfs()
+                    .path(*file)
+                    .is_ok_and(|path| file_path_matches_filter(ws, &path.to_string_lossy(), file_filter))
+            })
+            .collect::<Vec<_>>();
+        ws.compiler_header_index_for_files(&files)
+    } else {
+        ws.compiler_header_index()
+    };
     let name_match = make_name_filter(f.name, f.regex)?;
-    let mut out = Vec::new();
+    let mut candidates = Vec::new();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
             if !is_callable_entry_kind(decl.kind) {
@@ -59,7 +72,7 @@ pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<Ent
             {
                 continue;
             }
-            let (path, line, column) = format_span(&decl.name_span, ws);
+            let path = format_span(&decl.name_span, ws).0;
             if f.file
                 .is_some_and(|needle| !file_path_matches_filter(ws, &path, needle))
             {
@@ -70,29 +83,36 @@ pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<Ent
                 continue;
             }
             let func = FuncId::new(decl.symbol.raw());
-            if graph.callers_of(func).any(|edge| edge.precision.is_semantic()) {
-                continue;
-            }
-            let mut callees = global
-                .linkage_facts(decl.symbol)
-                .into_iter()
-                .flat_map(|facts| facts.calls.iter())
-                .map(|call| call.name.to_string())
-                .collect::<Vec<_>>();
-            let mut seen = ahash::AHashSet::default();
-            callees.retain(|callee| seen.insert(callee.clone()));
-            out.push(EntryPointOut {
-                name: decl.name.clone(),
-                qualified_name: decl.qualified_name.clone(),
-                kind,
-                file: path,
-                line,
-                column,
-                params: decl.params.clone(),
-                callees,
-                reason: "no_semantic_callers".to_string(),
-            });
+            candidates.push((func, decl));
         }
+    }
+    let called = ws.functions_with_semantic_callers(
+        &candidates
+            .iter()
+            .map(|(function, _)| *function)
+            .collect::<Vec<_>>(),
+    );
+    let mut out = Vec::new();
+    for (func, decl) in candidates {
+        if called.contains(&func) {
+            continue;
+        }
+        let kind = format!("{:?}", decl.kind).to_lowercase();
+        let (path, line, column) = format_span(&decl.name_span, ws);
+        let callees = ws
+            .exact_decl_with_headers(decl.symbol, global.clone())
+            .map_or_else(Vec::new, |exact| collect_callee_names(&exact.flow_events));
+        out.push(EntryPointOut {
+            name: decl.name.clone(),
+            qualified_name: decl.qualified_name.clone(),
+            kind,
+            file: path,
+            line,
+            column,
+            params: decl.params.clone(),
+            callees,
+            reason: "no_semantic_callers".to_string(),
+        });
     }
     out.sort_by(|a, b| {
         entrypoint_relevance_key(a, f)

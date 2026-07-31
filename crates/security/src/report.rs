@@ -103,6 +103,7 @@ pub(crate) struct TrainExample {
     pub source_id: String,
     pub sink_id: String,
     pub sanitizer_ids: Vec<String>,
+    pub taint_transform_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,6 +144,11 @@ pub fn render_train_json(report: &SecurityReport) -> String {
                 .sanitizers_seen
                 .iter()
                 .map(|sanitizer| sanitizer.rule_id.clone())
+                .collect(),
+            taint_transform_ids: finding
+                .taint_transforms_seen
+                .iter()
+                .map(|transform| transform.rule_id.clone())
                 .collect(),
             group_id: finding.group_id.clone(),
             flow_id: finding.representative_flow_id.clone(),
@@ -223,6 +229,14 @@ pub fn render_grouped_text(report: &SecurityReport) -> String {
             output.push_str("    sanitizers: ");
             for sanitizer in &finding.sanitizers_seen {
                 output.push_str(&sanitizer.rule_id);
+                output.push(' ');
+            }
+            output.push('\n');
+        }
+        if !finding.taint_transforms_seen.is_empty() {
+            output.push_str("    taint transforms: ");
+            for transform in &finding.taint_transforms_seen {
+                output.push_str(&transform.rule_id);
                 output.push(' ');
             }
             output.push('\n');
@@ -805,6 +819,7 @@ fn finding_to_sarif_result(
                 "source_rule_id": finding.source.rule_id,
                 "sink_rule_id": finding.sink.rule_id,
                 "sanitizer_rule_ids": finding_sanitizer_rule_ids(finding),
+                "taint_transform_rule_ids": finding_taint_transform_rule_ids(finding),
                 "tainted_args": finding_tainted_args(finding),
                 "taint_path": finding.taint_path,
                 "chain_display": finding.chain_display,
@@ -846,6 +861,18 @@ fn finding_sanitizer_rule_ids(finding: &Finding) -> Vec<String> {
         for sanitizer in flow.sanitizers_seen {
             if !ids.iter().any(|existing| existing == &sanitizer.rule_id) {
                 ids.push(sanitizer.rule_id.clone());
+            }
+        }
+    }
+    ids
+}
+
+fn finding_taint_transform_rule_ids(finding: &Finding) -> Vec<String> {
+    let mut ids = Vec::new();
+    for flow in finding.flows() {
+        for transform in flow.taint_transforms_seen {
+            if !ids.iter().any(|existing| existing == &transform.rule_id) {
+                ids.push(transform.rule_id.clone());
             }
         }
     }
@@ -906,6 +933,16 @@ fn build_sarif_code_flow(
             unmatched_sanitizers.push(sanitizer);
         }
     }
+    let mut transforms_by_step: Vec<Vec<&crate::finding::FindingMatch>> =
+        vec![Vec::new(); flow.taint_path.len()];
+    let mut unmatched_transforms = Vec::new();
+    for transform in flow.taint_transforms_seen {
+        if let Some(idx) = sanitizer_taint_step_index(transform, flow.taint_path) {
+            transforms_by_step[idx].push(transform);
+        } else {
+            unmatched_transforms.push(transform);
+        }
+    }
 
     for (idx, step) in flow.taint_path.iter().enumerate() {
         if !taint_step_matches_match(step, sink) {
@@ -928,6 +965,16 @@ fn build_sarif_code_flow(
                 ),
             );
         }
+        for transform in &transforms_by_step[idx] {
+            push_thread_flow_location(
+                &mut thread_flow_locations,
+                thread_flow_location(
+                    match_to_sarif_location(transform, "taint transform", hops, workspace_root),
+                    &["taint", "taint-transform"],
+                    "important",
+                ),
+            );
+        }
     }
     unmatched_sanitizers.sort_by(|a, b| {
         a.file
@@ -942,6 +989,23 @@ fn build_sarif_code_flow(
             thread_flow_location(
                 match_to_sarif_location(sanitizer, "sanitizer", hops, workspace_root),
                 &["sanitizer"],
+                "important",
+            ),
+        );
+    }
+    unmatched_transforms.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.column.cmp(&b.column))
+            .then_with(|| a.rule_id.cmp(&b.rule_id))
+    });
+    for transform in unmatched_transforms {
+        push_thread_flow_location(
+            &mut thread_flow_locations,
+            thread_flow_location(
+                match_to_sarif_location(transform, "taint transform", hops, workspace_root),
+                &["taint", "taint-transform"],
                 "important",
             ),
         );

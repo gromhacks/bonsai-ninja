@@ -1,4 +1,5 @@
 use super::*;
+use bonsai_common::FileId;
 
 #[test]
 fn drops_assignment_args_shadowed_by_real_call_args() {
@@ -32,7 +33,34 @@ fn drops_assignment_args_shadowed_by_real_call_args() {
     );
 }
 
+#[test]
+fn drops_multiline_assignment_args_by_span_containment() {
+    let mut real = fact("client.execute", 0, "request.payload", 17, ArgOrigin::RealCall);
+    real.out.line = 43;
+    real.source_span = Span::new(FileId::new(0), 140, 155);
+    let mut assignment = fact(
+        "client.execute",
+        0,
+        "request.payload",
+        5,
+        ArgOrigin::AssignmentSourceCall,
+    );
+    assignment.out.line = 42;
+    assignment.source_span = Span::new(FileId::new(0), 100, 180);
+    let mut facts = vec![assignment, real];
+
+    drop_shadowed_assignment_args(&mut facts);
+
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].origin, ArgOrigin::RealCall);
+    assert_eq!(facts[0].out.line, 43);
+}
+
 fn fact(callee: &str, position: usize, value: &str, column: u32, origin: ArgOrigin) -> ArgFact {
+    let source_span = match origin {
+        ArgOrigin::RealCall => Span::new(FileId::new(0), u64::from(column), u64::from(column + 1)),
+        ArgOrigin::AssignmentSourceCall => Span::new(FileId::new(0), 0, 100),
+    };
     ArgFact {
         out: ArgOut {
             resolution_scope: ARG_RESOLUTION_SCOPE,
@@ -45,5 +73,6 @@ fn fact(callee: &str, position: usize, value: &str, column: u32, origin: ArgOrig
             column,
         },
         origin,
+        source_span,
     }
 }

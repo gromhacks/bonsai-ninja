@@ -16,13 +16,16 @@ const PACK_NAME: &str = "erlang";
 // names for control flow that the generic handler doesn't cover. Layer
 // them on top so flow events surface for case / if / try / receive.
 const HANDLER: GrammarHandler = GrammarHandler {
+    nested_type_ownership: true,
     // Erlang functions: `fun_decl` is the umbrella; clauses are
     // `function_clause`. We index both so single- and multi-clause
     // functions both produce decls.
     fn_kinds: &["fun_decl", "function_clause"],
     class_kinds: &[],
+    class_decl_kinds: &[],
     method_kinds: &[],
     method_context_kinds: &[],
+    method_owner_barrier_kinds: &[],
     constructor_method_kinds: &[],
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     if_kinds: &["if_expr", "case_expr"],

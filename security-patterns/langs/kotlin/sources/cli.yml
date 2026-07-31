@@ -1,16 +1,28 @@
 # Kotlin CLI / process-local inputs.
 - id: kotlin.source.main_args
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: kotlin
   trust: local
   tag: cli-input
   match:
     kind: param
     target:
-      name: args
-  description: "Disabled - `kind: param` cannot currently prove the enclosing function is top-level `main`, so bare `args` overmatches ordinary helper parameters."
+      in_method: [main]
+      param_index_in: [0]
+      param_type_in: [Array]
+      param_count_in: [1]
+  match_examples:
+    - name: Kotlin main parameter can use any binding name
+      code: |
+        fun main(commandLine: Array<String>) {
+        }
+      expect_match_text: [commandLine]
+    - name: ordinary Array parameter is not process input
+      code: |
+        fun helper(commandLine: Array<String>) {
+        }
+      expect_no_match: true
+  description: "The Array<String> parameter of top-level Kotlin main(...) - matched from the grammar-declared runtime signature, not a conventional `args` name."
 
 - id: kotlin.source.system_getenv
   enabled: true

@@ -301,9 +301,10 @@ impl Iterator for BoundaryRunMerger {
 
 struct FunctionLayout {
     segment: SegmentId,
-    /// Segment-local nodes in compact function order. This is the only
-    /// workspace-sized address vector retained after boundary discovery.
-    local_nodes: Vec<NodeId>,
+    /// Number of nodes in compact function order. Compact-to-segment address
+    /// translation is reconstructed one source segment at a time from the
+    /// canonical IDG instead of retaining a second workspace-wide node vector.
+    node_count: u32,
     /// `(source parameter index, compact node)`.
     params: Vec<(u32, u32)>,
     /// Compact structural Return/Throw ports used by callers.
@@ -315,18 +316,20 @@ impl FunctionLayout {
     fn new(segment: SegmentId) -> Self {
         Self {
             segment,
-            local_nodes: Vec::new(),
+            node_count: 0,
             params: Vec::new(),
             outputs: Vec::new(),
             return_node: None,
         }
     }
 
-    fn compact_of(&self, local: NodeId) -> Option<u32> {
-        self.local_nodes
-            .binary_search_by_key(&local.0, |node| node.0)
-            .ok()
-            .and_then(|index| u32::try_from(index).ok())
+    fn allocate_node(&mut self) -> u32 {
+        let compact = self.node_count;
+        self.node_count = self
+            .node_count
+            .checked_add(1)
+            .expect("function-local IDG node count exceeds u32");
+        compact
     }
 }
 
@@ -444,15 +447,12 @@ fn build_layout(workspace: &IdgWorkspace) -> (AHashMap<FuncId, FunctionLayout>, 
     let mut addresses = CompactAddressPager::new(workspace.segment_count());
     for (segment_id, segment) in workspace.segment_views() {
         let mut segment_addresses = Vec::with_capacity(segment.nodes.nodes.len());
-        for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
-            let local = NodeId(u32::try_from(node_index).expect("segment-local IDG node count exceeds u32"));
+        for node in &segment.nodes.nodes {
             let layout = layouts
                 .entry(node.func)
                 .or_insert_with(|| FunctionLayout::new(segment_id));
             debug_assert_eq!(layout.segment, segment_id);
-            let compact =
-                u32::try_from(layout.local_nodes.len()).expect("function-local IDG node count exceeds u32");
-            layout.local_nodes.push(local);
+            let compact = layout.allocate_node();
             match segment.places.get(node.place) {
                 Some(Place::Param { idx }) => layout.params.push((*idx, compact)),
                 Some(Place::Return) => {
@@ -608,7 +608,7 @@ fn segment_base_edges(
         let compact = next_compact.entry(node.func).or_default();
         let address = layouts
             .get(&node.func)
-            .is_some_and(|layout| (*compact as usize) < layout.local_nodes.len())
+            .is_some_and(|layout| *compact < layout.node_count)
             .then_some((node.func, *compact));
         *compact = compact.saturating_add(1);
         addresses.push(address);
@@ -671,7 +671,7 @@ fn compile_function(
 
     let mut edges = base_edges.to_vec();
     edges.extend_from_slice(&derived_edges);
-    let reach = ReachabilityIndex::from_pairs(layout.local_nodes.len(), &edges);
+    let reach = ReachabilityIndex::from_pairs(layout.node_count as usize, &edges);
     let mut summary = Vec::new();
     for &output in &layout.outputs {
         let backward = reach.backward_closure(&[NodeId(output)]);
@@ -761,6 +761,17 @@ pub(crate) fn return_taint_param_indices(
     max_precision: Option<Precision>,
 ) -> ReturnSummaryBatch {
     let (layouts, mut address_pages) = build_layout(workspace);
+    bonsai_diagnostics::debug_log!(
+        "idg-summary",
+        "ordinary layout functions={} nodes={} params={} outputs={}",
+        layouts.len(),
+        layouts
+            .values()
+            .map(|layout| layout.node_count as usize)
+            .sum::<usize>(),
+        layouts.values().map(|layout| layout.params.len()).sum::<usize>(),
+        layouts.values().map(|layout| layout.outputs.len()).sum::<usize>()
+    );
     let mut boundary_inputs = BoundaryPairSpool::new();
     let mut boundary_outputs = BoundaryPairSpool::new();
     for (segment_id, segment) in workspace.segment_views() {
@@ -826,6 +837,13 @@ pub(crate) fn return_taint_param_indices(
         .expect("validated IDG cross-file relation remains readable");
     drop(address_pages);
     let boundaries = build_call_boundaries(boundary_inputs, boundary_outputs);
+    bonsai_diagnostics::debug_log!(
+        "idg-summary",
+        "ordinary boundaries rows={} inputs={} outputs={}",
+        boundaries.rows.len(),
+        boundaries.inputs.len(),
+        boundaries.outputs.len()
+    );
 
     let mut callers_by_callee: AHashMap<FuncId, Vec<FuncId>> = AHashMap::default();
     let mut return_continuations_by_caller: AHashMap<FuncId, Vec<(FuncId, u32)>> = AHashMap::default();
@@ -857,6 +875,12 @@ pub(crate) fn return_taint_param_indices(
         &callers_by_callee,
         max_precision,
     );
+    bonsai_diagnostics::debug_log!(
+        "idg-summary",
+        "ordinary fixed point functions={} pairs={}",
+        ordinary.len(),
+        ordinary.values().map(Vec::len).sum::<usize>()
+    );
 
     let mut requested: Vec<FuncId> = funcs.to_vec();
     requested.sort_unstable_by_key(|func| func.raw());
@@ -864,7 +888,16 @@ pub(crate) fn return_taint_param_indices(
     let requested_set: AHashSet<FuncId> = requested.iter().copied().collect();
     let mut indices: AHashMap<FuncId, Vec<u32>> =
         requested.iter().copied().map(|func| (func, Vec::new())).collect();
-    let symbolic_consumers = symbolic_consumer_nodes_streaming(workspace, &layouts, max_precision);
+    let symbolic_consumers = symbolic_consumer_nodes_streaming(workspace, max_precision);
+    bonsai_diagnostics::debug_log!(
+        "idg-summary",
+        "symbolic consumers functions={} nodes={}",
+        symbolic_consumers.len(),
+        symbolic_consumers
+            .values()
+            .map(|nodes| nodes.len())
+            .sum::<usize>()
+    );
     let mut directly_sensitive = AHashSet::default();
     let mut return_callers_by_callee: AHashMap<FuncId, Vec<FuncId>> = AHashMap::default();
     let mut contextual_edges = Vec::new();
@@ -876,16 +909,24 @@ pub(crate) fn return_taint_param_indices(
     });
     let mut cached_segment = None;
     let mut cached_base_edges: AHashMap<FuncId, Vec<(u32, u32)>> = AHashMap::default();
+    let mut cached_local_nodes: AHashMap<FuncId, Vec<NodeId>> = AHashMap::default();
     for func in layout_funcs {
         let Some(layout) = layouts.get(&func) else {
             continue;
         };
         if cached_segment != Some(layout.segment) {
-            cached_base_edges = workspace
-                .segment_view(layout.segment)
-                .map_or_else(AHashMap::default, |segment| {
-                    segment_base_edges(&segment, &layouts, max_precision)
-                });
+            if let Some(segment) = workspace.segment_view(layout.segment) {
+                cached_base_edges = segment_base_edges(&segment, &layouts, max_precision);
+                cached_local_nodes.clear();
+                for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
+                    cached_local_nodes.entry(node.func).or_default().push(NodeId(
+                        u32::try_from(node_index).expect("segment-local IDG node count exceeds u32"),
+                    ));
+                }
+            } else {
+                cached_base_edges.clear();
+                cached_local_nodes.clear();
+            }
             cached_segment = Some(layout.segment);
         }
         let base_edges = cached_base_edges
@@ -893,11 +934,15 @@ pub(crate) fn return_taint_param_indices(
             .map(Vec::as_slice)
             .unwrap_or_default();
         let compilation = compile_function(func, layout, base_edges, &boundaries, &ordinary);
+        let local_nodes = cached_local_nodes
+            .get(&func)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         for (from, to) in compilation.derived_edges {
-            let Some(from) = layout.local_nodes.get(from as usize).copied() else {
+            let Some(from) = local_nodes.get(from as usize).copied() else {
                 continue;
             };
-            let Some(to) = layout.local_nodes.get(to as usize).copied() else {
+            let Some(to) = local_nodes.get(to as usize).copied() else {
                 continue;
             };
             contextual_edges.push(ContextualSummaryEdge {
@@ -978,9 +1023,8 @@ pub(crate) fn return_taint_param_indices(
 
 fn symbolic_consumer_nodes_streaming(
     workspace: &IdgWorkspace,
-    layouts: &AHashMap<FuncId, FunctionLayout>,
     max_precision: Option<Precision>,
-) -> AHashMap<FuncId, AHashSet<u32>> {
+) -> AHashMap<FuncId, Vec<u32>> {
     let symbolic = workspace.symbolic_field();
     if !workspace.has_symbolic_transforms() {
         return AHashMap::default();
@@ -998,9 +1042,15 @@ fn symbolic_consumer_nodes_streaming(
             Ok(())
         })
         .expect("validated IDG symbolic relation remains readable");
-    let mut consumers: AHashMap<FuncId, AHashSet<u32>> = AHashMap::default();
+    let mut consumers: AHashMap<FuncId, Vec<u32>> = AHashMap::default();
     for (segment_id, segment) in workspace.segment_views() {
-        for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
+        let mut next_compact = AHashMap::<FuncId, u32>::default();
+        for node in &segment.nodes.nodes {
+            let compact = next_compact.entry(node.func).or_default();
+            let node_compact = *compact;
+            *compact = compact
+                .checked_add(1)
+                .expect("function-local IDG node count exceeds u32");
             let Some(place) = segment.places.get(node.place) else {
                 continue;
             };
@@ -1021,15 +1071,12 @@ fn symbolic_consumer_nodes_streaming(
             if !bare_consumer && !exact_consumer && !scalar_consumer {
                 continue;
             }
-            let local = NodeId(u32::try_from(node_index).expect("segment-local IDG node count exceeds u32"));
-            let Some(compact) = layouts
-                .get(&node.func)
-                .and_then(|layout| layout.compact_of(local))
-            else {
-                continue;
-            };
-            consumers.entry(node.func).or_default().insert(compact);
+            consumers.entry(node.func).or_default().push(node_compact);
         }
+    }
+    for nodes in consumers.values_mut() {
+        nodes.sort_unstable();
+        nodes.dedup();
     }
     consumers
 }

@@ -355,21 +355,25 @@ fn fast_tree_should_skip(path: &Path, build: &FastTreeBuild) -> bool {
     {
         return true;
     }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_internal_tree_entry_name)
+}
+
+fn is_internal_tree_entry_name(name: &str) -> bool {
     matches!(
-        path.file_name().and_then(|n| n.to_str()),
-        Some(
-            ".git"
-                | ".bonsai"
-                | ".bonsai-agent"
-                | "target"
-                | "node_modules"
-                | ".gradle"
-                | "build"
-                | "dist"
-                | "out"
-                | ".idea"
-        )
-    )
+        name,
+        ".git"
+            | ".bonsai"
+            | ".bonsai-agent"
+            | "target"
+            | "node_modules"
+            | ".gradle"
+            | "build"
+            | "dist"
+            | "out"
+            | ".idea"
+    ) || name.starts_with(".bonsai.pre-")
 }
 
 fn fast_tree_file_matches(path: &Path, build: &FastTreeBuild) -> bool {
@@ -408,6 +412,20 @@ fn normalize_path_for_filter(value: &str) -> String {
     value.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::is_internal_tree_entry_name;
+
+    #[test]
+    fn scanner_state_and_pre_upgrade_backups_are_not_user_tree_entries() {
+        for name in [".bonsai", ".bonsai-agent", ".bonsai.pre-20260730-120000"] {
+            assert!(is_internal_tree_entry_name(name), "{name}");
+        }
+        assert!(!is_internal_tree_entry_name(".bonsaiignore"));
+        assert!(!is_internal_tree_entry_name(".bonsai-notes"));
+    }
+}
+
 fn tree_filters_hash(args: &TreeArgs<'_>) -> u64 {
     let max_depth = args.max_depth.map(|n| n.to_string()).unwrap_or_default();
     let exclude_file = args.exclude_file.join("\0");
@@ -433,7 +451,7 @@ fn render_text_paged(
     let rows: Vec<usize> = (0..lines.len()).collect();
     let (page_rows, info) = paging::paginate(&rows, &cfg, "tree", filters_hash, |idx| {
         lines[*idx].len() as u64 + 128
-    });
+    })?;
     for idx in page_rows {
         cli_println!("{}", lines[idx]);
     }

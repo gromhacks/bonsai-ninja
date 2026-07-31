@@ -33,6 +33,10 @@ fn dump_taint_token_seed_policy_preserves_clean_overwrite() {
         panic!("dump-taint should resolve entry")
     };
     assert!(
+        ws.db().idg_service().is_none(),
+        "source-scoped dump-taint must not install a partial graph as the workspace-global IDG"
+    );
+    assert!(
         report.records.is_empty(),
         "canonical parameter seeding must not resurrect the post-seed clean write: {:#?}",
         report.records

@@ -15,6 +15,7 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub struct DeclNameEntry {
     pub lowercased_name: String,
+    pub lowercased_qualified_name: Option<String>,
     pub decl: Decl,
 }
 
@@ -57,8 +58,10 @@ impl DeclNameIndex {
         for file in headers.all_files() {
             for decl in headers.decls_in(file) {
                 let lowercased_name = decl.name.to_lowercase();
+                let lowercased_qualified_name = decl.qualified_name.as_ref().map(|name| name.to_lowercase());
                 out.push(DeclNameEntry {
                     lowercased_name,
+                    lowercased_qualified_name,
                     decl: decl.clone(),
                 });
             }

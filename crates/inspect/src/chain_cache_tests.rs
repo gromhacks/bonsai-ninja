@@ -581,6 +581,38 @@ def driver(obj):
     }
 }
 
+#[test]
+fn call_span_resolution_honors_query_scoped_graph() {
+    let ws = ws_with_python(FIXTURE);
+    let entry = func_id(&ws, "entry");
+    let helper = func_id(&ws, "helper");
+    assert!(
+        ws.resolved_call_graph()
+            .callees_of(entry)
+            .all(|edge| edge.to != helper),
+        "fixture workspace must not already contain the synthetic scoped edge"
+    );
+
+    let span = Span::new(ws.vfs().all_files()[0], 7, 11);
+    let mut graph = bonsai_callgraph::CallGraph::new();
+    graph.add_edge(bonsai_callgraph::CallEdge {
+        from: entry,
+        to: helper,
+        span,
+        kind: bonsai_callgraph::EdgeKind::Direct,
+        precision: bonsai_common::Precision::Exact,
+        provenance: bonsai_callgraph::EdgeProvenance::direct_symbol(),
+    });
+    let scoped = Arc::new(bonsai_callgraph::ResolvedCallGraph::from_call_graph(graph));
+    let mut resolver = CallEdgeResolver::with_resolved_graph(&ws, scoped);
+
+    assert_eq!(
+        resolver.call_spans_for_chain(&[entry, helper]),
+        vec![Some(span), None],
+        "presentation must verify against the compiler corridor supplied by its query planner"
+    );
+}
+
 // ---------- BoundedCache eviction tests ----------
 
 #[test]

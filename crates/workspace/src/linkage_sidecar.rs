@@ -13,11 +13,12 @@
 //! object-file symbol table.
 
 use crate::cache_fingerprint::dependency_metadata_fingerprint_for_sidecar;
-use bonsai_common::{wire, workspace_bonsai_dir, MATCHER_POLICY_FINGERPRINT};
+use bonsai_common::{wire, workspace_bonsai_dir, FileId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_hash::fnv1a_bytes64;
 use bonsai_index::{GlobalIndex, ReceiverAncestry};
+use bonsai_lang_api::DeclIndex;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -25,18 +26,37 @@ use std::sync::Arc;
 
 /// Current compiler-linkage schema and semantic ABI.
 ///
+/// Version 8 stores per-file declaration headers as named-field MessagePack.
+/// Version 7 used positional encoding for structs with omitted default
+/// grammar fields, which shifted later fields and made non-empty partitions
+/// undecodable.
+///
+/// Version 7 binds the header partitions to the current declaration-index
+/// wire schema. Version 6 artifacts predate the adapter-owned grammar
+/// taxonomy fields and cannot be decoded safely by the current compiler.
+///
+/// Version 9 retains complete nested lexical identities from compiler-object
+/// ABI v13.
+///
+/// Version 6 stores declaration headers as independently decodable per-file
+/// partitions. Scoped compiler worklists no longer allocate every workspace
+/// header merely to replay a handful of exact bodies.
+///
+/// Version 5 carries exact class-like declaration kinds and anonymous-body
+/// ownership from compiler-object ABI v11.
+///
 /// Version 4 adds independently decodable receiver ancestry beside the
 /// declaration/type header and call-linkage payloads. File-local inventory
 /// scans can preserve cross-file receiver constraints without hydrating the
 /// complete global symbol table.
-pub const LINKAGE_CACHE_VERSION: u32 = 4;
+pub const LINKAGE_CACHE_VERSION: u32 = 9;
 
 const LINKAGE_TABLE_ID: u32 = 103;
 const METADATA_KEY: u64 = 0;
 const LINKAGE_KEY: u64 = 1;
-const HEADER_KEY: u64 = 2;
 const RECEIVER_ANCESTRY_KEY: u64 = 3;
-const ENTRY_COUNT: usize = 4;
+const HEADER_PARTITION_KEY_BASE: u64 = 0x2000_0000_0000_0000;
+const FIXED_ENTRY_COUNT: usize = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LinkageMetadata {
@@ -46,6 +66,9 @@ struct LinkageMetadata {
     files: Vec<(u32, String, u64)>,
     dependency_metadata_fingerprint: u64,
     declaration_count: u64,
+    /// Sorted full-workspace FileIds with independently decodable declaration
+    /// header partitions.
+    header_files: Vec<u32>,
     /// Producer provenance. Compatibility is governed by the explicit
     /// semantic ABI above, so storage-only binary changes retain this cache.
     build_fingerprint: u64,
@@ -62,6 +85,7 @@ pub(crate) fn save_linkage_sidecar(
     db: &AnalyzerDb,
     index: Arc<GlobalIndex>,
 ) -> std::io::Result<()> {
+    let header_files = index.all_files().map(FileId::raw).collect::<Vec<_>>();
     let metadata = LinkageMetadata {
         version: LINKAGE_CACHE_VERSION,
         matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
@@ -69,9 +93,17 @@ pub(crate) fn save_linkage_sidecar(
         dependency_metadata_fingerprint: dependency_metadata_fingerprint_for_sidecar(path),
         declaration_count: index.len() as u64,
         build_fingerprint: crate::build_fingerprint_hash(),
+        header_files: header_files.clone(),
     };
-    let writer = FactStoreWriter::create(path, LINKAGE_TABLE_ID, metadata_pipeline_hash(&metadata))
-        .map_err(factstore_io)?;
+    let writer = FactStoreWriter::create_with_capacity(
+        path,
+        LINKAGE_TABLE_ID,
+        metadata_pipeline_hash(&metadata),
+        FIXED_ENTRY_COUNT.saturating_add(header_files.len()),
+        0,
+        0,
+    )
+    .map_err(factstore_io)?;
     writer
         .add_owned(
             METADATA_KEY,
@@ -87,17 +119,24 @@ pub(crate) fn save_linkage_sidecar(
         .map_err(factstore_io)?;
     let receiver_ancestry = index.receiver_ancestry();
     writer
-        .add_streamed(HEADER_KEY, LINKAGE_CACHE_VERSION as u64, move |output| {
-            wire::encode_struct_map_to_writer(output, &index.header_projection()).map_err(invalid_wire)
-        })
-        .map_err(factstore_io)?;
-    writer
         .add_owned(
             RECEIVER_ANCESTRY_KEY,
             LINKAGE_CACHE_VERSION as u64,
             wire::encode_struct_map(&receiver_ancestry).map_err(invalid_wire)?,
         )
         .map_err(factstore_io)?;
+    for file in header_files {
+        let header = index.file_index(FileId::new(file)).cloned().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing header partition")
+        })?;
+        writer
+            .add_streamed(
+                header_partition_key(file),
+                header_partition_body_hash(file),
+                move |output| wire::encode_struct_map_to_writer(output, &header).map_err(invalid_wire),
+            )
+            .map_err(factstore_io)?;
+    }
     writer.finish().map_err(factstore_io)?;
     let _ = prune_obsolete_linkage_sidecars(path);
     Ok(())
@@ -118,7 +157,75 @@ pub(crate) fn load_linkage_sidecar_checked(path: &Path, db: &AnalyzerDb) -> std:
 pub(crate) fn load_header_sidecar_checked(path: &Path, db: &AnalyzerDb) -> std::io::Result<GlobalIndex> {
     let (reader, metadata) = open_sidecar(path)?;
     validate_metadata(path, db, &metadata)?;
-    decode_index_payload(&reader, &metadata, HEADER_KEY, "header")
+    decode_header_partitions(&reader, &metadata, &metadata.header_files)
+}
+
+/// Load the complete declaration/type header table after a scoped compiler
+/// session has independently fingerprinted the whole workspace.
+pub(crate) fn load_header_sidecar_checked_with_source_inputs(
+    path: &Path,
+    inputs: &[(u32, String, u64)],
+) -> std::io::Result<GlobalIndex> {
+    let (reader, metadata) = open_sidecar(path)?;
+    validate_metadata_base(path, &metadata)?;
+    if metadata.files != inputs {
+        return Err(invalid_data(
+            "linkage sidecar source/VFS identity mismatch for scoped compiler session",
+        ));
+    }
+    decode_header_partitions(&reader, &metadata, &metadata.header_files)
+}
+
+/// Load only declaration headers for the exact files admitted by a compiler
+/// worklist while preserving their workspace-global symbol identities.
+pub(crate) fn load_header_partitions_checked(
+    path: &Path,
+    db: &AnalyzerDb,
+    files: &[FileId],
+) -> std::io::Result<GlobalIndex> {
+    let (reader, metadata) = open_sidecar(path)?;
+    validate_metadata(path, db, &metadata)?;
+    decode_requested_header_partitions(&reader, &metadata, files)
+}
+
+/// Load selected declaration headers after a scoped compiler session has
+/// independently fingerprinted the complete workspace.
+///
+/// `inputs` retains the canonical full-workspace FileId ordering, so both
+/// source freshness and SymbolId identity are checked without keeping every
+/// source string resident.
+pub(crate) fn load_header_partitions_checked_with_source_inputs(
+    path: &Path,
+    inputs: &[(u32, String, u64)],
+    files: &[FileId],
+) -> std::io::Result<GlobalIndex> {
+    let (reader, metadata) = open_sidecar(path)?;
+    validate_metadata_base(path, &metadata)?;
+    if metadata.files != inputs {
+        return Err(invalid_data(
+            "linkage sidecar source/VFS identity mismatch for scoped compiler session",
+        ));
+    }
+    decode_requested_header_partitions(&reader, &metadata, files)
+}
+
+fn decode_requested_header_partitions(
+    reader: &FactStoreReader,
+    metadata: &LinkageMetadata,
+    files: &[FileId],
+) -> std::io::Result<GlobalIndex> {
+    let mut requested = files.iter().map(|file| file.raw()).collect::<Vec<_>>();
+    requested.sort_unstable();
+    requested.dedup();
+    if requested
+        .iter()
+        .any(|file| metadata.header_files.binary_search(file).is_err())
+    {
+        return Err(invalid_data(
+            "linkage sidecar does not contain every requested header file",
+        ));
+    }
+    decode_header_partitions(reader, metadata, &requested)
 }
 
 /// Load only finalized cross-file receiver inheritance facts.
@@ -148,7 +255,7 @@ where
     validate_linkage_sidecar_metadata_with_source_fingerprints(path, fingerprints)?;
     let (reader, metadata) = open_sidecar(path)?;
     let index = decode_index_payload(&reader, &metadata, LINKAGE_KEY, "linkage")?;
-    let headers = decode_index_payload(&reader, &metadata, HEADER_KEY, "header")?;
+    let headers = decode_header_partitions(&reader, &metadata, &metadata.header_files)?;
     decode_receiver_ancestry_payload(&reader)?;
     if headers.len() != index.len() {
         return Err(invalid_data(
@@ -156,6 +263,42 @@ where
         ));
     }
     Ok(index.len())
+}
+
+fn decode_header_partitions(
+    reader: &FactStoreReader,
+    metadata: &LinkageMetadata,
+    files: &[u32],
+) -> std::io::Result<GlobalIndex> {
+    let ancestry = decode_receiver_ancestry_payload(reader)?;
+    let mut headers = Vec::with_capacity(files.len());
+    for file in files {
+        let hit = reader
+            .get(header_partition_key(*file))
+            .map_err(factstore_io)?
+            .ok_or_else(|| invalid_data("linkage sidecar header partition is missing"))?;
+        if hit.body_hash != header_partition_body_hash(*file) {
+            return Err(invalid_data("linkage sidecar header partition version mismatch"));
+        }
+        let header: DeclIndex = wire::decode(&hit.payload).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("decoding linkage header partition {file}: {error}"),
+            )
+        })?;
+        if header.file.raw() != *file {
+            return Err(invalid_data(
+                "linkage sidecar header partition key/payload mismatch",
+            ));
+        }
+        headers.push(header);
+    }
+    let index = GlobalIndex::from_persisted_header_files(headers, ancestry)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if files.len() == metadata.header_files.len() && index.len() as u64 != metadata.declaration_count {
+        return Err(invalid_data("linkage sidecar header declaration count mismatch"));
+    }
+    Ok(index)
 }
 
 fn decode_receiver_ancestry_payload(reader: &FactStoreReader) -> std::io::Result<ReceiverAncestry> {
@@ -236,10 +379,9 @@ fn open_sidecar(path: &Path) -> std::io::Result<(FactStoreReader, LinkageMetadat
     if reader.header().table_id != LINKAGE_TABLE_ID {
         return Err(invalid_data("linkage sidecar factstore table mismatch"));
     }
-    if reader.len() != ENTRY_COUNT
+    if reader.len() < FIXED_ENTRY_COUNT
         || !reader.contains_key(METADATA_KEY)
         || !reader.contains_key(LINKAGE_KEY)
-        || !reader.contains_key(HEADER_KEY)
         || !reader.contains_key(RECEIVER_ANCESTRY_KEY)
     {
         return Err(invalid_data("linkage sidecar entry layout mismatch"));
@@ -252,6 +394,15 @@ fn open_sidecar(path: &Path) -> std::io::Result<(FactStoreReader, LinkageMetadat
         return Err(invalid_data("linkage sidecar metadata version mismatch"));
     }
     let metadata: LinkageMetadata = wire::decode(&hit.payload).map_err(invalid_wire)?;
+    let expected_entries = FIXED_ENTRY_COUNT.saturating_add(metadata.header_files.len());
+    if reader.len() != expected_entries
+        || metadata
+            .header_files
+            .iter()
+            .any(|file| !reader.contains_key(header_partition_key(*file)))
+    {
+        return Err(invalid_data("linkage sidecar header partition layout mismatch"));
+    }
     if reader.header().pipeline_hash != metadata_pipeline_hash(&metadata) {
         return Err(invalid_data("linkage sidecar pipeline fingerprint mismatch"));
     }
@@ -260,8 +411,31 @@ fn open_sidecar(path: &Path) -> std::io::Result<(FactStoreReader, LinkageMetadat
 
 fn validate_metadata(path: &Path, db: &AnalyzerDb, metadata: &LinkageMetadata) -> std::io::Result<()> {
     validate_metadata_base(path, metadata)?;
-    if metadata.files != current_source_inputs(db) {
-        return Err(invalid_data("linkage sidecar source/VFS identity mismatch"));
+    let current = current_source_inputs(db);
+    if metadata.files != current {
+        let first_mismatch = metadata
+            .files
+            .iter()
+            .zip(current.iter())
+            .position(|(recorded, actual)| recorded != actual);
+        let mismatch_detail = first_mismatch
+            .and_then(|index| metadata.files.get(index).zip(current.get(index)))
+            .map_or_else(
+                || "length differs".to_string(),
+                |(recorded, actual)| format!("recorded={recorded:?} current={actual:?}"),
+            );
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "linkage sidecar source/VFS identity mismatch: recorded={} current={} first_mismatch={} ({})",
+                metadata.files.len(),
+                current.len(),
+                first_mismatch
+                    .map(|index| index.to_string())
+                    .unwrap_or_else(|| "length".to_string()),
+                mismatch_detail
+            ),
+        ));
     }
     Ok(())
 }
@@ -275,6 +449,11 @@ fn validate_metadata_base(path: &Path, metadata: &LinkageMetadata) -> std::io::R
     }
     if metadata.dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path) {
         return Err(invalid_data("linkage sidecar dependency metadata mismatch"));
+    }
+    if metadata.header_files.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(invalid_data(
+            "linkage sidecar header file table is not strictly sorted",
+        ));
     }
     Ok(())
 }
@@ -295,7 +474,19 @@ fn metadata_pipeline_hash(metadata: &LinkageMetadata) -> u64 {
         hasher.absorb(&content_hash.to_le_bytes());
         hasher.absorb_separator();
     }
+    for file in &metadata.header_files {
+        hasher.absorb(&file.to_le_bytes());
+        hasher.absorb_separator();
+    }
     hasher.finish()
+}
+
+fn header_partition_key(file: u32) -> u64 {
+    HEADER_PARTITION_KEY_BASE | u64::from(file)
+}
+
+fn header_partition_body_hash(file: u32) -> u64 {
+    (u64::from(LINKAGE_CACHE_VERSION) << 32) | u64::from(file)
 }
 
 fn current_source_inputs(db: &AnalyzerDb) -> Vec<(u32, String, u64)> {
@@ -361,8 +552,37 @@ fn factstore_io(error: bonsai_factstore::FactStoreError) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bonsai_lang_api::LanguageRegistry;
+    use bonsai_common::{Span, SymbolId};
+    use bonsai_lang_api::{Decl, DeclKind, LanguageRegistry, ModulePath, Visibility};
     use bonsai_vfs::Vfs;
+
+    fn callable_header(file: FileId) -> Decl {
+        let span = Span::new(file, 0, 4);
+        Decl {
+            symbol: SymbolId::new(0),
+            kind: DeclKind::Function,
+            name: "main".to_string(),
+            qualified_name: None,
+            module_path: ModulePath::default(),
+            span,
+            name_span: span,
+            visibility: Visibility::Private,
+            parent: None,
+            body_span: Some(span),
+            flow_events: Vec::new(),
+            has_implicit_returns: false,
+            params: Vec::new(),
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: Vec::new(),
+            receiver_state_sources: Vec::new(),
+            return_type: None,
+            is_variadic: false,
+        }
+    }
 
     #[test]
     fn parser_accepts_only_versioned_linkage_artifacts() {
@@ -387,13 +607,26 @@ mod tests {
         vfs.write("src/input.fixture".to_string(), Arc::<str>::from("first"));
         let db = AnalyzerDb::new(Arc::clone(&vfs), Arc::new(LanguageRegistry::new()));
         let path = linkage_sidecar_path(root.path());
+        let mut index = GlobalIndex::new();
+        index.insert(DeclIndex {
+            file: FileId::new(0),
+            defs: vec![callable_header(FileId::new(0))],
+            ..DeclIndex::default()
+        });
 
-        save_linkage_sidecar(&path, &db, Arc::new(GlobalIndex::new())).expect("save linkage");
+        save_linkage_sidecar(&path, &db, Arc::new(index)).expect("save linkage");
         assert!(validate_linkage_sidecar_for_db(&path, &db).is_ok());
         let restored = load_linkage_sidecar_checked(&path, &db).expect("load linkage");
-        assert!(restored.is_empty());
+        assert_eq!(restored.len(), 1);
         let headers = load_header_sidecar_checked(&path, &db).expect("load headers");
-        assert!(headers.is_empty());
+        assert_eq!(headers.len(), 1);
+        let scoped_headers = load_header_partitions_checked_with_source_inputs(
+            &path,
+            &[(0, "src/input.fixture".to_string(), fnv1a_bytes64(b"first"))],
+            &[FileId::new(0)],
+        )
+        .expect("load scoped headers against complete source identity");
+        assert_eq!(scoped_headers.len(), 1);
         let ancestry = load_receiver_ancestry_sidecar_checked(&path, &db).expect("load receiver ancestry");
         assert!(ancestry.is_empty());
 

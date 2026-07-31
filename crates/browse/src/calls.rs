@@ -8,7 +8,9 @@
 //! (catches module-level / non-decl calls the flow-event walker
 //! doesn't reach).
 
-use crate::common::{file_path_matches_filter, format_span, make_name_filter, textual_relevance_key};
+use crate::common::{
+    file_path_matches_filter, format_span, make_callable_name_filter, make_name_filter, textual_relevance_key,
+};
 use bonsai_lang_api::{FlowEvent, RefKind};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -67,7 +69,7 @@ pub struct CallOut {
 /// call.
 pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex::Error> {
     use rayon::prelude::*;
-    let callee_match = make_name_filter(f.callee, f.regex)?;
+    let callee_match = make_callable_name_filter(f.callee, f.regex)?;
     let caller_match = make_name_filter(f.caller, f.regex)?;
     let files = ws.vfs().all_files();
     // `fold` accumulates per-thread (not per-file) so we don't pay

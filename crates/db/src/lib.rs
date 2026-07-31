@@ -27,8 +27,9 @@ use std::sync::{
 mod compiler_object;
 
 pub use compiler_object::{
-    compiler_object_sidecar_path, validate_compiler_object_sidecar_file_with_source_fingerprints,
-    validate_compiler_object_sidecar_layout,
+    compiler_object_languages_with_source_fingerprints, compiler_object_sidecar_path,
+    migrate_legacy_compiler_object_sidecar_v11_with_source_fingerprints,
+    validate_compiler_object_sidecar_file_with_source_fingerprints, validate_compiler_object_sidecar_layout,
     validate_compiler_object_sidecar_metadata_with_source_fingerprints, CompiledFileObject,
     COMPILER_OBJECT_CACHE_VERSION,
 };
@@ -195,6 +196,22 @@ impl AnalyzerDb {
             .map(Arc::new);
         *self.inner.workspace_root.write() = Some(root);
         *self.inner.compiler_object_store.write() = store;
+        self.inner
+            .compiler_object_store_requires_repair
+            .store(false, Ordering::Release);
+    }
+
+    /// Set adapter/module context for an intentionally partial query without
+    /// opening the complete workspace compiler-object generation.
+    ///
+    /// A one-file or retrieval-narrowed workspace has its own VFS universe.
+    /// Loading the full generation would both allocate metadata for every
+    /// unrelated file and risk interpreting its stable full-workspace
+    /// `FileId`s inside the scoped universe. Scoped commands lower their
+    /// already-selected source files directly through Tree-sitter instead.
+    pub fn set_scoped_workspace_root(&self, root: std::path::PathBuf) {
+        *self.inner.workspace_root.write() = Some(root);
+        *self.inner.compiler_object_store.write() = None;
         self.inner
             .compiler_object_store_requires_repair
             .store(false, Ordering::Release);
@@ -535,9 +552,10 @@ impl AnalyzerDb {
             bonsai_lang_api::apply_constructor_result_type_aliases(&mut index);
             bonsai_lang_api::apply_assign_value_kind(&mut index);
             bonsai_lang_api::apply_assign_call_result_types(&mut index);
-            bonsai_lang_api::apply_call_receiver_types_with_super_tokens(
+            bonsai_lang_api::apply_call_receiver_types_with_language_syntax(
                 &mut index,
-                adapter.capabilities().effective_super_receiver_tokens(),
+                capabilities.effective_super_receiver_tokens(),
+                capabilities.effective_constructor_method_names(),
             );
             index.compact_storage();
             index

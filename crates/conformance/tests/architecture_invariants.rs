@@ -4740,11 +4740,15 @@ fn workspace_context_does_not_run_an_unneeded_compiler_pass() {
     let diagnostics = read(&root.join("crates/cli/src/commands/diagnostics.rs"));
     let body = function_body(&diagnostics, "cmd_context");
     assert!(
-        body.contains("open_workspace_syntax_only(root)?") && body.contains("workspace.semantic_context()"),
-        "context must derive filesystem metadata without parsing every source file"
+        body.contains("Workspace::new")
+            && body.contains("semantic_context_for_root(root)")
+            && !body.contains("open_workspace_syntax_only"),
+        "context must derive metadata-only source paths without ingesting source contents"
     );
     assert!(
-        !body.contains("open_project_parse_only") && !body.contains("global_index"),
+        !body.contains("open_project_parse_only")
+            && !body.contains("global_index")
+            && !body.contains(".ingest"),
         "context must not trigger declaration lowering or global semantic indexing"
     );
 }

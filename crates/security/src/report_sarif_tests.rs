@@ -36,6 +36,7 @@ fn sample_finding() -> Finding {
         source: sample_match("python.sources.flask_args", "app.py", 12),
         sink: sample_match("python.cmdi.os_system", "auth.py", 42),
         sanitizers_seen: Vec::new(),
+        taint_transforms_seen: Vec::new(),
         group_id: Some("G:000000000a1b2c3d".to_string()),
         representative_flow_id: Some("F:0000000001ab73e2".to_string()),
         analysis_complete: true,
@@ -357,6 +358,7 @@ fn sarif_emits_alternate_routes_as_codeflows_on_one_result() {
         source: sample_match("python.sources.flask_json", "api.py", 18),
         sink_tainted_args: finding.sink.tainted_args.clone(),
         sanitizers_seen: Vec::new(),
+        taint_transforms_seen: Vec::new(),
         flow_id: Some("F:alternate".to_string()),
         chain_display: vec!["json_handler".to_string(), "run_admin_command".to_string()],
         taint_path: vec![TaintPropagationStep {
@@ -584,6 +586,29 @@ fn sarif_properties_carry_bonsai_metadata() {
     assert_eq!(props["cwe"][0], "CWE-78");
     assert_eq!(props["chain_display"][0], "handle_request");
     assert_eq!(props["tainted_args"][0]["value_text"], "user_input");
+}
+
+#[test]
+fn sarif_reports_taint_preserving_transforms_without_calling_them_sanitizers() {
+    let mut finding = sample_finding();
+    finding.taint_transforms_seen = vec![sample_match("python.transform.url_decode", "decode.py", 8)];
+    let report = SecurityReport::new(vec![finding]);
+    let value: Value = serde_json::from_str(&render_sarif_json(&report)).unwrap();
+    let result = &value["runs"][0]["results"][0];
+    let properties = &result["properties"]["bonsai"];
+    assert_eq!(
+        properties["taint_transform_rule_ids"][0],
+        "python.transform.url_decode"
+    );
+    assert!(properties["sanitizer_rule_ids"].as_array().unwrap().is_empty());
+    let locations = result["codeFlows"][0]["threadFlows"][0]["locations"]
+        .as_array()
+        .unwrap();
+    assert!(locations.iter().any(|location| {
+        location["kinds"]
+            .as_array()
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind == "taint-transform"))
+    }));
 }
 
 #[test]

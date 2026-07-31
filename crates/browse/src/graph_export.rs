@@ -121,7 +121,6 @@ impl GraphProjection {
 pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjection {
     let mut graph = GraphProjection::default();
     let db = ws.db();
-    let global = ws.compiler_linkage_index();
     let workspace_id = "workspace".to_string();
 
     graph.node(
@@ -136,10 +135,14 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
         ],
     );
 
-    let mut file_ids: BTreeMap<String, String> = BTreeMap::new();
     let idg = db
         .idg_service()
         .unwrap_or_else(|| ws.build_and_seed_idg_service());
+    // The IDG owns the canonical declaration/type header generation. Build it
+    // before borrowing those headers so the workspace can consume and release
+    // the larger resolver-linkage table at the compiler phase boundary.
+    let global = idg.global_linkage_index();
+    let mut file_ids: BTreeMap<String, String> = BTreeMap::new();
     for file in global.all_files() {
         let path = ws
             .vfs()

@@ -9,8 +9,10 @@
 //! spelling suggestions.
 
 use anyhow::Result;
-use bonsai_sdk::{summarize_precision, CrossModuleOptions, Workspace};
+use bonsai_sdk::{summarize_incomplete_reasons, summarize_precision, CrossModuleOptions, Workspace};
 use bonsai_sdk::{PathSummary, TraceResult, TraceStep, TraceStepKind};
+use serde::Serialize;
+use std::collections::BTreeSet;
 
 use crate::args::OutputFormat;
 use crate::footer::render_paging_footer;
@@ -21,6 +23,16 @@ use crate::{cli_print, cli_println, ui};
 
 use super::{open_project_index_only as open_project, page_info_to_json, paged_json_incomplete_reasons};
 
+const TRACE_SEMANTIC_CACHE_KIND: &str = "trace-result-v1";
+
+#[derive(Clone, Serialize)]
+struct TracePageRow<'a> {
+    path: &'a PathSummary,
+    steps: Vec<&'a TraceStep>,
+    #[serde(skip)]
+    cost: u64,
+}
+
 pub(crate) fn cmd_trace(
     root: &std::path::Path,
     function: Option<String>,
@@ -30,33 +42,9 @@ pub(crate) fn cmd_trace(
     format: OutputFormat,
     trace_opts: CrossModuleOptions,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
-    let ws = project.workspace();
-    let trace_seed = function.as_deref().or(from.as_deref());
-    {
-        let spin = progress::ScopedSpinner::new("loading taint graph");
-        load_trace_taint_graph(ws, trace_seed);
-        spin.finish();
-    }
-    // Path enumeration walks the resolved call graph from the seed; on
-    // big workspaces this can take many seconds before the first line
-    // of output appears, so spin during traversal.
-    let spin = progress::ScopedSpinner::new("walking call paths");
-    let trace = match (&function, &from, &to) {
-        (Some(f), None, None) => project
-            .trace()
-            .from_with_options(f, trace_opts)
-            .map_err(|e| augment_not_found(e, ws, f))?,
-        (None, Some(f), Some(t)) => project
-            .trace()
-            .source_to_sink_with_options(f, t, trace_opts)
-            .map_err(|e| augment_source_or_sink_not_found(e, ws, f, t))?,
-        _ => anyhow::bail!("specify a function as a positional arg, --function, or --from + --to"),
-    };
-    spin.finish();
-    // Filter-signature hash is format-agnostic so a `P:xxxxxxxx`
-    // cursor minted in text mode resolves in JSON mode and vice
-    // versa (and reproduces across runs of the same query).
+    // The semantic key deliberately excludes format, page, context, and
+    // colour. A trace is compiler output; text/JSON/DOT are renderers over
+    // the same artifact and must not trigger another graph traversal.
     let max_depth = trace_opts.max_depth.to_string();
     let max_steps = trace_opts.max_steps.to_string();
     let max_branch_fanout = trace_opts.max_branch_fanout.to_string();
@@ -70,6 +58,42 @@ pub(crate) fn cmd_trace(
         ("max_branch_fanout", max_branch_fanout.as_str()),
         ("max_loop_iters", max_loop_iters.as_str()),
     ]);
+    let (project, _footer) = open_project(root)?;
+    let ws = project.workspace();
+    let cached_trace =
+        match page_cache::read_keyed_payload::<TraceResult>(root, filters_hash, TRACE_SEMANTIC_CACHE_KIND) {
+            Ok(cached) => cached,
+            Err(error) => {
+                tracing::debug!("ignoring unreadable trace semantic cache: {error}");
+                None
+            }
+        };
+    let trace = if let Some(cached) = cached_trace {
+        cached
+    } else {
+        // Path enumeration walks the resolved call graph from the seed; on
+        // big workspaces this can take many seconds before the first line
+        // of output appears, so spin during traversal.
+        let spin = progress::ScopedSpinner::new("walking call paths");
+        let computed = match (&function, &from, &to) {
+            (Some(f), None, None) => project
+                .trace()
+                .from_with_options(f, trace_opts)
+                .map_err(|e| augment_not_found(e, ws, f))?,
+            (None, Some(f), Some(t)) => project
+                .trace()
+                .source_to_sink_with_options(f, t, trace_opts)
+                .map_err(|e| augment_source_or_sink_not_found(e, ws, f, t))?,
+            _ => anyhow::bail!("specify a function as a positional arg, --function, or --from + --to"),
+        };
+        spin.finish();
+        if let Err(error) =
+            page_cache::save_keyed_payload(root, filters_hash, TRACE_SEMANTIC_CACHE_KIND, &computed)
+        {
+            tracing::debug!("trace semantic cache save failed: {error}");
+        }
+        computed
+    };
     match format {
         OutputFormat::Json => {
             // Programmatic trace is token-budgeted by default. Keep
@@ -79,13 +103,14 @@ pub(crate) fn cmd_trace(
                 let force_wrapper = paging_cfg.context.is_some()
                     || !matches!(paging_cfg.page, paging::PageArg::First)
                     || crate::filter::active().is_active();
+                let page_rows = trace_page_rows(&trace);
                 page_cache::emit_paged_text(
                     root,
-                    &trace.paths,
+                    &page_rows,
                     &paging_cfg,
                     "trace",
                     filters_hash,
-                    trace_path_cost,
+                    |row| row.cost,
                     |slice, info, _cfg| {
                         if !force_wrapper && info.page_number == 1 && info.is_last {
                             cli_println!("{}", project.trace().to_json(&trace)?);
@@ -101,11 +126,47 @@ pub(crate) fn cmd_trace(
                         analysis_incomplete_reasons.extend(paged_json_incomplete_reasons("trace", info));
                         analysis_incomplete_reasons.sort();
                         analysis_incomplete_reasons.dedup();
+                        let path_ids = slice.iter().map(|row| row.path.path_id).collect::<BTreeSet<_>>();
+                        let step_ids = slice
+                            .iter()
+                            .flat_map(|row| row.steps.iter().map(|step| step.id))
+                            .collect::<BTreeSet<_>>();
+                        let state_ids = slice
+                            .iter()
+                            .flat_map(|row| row.steps.iter())
+                            .flat_map(|step| [step.state_before, step.state_after])
+                            .flatten()
+                            .collect::<BTreeSet<_>>();
+                        let paths = slice.iter().map(|row| row.path).collect::<Vec<_>>();
+                        let steps = slice
+                            .iter()
+                            .flat_map(|row| row.steps.iter().copied())
+                            .collect::<Vec<_>>();
+                        let edges = trace
+                            .edges
+                            .iter()
+                            .filter(|edge| {
+                                step_ids.contains(&edge.from_step) && step_ids.contains(&edge.to_step)
+                            })
+                            .collect::<Vec<_>>();
+                        let states = trace
+                            .states
+                            .iter()
+                            .filter(|state| state_ids.contains(&state.id))
+                            .collect::<Vec<_>>();
                         let wrapped = serde_json::json!({
                             "analysis_complete": analysis_incomplete_reasons.is_empty(),
                             "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                            "trace_id": &trace.trace_id,
+                            "query": &trace.query,
                             "summary": &trace.summary,
-                            "paths": slice,
+                            "paths": paths,
+                            "steps": steps,
+                            "edges": edges,
+                            "states": states,
+                            "diagnostics": &trace.diagnostics,
+                            "metadata": &trace.metadata,
+                            "included_path_ids": path_ids,
                             "page": page_info_to_json(info),
                         });
                         cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
@@ -139,35 +200,29 @@ pub(crate) fn cmd_trace(
     Ok(())
 }
 
-/// Eagerly hydrate the indexed taint graph for the trace's seed
-/// function so the first call to `dataflow().graph_for(...)` doesn't
-/// trip a cold-build pause inside the spinner. No-op when the seed is
-/// unknown or `BONSAI_NO_DATAFLOW` is set.
-fn load_trace_taint_graph(ws: &Workspace, seed: Option<&str>) {
-    if std::env::var("BONSAI_NO_DATAFLOW")
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-    {
-        return;
-    }
-    let Some(seed) = seed else {
-        return;
-    };
-    let Some(entry) = ws.lookup_function(seed) else {
-        return;
-    };
-    let _ = ws.dataflow().graph_for(entry, ws.db());
-}
-
-/// Rough byte cost of one rendered `PathSummary`, used by the
-/// pager to split a trace's path list into budget-fitting pages.
-/// Scales with the step span; exact ratio is unimportant — the
-/// pager only needs monotonicity.
-fn trace_path_cost(p: &PathSummary) -> u64 {
-    // Chrome floor (themed prefix, depth indent, path + line + code
-    // snippet, trailing newline) adds a consistent ~400 bytes per
-    // rendered step that the step-count×60 multiplier doesn't cover.
-    (p.last_step.saturating_sub(p.first_step) * 60).max(64) + paging::TABLE_ROW_CHROME_BYTES
+fn trace_page_rows(trace: &TraceResult) -> Vec<TracePageRow<'_>> {
+    trace
+        .paths
+        .iter()
+        .map(|path| {
+            let steps = trace
+                .steps
+                .iter()
+                .filter(|step| step.path_id == path.path_id)
+                .collect::<Vec<_>>();
+            let cost = steps.iter().fold(256u64, |cost, step| {
+                cost.saturating_add(
+                    (step.message.len()
+                        + step.function.len()
+                        + step.file.len()
+                        + step.code.len()
+                        + step.notes.iter().map(String::len).sum::<usize>()
+                        + 192) as u64,
+                )
+            });
+            TracePageRow { path, steps, cost }
+        })
+        .collect()
 }
 
 /// CLI-themed text rendering for `trace`. Indents by call depth so the
@@ -193,7 +248,6 @@ fn trace_text_lines(
         .or(trace.query.target_symbol.as_deref())
         .unwrap_or("<unknown>");
     let sink_label = trace.query.sink_symbol.as_deref();
-    cli_println!();
     let header = if let Some(sink) = sink_label {
         format!("▸ trace {} → {}", entry_label, sink)
     } else {
@@ -225,11 +279,7 @@ fn trace_text_lines(
         reasons.extend(trace.summary.analysis_incomplete_reasons.iter().cloned());
         reasons.sort();
         reasons.dedup();
-        let reasons = if reasons.is_empty() {
-            "unknown".to_string()
-        } else {
-            reasons.join(", ")
-        };
+        let reasons = summarize_incomplete_reasons(&reasons, 8);
         lines.extend(ui.wrapped_warn_labeled_lines("analysis incomplete", &reasons));
     }
     let ws_root = workspace_root

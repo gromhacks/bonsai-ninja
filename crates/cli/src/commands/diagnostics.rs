@@ -5,6 +5,7 @@
 //! single small module together.
 
 use anyhow::Result;
+use serde::Serialize;
 use serde_json::json;
 use std::io::Write as _;
 use std::process::Command;
@@ -12,12 +13,13 @@ use std::time::Duration;
 
 use crate::args::SemanticWorkerPhase;
 use crate::cli_println;
-use crate::progress;
+use crate::{page_cache, paging, progress};
 
 use super::{
-    bonsai_for_cli, not_found_with_suggestions, open_project_dataflow_prewarm, open_project_index_only,
-    open_project_parse_only, open_project_sidecar_validation_only, open_project_streaming_parse_only,
-    open_workspace_syntax_only,
+    bonsai_for_cli, not_found_with_suggestions, open_project_dataflow_prewarm,
+    open_project_index_matching_literal, open_project_index_matching_path, open_project_index_only,
+    open_project_parse_only, open_project_sidecar_validation_only, page_info_to_json,
+    paged_json_incomplete_reasons,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -31,7 +33,6 @@ pub(crate) struct IndexCommandOptions {
 }
 
 pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) -> Result<()> {
-    let _ = options.structural_only;
     if options.semantic {
         if let Some(phase) = options.semantic_worker {
             return run_semantic_worker(root, phase);
@@ -39,12 +40,38 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
         run_semantic_workers(root)?;
         return Ok(());
     }
-    let (project, _footer) = if options.prewarm_dataflow {
-        open_project_dataflow_prewarm(root)?
-    } else if options.watch {
-        open_project_parse_only(root)?
+    // A one-shot structural index must leave reusable compiler artifacts.
+    // Merely parsing into a process-local workspace makes the documented
+    // warm-up disappear at process exit and forces the next semantic command
+    // to parse the repository again. The command itself is already the hard
+    // process-lifetime boundary, so build and report from one source snapshot
+    // instead of spawning a worker and reopening the whole repository merely
+    // to print counters. `--structural-only` is the explicit spelling of this
+    // default behavior; it suppresses graph sidecars, not syntax objects.
+    let _ = options.structural_only;
+    if !options.watch && !options.prewarm_dataflow {
+        bonsai_for_cli().cache(root).maintain_persisted_sidecars()?;
+        let project = open_project_sidecar_validation_only(root)?;
+        let compiler_cache_hit = project.cache().compiler_object_generation_is_current();
+        project.cache().warm_compiler_object_sidecar()?;
+        let stats = project.stats();
+        cli_println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "files": stats.files,
+                "compiler_cache": if compiler_cache_hit { "hit" } else { "rebuilt" },
+                "compiler_objects": stats.files,
+                "parsed_files": if compiler_cache_hit { 0 } else { stats.files },
+                "semantic_context": stats.semantic_context,
+            }))?
+        );
+        flush_stdout()?;
+        return Ok(());
+    }
+    let project = if options.prewarm_dataflow {
+        open_project_dataflow_prewarm(root)?.0
     } else {
-        open_project_streaming_parse_only(root)?
+        open_project_parse_only(root)?.0
     };
     let stage = progress::ScopedSpinner::new("collecting index stats");
     let stats = project.stats();
@@ -92,6 +119,11 @@ pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) ->
 /// while their peak resident sets cannot become additive.
 pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
     let executable = std::env::current_exe()?;
+    // Maintenance is intentionally separate from semantic planning. A fully
+    // fresh manifest can coexist with crash staging files or sidecars from an
+    // older schema; reclaim those under writer locks without opening or
+    // decoding any compiler graph.
+    bonsai_for_cli().cache(root).maintain_persisted_sidecars()?;
     loop {
         // Cache validation hashes the complete source snapshot and may inspect
         // large factstore metadata. A fresh process is a hard reclamation
@@ -102,28 +134,7 @@ pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
             return Ok(());
         }
         for phase in semantic_phase_plan(&stats.validation) {
-            let phase_name = match phase {
-                SemanticWorkerPhase::Compiler => "compiler",
-                SemanticWorkerPhase::Retrieval => "retrieval",
-                SemanticWorkerPhase::Callgraph => "callgraph",
-                SemanticWorkerPhase::Linkage => "linkage",
-                SemanticWorkerPhase::Idg => "idg",
-                SemanticWorkerPhase::Manifest => "manifest",
-            };
-            let mut command = Command::new(&executable);
-            command
-                .arg("index")
-                .arg("--semantic")
-                .arg("--semantic-worker")
-                .arg(phase_name)
-                .arg(root);
-            if let Some(timeout_ms) = crate::PARSE_TIMEOUT_MS.get().copied().flatten() {
-                command.arg("--parse-timeout").arg(timeout_ms.to_string());
-            }
-            let status = command.status()?;
-            if !status.success() {
-                anyhow::bail!("semantic {phase_name} worker exited with {status}");
-            }
+            run_semantic_phase_process(&executable, root, phase)?;
         }
         // Each worker publishes atomically. This final validation proves every
         // artifact describes the same current snapshot. An edit between
@@ -138,6 +149,36 @@ pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
         );
         retry.finish();
     }
+}
+
+fn run_semantic_phase_process(
+    executable: &std::path::Path,
+    root: &std::path::Path,
+    phase: SemanticWorkerPhase,
+) -> Result<()> {
+    let phase_name = match phase {
+        SemanticWorkerPhase::Compiler => "compiler",
+        SemanticWorkerPhase::Retrieval => "retrieval",
+        SemanticWorkerPhase::Callgraph => "callgraph",
+        SemanticWorkerPhase::Linkage => "linkage",
+        SemanticWorkerPhase::Idg => "idg",
+        SemanticWorkerPhase::Manifest => "manifest",
+    };
+    let mut command = Command::new(executable);
+    command
+        .arg("index")
+        .arg("--semantic")
+        .arg("--semantic-worker")
+        .arg(phase_name)
+        .arg(root);
+    if let Some(timeout_ms) = crate::PARSE_TIMEOUT_MS.get().copied().flatten() {
+        command.arg("--parse-timeout").arg(timeout_ms.to_string());
+    }
+    let status = command.status()?;
+    if !status.success() {
+        anyhow::bail!("semantic {phase_name} worker exited with {status}");
+    }
+    Ok(())
 }
 
 fn semantic_generation_is_current(validation: &bonsai_sdk::CacheValidationReport) -> bool {
@@ -227,6 +268,13 @@ fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Re
         let _ = bonsai_for_cli().cache(root).write_manifest()?;
         return Ok(());
     }
+    if phase == SemanticWorkerPhase::Compiler {
+        let cache = bonsai_for_cli().cache(root);
+        if cache.migrate_legacy_compiler_object_sidecar()?.is_some() {
+            let _ = cache.write_manifest()?;
+            return Ok(());
+        }
+    }
     let project = open_project_sidecar_validation_only(root)?;
     match phase {
         SemanticWorkerPhase::Compiler => project.cache().warm_compiler_object_sidecar(),
@@ -245,15 +293,107 @@ fn run_semantic_worker(root: &std::path::Path, phase: SemanticWorkerPhase) -> Re
     }
 }
 
-pub(crate) fn cmd_context(root: &std::path::Path) -> Result<()> {
+#[derive(Clone, Debug, Serialize)]
+struct ContextRow {
+    category: &'static str,
+    #[serde(flatten)]
+    value: serde_json::Value,
+}
+
+fn context_row<T: Serialize>(category: &'static str, value: T) -> Result<ContextRow> {
+    Ok(ContextRow {
+        category,
+        value: serde_json::to_value(value)?,
+    })
+}
+
+pub(crate) fn cmd_context(root: &std::path::Path, paging_cfg: paging::PagingConfig) -> Result<()> {
     // Workspace context is a filesystem/path fact. It does not inspect
-    // declarations, so parsing every Tree-sitter input here would be an
-    // accidental whole-program compiler pass for a metadata-only command.
-    let (workspace, _footer) = open_workspace_syntax_only(root)?;
+    // declarations, so do not read source contents into a VFS or invoke
+    // Tree-sitter for a metadata-only command.
+    let workspace = bonsai_sdk::Workspace::new(bonsai_adapters::all_languages_registry());
     let stage = progress::ScopedSpinner::new("collecting workspace context");
-    let context = workspace.semantic_context();
+    let context = workspace
+        .semantic_context_for_root(root)
+        .map_err(|error| anyhow::anyhow!("collecting context for {}: {error}", root.display()))?;
     stage.finish();
-    cli_println!("{}", serde_json::to_string_pretty(&context)?);
+    if !paging_cfg.json_wrapped() {
+        cli_println!("{}", serde_json::to_string_pretty(&context)?);
+        flush_stdout()?;
+        return Ok(());
+    }
+
+    let mut rows = Vec::with_capacity(
+        context.module_roots.len()
+            + context.dependency_roots.len()
+            + context.generated_roots.len()
+            + context.excluded_roots.len()
+            + context.toolchain_manifests.len()
+            + context.configured_source_variants.len()
+            + context.source_transformations.len()
+            + context.incomplete_reasons.len(),
+    );
+    for value in &context.module_roots {
+        rows.push(context_row("module_root", value)?);
+    }
+    for value in &context.dependency_roots {
+        rows.push(context_row("dependency_root", value)?);
+    }
+    for value in &context.generated_roots {
+        rows.push(context_row("generated_root", value)?);
+    }
+    for value in &context.excluded_roots {
+        rows.push(context_row("excluded_root", value)?);
+    }
+    for value in &context.toolchain_manifests {
+        rows.push(context_row("toolchain_manifest", value)?);
+    }
+    for value in &context.configured_source_variants {
+        rows.push(context_row("configured_source_variant", value)?);
+    }
+    for value in &context.source_transformations {
+        rows.push(context_row("source_transformation", value)?);
+    }
+    for reason in &context.incomplete_reasons {
+        rows.push(context_row(
+            "incomplete_reason",
+            serde_json::json!({ "reason": reason }),
+        )?);
+    }
+
+    let workspace_root = context.workspace_root.clone();
+    let summary = context.summary;
+    let semantic_incomplete_reasons = context.incomplete_reasons.clone();
+    let canonical_context = context.clone();
+    let force_wrapper = paging_cfg.context.is_some() || !matches!(paging_cfg.page, paging::PageArg::First);
+    let filters_hash = paging::hash_filters(&[("command", "context")]);
+    page_cache::emit_paged_text(
+        root,
+        &rows,
+        &paging_cfg,
+        "context",
+        filters_hash,
+        |row| serde_json::to_vec(row).map_or(256, |bytes| bytes.len()) as u64,
+        |slice, info, _cfg| {
+            let page_complete = info.page_number == 1 && info.is_last;
+            if !force_wrapper && page_complete {
+                cli_println!("{}", serde_json::to_string_pretty(&canonical_context)?);
+                return Ok(());
+            }
+            let mut analysis_incomplete_reasons = semantic_incomplete_reasons.clone();
+            analysis_incomplete_reasons.extend(paged_json_incomplete_reasons("context", info));
+            let wrapped = serde_json::json!({
+                "workspace_root": workspace_root,
+                "summary": summary,
+                "analysis_complete": semantic_incomplete_reasons.is_empty() && page_complete,
+                "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                "rows": slice,
+                "page": page_info_to_json(info),
+            });
+            cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+            Ok(())
+        },
+    )?;
     flush_stdout()?;
     Ok(())
 }
@@ -282,7 +422,7 @@ pub(crate) fn cmd_diagnostics(root: &std::path::Path) -> Result<()> {
 }
 
 pub(crate) fn cmd_dump_hir(root: &std::path::Path, symbol: &str) -> Result<()> {
-    let (project, _footer) = open_project_index_only(root)?;
+    let (project, _footer) = open_project_for_dump_target(root, symbol)?;
     let ws = project.workspace();
     let stage = progress::ScopedSpinner::new("building HIR dump");
     let dump = project
@@ -296,7 +436,7 @@ pub(crate) fn cmd_dump_hir(root: &std::path::Path, symbol: &str) -> Result<()> {
 }
 
 pub(crate) fn cmd_dump_cfg(root: &std::path::Path, symbol: &str) -> Result<()> {
-    let (project, _footer) = open_project_index_only(root)?;
+    let (project, _footer) = open_project_for_dump_target(root, symbol)?;
     let ws = project.workspace();
     let stage = progress::ScopedSpinner::new("building CFG dump");
     let cfg = project
@@ -309,11 +449,42 @@ pub(crate) fn cmd_dump_cfg(root: &std::path::Path, symbol: &str) -> Result<()> {
     Ok(())
 }
 
+fn open_project_for_dump_target(
+    root: &std::path::Path,
+    symbol: &str,
+) -> Result<(bonsai_sdk::Project, crate::footer::WorkspaceFooter)> {
+    if let Some(file) = bonsai_sdk::dump_callable_file_qualifier(symbol) {
+        return open_project_index_matching_path(root, std::path::Path::new(file));
+    }
+    open_project_index_matching_literal(root, symbol)
+}
+
 #[cfg(test)]
 mod semantic_phase_tests {
     use super::*;
     use bonsai_sdk::{CacheFreshnessStatus, CacheSidecarValidation, CacheValidationReport};
     use std::path::PathBuf;
+
+    #[test]
+    fn dump_target_file_qualifier_understands_documented_disambiguators() {
+        assert_eq!(
+            bonsai_sdk::dump_callable_file_qualifier("server/src/App.java:42:dispatchRequest"),
+            Some("server/src/App.java")
+        );
+        assert_eq!(
+            bonsai_sdk::dump_callable_file_qualifier("server/src/App.java:dispatchRequest"),
+            Some("server/src/App.java")
+        );
+        assert_eq!(
+            bonsai_sdk::dump_callable_file_qualifier("App.java:42:dispatchRequest"),
+            Some("App.java")
+        );
+        assert_eq!(bonsai_sdk::dump_callable_file_qualifier("dispatchRequest"), None);
+        assert_eq!(
+            bonsai_sdk::dump_callable_file_qualifier("module::dispatchRequest"),
+            None
+        );
+    }
 
     fn validation(
         compiler: CacheFreshnessStatus,

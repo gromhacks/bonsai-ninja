@@ -46,6 +46,15 @@ pub struct AstFileDump {
     pub root: AstNode,
 }
 
+#[derive(Serialize, Clone, Debug)]
+pub struct AstFunctionCandidate {
+    pub path: String,
+    pub node_id: String,
+    pub kind: String,
+    pub line: u32,
+    pub column: u32,
+}
+
 /// Outcome of a [`dump_ast`] call. The `NodeIdNotFound` variant
 /// lets the CLI surface a precise error when `--node N:xx` doesn't
 /// match anything; library consumers can pattern-match the same way.
@@ -53,6 +62,10 @@ pub struct AstFileDump {
 pub enum AstOutcome {
     Dumps(Vec<AstFileDump>),
     NodeIdNotFound,
+    FunctionAmbiguous {
+        function: String,
+        candidates: Vec<AstFunctionCandidate>,
+    },
 }
 
 /// Stable content-hash id for a tree-sitter node: `N:` + 8 hex
@@ -71,6 +84,11 @@ pub fn compute_node_id(file_path: &str, start_byte: usize, end_byte: usize, kind
 /// to the optional `--node` drill-down.
 pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
     use rayon::prelude::*;
+    enum FileResult {
+        Dump(AstFileDump),
+        Ambiguous(Vec<AstFunctionCandidate>),
+    }
+
     let depth_cap = f.max_depth.unwrap_or(usize::MAX);
     let all_files = ws.vfs().all_files();
     // Parallel per-file tree walk. `tree_sitter::Node` isn't Send,
@@ -78,7 +96,7 @@ pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
     // an owned `AstNode` entirely within a single worker's stack —
     // nothing crosses thread boundaries. Each worker gets its own
     // `Arc<ParsedFile>` clone from `db.parse(file_id)`.
-    let mut file_dumps: Vec<AstFileDump> = all_files
+    let file_results: Vec<FileResult> = all_files
         .par_iter()
         .filter_map(|&file_id| {
             let display_path = ws
@@ -99,19 +117,84 @@ pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
             // covering that decl's span.
             let scoped_node = if let Some(func_name) = f.function {
                 let index = ws.db().decl_index_uncached(file_id)?;
-                let matching_decl = index.defs.iter().find(|decl| decl.name == func_name)?;
+                let matching_decls = index
+                    .defs
+                    .iter()
+                    .filter(|decl| {
+                        decl.name == func_name
+                            && matches!(
+                                decl.kind,
+                                bonsai_lang_api::DeclKind::Function
+                                    | bonsai_lang_api::DeclKind::Method
+                                    | bonsai_lang_api::DeclKind::Constructor
+                            )
+                    })
+                    .collect::<Vec<_>>();
+                if matching_decls.len() > 1 {
+                    let mut candidates = matching_decls
+                        .into_iter()
+                        .filter_map(|decl| {
+                            let node = find_node_covering_span(tree_root, decl.span.start, decl.span.end)?;
+                            let start = node.start_position();
+                            Some(AstFunctionCandidate {
+                                path: display_path.clone(),
+                                node_id: compute_node_id(
+                                    &display_path,
+                                    node.start_byte(),
+                                    node.end_byte(),
+                                    node.kind(),
+                                ),
+                                kind: node.kind().to_string(),
+                                line: u32::try_from(start.row).unwrap_or(u32::MAX).saturating_add(1),
+                                column: u32::try_from(start.column).unwrap_or(u32::MAX).saturating_add(1),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    candidates.sort_by(|left, right| {
+                        left.path
+                            .cmp(&right.path)
+                            .then_with(|| left.line.cmp(&right.line))
+                            .then_with(|| left.column.cmp(&right.column))
+                            .then_with(|| left.node_id.cmp(&right.node_id))
+                    });
+                    candidates.dedup_by(|left, right| left.node_id == right.node_id);
+                    return Some(FileResult::Ambiguous(candidates));
+                }
+                let matching_decl = matching_decls.into_iter().next()?;
                 find_node_covering_span(tree_root, matching_decl.span.start, matching_decl.span.end)?
             } else {
                 tree_root
             };
 
             let root_ast = build_ast_node(scoped_node, source, &display_path, None, 0, depth_cap);
-            Some(AstFileDump {
+            Some(FileResult::Dump(AstFileDump {
                 path: display_path,
                 root: root_ast,
-            })
+            }))
         })
         .collect();
+    let mut file_dumps = Vec::new();
+    let mut ambiguities = Vec::new();
+    for result in file_results {
+        match result {
+            FileResult::Dump(dump) => file_dumps.push(dump),
+            FileResult::Ambiguous(candidates) => ambiguities.extend(candidates),
+        }
+    }
+    if !ambiguities.is_empty() {
+        ambiguities.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then_with(|| left.line.cmp(&right.line))
+                .then_with(|| left.column.cmp(&right.column))
+                .then_with(|| left.node_id.cmp(&right.node_id))
+        });
+        ambiguities.dedup_by(|left, right| left.node_id == right.node_id);
+        return AstOutcome::FunctionAmbiguous {
+            function: f.function.unwrap_or_default().to_string(),
+            candidates: ambiguities,
+        };
+    }
     // Deterministic file order (path-sorted) regardless of worker
     // completion order.
     file_dumps.sort_by(|a, b| a.path.cmp(&b.path));
@@ -235,4 +318,64 @@ fn find_node_in_ast<'a>(root: &'a AstNode, target_id: &str) -> Option<&'a AstNod
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_function_names_report_selectable_ast_nodes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("app.py"),
+            "def render(value):\n    return value\n\ndef render(value, suffix):\n    return value + suffix\n",
+        )
+        .expect("write fixture");
+        let workspace =
+            Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+
+        let candidates = match dump_ast(
+            &workspace,
+            &AstFilters {
+                file: Some("app.py"),
+                function: Some("render"),
+                max_depth: Some(1),
+                node_id: None,
+            },
+        ) {
+            AstOutcome::FunctionAmbiguous { function, candidates } => {
+                assert_eq!(function, "render");
+                candidates
+            }
+            other => panic!("expected explicit overload ambiguity, got {other:?}"),
+        };
+        assert_eq!(candidates.len(), 2);
+        assert_ne!(candidates[0].node_id, candidates[1].node_id);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.line)
+                .collect::<Vec<_>>(),
+            vec![1, 4]
+        );
+
+        let selected = dump_ast(
+            &workspace,
+            &AstFilters {
+                file: Some("app.py"),
+                function: None,
+                max_depth: None,
+                node_id: Some(&candidates[1].node_id),
+            },
+        );
+        match selected {
+            AstOutcome::Dumps(dumps) => {
+                assert_eq!(dumps.len(), 1);
+                assert_eq!(dumps[0].root.node_id, candidates[1].node_id);
+                assert_eq!(dumps[0].root.start_line, 4);
+            }
+            other => panic!("expected selected AST node, got {other:?}"),
+        }
+    }
 }

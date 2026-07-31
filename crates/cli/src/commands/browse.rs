@@ -18,13 +18,13 @@ use crate::ui::{extension_for, Ui};
 use crate::{cli_println, ui};
 
 use super::{
-    open_project_index_filtered_paths, open_project_index_matching_literal,
-    open_project_index_only as open_project, open_workspace_syntax_filtered_paths,
-    open_workspace_syntax_only,
+    open_project_index_filtered_paths, open_project_index_matching_literal, open_project_index_matching_path,
+    open_project_index_only as open_project, open_project_index_retrieval_candidates,
+    open_workspace_syntax_filtered_paths, open_workspace_syntax_only,
 };
 
 const BROWSE_LITERAL_PREFILTER_FILE_LIMIT: usize = 5_000;
-fn workspace_file_count_exceeds(root: &std::path::Path, limit: usize) -> bool {
+pub(crate) fn workspace_file_count_exceeds(root: &std::path::Path, limit: usize) -> bool {
     let mut stack = vec![root.to_path_buf()];
     let mut seen = 0usize;
     while let Some(dir) = stack.pop() {
@@ -57,11 +57,26 @@ fn workspace_file_count_exceeds(root: &std::path::Path, limit: usize) -> bool {
 }
 
 fn browse_literal_prefilter_enabled(root: &std::path::Path, literal: Option<&str>, regex: bool) -> bool {
-    literal.is_some_and(|literal| {
-        !regex
-            && literal.len() >= 3
-            && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT)
-    })
+    literal
+        .and_then(|literal| {
+            if regex {
+                exact_identifier_regex_literal(literal)
+            } else {
+                Some(literal)
+            }
+        })
+        .is_some_and(|literal| {
+            literal.len() >= 3 && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT)
+        })
+}
+
+fn exact_identifier_regex_literal(pattern: &str) -> Option<&str> {
+    let literal = pattern.strip_prefix('^')?.strip_suffix('$')?;
+    (!literal.is_empty()
+        && literal
+            .chars()
+            .all(|character| character == '_' || character == '$' || character.is_alphanumeric()))
+    .then_some(literal)
 }
 
 fn open_browse_project(
@@ -69,8 +84,15 @@ fn open_browse_project(
     literal: Option<&str>,
     regex: bool,
 ) -> Result<(bonsai_sdk::Project, WorkspaceFooter, bool)> {
+    let prefilter_literal = literal.and_then(|literal| {
+        if regex {
+            exact_identifier_regex_literal(literal)
+        } else {
+            Some(literal)
+        }
+    });
     let use_literal_prefilter = browse_literal_prefilter_enabled(root, literal, regex);
-    let (project, footer) = match (use_literal_prefilter, literal) {
+    let (project, footer) = match (use_literal_prefilter, prefilter_literal) {
         (true, Some(literal)) => open_project_index_matching_literal(root, literal)?,
         _ => open_project(root)?,
     };
@@ -84,33 +106,53 @@ fn open_browse_project_with_retrieval(
     file: Option<&str>,
     regex: bool,
 ) -> Result<(bonsai_sdk::Project, WorkspaceFooter, bool)> {
-    if let Some(query) = literal {
-        if let Some(include_filters) = retrieval_prefilter_for_browse_literal(root, query, kind, file, regex)?
-        {
-            let (project, footer) = open_project_index_filtered_paths(root, &include_filters, &[])?;
+    // An explicit file filter defines the complete requested universe. Open
+    // that syntax slice directly instead of hydrating the full workspace and
+    // discarding nearly every row after allocation. This is both exact and
+    // important for compiler-like latency on large repositories: `defs
+    // --file X`, `classes --file X`, and the other browse facades should cost
+    // roughly one file, not one Elasticsearch checkout.
+    if let Some(file) = file.filter(|file| !file.trim().is_empty()) {
+        let requested_path = std::path::Path::new(file);
+        let direct_path = if requested_path.is_absolute() {
+            requested_path.to_path_buf()
+        } else {
+            root.join(requested_path)
+        };
+        if direct_path.is_file() {
+            let (project, footer) = open_project_index_matching_path(root, requested_path)?;
             return Ok((project, footer, true));
+        }
+        let include_filters = [file.to_string()];
+        let (project, footer) = open_project_index_filtered_paths(root, &include_filters, &[])?;
+        return Ok((project, footer, true));
+    }
+    if let Some(query) = literal.and_then(|query| {
+        if regex {
+            exact_identifier_regex_literal(query)
+        } else {
+            Some(query)
+        }
+    }) {
+        if query.trim().len() >= 3 && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT)
+        {
+            if let Some((project, footer)) = open_project_index_retrieval_candidates(
+                root,
+                query,
+                SearchFilters {
+                    kind,
+                    file,
+                    regex: false,
+                },
+            )? {
+                return Ok((project, footer, true));
+            }
         }
     }
     open_browse_project(root, literal, regex)
 }
 
-fn retrieval_prefilter_for_browse_literal(
-    root: &std::path::Path,
-    query: &str,
-    kind: Option<&str>,
-    file: Option<&str>,
-    regex: bool,
-) -> Result<Option<Vec<String>>> {
-    retrieval_prefilter_for_browse_literal_with_limit(
-        root,
-        query,
-        kind,
-        file,
-        regex,
-        BROWSE_LITERAL_PREFILTER_FILE_LIMIT,
-    )
-}
-
+#[cfg(test)]
 fn retrieval_prefilter_for_browse_literal_with_limit(
     root: &std::path::Path,
     query: &str,
@@ -119,7 +161,15 @@ fn retrieval_prefilter_for_browse_literal_with_limit(
     regex: bool,
     large_workspace_limit: usize,
 ) -> Result<Option<Vec<String>>> {
-    if regex || query.trim().len() < 3 || !workspace_file_count_exceeds(root, large_workspace_limit) {
+    let query = if regex {
+        let Some(literal) = exact_identifier_regex_literal(query) else {
+            return Ok(None);
+        };
+        literal
+    } else {
+        query
+    };
+    if query.trim().len() < 3 || !workspace_file_count_exceeds(root, large_workspace_limit) {
         return Ok(None);
     }
     let Some(mut include_filters) = super::bonsai_for_cli().retrieval_hydration_include_filters(
@@ -139,14 +189,7 @@ fn retrieval_prefilter_for_browse_literal_with_limit(
     Ok(Some(include_filters))
 }
 
-fn retrieval_prefilter_for_search(
-    root: &std::path::Path,
-    query: &str,
-    f: SearchFilters<'_>,
-) -> Result<Option<Vec<String>>> {
-    retrieval_prefilter_for_search_with_limit(root, query, f, BROWSE_LITERAL_PREFILTER_FILE_LIMIT)
-}
-
+#[cfg(test)]
 fn retrieval_prefilter_for_search_with_limit(
     root: &std::path::Path,
     query: &str,
@@ -193,11 +236,13 @@ pub(crate) fn cmd_defs(
     format: BrowseFormat,
 ) -> Result<()> {
     let prefilter_literal = f.name.or(f.has_callee).or(f.has_param).or(f.has_decorator);
-    let large_workspace = workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
+    let large_workspace =
+        f.file.is_none() && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
     if matches!(format, BrowseFormat::Text)
         && !f.regex
         && matches!(paging_cfg.page, paging::PageArg::First)
         && !paging_cfg.all
+        && f.file.is_none()
         && prefilter_literal.is_none()
         && (!flows || large_workspace)
     {
@@ -431,7 +476,11 @@ pub(crate) fn cmd_entrypoints(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let (project, _footer) = if let Some(file) = f.file.filter(|file| !file.trim().is_empty()) {
+        open_project_index_filtered_paths(root, &[file.to_string()], &[])?
+    } else {
+        open_project(root)?
+    };
     let out = with_browse_progress("collecting entrypoints", || {
         project
             .browse()
@@ -841,6 +890,26 @@ fn browse_table_row_cost(cells: &[usize]) -> u64 {
         .saturating_add(cells.iter().map(|len| wrapped_table_cell_cost(*len)).sum::<u64>())
 }
 
+/// Estimate a row whose complete visible cells are already known.
+///
+/// Comfy-table renders at roughly 140 bytes per physical line in the
+/// canonical CLI width. Folding the combined cell width into 120 visible
+/// columns and allowing 160 encoded bytes per output line accounts for
+/// borders, padding, and optional ANSI without charging every cell as if it
+/// wrapped independently. Use this for inventories such as imports where the
+/// source cell is cheap to read exactly.
+fn rendered_table_row_cost(cells: &[usize]) -> u64 {
+    let visible = cells
+        .iter()
+        .copied()
+        .sum::<usize>()
+        .saturating_add(cells.len().saturating_mul(3));
+    let physical_lines = visible.max(1).div_ceil(120);
+    u64::try_from(physical_lines)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(160)
+}
+
 fn source_line_estimated_cell_cost() -> u64 {
     wrapped_table_cell_cost(320)
 }
@@ -1242,11 +1311,13 @@ pub(crate) fn cmd_imports(
     format: BrowseFormat,
 ) -> Result<()> {
     let prefilter_literal = f.module.or(f.alias);
-    let large_workspace = workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
+    let large_workspace =
+        f.file.is_none() && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
     if matches!(format, BrowseFormat::Text)
         && !f.regex
         && matches!(paging_cfg.page, paging::PageArg::First)
         && !paging_cfg.all
+        && f.file.is_none()
         && (!flows || large_workspace)
     {
         let include_filters: Vec<String> = f.file.into_iter().map(str::to_string).collect();
@@ -1297,19 +1368,20 @@ pub(crate) fn cmd_imports(
         let symbol = import.original_name.as_deref().unwrap_or("-");
         let kind = import_kind_label(import.is_wildcard, import.original_name.as_deref());
         let loc_len = short_file(&import.file).len() + 16;
-        let flow_cost = flow_cost_ann
+        let source_len = read_line(ws, &import.file, import.line).len();
+        let flow_len = flow_cost_ann
             .as_ref()
-            .map(|ann| flow_labels_cell_cost(&import_flow_labels(ann, import)))
+            .map(|ann| import_flow_labels(ann, import).len().min(120))
             .unwrap_or(0);
-        browse_table_row_cost(&[
+        rendered_table_row_cost(&[
             import.module.len(),
             symbol.len(),
             alias.len(),
             kind.len(),
             loc_len,
+            source_len,
+            flow_len,
         ])
-        .saturating_add(source_line_estimated_cell_cost())
-        .saturating_add(flow_cost)
     };
     match format {
         BrowseFormat::Json => {
@@ -1445,9 +1517,14 @@ fn render_imports_streaming_first_page(
             let kind = import_kind_label(imp.is_wildcard, imp.original_name.as_deref());
             let loc = format!("{}:{}", short_file(&path), line);
             let line_text = read_line_by_file_id(ws, file_id, line);
-            let row_cost =
-                browse_table_row_cost(&[imp.module.len(), symbol.len(), alias.len(), kind.len(), loc.len()])
-                    .saturating_add(wrapped_table_cell_cost(line_text.len().min(4_000)));
+            let row_cost = rendered_table_row_cost(&[
+                imp.module.len(),
+                symbol.len(),
+                alias.len(),
+                kind.len(),
+                loc.len(),
+                line_text.len().min(4_000),
+            ]);
             let row_tokens = paging::bytes_to_tokens(row_cost);
             if rows_rendered > 0
                 && (tokens_used.saturating_add(row_tokens) > budget_tokens
@@ -2130,12 +2207,15 @@ pub(crate) fn cmd_classes(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let prefilter_literal = f.name.or(f.has_method);
-    let large_workspace = workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
+    let (prefilter_literal, prefilter_regex) =
+        f.name.map_or((f.has_method, false), |name| (Some(name), f.regex));
+    let large_workspace =
+        f.file.is_none() && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
     if matches!(format, BrowseFormat::Text)
         && !f.regex
         && matches!(paging_cfg.page, paging::PageArg::First)
         && !paging_cfg.all
+        && f.file.is_none()
         && prefilter_literal.is_none()
         && (!flows || large_workspace)
     {
@@ -2153,7 +2233,7 @@ pub(crate) fn cmd_classes(
         f.kind
     };
     let (project, _footer, partial_workspace) =
-        open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, f.regex)?;
+        open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, prefilter_regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = with_browse_progress("collecting classes", || {
@@ -2488,9 +2568,15 @@ pub(crate) fn cmd_search(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let retrieval_filters = retrieval_prefilter_for_search(root, query, f)?;
-    let (project, _footer, partial_workspace) = if let Some(include_filters) = retrieval_filters {
-        let (project, footer) = open_project_index_filtered_paths(root, &include_filters, &[])?;
+    let retrieval_project = if !f.regex
+        && query.trim().len() >= 3
+        && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT)
+    {
+        open_project_index_retrieval_candidates(root, query, f)?
+    } else {
+        None
+    };
+    let (project, _footer, partial_workspace) = if let Some((project, footer)) = retrieval_project {
         (project, footer, true)
     } else {
         open_browse_project(root, Some(query), f.regex)?

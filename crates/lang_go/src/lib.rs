@@ -66,8 +66,24 @@ type GoRangeAssignmentsByDecl = Vec<(Span, GoRangeLoopAssignments)>;
 type GoIfInitAssignments = Vec<FlowEvent>;
 type GoIfInitAssignmentsByDecl = Vec<(Span, Vec<(Span, GoIfInitAssignments)>)>;
 
+fn apply_go_type_declaration_kinds(index: &mut DeclIndex, tree: &Tree, file: FileId) {
+    for type_spec in collect_kinds(tree, &["type_spec"]) {
+        let kind = match type_spec.child_by_field_name("type").map(|node| node.kind()) {
+            Some("struct_type") => bonsai_lang_api::DeclKind::Struct,
+            Some("interface_type") => bonsai_lang_api::DeclKind::Interface,
+            _ => bonsai_lang_api::DeclKind::TypeAlias,
+        };
+        let span = span_of(file, &type_spec);
+        if let Some(declaration) = index.defs.iter_mut().find(|declaration| declaration.span == span) {
+            declaration.kind = kind;
+        }
+    }
+}
+
 const HANDLER: GrammarHandler = GrammarHandler {
     fn_kinds: &["function_declaration", "method_declaration"],
+    class_kinds: &["type_spec"],
+    class_decl_kinds: &[("type_spec", bonsai_lang_api::DeclKind::TypeAlias)],
     call_kinds: GO_CALL_KINDS,
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     method_receiver_param_index: Some(0),
@@ -152,6 +168,7 @@ impl LanguageAdapter for GoAdapter {
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parsed {
             let src = snapshot.text.as_bytes();
+            apply_go_type_declaration_kinds(&mut idx, &tree, file);
             populate_go_condition_expressions(&mut idx.branch_conditions, &tree, file, src);
             populate_go_call_argument_values(&mut idx, &tree, file, src);
             populate_go_assignment_values(&mut idx, &tree, file, src);
@@ -168,7 +185,14 @@ impl LanguageAdapter for GoAdapter {
             let class_symbols: Vec<(String, SymbolId)> = idx
                 .defs
                 .iter()
-                .filter(|decl| matches!(decl.kind, bonsai_lang_api::DeclKind::Class))
+                .filter(|decl| {
+                    matches!(
+                        decl.kind,
+                        bonsai_lang_api::DeclKind::Class
+                            | bonsai_lang_api::DeclKind::Struct
+                            | bonsai_lang_api::DeclKind::Interface
+                    )
+                })
                 .map(|decl| (decl.name.clone(), decl.symbol))
                 .collect();
             for decl in &mut idx.defs {

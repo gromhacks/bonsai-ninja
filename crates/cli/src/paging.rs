@@ -329,7 +329,7 @@ pub(crate) fn paginate<T, F>(
     command: &str,
     filters_hash: u64,
     row_cost_bytes: F,
-) -> (Vec<T>, PageInfo)
+) -> anyhow::Result<(Vec<T>, PageInfo)>
 where
     T: Clone,
     F: Fn(&T) -> u64,
@@ -352,7 +352,7 @@ where
             start_offset: 0,
             total_tokens_uncapped,
         };
-        return (rows.to_vec(), info);
+        return Ok((rows.to_vec(), info));
     }
     // Compute per-row token cost once. Paging walks these.
     let per_row: Vec<u64> = rows.iter().map(|r| bytes_to_tokens(row_cost_bytes(r))).collect();
@@ -406,7 +406,7 @@ where
             .iter()
             .position(|(offset, _)| cursor_id(command, filters_hash, *offset) == *c)
             .map(|p| p as u64)
-            .unwrap_or(0),
+            .ok_or_else(|| invalid_cursor_error(c))?,
         PageArg::Next => {
             // `--page next` resolves to the page after the one
             // stored in the last-cursor history. If no history,
@@ -445,7 +445,7 @@ where
         ))
     };
     write_last_cursor(command, filters_hash, &cursor);
-    (
+    Ok((
         slice,
         PageInfo {
             page_number: clamped_idx + 1,
@@ -461,6 +461,31 @@ where
             start_offset,
             total_tokens_uncapped,
         },
+    ))
+}
+
+/// Resolve an opaque page cursor against the exact offsets admitted by a
+/// command-specific paginator. A well-formed cursor can still be stale or
+/// belong to another command/filter set; silently replaying page one in that
+/// case makes an exhaustive review skip data while appearing successful.
+pub(crate) fn resolve_cursor_offset<I>(
+    cursor: &str,
+    command: &str,
+    filters_hash: u64,
+    offsets: I,
+) -> anyhow::Result<u64>
+where
+    I: IntoIterator<Item = u64>,
+{
+    offsets
+        .into_iter()
+        .find(|offset| cursor_id(command, filters_hash, *offset) == cursor)
+        .ok_or_else(|| invalid_cursor_error(cursor))
+}
+
+fn invalid_cursor_error(cursor: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "page cursor `{cursor}` does not belong to this command result; rerun without `--page` and use the cursor printed in its footer"
     )
 }
 

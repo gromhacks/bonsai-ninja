@@ -52,14 +52,19 @@ use flow_ids::FlowIdCache;
 use idg_persistence::IdgSidecarWriteGuard;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::{io::Read, path::Path, sync::Arc};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use taint_index::TaintGraphIndex;
 use thiserror::Error;
 use value_flow::ValueFlowCache;
 
 pub use bonsai_db::{
-    compiler_object_sidecar_path, validate_compiler_object_sidecar_file_with_source_fingerprints,
-    validate_compiler_object_sidecar_layout,
+    compiler_object_languages_with_source_fingerprints, compiler_object_sidecar_path,
+    migrate_legacy_compiler_object_sidecar_v11_with_source_fingerprints,
+    validate_compiler_object_sidecar_file_with_source_fingerprints, validate_compiler_object_sidecar_layout,
     validate_compiler_object_sidecar_metadata_with_source_fingerprints, COMPILER_OBJECT_CACHE_VERSION,
 };
 pub use cross_module::CrossModuleOptions;
@@ -104,6 +109,31 @@ pub fn idg_sidecar_path(workspace_root: &Path) -> std::path::PathBuf {
     bonsai_idg::workspace::idg_sidecar_path(workspace_root)
 }
 
+/// Reclaim lock-proven crash staging files and sidecars from superseded IDG
+/// and taint-graph schemas.
+///
+/// This never removes a current or newer finalized generation and skips any
+/// target owned by another writer. It is cache maintenance only: analysis
+/// semantics and result coverage are unchanged.
+pub fn maintain_persisted_sidecars(workspace_root: &Path) -> std::io::Result<()> {
+    let cache_dir = bonsai_common::workspace_bonsai_dir(workspace_root);
+    if !cache_dir.is_dir() {
+        return Ok(());
+    }
+    let idg_target = bonsai_idg::workspace::idg_sidecar_path(workspace_root);
+    match idg_persistence::maintain_idg_sidecar_cache(&idg_target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(error) => return Err(error),
+    }
+    match taint_index::maintain_sidecar_cache(workspace_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
 /// Validate that an existing workspace IDG sidecar is structurally readable.
 pub fn validate_idg_sidecar_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
     bonsai_idg::workspace::IdgWorkspace::validate_sidecar_file(path)
@@ -115,6 +145,40 @@ pub fn validate_idg_sidecar_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
 /// established independently.
 pub fn validate_idg_sidecar_layout_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
     bonsai_idg::workspace::IdgWorkspace::validate_sidecar_layout_file(path)
+}
+
+/// Validate an IDG against exact root-only compiler inputs without parsing or
+/// decoding graph pages.
+///
+/// `complete_field_place_languages` comes from the validated compiler-object
+/// language inventory intersected with the active adapter registry's
+/// capability declarations. This preserves custom registries and ambiguous
+/// extension selection without embedding language names in the graph engine.
+pub fn validate_idg_sidecar_layout_with_source_fingerprints<I, P, J, S>(
+    path: &Path,
+    workspace_root: &Path,
+    fingerprints: I,
+    complete_field_place_languages: J,
+) -> bonsai_idg::IdgResult<usize>
+where
+    I: IntoIterator<Item = (P, u64)>,
+    P: AsRef<Path>,
+    J: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let content = crate::cache_fingerprint::workspace_content_fingerprint_from_paths(fingerprints);
+    let complete_field_place_languages = complete_field_place_languages
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let transfer = bonsai_idg::TransferOptions::compiler_semantics(complete_field_place_languages)
+        .semantic_fingerprint();
+    let pipeline_hash = idg_pipeline_hash()
+        ^ content
+        ^ transfer
+        ^ u64::from(callgraph_sidecar::CALLGRAPH_CACHE_VERSION).wrapping_mul(0x9E37_79B1_85EB_CA87)
+        ^ crate::cache_fingerprint::dependency_metadata_fingerprint(workspace_root);
+    bonsai_idg::workspace::IdgWorkspace::validate_sidecar_layout_with_pipeline(path, pipeline_hash)
 }
 
 /// Whether the default workspace-wide IDG sidecar is enabled for a workspace
@@ -469,6 +533,18 @@ struct Inner {
     /// `dump callgraph` share the same instance instead of each
     /// rebuilding from scratch. Cleared on file edits.
     resolved_call_graph: parking_lot::RwLock<Option<Arc<bonsai_callgraph::ResolvedCallGraph>>>,
+    /// File-partitioned persisted graph reader for scoped semantic queries.
+    /// It owns only the compact callable table and mmapped factstore; exact
+    /// adjacency partitions are decoded on demand.
+    callgraph_query: Mutex<Option<Arc<callgraph_sidecar::CallgraphQueryService>>>,
+    /// Complete canonical `(FileId, path, content hash)` input table used to
+    /// validate whole-workspace sidecars from a scoped compiler session.
+    ///
+    /// Full opens derive it from their immutable VFS snapshot. Scoped opens
+    /// stream every source hash from disk without retaining unrelated source
+    /// text. Callgraph and linkage readers share the resulting compact table
+    /// so a command never fingerprints the workspace twice.
+    sidecar_source_inputs: Mutex<Option<Arc<Vec<(u32, String, u64)>>>>,
     /// Compact declaration/type/linkage table for the current source snapshot.
     /// This is the compiler's workspace symbol layer: exact file bodies are
     /// lowered beside it and discarded after each consumer finishes. The IDG
@@ -869,6 +945,8 @@ impl Workspace {
                 value_flow: ValueFlowCache::new(),
                 inter_taint: Arc::new(InterTaintCaches::default()),
                 resolved_call_graph: parking_lot::RwLock::new(None),
+                callgraph_query: Mutex::new(None),
+                sidecar_source_inputs: Mutex::new(None),
                 compiler_linkage: parking_lot::RwLock::new(None),
                 compiler_headers: parking_lot::RwLock::new(None),
                 exact_bodies: ExactBodyCache::default(),
@@ -1152,18 +1230,16 @@ impl Workspace {
         linkage_sidecar::save_linkage_sidecar(&path, &self.inner.db, linkage)
     }
 
-    /// Compact workspace-wide compiler linkage shared by call resolution and
-    /// the IDG. It contains stable declaration/type symbols and AST-derived
-    /// linkage summaries, but never retains every function body.
+    /// Compact workspace-wide compiler linkage used while resolving calls or
+    /// building a new IDG. It contains stable declaration/type symbols and
+    /// AST-derived linkage summaries, but never retains every function body.
     ///
-    /// Warm semantic commands reuse the linkage table already owned by the
-    /// validated IDG service. A caller without an IDG receives the same exact
-    /// table from a streamed Tree-sitter lowering pass.
+    /// A loaded IDG needs declaration/type headers only: its call and return
+    /// relations are already compiled into the graph. Keeping this resolver
+    /// payload separate prevents a warm semantic query from retaining every
+    /// AST call-linkage row beside the IDG.
     #[must_use]
     pub fn compiler_linkage_index(&self) -> Arc<GlobalIndex> {
-        if let Some(service) = self.inner.db.idg_service() {
-            return service.global_linkage_index();
-        }
         if let Some(linkage) = self.inner.compiler_linkage.read().clone() {
             return linkage;
         }
@@ -1171,61 +1247,17 @@ impl Workspace {
         if let Some(linkage) = slot.as_ref() {
             return linkage.clone();
         }
-        if let Some(root) = self.root_path() {
+        if let Some(root) = self.root_path().filter(|_| self.is_complete_workspace_index()) {
             let path = linkage_sidecar::linkage_sidecar_path(&root);
             if let Ok(linkage) = linkage_sidecar::load_linkage_sidecar_checked(&path, &self.inner.db) {
                 let linkage = Arc::new(linkage);
                 *slot = Some(linkage.clone());
                 return linkage;
             }
-            if self.is_complete_workspace_index() {
-                self.ensure_reusable_compiler_objects_best_effort(&root);
-                // A peer compiler may have published the exact linkage while
-                // this process prepared compiler objects. Recheck before
-                // paying the streamed link pass.
-                if let Ok(linkage) = linkage_sidecar::load_linkage_sidecar_checked(&path, &self.inner.db) {
-                    let linkage = Arc::new(linkage);
-                    *slot = Some(linkage.clone());
-                    return linkage;
-                }
-            }
         }
         let linkage = self.inner.db.build_global_linkage_index();
-        if let Some(root) = self.root_path().filter(|_| self.is_complete_workspace_index()) {
-            // Any corrupt object encountered by the link pass fell back to
-            // exact Tree-sitter lowering and marked the generation dirty.
-            // Repair that generation before publishing linkage derived from
-            // it so the next process reuses the same compiler facts.
-            self.ensure_reusable_compiler_objects_best_effort(&root);
-            let path = linkage_sidecar::linkage_sidecar_path(&root);
-            if let Err(error) = linkage_sidecar::save_linkage_sidecar(&path, &self.inner.db, linkage.clone())
-            {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %error,
-                    "compiler linkage publication failed; keeping exact in-process result"
-                );
-            }
-        }
         *slot = Some(linkage.clone());
         linkage
-    }
-
-    fn ensure_reusable_compiler_objects_best_effort(&self, root: &Path) {
-        if self
-            .inner
-            .db
-            .compiler_object_generation_matches_current_snapshot()
-        {
-            return;
-        }
-        if let Err(error) = self.inner.db.save_compiler_object_sidecar(root) {
-            tracing::warn!(
-                path = %compiler_object_sidecar_path(root).display(),
-                error = %error,
-                "compiler-object publication failed; continuing with exact Tree-sitter lowering"
-            );
-        }
     }
 
     /// Complete workspace declaration/type headers without call linkage or
@@ -1243,27 +1275,99 @@ impl Workspace {
         if let Some(headers) = slot.as_ref() {
             return headers.clone();
         }
-        if let Some(root) = self.root_path() {
+        if let Some(root) = self.root_path().filter(|_| self.is_complete_workspace_index()) {
             let path = linkage_sidecar::linkage_sidecar_path(&root);
-            if let Ok(headers) = linkage_sidecar::load_header_sidecar_checked(&path, &self.inner.db) {
-                let headers = Arc::new(headers);
-                *slot = Some(headers.clone());
-                return headers;
-            }
-            if self.is_complete_workspace_index() {
-                self.ensure_reusable_compiler_objects_best_effort(&root);
-                // Another compiler worker may have published the exact symbol
-                // table while this process repaired compiler objects.
-                if let Ok(headers) = linkage_sidecar::load_header_sidecar_checked(&path, &self.inner.db) {
+            match linkage_sidecar::load_header_sidecar_checked(&path, &self.inner.db) {
+                Ok(headers) => {
                     let headers = Arc::new(headers);
                     *slot = Some(headers.clone());
                     return headers;
+                }
+                Err(error) => {
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-cache",
+                        "header sidecar rejected at {}: {}",
+                        path.display(),
+                        error
+                    );
                 }
             }
         }
         let headers = self.inner.db.build_global_header_index();
         *slot = Some(headers.clone());
         headers
+    }
+
+    /// Complete workspace declaration/type headers for read-only lookup.
+    ///
+    /// A scoped compiler session must keep [`Self::compiler_header_index`]
+    /// aligned with the files it can compile. Query planners that need global
+    /// endpoint names use this separate projection, validated against the
+    /// scoped session's independently fingerprinted complete source set.
+    #[must_use]
+    pub fn complete_compiler_header_index(&self) -> Arc<GlobalIndex> {
+        if self.is_complete_workspace_index() {
+            return self.compiler_header_index();
+        }
+        if let Some(root) = self.root_path() {
+            let path = linkage_sidecar::linkage_sidecar_path(&root);
+            if let Ok(headers) = self.sidecar_source_inputs().and_then(|inputs| {
+                linkage_sidecar::load_header_sidecar_checked_with_source_inputs(&path, inputs.as_slice())
+            }) {
+                return Arc::new(headers);
+            }
+        }
+        self.compiler_header_index()
+    }
+
+    /// Load declaration headers only for files admitted by an exact compiler
+    /// worklist.
+    ///
+    /// Stable workspace symbol ids are preserved by the partitioned linkage
+    /// sidecar. A missing or stale partition artifact falls back to the
+    /// canonical complete header table, so storage layout never changes
+    /// analysis semantics.
+    pub fn compiler_header_index_for_files(&self, files: &[FileId]) -> Arc<GlobalIndex> {
+        self.persisted_compiler_header_index_for_files(files)
+            .unwrap_or_else(|| self.compiler_header_index())
+    }
+
+    /// Load exact global-symbol header partitions without falling back to a
+    /// scoped workspace's locally renumbered declaration table.
+    ///
+    /// Query planners use the `None` result to choose a complete-workspace
+    /// compiler fallback. Treating local symbols from a retrieval workspace
+    /// as globally stable can silently target unrelated callgraph nodes.
+    fn persisted_compiler_header_index_for_files(&self, files: &[FileId]) -> Option<Arc<GlobalIndex>> {
+        let mut files = files.to_vec();
+        files.sort_unstable_by_key(|file| file.raw());
+        files.dedup();
+        if let Some(root) = self.root_path() {
+            let path = linkage_sidecar::linkage_sidecar_path(&root);
+            let loaded = if self.is_complete_workspace_index() {
+                linkage_sidecar::load_header_partitions_checked(&path, &self.inner.db, &files)
+            } else {
+                self.sidecar_source_inputs().and_then(|inputs| {
+                    linkage_sidecar::load_header_partitions_checked_with_source_inputs(
+                        &path,
+                        inputs.as_slice(),
+                        &files,
+                    )
+                })
+            };
+            match loaded {
+                Ok(headers) => return Some(Arc::new(headers)),
+                Err(error) => {
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-cache",
+                        "scoped header partitions rejected at {}: {}",
+                        path.display(),
+                        error
+                    );
+                }
+            }
+        }
+        None
     }
 
     /// Finalized cross-file receiver ancestry without declaration headers,
@@ -1310,17 +1414,16 @@ impl Workspace {
     /// state; the next semantic consumer reloads or rebuilds the same exact
     /// graph on demand.
     ///
-    /// Preserve the service's compact compiler linkage before dropping graph
-    /// readers. Large persisted IDGs can map gigabytes of graph pages; later
-    /// scoped phases still need the same symbols, but must not keep that
-    /// canonical mapping resident beside a smaller query graph.
+    /// Preserve the service's declaration/type headers before dropping graph
+    /// readers. A loaded IDG never owns the much larger resolver-linkage
+    /// payload: call and return relations are already compiled into the graph.
     pub fn release_idg_service_cache(&self) {
-        if self.inner.compiler_linkage.read().is_none() {
+        if self.inner.compiler_headers.read().is_none() {
             if let Some(service) = self.inner.db.idg_service() {
-                let linkage = service.global_linkage_index();
-                let mut slot = self.inner.compiler_linkage.write();
+                let headers = service.global_linkage_index();
+                let mut slot = self.inner.compiler_headers.write();
                 if slot.is_none() {
-                    *slot = Some(linkage);
+                    *slot = Some(headers);
                 }
             }
         }
@@ -1356,6 +1459,7 @@ impl Workspace {
     /// rebuilds the complete graph on demand.
     pub fn release_resolved_call_graph_cache(&self) {
         *self.inner.resolved_call_graph.write() = None;
+        *self.inner.callgraph_query.lock() = None;
         self.inner.dataflow.release_call_graph();
         self.inner.flow_ids.release_call_graph();
     }
@@ -1432,6 +1536,14 @@ impl Workspace {
     #[must_use]
     pub fn exact_decl(&self, symbol: SymbolId) -> Option<ExactDecl> {
         let headers = self.compiler_header_index();
+        self.exact_decl_with_headers(symbol, headers)
+    }
+
+    /// Return one exact declaration using an already-selected stable header
+    /// projection. Scoped graph queries pass their partitioned header table so
+    /// exact body replay never triggers a complete workspace header decode.
+    #[must_use]
+    pub fn exact_decl_with_headers(&self, symbol: SymbolId, headers: Arc<GlobalIndex>) -> Option<ExactDecl> {
         let file = headers.declaring_file(symbol)?;
         let snapshot = self.inner.vfs.snapshot(file).ok()?;
         let file_index = self.inner.exact_bodies.get_or_insert_with(
@@ -1479,13 +1591,10 @@ impl Workspace {
             );
             return Ok(None);
         }
-        // Build the compact AST/resolver linkage before opening the paged graph.
-        // Tree-sitter lowers one file at a time, but its C allocator may keep
-        // released parser arenas mapped. Loading a multi-gigabyte IDG first
-        // makes those transient frontend pages additive with the live graph.
-        // In this order the later IDG decode can reuse the released pages; the
-        // final service contains the exact same graph and linkage facts.
-        let global = self.compiler_linkage_index();
+        // A persisted IDG already contains exact call/return relations. Query
+        // rendering needs stable declaration/type headers, not the complete
+        // AST resolver-linkage payload that built those relations.
+        let global = self.compiler_header_index();
         let Some(service) = bonsai_idg::IdgQueryService::load_from_disk(&sidecar, pipeline_hash, global)?
         else {
             return Ok(None);
@@ -1493,6 +1602,10 @@ impl Workspace {
         let segment_count = service.segment_count();
         let service = Arc::new(service);
         self.inner.db.set_idg_service(service);
+        // The current immutable generation is open and usable. Reclaim crash
+        // staging files and superseded schema generations under per-target
+        // writer locks; query correctness never depends on this maintenance.
+        idg_persistence::maintain_current_idg_sidecar(&sidecar);
         Ok(Some(segment_count))
     }
 
@@ -1521,10 +1634,6 @@ impl Workspace {
         }
         let complete_root = self.root_path().filter(|_| self.is_complete_workspace_index());
         if let Some(root) = complete_root.as_deref() {
-            self.ensure_reusable_compiler_objects_best_effort(root);
-            // Preparing objects may overlap a peer process that publishes the
-            // graph. Prefer its validated immutable result over duplicate
-            // resolution work.
             if let Ok(graph) = callgraph_sidecar::load_callgraph_sidecar_checked(
                 &callgraph_sidecar::callgraph_sidecar_path(root),
                 &self.inner.db,
@@ -1554,19 +1663,192 @@ impl Workspace {
         self.inner.flow_ids.seed_call_graph(arc.clone());
         *slot = Some(arc.clone());
         drop(slot);
-        if let Some(root) = complete_root {
-            self.ensure_reusable_compiler_objects_best_effort(&root);
-            let path = callgraph_sidecar::callgraph_sidecar_path(&root);
-            if let Err(error) = callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, arc.clone())
-            {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %error,
-                    "resolved callgraph publication failed; keeping exact in-process result"
+        arc
+    }
+
+    fn callgraph_query_service(&self) -> Option<Arc<callgraph_sidecar::CallgraphQueryService>> {
+        if let Some(service) = self.inner.callgraph_query.lock().as_ref().cloned() {
+            return Some(service);
+        }
+        let root = self.root_path()?;
+        let path = callgraph_sidecar::callgraph_sidecar_path(&root);
+        let opened = if self.is_complete_workspace_index() {
+            callgraph_sidecar::CallgraphQueryService::open_checked(&path, &self.inner.db)
+        } else {
+            self.sidecar_source_inputs().and_then(|inputs| {
+                callgraph_sidecar::CallgraphQueryService::open_checked_with_source_inputs(
+                    &path,
+                    inputs.as_slice(),
+                )
+            })
+        };
+        let service = match opened {
+            Ok(service) => Arc::new(service),
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "partitioned callgraph rejected at {}: {}",
+                    path.display(),
+                    error
                 );
+                return None;
+            }
+        };
+        let mut slot = self.inner.callgraph_query.lock();
+        Some(slot.get_or_insert_with(|| Arc::clone(&service)).clone())
+    }
+
+    /// Return the requested callables that have at least one compiler-resolved
+    /// in-workspace caller.
+    ///
+    /// A complete workspace with a current partitioned sidecar reads only the
+    /// compact callable table and the incoming partitions for the candidates'
+    /// declaration files. This is the exact query needed by `entrypoints`; it
+    /// must not allocate the unrelated outgoing graph merely to answer a
+    /// boolean caller predicate.
+    #[must_use]
+    pub fn functions_with_semantic_callers(&self, functions: &[FuncId]) -> AHashSet<FuncId> {
+        if functions.is_empty() {
+            return AHashSet::new();
+        }
+        if let Some(graph) = self.inner.resolved_call_graph.read().as_ref().cloned() {
+            return functions
+                .iter()
+                .copied()
+                .filter(|function| {
+                    graph
+                        .callers_of(*function)
+                        .any(|edge| edge.precision.is_semantic())
+                })
+                .collect();
+        }
+        if let Some(service) = self.callgraph_query_service() {
+            if let Ok(called) = service.functions_with_semantic_callers(functions) {
+                return called;
             }
         }
-        arc
+        let graph = self.cached_resolved_call_graph();
+        functions
+            .iter()
+            .copied()
+            .filter(|function| {
+                graph
+                    .callers_of(*function)
+                    .any(|edge| edge.precision.is_semantic())
+            })
+            .collect()
+    }
+
+    /// Look up exact short or qualified callable names from the persisted
+    /// compiler graph without hydrating declaration headers or function
+    /// bodies.
+    pub fn persisted_callable_nodes_named(
+        &self,
+        name: &str,
+    ) -> Option<std::io::Result<Vec<bonsai_callgraph::CallGraphNode>>> {
+        let service = self.callgraph_query_service()?;
+        Some(service.callable_nodes_named(name))
+    }
+
+    /// Visit the exact persisted resolved-callgraph one file partition at a
+    /// time, if a fresh partitioned sidecar is available.
+    ///
+    /// This is the broad-consumer counterpart to targeted callgraph queries:
+    /// it preserves the complete compiler relation while bounding live graph
+    /// memory by the largest source-file partition. `None` means no reusable
+    /// sidecar exists; callers may then use the canonical in-memory graph.
+    pub fn visit_persisted_callgraph_partitions(
+        &self,
+        visit: impl FnMut(
+            FileId,
+            &[bonsai_callgraph::CallGraphNode],
+            &[bonsai_callgraph::CallEdge],
+            &[bonsai_callgraph::CallEdge],
+            &[bonsai_callgraph::UnresolvedWorkspaceCallSite],
+        ),
+    ) -> Option<std::io::Result<()>> {
+        let service = self.callgraph_query_service()?;
+        Some(service.visit_partitions(visit))
+    }
+
+    /// Load one callable node from the validated partitioned callgraph.
+    ///
+    /// Filtered graph renderers use this to join an edge with its opposite
+    /// endpoint without hydrating the complete callable table. `None` means
+    /// no reusable sidecar exists; the caller must take its canonical
+    /// resident-graph fallback.
+    pub fn persisted_callgraph_node(
+        &self,
+        function: FuncId,
+    ) -> Option<std::io::Result<bonsai_callgraph::CallGraphNode>> {
+        let service = self.callgraph_query_service()?;
+        Some(service.callable_node(function))
+    }
+
+    /// Return the exact persisted callgraph slice containing every path from
+    /// `starts` to `targets`, if a fresh partitioned sidecar is available.
+    ///
+    /// This is the target-directed counterpart to whole-workspace graph
+    /// hydration. It performs uncapped compiler work while keeping resident
+    /// memory proportional to the source/target slice.
+    pub fn persisted_resolved_call_graph_between(
+        &self,
+        starts: &[FuncId],
+        targets: &[FuncId],
+    ) -> Option<std::io::Result<bonsai_callgraph::ResolvedCallGraph>> {
+        let service = self.callgraph_query_service()?;
+        Some(service.materialize_between(starts, targets))
+    }
+
+    pub fn persisted_resolved_call_graph_between_with_max_precision(
+        &self,
+        starts: &[FuncId],
+        targets: &[FuncId],
+        max_precision: Option<Precision>,
+    ) -> Option<std::io::Result<bonsai_callgraph::ResolvedCallGraph>> {
+        let service = self.callgraph_query_service()?;
+        Some(service.materialize_between_with_max_precision(starts, targets, max_precision))
+    }
+
+    /// Return every exact persisted direct edge from `starts` to `targets`.
+    pub fn persisted_direct_call_graph_between(
+        &self,
+        starts: &[FuncId],
+        targets: &[FuncId],
+    ) -> Option<std::io::Result<bonsai_callgraph::ResolvedCallGraph>> {
+        let service = self.callgraph_query_service()?;
+        Some(service.materialize_direct_between(starts, targets))
+    }
+
+    /// Materialize the exact compiler-resolved subgraph reachable from
+    /// `starts`.
+    ///
+    /// The partitioned sidecar makes tracing proportional to the reachable
+    /// compiler worklist instead of the total workspace graph. A cache miss
+    /// falls back to the canonical whole-workspace graph without weakening
+    /// resolution or imposing a depth/edge cap.
+    fn resolved_call_graph_reachable_from(
+        &self,
+        starts: &[FuncId],
+    ) -> Arc<bonsai_callgraph::ResolvedCallGraph> {
+        if let Some(graph) = self.inner.resolved_call_graph.read().as_ref().cloned() {
+            return graph;
+        }
+        if let Some(service) = self.callgraph_query_service() {
+            if let Ok(graph) = service.materialize_reachable(starts) {
+                return Arc::new(graph);
+            }
+        }
+        self.cached_resolved_call_graph()
+    }
+
+    fn persisted_resolved_call_graph_reachable_from(
+        &self,
+        starts: &[FuncId],
+        max_precision: Option<Precision>,
+    ) -> Option<std::io::Result<bonsai_callgraph::ResolvedCallGraph>> {
+        let service = self.callgraph_query_service()?;
+        Some(service.materialize_reachable_with_max_precision(starts, max_precision))
     }
 
     fn build_resolved_call_graph(&self) -> bonsai_callgraph::ResolvedCallGraph {
@@ -1579,7 +1861,35 @@ impl Workspace {
         target_funcs: &[FuncId],
         max_precision: Option<Precision>,
     ) -> SourceReachableCallGraph {
-        self.source_reachable_resolved_call_graph_with_scope(source_funcs, target_funcs, max_precision, false)
+        self.source_reachable_resolved_call_graph_with_scope(
+            source_funcs,
+            target_funcs,
+            max_precision,
+            false,
+            false,
+        )
+    }
+
+    /// Compile an uncapped source-reachable callgraph from complete compiler
+    /// headers while hydrating only reached function bodies.
+    ///
+    /// Query commands use this when the partitioned callgraph is absent or
+    /// stale. It preserves the same resolver semantics as the complete graph
+    /// without loading the workspace-wide linkage payload or compiling every
+    /// function merely to answer one exact endpoint question.
+    pub fn source_reachable_query_call_graph(
+        &self,
+        source_funcs: &[FuncId],
+        target_funcs: &[FuncId],
+        max_precision: Option<Precision>,
+    ) -> SourceReachableCallGraph {
+        self.source_reachable_resolved_call_graph_with_scope(
+            source_funcs,
+            target_funcs,
+            max_precision,
+            false,
+            true,
+        )
     }
 
     /// Compile the exact callgraph region needed to emit flows inside
@@ -1599,7 +1909,13 @@ impl Workspace {
         target_funcs: &[FuncId],
         max_precision: Option<Precision>,
     ) -> SourceReachableCallGraph {
-        self.source_reachable_resolved_call_graph_with_scope(source_funcs, target_funcs, max_precision, true)
+        self.source_reachable_resolved_call_graph_with_scope(
+            source_funcs,
+            target_funcs,
+            max_precision,
+            true,
+            true,
+        )
     }
 
     fn source_reachable_resolved_call_graph_with_scope(
@@ -1608,8 +1924,9 @@ impl Workspace {
         target_funcs: &[FuncId],
         max_precision: Option<Precision>,
         target_emissions_only: bool,
+        function_scoped: bool,
     ) -> SourceReachableCallGraph {
-        let mut global = if target_emissions_only {
+        let mut global = if function_scoped {
             self.take_exclusive_compiler_header_index()
         } else {
             self.compiler_linkage_index()
@@ -1632,7 +1949,7 @@ impl Workspace {
         // file cannot be invisible merely because the forward source walk
         // has not visited its caller yet.
         for func in source_funcs.iter().chain(target_funcs) {
-            if target_emissions_only {
+            if function_scoped {
                 queued_funcs.insert(*func);
             } else if let Some(file) = global.declaring_file(SymbolId::new(func.raw())) {
                 queued_files.insert(file);
@@ -1692,7 +2009,7 @@ impl Workspace {
                 if !processed_reached.insert(func) {
                     continue;
                 }
-                if target_emissions_only {
+                if function_scoped {
                     if !built_funcs.contains(&func) {
                         queued_funcs.insert(func);
                     }
@@ -1746,7 +2063,7 @@ impl Workspace {
             requested_funcs.sort_unstable_by_key(|func| func.raw());
             requested_funcs.dedup();
 
-            let mut batch: Vec<FileId> = if target_emissions_only {
+            let mut batch: Vec<FileId> = if function_scoped {
                 requested_funcs
                     .iter()
                     .filter_map(|func| global.declaring_file(SymbolId::new(func.raw())))
@@ -1754,12 +2071,12 @@ impl Workspace {
             } else {
                 queued_files.drain().collect()
             };
-            if !target_emissions_only {
+            if !function_scoped {
                 batch.retain(|file| !built_files.contains(file));
             }
             batch.sort_unstable_by_key(|file| file.raw());
             batch.dedup();
-            if batch.is_empty() || (target_emissions_only && requested_funcs.is_empty()) {
+            if batch.is_empty() || (function_scoped && requested_funcs.is_empty()) {
                 continue;
             }
 
@@ -1778,7 +2095,7 @@ impl Workspace {
                 rayon::current_num_threads(),
             ) {
                 let files = &batch[range];
-                let funcs: Vec<FuncId> = if target_emissions_only {
+                let funcs: Vec<FuncId> = if function_scoped {
                     let files: AHashSet<FileId> = files.iter().copied().collect();
                     requested_funcs
                         .iter()
@@ -1805,7 +2122,7 @@ impl Workspace {
                         .inner
                         .db
                         .decl_index_remapped_to_headers(global.as_ref(), file);
-                    if target_emissions_only {
+                    if function_scoped {
                         if let Some(index) = index.as_ref() {
                             projected_linkage
                                 .lock()
@@ -1814,7 +2131,7 @@ impl Workspace {
                     }
                     index
                 };
-                let batch_graph = if target_emissions_only {
+                let batch_graph = if function_scoped {
                     bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_funcs_streaming_with_context(
                         global.as_ref(),
                         aliases_for_file,
@@ -1866,7 +2183,7 @@ impl Workspace {
                         }
                     }
                 }
-                if target_emissions_only {
+                if function_scoped {
                     built_funcs.extend(funcs);
                 } else {
                     built_files.extend(files.iter().copied());
@@ -2023,7 +2340,7 @@ impl Workspace {
             .iter()
             .filter(|target| reached_funcs.contains(target))
             .count();
-        if target_emissions_only {
+        if function_scoped {
             let mut header = Arc::try_unwrap(global)
                 .unwrap_or_else(|_| panic!("scoped compiler header unexpectedly shared"));
             header.install_projected_linkage(scoped_linkage);
@@ -2033,8 +2350,31 @@ impl Workspace {
                 *slot = Some(global.clone());
             }
         }
+        let nodes = funcs
+            .iter()
+            .filter_map(|func| {
+                global
+                    .decl_of(SymbolId::new(func.raw()))
+                    .map(|decl| bonsai_callgraph::CallGraphNode {
+                        func: *func,
+                        name: decl.name.clone().into_boxed_str(),
+                        qualified_name: decl
+                            .qualified_name
+                            .as_deref()
+                            .map(|name| name.to_string().into_boxed_str()),
+                        kind: decl.kind,
+                        file: decl.name_span.file,
+                        name_span: decl.name_span,
+                    })
+            })
+            .collect();
         SourceReachableCallGraph {
-            graph: Arc::new(bonsai_callgraph::ResolvedCallGraph::from_call_graph(filtered)),
+            graph: Arc::new(bonsai_callgraph::ResolvedCallGraph::from_persisted_parts(
+                nodes,
+                filtered.edges,
+                Vec::new(),
+                Vec::new(),
+            )),
             linkage_index: global,
             files,
             funcs,
@@ -2170,6 +2510,22 @@ impl Workspace {
                 "skipping workspace IDG sidecar save"
             );
         }
+        // The graph has consumed every resolver-linkage fact. Move the same
+        // stable symbol table into header-only form before the query service
+        // owns it, rather than keeping millions of call summaries beside the
+        // IDG. No syntax or graph fact is changed by this ownership boundary.
+        self.release_compiler_linkage_cache();
+        // Most callers let the compiler phase own the last linkage handle, so
+        // this strips call summaries in place. The API is also callable while
+        // an independent syntax consumer still holds an immutable generation;
+        // that reader must remain valid, so fall back to one header clone
+        // instead of turning a legal concurrent/read-before-build pattern into
+        // a process-wide panic.
+        let global = Arc::try_unwrap(global)
+            .unwrap_or_else(|shared| (*shared).clone())
+            .into_header_index();
+        let global = Arc::new(global);
+        *self.inner.compiler_headers.write() = Some(global.clone());
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
         self.inner.db.set_idg_service(service.clone());
         service
@@ -2211,14 +2567,37 @@ impl Workspace {
         ) {
             return Ok(Some(segment_count));
         }
-        let call_graph = self.cached_resolved_call_graph();
+        let call_graph_path = callgraph_sidecar::callgraph_sidecar_path(&root);
+        let partitioned_call_graph =
+            match callgraph_sidecar::CallgraphQueryService::open_checked(&call_graph_path, &self.inner.db) {
+                Ok(service) => Some(service),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %call_graph_path.display(),
+                        error = %error,
+                        "partitioned IDG callgraph relation unavailable; rebuilding resident exact graph"
+                    );
+                    None
+                }
+            };
+        let resident_call_graph = partitioned_call_graph
+            .is_none()
+            .then(|| self.cached_resolved_call_graph());
+        let call_graph: &dyn bonsai_idg::workspace_adapter::CallGraphRelation =
+            if let Some(service) = partitioned_call_graph.as_ref() {
+                service
+            } else {
+                resident_call_graph
+                    .as_deref()
+                    .expect("resident callgraph built after partitioned sidecar miss")
+            };
         let global = self.compiler_linkage_index();
         let transfer_options = default_workspace_idg_transfer_options(&self.inner.db);
         let semantics = bonsai_taint::compiler_idg_file_semantics(&self.inner.db);
         let workspace =
-            bonsai_idg::workspace_adapter::build_for_persistence_streaming_with_file_semantics_and_options(
+            bonsai_idg::workspace_adapter::build_for_persistence_streaming_with_callgraph_relation_and_file_semantics_and_options(
                 global.as_ref(),
-                call_graph.as_ref(),
+                call_graph,
                 semantics,
                 &transfer_options,
                 &sidecar,
@@ -2652,6 +3031,67 @@ impl Workspace {
         self.inner.idg_sidecar_root.lock().clone()
     }
 
+    fn sidecar_source_inputs(&self) -> std::io::Result<Arc<Vec<(u32, String, u64)>>> {
+        let mut slot = self.inner.sidecar_source_inputs.lock();
+        if let Some(inputs) = slot.as_ref() {
+            return Ok(Arc::clone(inputs));
+        }
+        let inputs = if self.is_complete_workspace_index() {
+            let mut inputs = self
+                .inner
+                .vfs
+                .all_files()
+                .into_iter()
+                .map(|file| {
+                    let path = self
+                        .inner
+                        .vfs
+                        .path(file)
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    let snapshot = self
+                        .inner
+                        .vfs
+                        .snapshot(file)
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    Ok((
+                        file.raw(),
+                        path.to_string_lossy().into_owned(),
+                        bonsai_hash::fnv1a_bytes64(snapshot.text.as_bytes()),
+                    ))
+                })
+                .collect::<std::io::Result<Vec<_>>>()?;
+            inputs.sort_unstable_by_key(|(file, _, _)| *file);
+            inputs
+        } else {
+            let root = self.root_path().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "scoped workspace has no root for sidecar validation",
+                )
+            })?;
+            read_supported_source_file_fingerprints(&canonical_workspace_root(&root), &self.inner.registry)
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, source)| {
+                    Ok((
+                        u32::try_from(ordinal).map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "workspace contains more than u32::MAX supported sources",
+                            )
+                        })?,
+                        source.path.to_string_lossy().into_owned(),
+                        source.hash,
+                    ))
+                })
+                .collect::<std::io::Result<Vec<_>>>()?
+        };
+        let inputs = Arc::new(inputs);
+        *slot = Some(Arc::clone(&inputs));
+        Ok(inputs)
+    }
+
     /// Record the workspace root so [`Self::build_and_seed_idg_service`]
     /// can persist the IDG sidecar next to the other `.bonsai/` files.
     /// Called by the `open*` family once the root path is known.
@@ -2754,6 +3194,8 @@ impl Workspace {
         self.delete_idg_sidecar();
         self.inner.inter_taint.clear();
         *self.inner.resolved_call_graph.write() = None;
+        *self.inner.callgraph_query.lock() = None;
+        *self.inner.sidecar_source_inputs.lock() = None;
         *self.inner.compiler_linkage.write() = None;
         *self.inner.compiler_headers.write() = None;
         self.inner.exact_bodies.clear();
@@ -2849,7 +3291,7 @@ impl Workspace {
         ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
-        ws.inner.db.set_workspace_root(canonical_root.clone());
+        ws.inner.db.set_scoped_workspace_root(canonical_root.clone());
         on_event(WorkspaceOpenEvent::IngestStarted);
         let files =
             read_supported_source_files_matching_literal(&canonical_root, &ws.inner.registry, literal)?;
@@ -2868,6 +3310,54 @@ impl Workspace {
             if let Some(prev) = old_id {
                 ws.invalidate_after_file_change(prev);
             }
+            *ws.inner.reparse_counter.lock() += 1;
+            let _ = id;
+        }
+        on_event(WorkspaceOpenEvent::IngestFinished { files: file_count });
+        let files = ws.vfs().all_files();
+        on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
+        index_workspace_files_in_parallel(&ws, &files, options.retain_eager_syntax_ir, on_event);
+        on_event(WorkspaceOpenEvent::ParseFinished);
+        Ok(ws)
+    }
+
+    /// Open only source files whose raw text contains at least one requested
+    /// literal.
+    ///
+    /// Multi-endpoint structural queries use this candidate phase before
+    /// deciding whether a broader graph slice is necessary. Selection is
+    /// lexical only; every rendered fact is still hydrated from the normal
+    /// Tree-sitter/compiler APIs in the resulting scoped workspace.
+    pub fn open_query_matching_any_literal_with_options_and_events<F>(
+        root: &Path,
+        registry: Arc<LanguageRegistry>,
+        literals: &[&str],
+        options: WorkspaceOpenOptions,
+        on_event: &F,
+    ) -> Result<Self, WorkspaceError>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
+        let ws = Self::new_with_open_options(registry, options);
+        ws.set_idg_sidecar_root(root);
+        ws.set_complete_workspace_index(false);
+        let canonical_root = canonical_workspace_root(root);
+        *ws.inner.root_label.lock() = root.display().to_string();
+        ws.inner.db.set_scoped_workspace_root(canonical_root.clone());
+        on_event(WorkspaceOpenEvent::IngestStarted);
+        let files =
+            read_supported_source_files_matching_literals(&canonical_root, &ws.inner.registry, literals)?;
+        let file_count = files.len();
+        for source in files {
+            let SourceFileContent {
+                path,
+                text,
+                full_workspace_file,
+            } = source;
+            let id = match full_workspace_file {
+                Some(file) => ws.inner.vfs.write_with_id(file, path, Arc::<str>::from(text)),
+                None => ws.inner.vfs.write(path, Arc::<str>::from(text)),
+            };
             *ws.inner.reparse_counter.lock() += 1;
             let _ = id;
         }
@@ -2937,7 +3427,7 @@ impl Workspace {
         ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
-        ws.inner.db.set_workspace_root(canonical_root.clone());
+        ws.inner.db.set_scoped_workspace_root(canonical_root.clone());
         on_event(WorkspaceOpenEvent::IngestStarted);
         let files = read_supported_source_files_filtered_paths(
             &canonical_root,
@@ -2962,6 +3452,107 @@ impl Workspace {
             }
             *ws.inner.reparse_counter.lock() += 1;
             let _ = id;
+        }
+        on_event(WorkspaceOpenEvent::IngestFinished { files: file_count });
+        if options.eager_decl_index {
+            let files = ws.vfs().all_files();
+            on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
+            index_workspace_files_in_parallel(&ws, &files, options.retain_eager_syntax_ir, on_event);
+            on_event(WorkspaceOpenEvent::ParseFinished);
+        }
+        Ok(ws)
+    }
+
+    /// Open an exact compiler worklist without walking the workspace again.
+    ///
+    /// `files` carries the stable full-workspace [`FileId`] for each selected
+    /// source. `source_inputs` is the complete, already-validated
+    /// `(FileId, path, content-hash)` table used to validate partitioned
+    /// semantic sidecars. Retrieval/query planners use this after checking a
+    /// strong source manifest, so a warm exact query reads only its candidate
+    /// source bodies while preserving whole-workspace symbol identity.
+    pub fn open_query_exact_files_with_source_inputs_and_events<F>(
+        root: &Path,
+        registry: Arc<LanguageRegistry>,
+        files: &[(FileId, PathBuf)],
+        source_inputs: Vec<(u32, String, u64)>,
+        options: WorkspaceOpenOptions,
+        on_event: &F,
+    ) -> Result<Self, WorkspaceError>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
+        let ws = Self::new_with_open_options(registry, options);
+        ws.set_idg_sidecar_root(root);
+        ws.set_complete_workspace_index(false);
+        let canonical_root = canonical_workspace_root(root);
+        *ws.inner.root_label.lock() = root.display().to_string();
+        ws.inner.db.set_scoped_workspace_root(canonical_root.clone());
+        if let Err(error) = ws.inner.db.load_compiler_object_store_for_source_fingerprints(
+            &canonical_root,
+            source_inputs.iter().map(|(_, path, hash)| (path, *hash)),
+        ) {
+            bonsai_diagnostics::debug_log!(
+                "compiler-cache",
+                "exact query compiler-object generation rejected at {}: {}",
+                canonical_root.display(),
+                error
+            );
+        }
+        *ws.inner.sidecar_source_inputs.lock() = Some(Arc::new(source_inputs));
+
+        let mut selected = Vec::with_capacity(files.len());
+        let mut seen_files = std::collections::BTreeSet::new();
+        let mut seen_paths = std::collections::BTreeSet::new();
+        for (file, path) in files {
+            if !seen_files.insert(file.raw()) || !seen_paths.insert(path.clone()) {
+                return Err(WorkspaceError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "exact query worklist contains conflicting file identities",
+                )));
+            }
+            selected.push((*file, path.clone()));
+        }
+        selected.sort_unstable_by_key(|(file, _)| file.raw());
+
+        on_event(WorkspaceOpenEvent::IngestStarted);
+        use rayon::prelude::*;
+        let sources = selected
+            .into_par_iter()
+            .map(|(file, path)| {
+                if !path.starts_with(&canonical_root) {
+                    return Err(WorkspaceError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "exact query source {} is outside workspace {}",
+                            path.display(),
+                            canonical_root.display()
+                        ),
+                    )));
+                }
+                let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+                    return Err(WorkspaceError::NoAdapter(path.display().to_string()));
+                };
+                if ws.inner.registry.adapter_for_extension(extension).is_none() {
+                    return Err(WorkspaceError::NoAdapter(extension.to_string()));
+                }
+                let text = std::fs::read_to_string(&path).map_err(WorkspaceError::Io)?;
+                Ok(SourceFileContent {
+                    path,
+                    text,
+                    full_workspace_file: Some(file),
+                })
+            })
+            .collect::<Result<Vec<_>, WorkspaceError>>()?;
+        let file_count = sources.len();
+        for source in sources {
+            let file = source
+                .full_workspace_file
+                .expect("exact query source always carries a full-workspace FileId");
+            ws.inner
+                .vfs
+                .write_with_id(file, source.path, Arc::<str>::from(source.text));
+            *ws.inner.reparse_counter.lock() += 1;
         }
         on_event(WorkspaceOpenEvent::IngestFinished { files: file_count });
         if options.eager_decl_index {
@@ -3018,7 +3609,7 @@ impl Workspace {
         ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
-        ws.inner.db.set_workspace_root(canonical_root.clone());
+        ws.inner.db.set_scoped_workspace_root(canonical_root.clone());
         on_event(WorkspaceOpenEvent::IngestStarted);
         let source = read_supported_source_file_at_path(&canonical_root, &ws.inner.registry, path)?;
         let id = ws
@@ -3639,6 +4230,27 @@ impl Workspace {
         self.build_semantic_context(true)
     }
 
+    /// Build language-neutral workspace context from metadata-only source
+    /// discovery.
+    ///
+    /// This is the compiler planning form used by `context`: it enumerates
+    /// adapter-owned source paths and filesystem roots without reading source
+    /// contents into the VFS or invoking Tree-sitter. Commands that need
+    /// declarations still use [`Self::semantic_context`] over their immutable
+    /// indexed snapshot.
+    pub fn semantic_context_for_root(&self, root: &Path) -> Result<WorkspaceSemanticContext, WorkspaceError> {
+        let canonical_root = canonical_workspace_root(root);
+        let files = read_supported_source_file_stamps(&canonical_root, &self.inner.registry)?
+            .into_iter()
+            .map(|stamp| stamp.path)
+            .collect::<Vec<_>>();
+        Ok(semantic_context::build_workspace_semantic_context(
+            Some(&canonical_root),
+            &files,
+            true,
+        ))
+    }
+
     /// Same counts as [`Self::semantic_context`], including complete
     /// filesystem discovery of non-indexed roots — `index` stats and
     /// `context` must not disagree about the same workspace.
@@ -3665,8 +4277,65 @@ impl Workspace {
             .map(|s| FuncId::new(s.raw()))
     }
 
+    /// Resolve one callable through persisted header partitions for the
+    /// supplied candidate files, retaining complete-workspace SymbolIds.
+    ///
+    /// This is the bridge from retrieval candidate workspaces to exact
+    /// semantic worklists. It returns `None` when the partition sidecar is
+    /// unavailable, stale, or the name is ambiguous; callers then reopen the
+    /// complete compiler workspace instead of guessing an identity.
+    pub fn lookup_function_in_persisted_headers(
+        &self,
+        qualified: &str,
+        candidate_files: &[FileId],
+    ) -> Option<FuncId> {
+        let hits = self.lookup_functions_in_persisted_headers(qualified, candidate_files)?;
+        match hits.as_slice() {
+            [function] => Some(*function),
+            _ => None,
+        }
+    }
+
+    /// Resolve every exact callable overload through persisted header
+    /// partitions for the supplied candidate files.
+    ///
+    /// A qualified source-level name does not necessarily identify one
+    /// callable: Java, C#, C++, Kotlin, and other languages can declare
+    /// overload sets. Relational query planners must carry that set into the
+    /// compiler graph rather than treating ordinary overloads as a cache miss
+    /// and broadening to an unrelated whole-workspace search. `None` means
+    /// the persisted compiler generation is unavailable or stale; `Some`
+    /// contains every exact match and can be empty when the name is absent.
+    pub fn lookup_functions_in_persisted_headers(
+        &self,
+        qualified: &str,
+        candidate_files: &[FileId],
+    ) -> Option<Vec<FuncId>> {
+        let lookup = split_symbol_lookup_spec(qualified);
+        let global = self.persisted_compiler_header_index_for_files(candidate_files)?;
+        let mut hits = global
+            .find_by_name(lookup.name)
+            .iter()
+            .copied()
+            .filter(|symbol| {
+                global.decl_of(*symbol).is_some_and(|decl| {
+                    matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    ) && self.decl_matches_lookup_spec(decl, &lookup)
+                })
+            })
+            .collect::<Vec<_>>();
+        hits.sort_unstable_by_key(|symbol| symbol.raw());
+        hits.dedup();
+        Some(hits.into_iter().map(|symbol| FuncId::new(symbol.raw())).collect())
+    }
+
     fn resolve_function_symbol(&self, qualified: &str) -> Result<SymbolId, WorkspaceError> {
         let lookup = split_symbol_lookup_spec(qualified);
+        if let Some(resolved) = self.resolve_function_symbol_from_callgraph(qualified, &lookup) {
+            return resolved;
+        }
         // Bare-name lookups can match multiple symbols when names
         // collide across translation units (the canonical regression
         // is `static fn error()` defined in multiple files).
@@ -3675,7 +4344,7 @@ impl Workspace {
         // instead of letting trace pick a workspace-order winner. A
         // `path:name` or `path:line:name` query narrows that same
         // inventory by declaration location; it never broadens lookup.
-        let global = self.inner.db.global_index();
+        let global = self.compiler_header_index();
         let mut candidates: Vec<(SymbolId, Decl)> = global
             // CLI/user-supplied trace entry lookup only.
             // CONTEXTLESS_LOOKUP_JUSTIFICATION: This is an inventory step that
@@ -3786,6 +4455,99 @@ impl Workspace {
         }
     }
 
+    fn resolve_function_symbol_from_callgraph(
+        &self,
+        query: &str,
+        lookup: &SymbolLookupSpec<'_>,
+    ) -> Option<Result<SymbolId, WorkspaceError>> {
+        let service = self.callgraph_query_service()?;
+        let mut nodes = match service.callable_nodes_named(lookup.name) {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "callable-name bucket query failed: {}",
+                    error
+                );
+                return None;
+            }
+        };
+        nodes.retain(|node| {
+            let file_matches = lookup.file.is_none_or(|qualifier| {
+                self.inner
+                    .db
+                    .vfs()
+                    .path(node.file)
+                    .is_ok_and(|path| file_matches_qualifier(path.as_ref(), qualifier))
+            });
+            let line_matches = lookup.line.is_none_or(|wanted| {
+                self.inner.db.vfs().snapshot(node.file).is_ok_and(|snapshot| {
+                    let map = bonsai_common::cached_span_map_arc(node.file, snapshot.version, &snapshot.text);
+                    map.line_col(node.name_span.start).line == wanted
+                })
+            });
+            file_matches && line_matches
+        });
+        nodes.sort_by(|left, right| {
+            let left_path = self
+                .inner
+                .db
+                .vfs()
+                .path(left.file)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let right_path = self
+                .inner
+                .db
+                .vfs()
+                .path(right.file)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            left_path
+                .cmp(&right_path)
+                .then_with(|| left.name_span.start.cmp(&right.name_span.start))
+                .then_with(|| left.func.raw().cmp(&right.func.raw()))
+        });
+        nodes.dedup_by_key(|node| node.func);
+        match nodes.as_slice() {
+            [] => None,
+            [node] => Some(Ok(SymbolId::new(node.func.raw()))),
+            nodes => Some(Err(WorkspaceError::AmbiguousSymbol {
+                query: query.to_string(),
+                count: nodes.len(),
+                candidates: nodes
+                    .iter()
+                    .map(|node| {
+                        let path = self
+                            .inner
+                            .db
+                            .vfs()
+                            .path(node.file)
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let line = self
+                            .inner
+                            .db
+                            .vfs()
+                            .snapshot(node.file)
+                            .ok()
+                            .map(|snapshot| {
+                                bonsai_common::cached_span_map_arc(
+                                    node.file,
+                                    snapshot.version,
+                                    &snapshot.text,
+                                )
+                                .line_col(node.name_span.start)
+                                .line
+                            })
+                            .unwrap_or(0);
+                        format!("{path}:{line}:{} (FuncId:{})", node.name, node.func.raw())
+                    })
+                    .collect(),
+            })),
+        }
+    }
+
     fn decl_matches_lookup_spec(&self, decl: &Decl, spec: &SymbolLookupSpec<'_>) -> bool {
         let file_matches = spec.file.is_none_or(|qualifier| {
             self.inner
@@ -3849,7 +4611,7 @@ impl Workspace {
     }
 
     fn decl_for_symbol(&self, symbol: SymbolId) -> Option<Decl> {
-        self.inner.db.global_index().decl_of(symbol).cloned()
+        self.compiler_header_index().decl_of(symbol).cloned()
     }
 
     fn symbol_candidate_label(&self, symbol: SymbolId, decl: &Decl) -> String {
@@ -3864,9 +4626,8 @@ impl Workspace {
         format!("{path}:{line}:{} (FuncId:{})", decl.name, symbol.raw())
     }
 
-    fn language_of(&self, symbol: SymbolId) -> String {
-        let global = self.inner.db.global_index();
-        global
+    fn language_of(&self, headers: &GlobalIndex, symbol: SymbolId) -> String {
+        headers
             .declaring_file(symbol)
             .and_then(|f| self.inner.db.adapter_for(f))
             .map(|a| a.language_id().as_str().to_string())
@@ -3885,8 +4646,14 @@ impl Workspace {
         opts: CrossModuleOptions,
     ) -> Result<TraceResult, WorkspaceError> {
         let symbol = self.resolve_function_symbol(qualified)?;
-        let call_graph = self.cached_resolved_call_graph();
-        let raw = CrossModuleTracer::new(&self.inner.db, call_graph.as_ref(), opts).trace(symbol);
+        let call_graph = self.resolved_call_graph_reachable_from(&[FuncId::new(symbol.raw())]);
+        let header_files = call_graph
+            .nodes()
+            .iter()
+            .map(|node| node.file)
+            .collect::<Vec<_>>();
+        let headers = self.compiler_header_index_for_files(&header_files);
+        let raw = CrossModuleTracer::new(self, Arc::clone(&headers), call_graph.as_ref(), opts).trace(symbol);
         Ok(self.finalize_trace(
             raw,
             TraceQuery {
@@ -3901,6 +4668,7 @@ impl Workspace {
             },
             symbol,
             opts,
+            headers,
         ))
     }
 
@@ -3922,8 +4690,14 @@ impl Workspace {
         // declared function in the workspace. Only pre-compute a
         // `FuncId` for it when it IS a declared function; otherwise we'll
         // still truncate the trace by matching step messages below.
-        let call_graph = self.cached_resolved_call_graph();
-        let raw = CrossModuleTracer::new(&self.inner.db, call_graph.as_ref(), opts).trace(src);
+        let call_graph = self.resolved_call_graph_reachable_from(&[FuncId::new(src.raw())]);
+        let header_files = call_graph
+            .nodes()
+            .iter()
+            .map(|node| node.file)
+            .collect::<Vec<_>>();
+        let headers = self.compiler_header_index_for_files(&header_files);
+        let raw = CrossModuleTracer::new(self, Arc::clone(&headers), call_graph.as_ref(), opts).trace(src);
         let mut result = self.finalize_trace(
             raw,
             TraceQuery {
@@ -3938,6 +4712,7 @@ impl Workspace {
             },
             src,
             opts,
+            headers,
         );
         if let Some(hit) = result.steps.iter().position(|s| s.function == sink) {
             bonsai_trace::truncate_after_step(&mut result, hit);
@@ -3967,26 +4742,26 @@ impl Workspace {
         query: TraceQuery,
         entry: SymbolId,
         opts: CrossModuleOptions,
+        headers: Arc<GlobalIndex>,
     ) -> TraceResult {
-        let language = self.language_of(entry);
+        let language = self.language_of(headers.as_ref(), entry);
         let root = self.inner.root_label.lock().clone();
-        let db_clone = self.inner.db.clone();
+        let name_headers = Arc::clone(&headers);
         let name_of: Box<dyn Fn(FuncId) -> Option<String>> = Box::new(move |fid: FuncId| {
-            let global = db_clone.global_index();
             let sym = SymbolId::new(fid.raw());
-            let file = global.declaring_file(sym)?;
-            global
+            let file = name_headers.declaring_file(sym)?;
+            name_headers
                 .decls_in(file)
                 .iter()
                 .find(|d| d.symbol == sym)
                 .map(|d| d.name.clone())
         });
         let module_of: Box<dyn Fn(FuncId) -> Option<String>> = {
+            let headers = Arc::clone(&headers);
             let db = self.inner.db.clone();
             Box::new(move |fid: FuncId| {
-                let global = db.global_index();
                 let sym = SymbolId::new(fid.raw());
-                let file = global.declaring_file(sym)?;
+                let file = headers.declaring_file(sym)?;
                 db.vfs().path(file).ok().map(|p| p.display().to_string())
             })
         };
@@ -4202,7 +4977,7 @@ fn collect_unindexed_named_decls<F>(
 ) where
     F: Fn(&Decl) -> bool,
 {
-    let global = ws.inner.db.global_index();
+    let global = ws.compiler_header_index();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
             if decl.name == qualified && kind_matches(decl) {
@@ -4348,7 +5123,13 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // v51 (2026-07-28): restrict that fallback to true root bindings;
     // projected call-result assignments remain governed by the finite AST
     // projection-demand closure. Invalidate the broader v50 sidecars.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 51;
+    // v52 (2026-07-30): compiler-object v11 corrects class-like taxonomy and
+    // anonymous-body ownership. Invalidate stitched graphs whose call/member
+    // edges were derived from the former ownership facts.
+    // v53 (2026-07-30): nested class-like declarations retain the complete
+    // AST lexical-parent chain. Rebuild resolver/IDG/taint facts so nested
+    // interface and class members cannot reuse truncated owner identities.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 53;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
@@ -4382,7 +5163,8 @@ pub fn analyzer_build_fingerprint() -> &'static str {
 fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
     let mut pipeline_hash = idg_pipeline_hash()
         ^ crate::cache_fingerprint::workspace_content_fingerprint(db)
-        ^ default_workspace_idg_transfer_options(db).semantic_fingerprint();
+        ^ default_workspace_idg_transfer_options(db).semantic_fingerprint()
+        ^ u64::from(callgraph_sidecar::CALLGRAPH_CACHE_VERSION).wrapping_mul(0x9E37_79B1_85EB_CA87);
     if let Some(root) = root {
         pipeline_hash ^= crate::cache_fingerprint::dependency_metadata_fingerprint(root);
     }
@@ -4672,6 +5454,7 @@ fn walk_workspace_entries(canonical_root: &Path) -> Result<Vec<ignore::DirEntry>
         .parents(true)
         .ignore(true)
         .add_custom_ignore_filename(".bonsaiignore");
+    builder.filter_entry(|entry| entry.file_name() != ".bonsai");
     let mut entries = builder
         .build()
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -4723,7 +5506,20 @@ fn read_supported_source_files_matching_literal(
     registry: &LanguageRegistry,
     literal: &str,
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
-    read_supported_source_files_impl(canonical_root, registry, Some(literal), None)
+    read_supported_source_files_impl(
+        canonical_root,
+        registry,
+        Some(std::slice::from_ref(&literal)),
+        None,
+    )
+}
+
+fn read_supported_source_files_matching_literals(
+    canonical_root: &Path,
+    registry: &LanguageRegistry,
+    literals: &[&str],
+) -> Result<Vec<SourceFileContent>, WorkspaceError> {
+    read_supported_source_files_impl(canonical_root, registry, Some(literals), None)
 }
 
 fn read_supported_source_files_filtered_paths(
@@ -4773,7 +5569,7 @@ fn read_supported_source_file_at_path(
 fn read_supported_source_files_impl(
     canonical_root: &Path,
     registry: &LanguageRegistry,
-    literal_filter: Option<&str>,
+    literal_filters: Option<&[&str]>,
     path_filter: Option<PathFilterSpec<'_>>,
 ) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     // Match the streaming path's compiler contract. Literal/path filters are
@@ -4797,7 +5593,12 @@ fn read_supported_source_files_impl(
         Skip,
         Err(std::io::Error),
     }
-    let literal_lower = literal_filter.map(str::to_lowercase);
+    let literal_lowers = literal_filters.map(|literals| {
+        literals
+            .iter()
+            .map(|literal| literal.to_lowercase())
+            .collect::<Vec<_>>()
+    });
     // Assign the same ordinal as a complete ingest before applying the query
     // filter. This is the compiler's stable file identity; filtering first
     // would renumber candidates and turn valid persistent objects into cache
@@ -4834,8 +5635,13 @@ fn read_supported_source_files_impl(
                 Ok(text) => text,
                 Err(error) => return ReadOutcome::Err(error),
             };
-            if let Some(literal) = literal_filter {
-                if !text_contains_literal_query(&text, literal, literal_lower.as_deref().unwrap_or(literal)) {
+            if let Some(literals) = literal_filters {
+                let lowers = literal_lowers.as_deref().unwrap_or_default();
+                if !literals
+                    .iter()
+                    .zip(lowers)
+                    .any(|(literal, lower)| text_contains_literal_query(&text, literal, lower))
+                {
                     return ReadOutcome::Skip;
                 }
             }

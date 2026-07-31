@@ -23,6 +23,7 @@ const PACK_NAME: &str = "dart";
 // `identifier selector(args)`; the walker has a Dart-specific branch
 // that synthesizes a Call event from the previous-sibling identifier.
 const HANDLER: GrammarHandler = GrammarHandler {
+    nested_type_ownership: true,
     fn_kinds: &[
         "function_signature",
         "getter_signature",
@@ -36,8 +37,15 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "extension_declaration",
         "enum_declaration",
     ],
+    class_decl_kinds: &[
+        ("class_definition", DeclKind::Class),
+        ("mixin_declaration", DeclKind::Trait),
+        ("extension_declaration", DeclKind::Class),
+        ("enum_declaration", DeclKind::Enum),
+    ],
     method_kinds: &["method_signature"],
     method_context_kinds: &["class_definition", "mixin_declaration", "extension_declaration"],
+    method_owner_barrier_kinds: &[],
     constructor_method_kinds: &["constructor_signature", "factory_constructor_signature"],
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     if_kinds: &["if_statement"],

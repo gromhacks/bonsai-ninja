@@ -22,10 +22,13 @@ const PACK_NAME: &str = "lua";
 //     idiomatic try-equivalent (function calls; we rely on the
 //     do_block-descent + call-arg walking to surface their bodies).
 const HANDLER: GrammarHandler = GrammarHandler {
+    nested_type_ownership: true,
     fn_kinds: &["function_declaration", "function_definition", "local_function"],
     class_kinds: &[],
+    class_decl_kinds: &[],
     method_kinds: &[],
     method_context_kinds: &[],
+    method_owner_barrier_kinds: &[],
     constructor_method_kinds: &[],
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     if_kinds: &["if_statement"],

@@ -40,7 +40,7 @@ mod syntax_highlight;
 mod theme;
 mod ui;
 
-use args::{CacheAction, Cli, Cmd, SecurityAction};
+use args::{BrowseFormat, CacheAction, Cli, Cmd, SecurityAction};
 use commands::{
     cmd_args, cmd_cache, cmd_calls, cmd_classes, cmd_comments, cmd_context, cmd_defs, cmd_diagnostics,
     cmd_dump_ast, cmd_dump_callgraph, cmd_dump_cfg, cmd_dump_edges, cmd_dump_hir, cmd_dump_resolution,
@@ -411,7 +411,16 @@ fn real_main() -> Result<()> {
                 structural_only,
             },
         ),
-        Cmd::Context { workspace, .. } => cmd_context(&workspace),
+        Cmd::Context {
+            workspace,
+            context,
+            page,
+            all,
+            output: _,
+        } => cmd_context(
+            &workspace,
+            paging_from_cli(context.as_deref(), page.as_deref(), all, BrowseFormat::Json)?,
+        ),
         Cmd::Trace {
             workspace,
             symbol,
@@ -676,7 +685,7 @@ fn real_main() -> Result<()> {
             has_param,
             regex,
             limit,
-            no_flows,
+            flows,
             context,
             page,
             all,
@@ -695,7 +704,7 @@ fn real_main() -> Result<()> {
             },
             limit,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-            !no_flows,
+            flows,
             format,
         ),
         Cmd::EntryPoints {
@@ -733,7 +742,7 @@ fn real_main() -> Result<()> {
             context,
             page,
             all,
-            no_flows,
+            flows,
             format,
             output: _,
         } => cmd_calls(
@@ -747,7 +756,7 @@ fn real_main() -> Result<()> {
             },
             limit,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-            !no_flows,
+            flows,
             format,
         ),
         Cmd::Imports {
@@ -758,7 +767,7 @@ fn real_main() -> Result<()> {
             wildcard,
             regex,
             limit,
-            no_flows,
+            flows,
             context,
             page,
             all,
@@ -776,7 +785,7 @@ fn real_main() -> Result<()> {
             },
             limit,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-            !no_flows,
+            flows,
             format,
         ),
         Cmd::Vars {
@@ -787,7 +796,7 @@ fn real_main() -> Result<()> {
             source,
             regex,
             limit,
-            no_flows,
+            flows,
             context,
             page,
             all,
@@ -804,7 +813,7 @@ fn real_main() -> Result<()> {
             },
             limit,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-            !no_flows,
+            flows,
             format,
         ),
         Cmd::Strings {
@@ -816,7 +825,7 @@ fn real_main() -> Result<()> {
             min_len,
             regex,
             limit,
-            no_flows,
+            flows,
             context,
             page,
             all,
@@ -834,7 +843,7 @@ fn real_main() -> Result<()> {
             },
             limit,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-            !no_flows,
+            flows,
             format,
         ),
         Cmd::Comments {
@@ -875,7 +884,7 @@ fn real_main() -> Result<()> {
             keyword,
             regex,
             limit,
-            no_flows,
+            flows,
             context,
             page,
             all,
@@ -894,7 +903,7 @@ fn real_main() -> Result<()> {
             },
             limit,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-            !no_flows,
+            flows,
             format,
         ),
         Cmd::Operations {
@@ -905,7 +914,7 @@ fn real_main() -> Result<()> {
             in_fn,
             regex,
             limit,
-            no_flows,
+            flows,
             context,
             page,
             all,
@@ -922,7 +931,7 @@ fn real_main() -> Result<()> {
             },
             limit,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-            !no_flows,
+            flows,
             format,
         ),
         Cmd::Classes {
@@ -934,7 +943,7 @@ fn real_main() -> Result<()> {
             min_methods,
             regex,
             limit,
-            no_flows,
+            flows,
             context,
             page,
             all,
@@ -952,7 +961,7 @@ fn real_main() -> Result<()> {
             },
             limit,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
-            !no_flows,
+            flows,
             format,
         ),
         Cmd::Refs {
@@ -964,7 +973,7 @@ fn real_main() -> Result<()> {
             in_fn,
             regex,
             limit,
-            no_flows,
+            flows,
             context,
             page,
             all,
@@ -984,7 +993,7 @@ fn real_main() -> Result<()> {
                 },
                 limit,
                 paging,
-                !no_flows,
+                flows,
                 format,
             )
         }
@@ -996,7 +1005,7 @@ fn real_main() -> Result<()> {
             file,
             regex,
             limit,
-            no_flows,
+            flows,
             context,
             page,
             all,
@@ -1015,7 +1024,7 @@ fn real_main() -> Result<()> {
                 },
                 limit,
                 paging,
-                !no_flows,
+                flows,
                 format,
             )
         }
@@ -1041,7 +1050,6 @@ fn real_main() -> Result<()> {
             group,
             graph_flow,
             taint_flow,
-            syntax_only,
             context,
             page,
             format,
@@ -1093,6 +1101,7 @@ fn real_main() -> Result<()> {
             // even when no `--query` / filters are set: enumerate every
             // decl + hit, then the flow-id filter in `cmd_inspect`
             // drops everything except the one matching flow.
+            let taint_id_lookup = flow.as_deref().is_some_and(|id| id.starts_with("T:"));
             let render = InspectRenderOptions {
                 compact,
                 flow_id_filter: flow,
@@ -1101,8 +1110,8 @@ fn real_main() -> Result<()> {
                 structural_drilldown: false,
             };
             let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
+            let taint_flow = taint_flow || taint_id_lookup;
             let taint_flow_explicit = taint_flow;
-            let taint_flow = taint_flow || !syntax_only;
             cmd_inspect(
                 &workspace,
                 InspectCommandOptions {

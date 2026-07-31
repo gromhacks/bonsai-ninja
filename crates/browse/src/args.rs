@@ -7,7 +7,10 @@
 //! an `os.system` argument that came from `request.args`?") and for
 //! refactor scoping.
 
-use crate::common::{file_path_matches_filter, format_span, make_name_filter, textual_relevance_key};
+use crate::common::{
+    file_path_matches_filter, format_span, make_callable_name_filter, make_name_filter, textual_relevance_key,
+};
+use bonsai_common::Span;
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -79,6 +82,11 @@ enum ArgOrigin {
 struct ArgFact {
     out: ArgOut,
     origin: ArgOrigin,
+    /// Exact compiler span that produced this presentation row. Real call
+    /// rows carry the argument expression; assignment fallbacks carry the
+    /// containing assignment. Keeping the structural relation avoids
+    /// line-based dedup bugs for multiline calls.
+    source_span: Span,
 }
 
 /// Collect every call-site argument matching the filters.
@@ -86,7 +94,7 @@ struct ArgFact {
 /// output across runs and thread counts.
 pub fn args(ws: &Workspace, f: &ArgsFilters<'_>) -> Result<Vec<ArgOut>, regex::Error> {
     use rayon::prelude::*;
-    let callee_match = make_name_filter(f.callee, f.regex)?;
+    let callee_match = make_callable_name_filter(f.callee, f.regex)?;
     let value_match = make_name_filter(f.value, f.regex)?;
     let files = ws.vfs().all_files();
     // Per-thread accumulator (not per-file) so we don't pay the
@@ -229,6 +237,7 @@ fn walk_args(
                             column,
                         },
                         origin: ArgOrigin::RealCall,
+                        source_span: arg.span,
                     });
                 }
             }
@@ -263,6 +272,7 @@ fn walk_args(
                             column,
                         },
                         origin: ArgOrigin::AssignmentSourceCall,
+                        source_span: *span,
                     });
                 }
             }
@@ -296,26 +306,28 @@ fn walk_args(
 }
 
 /// Strip `AssignmentSourceCall` rows when an explicit `RealCall`
-/// at the same `(file, line, position, value)` already covers the
-/// arg. Without this we'd double-count every assignment whose RHS
-/// is a call (`x = foo(a)` produces both a `Call foo(a)` and an
-/// `Assign source_call=foo, source_call_args=[a]`).
+/// structurally inside the assignment already covers the arg. Without this
+/// we'd double-count every assignment whose RHS is a call (`x = foo(a)`
+/// produces both a `Call foo(a)` and an `Assign
+/// source_call=foo, source_call_args=[a]`). Span containment is required:
+/// line equality fails as soon as the argument list wraps onto later lines.
 fn drop_shadowed_assignment_args(args: &mut Vec<ArgFact>) {
-    let real_args: Vec<ArgOut> = args
+    let real_args: Vec<ArgFact> = args
         .iter()
         .filter(|fact| fact.origin == ArgOrigin::RealCall)
-        .map(|fact| fact.out.clone())
+        .cloned()
         .collect();
     args.retain(|fact| {
         if fact.origin != ArgOrigin::AssignmentSourceCall {
             return true;
         }
         !real_args.iter().any(|real| {
-            real.file == fact.out.file
-                && real.line == fact.out.line
-                && real.position == fact.out.position
-                && real.value == fact.out.value
-                && arg_callees_shadow(&real.callee, &fact.out.callee)
+            real.source_span.file == fact.source_span.file
+                && real.source_span.start >= fact.source_span.start
+                && real.source_span.end <= fact.source_span.end
+                && real.out.position == fact.out.position
+                && real.out.value == fact.out.value
+                && arg_callees_shadow(&real.out.callee, &fact.out.callee)
         })
     });
 }

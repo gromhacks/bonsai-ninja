@@ -18,27 +18,65 @@ pub struct HirDump {
     pub analysis_complete: bool,
     pub analysis_incomplete_reasons: Vec<String>,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_name: Option<String>,
     pub kind: String,
     pub params: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub param_annotations: Vec<Vec<String>>,
+    /// Adapter-emitted receiver/type bindings consumed by resolver and
+    /// callgraph narrowing. Including these in the HIR dump makes a bad edge
+    /// diagnosable from compiler facts instead of requiring ad-hoc logging.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub type_aliases: Vec<bonsai_lang_api::TypeAliasBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<String>,
     pub span: bonsai_common::Span,
+    pub body_span: Option<bonsai_common::Span>,
+    /// Compile-time lexical bindings visible to the callable but not
+    /// executed as part of its body (for example Java `static final`
+    /// literal fields).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lexical_context: Vec<FlowEvent>,
     pub flow_events: Vec<FlowEvent>,
 }
 
 impl HirDump {
     /// Lift a [`Decl`] into the externally-serialised HIR shape.
     fn from_decl(decl: &Decl) -> Self {
+        let (lexical_context, flow_events) = partition_decl_events(decl);
         Self {
             // `dump-hir` is a local structural dump of the adapter-emitted
             // declaration body; no resolver fan-out or flow solve is involved.
             analysis_complete: true,
             analysis_incomplete_reasons: Vec::new(),
             name: decl.name.clone(),
+            qualified_name: decl.qualified_name.clone(),
             kind: format!("{:?}", decl.kind).to_lowercase(),
             params: decl.params.clone(),
+            param_annotations: decl.param_annotations.clone(),
+            type_aliases: decl.type_aliases.clone(),
+            return_type: decl.return_type.clone(),
             span: decl.span,
-            flow_events: decl.flow_events.clone(),
+            body_span: decl.body_span,
+            lexical_context,
+            flow_events,
         }
     }
+}
+
+fn partition_decl_events(decl: &Decl) -> (Vec<FlowEvent>, Vec<FlowEvent>) {
+    let Some(body) = decl.body_span else {
+        return (Vec::new(), decl.flow_events.clone());
+    };
+    decl.flow_events.iter().cloned().partition(|event| {
+        let span = event.span();
+        span.file != body.file || span.start < body.start || body.end < span.end
+    })
+}
+
+fn runtime_flow_events(decl: &Decl) -> Vec<FlowEvent> {
+    partition_decl_events(decl).1
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -98,7 +136,7 @@ pub fn dump_cfg(ws: &Workspace, symbol: &str) -> Result<Option<bonsai_cfg::Cfg>,
     };
     Ok(Some(bonsai_cfg::build_cfg_from_flow(
         &decl.name,
-        &decl.flow_events,
+        &runtime_flow_events(&decl),
     )))
 }
 
@@ -107,8 +145,19 @@ pub fn dump_cfg(ws: &Workspace, symbol: &str) -> Result<Option<bonsai_cfg::Cfg>,
 #[derive(Serialize, Clone, Debug)]
 pub struct CallgraphRow {
     pub function: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_name: Option<String>,
+    pub file: String,
+    pub name_start: u64,
     pub callers: usize,
     pub outgoing: usize,
+}
+
+impl CallgraphRow {
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        self.qualified_name.as_deref().unwrap_or(&self.function)
+    }
 }
 
 /// Build the per-function callers / outgoing summary, sorted
@@ -134,6 +183,12 @@ pub fn callgraph_summary(ws: &Workspace, resolved: &ResolvedCallGraph) -> Vec<Ca
                 let outgoing_count = unique_semantic_callees(resolved, func).len();
                 per_file.push(CallgraphRow {
                     function: func_decl.name.clone(),
+                    qualified_name: func_decl.qualified_name.clone(),
+                    file: ws
+                        .vfs()
+                        .path(file)
+                        .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string()),
+                    name_start: func_decl.name_span.start,
                     callers: caller_count,
                     outgoing: outgoing_count,
                 });
@@ -146,7 +201,9 @@ pub fn callgraph_summary(ws: &Workspace, resolved: &ResolvedCallGraph) -> Vec<Ca
         b.callers
             .cmp(&a.callers)
             .then_with(|| b.outgoing.cmp(&a.outgoing))
-            .then_with(|| a.function.cmp(&b.function))
+            .then_with(|| a.display_name().cmp(b.display_name()))
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.name_start.cmp(&b.name_start))
     });
     rows
 }
@@ -217,6 +274,16 @@ fn split_callable_spec(spec: &str) -> CallableSpec<'_> {
         name: spec,
         ..Default::default()
     }
+}
+
+/// Return the exact file qualifier carried by a dump target, if any.
+///
+/// CLI and SDK opening strategies use this same parser as callable
+/// resolution so scoped commands cannot disagree about forms such as
+/// `json.lua:189:codepoint_to_utf8`.
+#[must_use]
+pub fn dump_callable_file_qualifier(spec: &str) -> Option<&str> {
+    split_callable_spec(spec).file
 }
 
 /// Resolve `symbol` to exactly one function / method / constructor decl.
@@ -335,5 +402,59 @@ mod tests {
         assert_eq!(spec.file, None);
         assert_eq!(spec.line, None);
         assert_eq!(spec.name, "My.Module:run");
+    }
+
+    #[test]
+    fn hir_separates_lexical_bindings_from_runtime_body_events() {
+        let file = bonsai_common::FileId::new(1);
+        let lexical = FlowEvent::Assign {
+            span: bonsai_common::Span::new(file, 10, 20),
+            target: "ALG".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Literal),
+        };
+        let runtime = FlowEvent::Call {
+            span: bonsai_common::Span::new(file, 110, 120),
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: Vec::new(),
+        };
+        let decl = Decl {
+            symbol: bonsai_common::SymbolId::new(1),
+            kind: DeclKind::Method,
+            name: "run".to_string(),
+            qualified_name: Some("App.run".to_string()),
+            module_path: bonsai_lang_api::ModulePath::default(),
+            span: bonsai_common::Span::new(file, 90, 140),
+            name_span: bonsai_common::Span::new(file, 90, 93),
+            visibility: bonsai_lang_api::Visibility::Public,
+            parent: None,
+            body_span: Some(bonsai_common::Span::new(file, 100, 140)),
+            flow_events: vec![lexical.clone(), runtime.clone()],
+            has_implicit_returns: false,
+            params: Vec::new(),
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: Vec::new(),
+            receiver_state_sources: Vec::new(),
+            return_type: None,
+            is_variadic: false,
+        };
+
+        let dump = HirDump::from_decl(&decl);
+
+        assert_eq!(dump.qualified_name.as_deref(), Some("App.run"));
+        assert_eq!(dump.lexical_context, vec![lexical]);
+        assert_eq!(dump.flow_events, vec![runtime]);
+        assert_eq!(runtime_flow_events(&decl), dump.flow_events);
     }
 }

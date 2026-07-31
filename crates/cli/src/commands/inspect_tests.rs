@@ -5,7 +5,7 @@ use super::{
 };
 use crate::args::FactKindFilter;
 use bonsai_common::{FileId, FuncId, Span};
-use bonsai_lang_api::{DeclKind, FlowEvent, ImportScope, ImportSpec};
+use bonsai_lang_api::{CallKind, DeclKind, FlowEvent, ImportScope, ImportSpec};
 use bonsai_sdk::find_call_span_by_name;
 use bonsai_sdk::Workspace;
 use std::path::PathBuf;
@@ -94,6 +94,60 @@ fn walk_flow_hits_surfaces_assignment_source_call_args() {
     );
 
     assert_eq!(seen, vec![("arg".to_string(), "request".to_string())]);
+}
+
+#[test]
+fn walk_flow_hits_prefers_explicit_call_over_assignment_projection() {
+    let matcher = Matcher::build(Some("read_user"), false).expect("matcher");
+    let kinds = ahash::AHashSet::from_iter(["call".to_string()]);
+    let mut assign = assign_event();
+    if let FlowEvent::Assign { span, .. } = &mut assign {
+        span.start = 10;
+        span.end = 80;
+    }
+    let call_span = Span {
+        file: FileId(0),
+        start: 30,
+        end: 39,
+    };
+    let call = FlowEvent::Call {
+        span: call_span,
+        name: "read_user".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: Vec::new(),
+    };
+    let mut seen: Vec<(String, String, Span)> = Vec::new();
+    let mut out: Vec<HitOut> = Vec::new();
+    let mut push = |kind: &str,
+                    text: String,
+                    span: Span,
+                    _containing: Option<(FuncId, String)>,
+                    _assignment_projection: bool,
+                    _out: &mut Vec<HitOut>| {
+        seen.push((kind.to_string(), text, span));
+    };
+
+    walk_flow_hits(
+        &[assign, call],
+        FuncId::new(1),
+        "handler",
+        FlowHitWalkContext {
+            workspace: None,
+            matcher: &matcher,
+            endpoint_kind_filter: None,
+            kinds: &kinds,
+        },
+        &mut out,
+        &mut push,
+    );
+
+    assert_eq!(
+        seen,
+        vec![("call".to_string(), "read_user".to_string(), call_span)],
+        "one source call must render once from the explicit AST call event"
+    );
 }
 
 #[test]

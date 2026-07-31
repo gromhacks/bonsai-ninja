@@ -6,8 +6,8 @@
 //! debug output from over-fanning or drifting from inspect/export/taint.
 
 use crate::common::format_span;
-use bonsai_callgraph::{CallEdge, EdgeKind};
-use bonsai_common::{Span, SymbolId};
+use bonsai_callgraph::{CallEdge, EdgeKind, ResolvedCallGraph};
+use bonsai_common::{FuncId, Span, SymbolId};
 use bonsai_hash::fnv1a_names_low32;
 use bonsai_lang_api::{CallArg, Decl, FlowEvent};
 use bonsai_workspace::Workspace;
@@ -112,6 +112,11 @@ pub fn compute_edge_id(
 /// its result set even though exact coverage still examines every candidate
 /// edge.
 pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
+    if f.from.is_some() || f.to.is_some() {
+        if let Some(records) = dump_persisted_filtered_edges(ws, f) {
+            return records;
+        }
+    }
     let global = ws.compiler_linkage_index();
     let resolved = ws.cached_resolved_call_graph();
     let mut records: Vec<EdgeRecord> = resolved
@@ -144,19 +149,148 @@ pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
     records
 }
 
-pub(crate) fn edge_record_from_resolved_edge(
+fn dump_persisted_filtered_edges(ws: &Workspace, filters: &EdgesFilters<'_>) -> Option<Vec<EdgeRecord>> {
+    let scan_outgoing = filters.from.is_some();
+    let mut records = Vec::new();
+    let mut failure = None;
+    let visited = ws.visit_persisted_callgraph_partitions(|_, nodes, outgoing, incoming, _| {
+        if failure.is_some() {
+            return;
+        }
+        let edges = if scan_outgoing { outgoing } else { incoming };
+        for edge in edges {
+            if !edge.precision.is_semantic()
+                || filters
+                    .precision
+                    .is_some_and(|precision| !precision.matches(edge.precision))
+            {
+                continue;
+            }
+            let local_function = if scan_outgoing { edge.from } else { edge.to };
+            let Some(local_node) = nodes
+                .binary_search_by_key(&local_function.raw(), |node| node.func.raw())
+                .ok()
+                .map(|index| &nodes[index])
+            else {
+                failure = Some(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "callgraph partition is missing local edge endpoint {}",
+                        local_function.raw()
+                    ),
+                ));
+                return;
+            };
+            let local_matches = if scan_outgoing {
+                filters.from.is_none_or(|needle| local_node.name.contains(needle))
+            } else {
+                filters.to.is_none_or(|needle| local_node.name.contains(needle))
+            };
+            if !local_matches {
+                continue;
+            }
+            let remote_function = if scan_outgoing { edge.to } else { edge.from };
+            let Some(remote) = ws.persisted_callgraph_node(remote_function) else {
+                failure = Some(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "partitioned callgraph became unavailable during edge rendering",
+                ));
+                return;
+            };
+            let remote = match remote {
+                Ok(node) => node,
+                Err(error) => {
+                    failure = Some(error);
+                    return;
+                }
+            };
+            let (caller, callee) = if scan_outgoing {
+                (local_node, &remote)
+            } else {
+                (&remote, local_node)
+            };
+            if !edge_names_match_filters(caller.name.as_ref(), callee.name.as_ref(), filters) {
+                continue;
+            }
+            let record = edge_record_from_nodes(ws, caller, callee, edge);
+            if filters.edge_id.is_none_or(|edge_id| edge_id == record.edge_id) {
+                records.push(record);
+            }
+        }
+    })?;
+    if visited.is_err() || failure.is_some() {
+        return None;
+    }
+    sort_edge_records(&mut records);
+    Some(records)
+}
+
+pub(crate) fn edge_record_from_graph_nodes(
     ws: &Workspace,
-    global: &bonsai_index::GlobalIndex,
+    graph: &ResolvedCallGraph,
     edge: &CallEdge,
 ) -> Option<EdgeRecord> {
-    let caller_decl = global.decl_of(SymbolId::new(edge.from.raw()))?;
-    let callee_decl = global.decl_of(SymbolId::new(edge.to.raw()))?;
-    Some(edge_record_from_decls(ws, caller_decl, callee_decl, edge))
+    let node = |func: FuncId| {
+        graph
+            .nodes()
+            .binary_search_by_key(&func.raw(), |node| node.func.raw())
+            .ok()
+            .map(|index| &graph.nodes()[index])
+    };
+    let caller = node(edge.from)?;
+    let callee = node(edge.to)?;
+    Some(edge_record_from_nodes(ws, caller, callee, edge))
+}
+
+fn edge_record_from_nodes(
+    ws: &Workspace,
+    caller: &bonsai_callgraph::CallGraphNode,
+    callee: &bonsai_callgraph::CallGraphNode,
+    edge: &CallEdge,
+) -> EdgeRecord {
+    let (caller_file, caller_line, _) = format_span(&caller.name_span, ws);
+    let (callee_file, callee_line, _) = format_span(&callee.name_span, ws);
+    let (call_file, call_line, call_column) = format_span(&edge.span, ws);
+    let call_text = call_text_for_span(ws, edge.span).unwrap_or_else(|| callee.name.as_ref().to_string());
+    EdgeRecord {
+        edge_id: compute_edge_id(
+            caller.name.as_ref(),
+            callee.name.as_ref(),
+            &call_file,
+            call_line,
+            call_column,
+        ),
+        caller_name: caller.name.as_ref().to_string(),
+        caller_file,
+        caller_line,
+        callee_name: callee.name.as_ref().to_string(),
+        callee_file,
+        callee_line,
+        call_file,
+        call_line,
+        call_column,
+        call_text,
+        kind: edge_kind_display(edge.kind).to_string(),
+        precision: precision_display(edge.precision).to_string(),
+        resolver_stage: edge.provenance.resolver_stage().to_string(),
+        evidence: edge.provenance.evidence().to_string(),
+        confidence: edge.provenance.confidence(),
+    }
 }
 
 fn edge_names_match_filters(caller_name: &str, callee_name: &str, filters: &EdgesFilters<'_>) -> bool {
     filters.from.is_none_or(|needle| caller_name.contains(needle))
         && filters.to.is_none_or(|needle| callee_name.contains(needle))
+}
+
+fn sort_edge_records(records: &mut [EdgeRecord]) {
+    records.sort_by(|a, b| {
+        precision_sort_key(&a.precision)
+            .cmp(&precision_sort_key(&b.precision))
+            .then_with(|| a.caller_name.cmp(&b.caller_name))
+            .then_with(|| a.callee_name.cmp(&b.callee_name))
+            .then_with(|| a.call_line.cmp(&b.call_line))
+    });
 }
 
 fn edge_record_from_decls(

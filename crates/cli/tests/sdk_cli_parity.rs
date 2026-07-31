@@ -1368,6 +1368,9 @@ fn show_structural_ids_roundtrip_through_cli_and_sdk() {
     }) {
         bonsai_sdk::AstOutcome::Dumps(mut dumps) => dumps.pop().expect("AST dump"),
         bonsai_sdk::AstOutcome::NodeIdNotFound => panic!("function AST should exist"),
+        bonsai_sdk::AstOutcome::FunctionAmbiguous { .. } => {
+            panic!("fixture function should not be ambiguous")
+        }
     };
     let node_id = ast_root.root.node_id.clone();
     match project
@@ -1699,6 +1702,9 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
         }) {
             bonsai_sdk::AstOutcome::Dumps(dumps) => dumps,
             bonsai_sdk::AstOutcome::NodeIdNotFound => panic!("{lang} sdk dump-ast node not found"),
+            bonsai_sdk::AstOutcome::FunctionAmbiguous { .. } => {
+                panic!("{lang} fixture entry should not be ambiguous")
+            }
         };
         assert_json_rows_eq(
             &format!("{lang} dump-ast"),

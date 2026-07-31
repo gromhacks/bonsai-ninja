@@ -196,6 +196,8 @@ def load_from_pickle(data):
         td.to_str().unwrap(),
         "--to",
         "pickle",
+        "--graph-flow",
+        "--taint-flow",
         "--all",
         "--format",
         "json",
@@ -263,6 +265,7 @@ def load_from_pickle(data):
         td.to_str().unwrap(),
         "--to",
         "pickle",
+        "--graph-flow",
         "--all",
         "--no-progress",
     ]);
@@ -367,7 +370,6 @@ def load(data):
         "pickle",
         "--to-kind",
         "call",
-        "--syntax-only",
         "--format",
         "json",
         "--no-progress",
@@ -400,6 +402,7 @@ fn inspect_text_disambiguates_duplicate_chain_hop_names() {
         ws.to_str().unwrap(),
         "--to",
         "pickle",
+        "--graph-flow",
         "--all",
         "--no-progress",
     ]);
@@ -435,7 +438,6 @@ fn inspect_small_workspace_does_not_build_retrieval_sidecar_as_truth_filter() {
         td.to_str().unwrap(),
         "--query",
         "beta_target",
-        "--syntax-only",
         "--format",
         "json",
         "--no-progress",
@@ -469,20 +471,15 @@ fn inspect_small_workspace_does_not_build_retrieval_sidecar_as_truth_filter() {
 }
 
 #[test]
-fn inspect_default_includes_rulepack_free_taint_flows() {
+fn inspect_default_is_lightweight_syntax_evidence() {
     if require_binary_built().is_none() {
         return;
     }
     let ws = ws_path();
     let out = run(&["inspect", ws.to_str().unwrap(), "--query", "os.system"]);
     assert!(
-        out.contains("taint flow(s)")
-            && out.contains("══ TAINT FLOWS")
-            && out.contains("T:")
-            && out.contains("FLOW ")
-            && out.contains("[module]")
-            && out.contains("[def]"),
-        "default inspect should include query-scoped taint paths and code bodies: {out}"
+        out.contains("os.system") && !out.contains("══ TAINT FLOWS") && !out.contains("taint flow(s)"),
+        "default inspect should return syntax evidence without silently running taint: {out}"
     );
 }
 
@@ -497,6 +494,7 @@ fn inspect_footer_counts_taint_and_occurrence_only_results() {
         ws.to_str().unwrap(),
         "--query",
         "os.system",
+        "--taint-flow",
         "--context",
         "4k",
     ]);
@@ -511,7 +509,7 @@ fn inspect_footer_counts_taint_and_occurrence_only_results() {
 }
 
 #[test]
-fn inspect_syntax_only_omits_default_taint_flows() {
+fn inspect_explicit_taint_flow_adds_rulepack_free_paths() {
     if require_binary_built().is_none() {
         return;
     }
@@ -521,35 +519,39 @@ fn inspect_syntax_only_omits_default_taint_flows() {
         ws.to_str().unwrap(),
         "--query",
         "os.system",
-        "--syntax-only",
+        "--taint-flow",
     ]);
     assert!(
         out.contains("os.system"),
-        "syntax-only should still show syntax hit: {out}"
+        "explicit taint inspect should retain the syntax hit: {out}"
     );
     assert!(
-        !out.contains("══ TAINT FLOWS") && !out.contains("taint flow(s)"),
-        "syntax-only should omit default taint path table: {out}"
+        out.contains("══ TAINT FLOWS") && out.contains("taint flow(s)") && out.contains("T:"),
+        "--taint-flow should add raw taint evidence: {out}"
     );
 }
 
 #[test]
-fn inspect_explicit_taint_flow_overrides_syntax_only() {
-    if require_binary_built().is_none() {
+fn inspect_rejects_removed_syntax_only_switch() {
+    let Some(bin) = require_binary_built() else {
         return;
-    }
+    };
     let ws = ws_path();
-    let out = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "os.system",
-        "--syntax-only",
-        "--taint-flow",
-    ]);
+    let result = Command::new(bin)
+        .args([
+            "inspect",
+            ws.to_str().unwrap(),
+            "--query",
+            "os.system",
+            "--syntax-only",
+            "--no-color",
+        ])
+        .output()
+        .expect("run removed switch check");
+    let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
-        out.contains("1 taint flow(s)") && out.contains("══ TAINT FLOWS") && out.contains("T:"),
-        "explicit --taint-flow should still show raw taint paths when --syntax-only is present: {out}"
+        !result.status.success() && stderr.contains("unexpected argument '--syntax-only'"),
+        "removed redundant switch should fail with clap command truth: {stderr}"
     );
 }
 
@@ -564,6 +566,7 @@ fn inspect_secondary_contains_filters_taint_rows() {
         ws.to_str().unwrap(),
         "--query",
         "os.system",
+        "--taint-flow",
         "--contains",
         "notify-admin",
         "--format",
@@ -571,13 +574,13 @@ fn inspect_secondary_contains_filters_taint_rows() {
     ]);
     assert_eq!(
         v["taint_flows"].as_array().map(Vec::len),
-        Some(2),
-        "--contains must match taint row string leaves such as tainted argument values across all matching taint paths: {v:#}"
+        Some(1),
+        "--contains must keep the taint row whose argument value contains the needle: {v:#}"
     );
     assert_eq!(
         v["hits"].as_array().map(Vec::len),
-        Some(1),
-        "--contains should keep syntax rows whose expanded flow code contains the value: {v:#}"
+        Some(0),
+        "--contains must not retain an independent syntax row merely because another taint row matches: {v:#}"
     );
 }
 
@@ -592,6 +595,7 @@ fn inspect_secondary_not_contains_drops_only_matching_taint_rows() {
         ws.to_str().unwrap(),
         "--query",
         "os.system",
+        "--taint-flow",
         "--not-contains",
         "notify-admin",
         "--format",
@@ -607,8 +611,10 @@ fn inspect_secondary_not_contains_drops_only_matching_taint_rows() {
             .is_some_and(Vec::is_empty)
     };
     assert!(
-        section_empty("decl_hits") && section_empty("hits") && section_empty("taint_flows"),
-        "--not-contains must remove rows whose taint values or expanded flow code contain the needle: {v:#}"
+        section_empty("decl_hits")
+            && !section_empty("hits")
+            && section_empty("taint_flows"),
+        "--not-contains must remove the matching taint row without dropping the independent syntax call: {v:#}"
     );
 }
 
@@ -623,6 +629,7 @@ fn inspect_taint_flow_id_rerenders_without_query() {
         ws.to_str().unwrap(),
         "--query",
         "os.system",
+        "--taint-flow",
         "--format",
         "json",
     ]);
@@ -661,7 +668,7 @@ fn inspect_taint_flow_id_rerenders_without_query() {
 }
 
 #[test]
-fn inspect_from_to_filters_include_taint_flows_by_default() {
+fn inspect_from_to_filters_include_structural_flows_by_default() {
     if require_binary_built().is_none() {
         return;
     }
@@ -675,8 +682,8 @@ fn inspect_from_to_filters_include_taint_flows_by_default() {
         "os.system",
     ]);
     assert!(
-        out.contains("taint flow(s)") && out.contains("run_admin_command") && out.contains("os.system"),
-        "filter-only inspect should include taint paths that satisfy --from/--to: {out}"
+        out.contains("FLOW ") && out.contains("run_admin_command") && out.contains("os.system"),
+        "filter-only inspect should include structural paths that satisfy --from/--to: {out}"
     );
 }
 

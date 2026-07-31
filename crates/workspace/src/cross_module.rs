@@ -15,11 +15,14 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_abstract_interp::{RawStep, RawTrace, StepKind, TraceLimits};
 use bonsai_callgraph::{EdgeKind, ResolvedCallGraph};
 use bonsai_common::{FuncId, Precision, Span, SymbolId, TraceStepId};
-use bonsai_db::AnalyzerDb;
+use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
     AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, LoopKind, TypeAliasBinding,
 };
 use bonsai_resolve::{resolve_callable_with_context, ResolveContext};
+use std::sync::Arc;
+
+use crate::Workspace;
 
 #[derive(Copy, Clone, Debug)]
 pub struct CrossModuleOptions {
@@ -59,13 +62,15 @@ impl CrossModuleOptions {
 }
 
 pub(crate) struct CrossModuleTracer<'a> {
-    db: &'a AnalyzerDb,
+    workspace: &'a Workspace,
+    headers: Arc<GlobalIndex>,
     call_graph: &'a ResolvedCallGraph,
     opts: CrossModuleOptions,
 }
 
 struct TraceBuilder<'a> {
-    db: &'a AnalyzerDb,
+    workspace: &'a Workspace,
+    headers: Arc<GlobalIndex>,
     call_graph: &'a ResolvedCallGraph,
     opts: CrossModuleOptions,
     out: RawTrace,
@@ -79,6 +84,14 @@ struct TraceBuilder<'a> {
     /// the same higher-order function can be reached with different callback
     /// and receiver-type bindings.
     expanded_states: AHashSet<ExpansionState>,
+    /// Exact resolved targets indexed by compiler call-site identity. A
+    /// function body can be revisited under several callback/type states;
+    /// its callgraph edges do not change between those states.
+    resolved_site_cache: AHashMap<(FuncId, Span), Vec<ResolvedTarget>>,
+    /// Contextual textual callable resolution is likewise a pure function of
+    /// the caller declaration and spelling. Memoize it instead of rebuilding
+    /// import/type alias maps for every abstract state.
+    callable_resolution_cache: AHashMap<(SymbolId, String), Option<SymbolId>>,
 }
 
 #[derive(Default, Clone)]
@@ -202,16 +215,23 @@ struct ResolvedTarget {
 impl<'a> CrossModuleTracer<'a> {
     #[must_use]
     pub(crate) fn new(
-        db: &'a AnalyzerDb,
+        workspace: &'a Workspace,
+        headers: Arc<GlobalIndex>,
         call_graph: &'a ResolvedCallGraph,
         opts: CrossModuleOptions,
     ) -> Self {
-        Self { db, call_graph, opts }
+        Self {
+            workspace,
+            headers,
+            call_graph,
+            opts,
+        }
     }
 
     pub(crate) fn trace(&self, start: SymbolId) -> RawTrace {
         let mut builder = TraceBuilder {
-            db: self.db,
+            workspace: self.workspace,
+            headers: Arc::clone(&self.headers),
             call_graph: self.call_graph,
             opts: self.opts,
             out: RawTrace::default(),
@@ -220,6 +240,8 @@ impl<'a> CrossModuleTracer<'a> {
             current_path: 1,
             frames: vec![CallFrame::default()],
             expanded_states: AHashSet::new(),
+            resolved_site_cache: AHashMap::new(),
+            callable_resolution_cache: AHashMap::new(),
         };
         builder.expand(start, &[], None, 0);
         builder.out
@@ -265,9 +287,13 @@ impl<'a> TraceBuilder<'a> {
             self.out.mark_truncated("max-depth");
             return true;
         }
-        let Some(decl) = self.db.global_index().decl_of(symbol).cloned() else {
+        let Some(exact_decl) = self
+            .workspace
+            .exact_decl_with_headers(symbol, Arc::clone(&self.headers))
+        else {
             return true;
         };
+        let decl = &*exact_decl;
         if !matches!(
             decl.kind,
             DeclKind::Function | DeclKind::Method | DeclKind::Constructor
@@ -282,10 +308,11 @@ impl<'a> TraceBuilder<'a> {
             types: types_from_decl(&decl),
             ..Default::default()
         };
-        let global = self.db.global_index();
-        let binding_decl = caller
-            .and_then(|func| global.decl_of(SymbolId::new(func.raw())))
-            .unwrap_or(&decl);
+        let binding_exact = caller.and_then(|func| {
+            self.workspace
+                .exact_decl_with_headers(SymbolId::new(func.raw()), Arc::clone(&self.headers))
+        });
+        let binding_decl = binding_exact.as_ref().map_or(decl, |exact| &**exact);
         for (idx, param) in decl.params.iter().enumerate() {
             // Keyword-arg match first.
             let kw = args.iter().find(|a| a.name.as_deref() == Some(param.as_str()));
@@ -504,8 +531,10 @@ impl<'a> TraceBuilder<'a> {
                 ..
             } => {
                 // Record local binding for callback resolution.
-                let global = self.db.global_index();
-                let caller_decl = global.decl_of(SymbolId::new(func.raw()));
+                let caller_exact = self
+                    .workspace
+                    .exact_decl_with_headers(SymbolId::new(func.raw()), Arc::clone(&self.headers));
+                let caller_decl = caller_exact.as_ref().map(|exact| &**exact);
                 let assigned_callable = source_name
                     .as_deref()
                     .and_then(|name| caller_decl.and_then(|decl| self.resolve_callable_by_name(name, decl)));
@@ -816,7 +845,11 @@ impl<'a> TraceBuilder<'a> {
         true
     }
 
-    fn resolve_callgraph_site(&self, caller: FuncId, site: &CallSite<'_>) -> Vec<ResolvedTarget> {
+    fn resolve_callgraph_site(&mut self, caller: FuncId, site: &CallSite<'_>) -> Vec<ResolvedTarget> {
+        let cache_key = (caller, site.span);
+        if let Some(cached) = self.resolved_site_cache.get(&cache_key) {
+            return cached.clone();
+        }
         let mut out = Vec::new();
         let mut seen = AHashMap::new();
         let arg_spans: AHashSet<Span> = site.args.iter().map(|arg| arg.span).collect();
@@ -836,11 +869,12 @@ impl<'a> TraceBuilder<'a> {
             bind_site_args,
         }));
         out.sort_by_key(|target| target.symbol.raw());
+        self.resolved_site_cache.insert(cache_key, out.clone());
         out
     }
 
     fn is_trace_expandable(&self, symbol: SymbolId) -> bool {
-        self.db.global_index().decl_of(symbol).is_some_and(|decl| {
+        self.headers.decl_of(symbol).is_some_and(|decl| {
             matches!(
                 decl.kind,
                 DeclKind::Function | DeclKind::Method | DeclKind::Constructor
@@ -852,18 +886,23 @@ impl<'a> TraceBuilder<'a> {
     /// context. This is intentionally not a bare global-name
     /// lookup: visibility, module path, import aliases, and local
     /// type facts must all flow through `ResolveContext`.
-    fn resolve_callable_by_name(&self, raw: &str, caller_decl: &Decl) -> Option<SymbolId> {
+    fn resolve_callable_by_name(&mut self, raw: &str, caller_decl: &Decl) -> Option<SymbolId> {
         if raw.is_empty() {
             return None;
         }
         let trimmed = raw.trim();
-        let global = self.db.global_index();
+        let cache_key = (caller_decl.symbol, trimmed.to_string());
+        if let Some(cached) = self.callable_resolution_cache.get(&cache_key) {
+            return *cached;
+        }
+        let global = &self.headers;
         let caller_file = global
             .declaring_file(caller_decl.symbol)
             .unwrap_or(caller_decl.span.file);
         let alias_map = self.alias_map_for_decl(caller_decl);
         let capabilities = self
-            .db
+            .workspace
+            .db()
             .adapter_for(caller_file)
             .map(|adapter| adapter.capabilities())
             .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported);
@@ -872,14 +911,16 @@ impl<'a> TraceBuilder<'a> {
             .with_same_directory_unqualified_calls(capabilities.same_directory_unqualified_calls)
             .with_module_path_syntax(capabilities.module_path_syntax);
         for candidate in callable_name_variants(trimmed) {
-            let hits = resolve_callable_with_context(&global, &candidate, &ctx)
+            let hits = resolve_callable_with_context(global, &candidate, &ctx)
                 .into_iter()
                 .map(|func| SymbolId::new(func.raw()))
                 .collect::<Vec<_>>();
             if let Some(sym) = self.best_symbol_candidate(hits, caller_decl) {
+                self.callable_resolution_cache.insert(cache_key, Some(sym));
                 return Some(sym);
             }
         }
+        self.callable_resolution_cache.insert(cache_key, None);
         None
     }
 
@@ -925,7 +966,8 @@ impl<'a> TraceBuilder<'a> {
 
     fn alias_map_for_decl(&self, decl: &Decl) -> AHashMap<String, AliasTarget> {
         let mut map = self
-            .db
+            .workspace
+            .db()
             .import_index(decl.span.file)
             .map(|imports| bonsai_lang_api::alias_map_from_imports(imports.as_ref()))
             .unwrap_or_default();
@@ -938,8 +980,8 @@ impl<'a> TraceBuilder<'a> {
         if hits.is_empty() {
             return None;
         }
-        let global = self.db.global_index();
-        let vfs = self.db.vfs();
+        let global = &self.headers;
+        let vfs = self.workspace.db().vfs();
         let caller_file = global
             .declaring_file(caller_decl.symbol)
             .unwrap_or(caller_decl.span.file);

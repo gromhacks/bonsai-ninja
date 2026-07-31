@@ -54,6 +54,20 @@ pub const LANG_ID: LanguageId = LanguageId::new("swift");
 const PACK_NAME: &str = "swift";
 const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: &["init"],
+    class_kinds: &[
+        "class_declaration",
+        "struct_declaration",
+        "protocol_declaration",
+        "enum_declaration",
+        "extension_declaration",
+    ],
+    class_decl_kinds: &[
+        ("class_declaration", DeclKind::Class),
+        ("struct_declaration", DeclKind::Struct),
+        ("protocol_declaration", DeclKind::Interface),
+        ("enum_declaration", DeclKind::Enum),
+        ("extension_declaration", DeclKind::Class),
+    ],
     special_forms: &[SyntaxSpecialForm::TrailingClosureDefer],
     ..with_fn_kinds_and_implicit_receivers(&["function_declaration"], &["self", "super"], &[])
 };

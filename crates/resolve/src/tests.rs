@@ -405,6 +405,27 @@ fn module_target_matches_rust_root_prefixed_modules() {
 }
 
 #[test]
+fn exact_module_match_does_not_reinterpret_an_instance_field_as_a_class_trailer() {
+    let module = ModulePath::from_segments(["org", "elasticsearch", "context"]);
+
+    assert!(module_target_matches_decl_module_path_with_syntax(
+        "context.transientHeaders",
+        &module,
+        ModulePathSyntax::none()
+    ));
+    assert!(!module_target_exactly_matches_decl_module_path_with_syntax(
+        "context.transientHeaders",
+        &module,
+        ModulePathSyntax::none()
+    ));
+    assert!(module_target_exactly_matches_decl_module_path_with_syntax(
+        "context",
+        &module,
+        ModulePathSyntax::none()
+    ));
+}
+
+#[test]
 fn relative_alias_target_resolves_against_caller_module() {
     let mut global = GlobalIndex::new();
     let local_file = FileId::new(1);
