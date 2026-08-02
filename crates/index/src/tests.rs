@@ -220,11 +220,13 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
             call_span,
             argument_index: 0,
             argument_span: arg_span,
+            direct_call_span: Some(call_span),
             value_flow: bonsai_lang_api::ExpressionFlow {
                 call_sites: vec![call_span],
                 ..Default::default()
             },
             static_value: None,
+            exact_static_aggregate_fields: Vec::new(),
         }],
         static_string_maps: vec![bonsai_lang_api::StaticStringMapFact {
             assignment_span: Span::new(file, 1, 9),
@@ -243,6 +245,7 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
                 characters: vec!["a".to_string()],
             },
         }],
+        character_constraints: Vec::new(),
         ..DeclIndex::default()
     });
 

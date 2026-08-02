@@ -1369,7 +1369,7 @@ description: Downstream transport.
     let sibling = combined_terminal_finding("python.cmdi.transport", vec![FuncId::new(1), FuncId::new(4)]);
     let mut findings = vec![preferred, downstream, sibling];
 
-    drop_rulepack_terminal_dominated_findings(&mut findings, &pack);
+    drop_rulepack_terminal_dominated_findings(&mut findings, &pack, None);
 
     assert_eq!(findings.len(), 2);
     assert!(findings

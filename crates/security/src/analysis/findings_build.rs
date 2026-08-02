@@ -382,6 +382,29 @@ pub(super) fn make_finding(
             sanitizers_seen.push(escape);
         }
     }
+    let compiler_guard_context = CompilerGuardContext {
+        ws: context.ws,
+        source: src,
+        source_func: context.source_func,
+        sink: snk,
+        sink_rule: skr,
+        candidate_funcs: context.sanitizer_candidate_funcs,
+        tainted_call_spans: context.tainted_call_spans,
+        taint_path: &context.taint_path,
+        sink_tainted_args: &context.sink_tainted_args,
+    };
+    if let Some(constraint) = character_constraint_sanitizer(&compiler_guard_context) {
+        let dedup_key = (constraint.file.clone(), constraint.line, constraint.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(constraint);
+        }
+    }
+    if let Some(constraint) = same_origin_path_constraint_sanitizer(&compiler_guard_context) {
+        let dedup_key = (constraint.file.clone(), constraint.line, constraint.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(constraint);
+        }
+    }
     if let Some(path_guard) = relative_path_containment_guard_sanitizer(
         context.ws,
         context.sink_func,
@@ -416,6 +439,22 @@ pub(super) fn make_finding(
         );
         if seen_keys.insert(dedup_key) {
             sanitizers_seen.push(configured_factory_guard);
+        }
+    }
+    if let Some(configured_call_guard) = configured_call_argument_guard_sanitizer(
+        context.ws,
+        context.sink_func,
+        snk,
+        skr,
+        &context.sink_tainted_args,
+    ) {
+        let dedup_key = (
+            configured_call_guard.file.clone(),
+            configured_call_guard.line,
+            configured_call_guard.column,
+        );
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(configured_call_guard);
         }
     }
     if let Some(ssrf_guard) = url_network_guard_sanitizer(context.ws, context.sink_func, snk, skr) {

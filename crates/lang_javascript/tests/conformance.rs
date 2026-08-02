@@ -122,6 +122,118 @@ fn denylist_constructor_and_condition_emit_exact_compiler_facts() {
 }
 
 #[test]
+fn recursive_dynamic_key_filter_is_a_typed_summary() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "merge.js",
+            r#"
+const BLOCKED = new Set(["__proto__", "constructor", "prototype"]);
+function sanitize(value) {
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (BLOCKED.has(key)) continue;
+      out[key] = sanitize(item);
+    }
+    return out;
+  }
+  return value;
+}
+function shallow(value) {
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (BLOCKED.has(key)) continue;
+    out[key] = item;
+  }
+  return out;
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    let [fact] = index.dynamic_key_filters.as_slice() else {
+        panic!(
+            "expected only the recursive helper summary: {:?}",
+            index.dynamic_key_filters
+        );
+    };
+    assert_eq!(fact.collection_constructor, "Set");
+    assert_eq!(fact.membership_check, "has");
+    assert_eq!(fact.input_param_index, 0);
+    assert!(fact.recursive);
+    assert_eq!(
+        fact.rejected_exact_values,
+        ["__proto__", "constructor", "prototype"]
+    );
+}
+
+#[test]
+fn call_configuration_aggregate_uses_exact_language_decoded_scalars() {
+    use bonsai_lang_api::{LanguageAdapter, StaticScalarValue};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "parser.js",
+            r#"
+function safe(libxml, xml) {
+  return libxml.parseXml(xml, {
+    noent: false,
+    replaceEntities: false,
+    nonet: true,
+    dtdload: false,
+  });
+}
+function inexact(libxml, xml, defaults) {
+  return libxml.parseXml(xml, { ...defaults, noent: false });
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    let mut options: Vec<_> = index
+        .call_argument_values
+        .iter()
+        .filter(|fact| fact.argument_index == 1)
+        .collect();
+    options.sort_by_key(|fact| fact.call_span.start);
+    assert_eq!(options.len(), 2, "{:#?}", index.call_argument_values);
+    assert_eq!(
+        options[0].exact_static_aggregate_fields,
+        vec![
+            bonsai_lang_api::StaticAggregateFieldValue {
+                path: vec!["noent".to_string()],
+                value: StaticScalarValue::Boolean(false),
+            },
+            bonsai_lang_api::StaticAggregateFieldValue {
+                path: vec!["replaceEntities".to_string()],
+                value: StaticScalarValue::Boolean(false),
+            },
+            bonsai_lang_api::StaticAggregateFieldValue {
+                path: vec!["nonet".to_string()],
+                value: StaticScalarValue::Boolean(true),
+            },
+            bonsai_lang_api::StaticAggregateFieldValue {
+                path: vec!["dtdload".to_string()],
+                value: StaticScalarValue::Boolean(false),
+            },
+        ]
+    );
+    assert!(
+        options[1].exact_static_aggregate_fields.is_empty(),
+        "a spread can override a field and must fail closed: {:#?}",
+        options[1]
+    );
+}
+
+#[test]
 fn finite_map_selection_requires_an_immutable_unshadowed_binding_and_literal_fallback() {
     use bonsai_lang_api::LanguageAdapter;
 

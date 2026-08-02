@@ -11,6 +11,21 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// Exact compiler facts and taint lineage shared by value-shape guard
+/// recognizers. Keeping this state together prevents each recognizer from
+/// growing a separate, order-sensitive argument list.
+pub(super) struct CompilerGuardContext<'a> {
+    pub(super) ws: &'a Workspace,
+    pub(super) source: &'a RuleMatch,
+    pub(super) source_func: FuncId,
+    pub(super) sink: &'a RuleMatch,
+    pub(super) sink_rule: &'a Rule,
+    pub(super) candidate_funcs: &'a [FuncId],
+    pub(super) tainted_call_spans: &'a AHashSet<Span>,
+    pub(super) taint_path: &'a [TaintPropagationStep],
+    pub(super) sink_tainted_args: &'a [TaintedArgInfo],
+}
+
 pub(super) fn source_sink_pair_is_low_signal(
     source: &FindingMatch,
     source_rule: Option<&Rule>,
@@ -662,6 +677,760 @@ pub(super) fn character_escape_sanitizer(
         sink_tag,
         "compiler-proven-character-substitution",
     )
+}
+
+pub(super) fn character_constraint_sanitizer(context: &CompilerGuardContext<'_>) -> Option<FindingMatch> {
+    let ws = context.ws;
+    let source = context.source;
+    let source_func = context.source_func;
+    let sink = context.sink;
+    let sink_rule = context.sink_rule;
+    let candidate_funcs = context.candidate_funcs;
+    let tainted_call_spans = context.tainted_call_spans;
+    let taint_path = context.taint_path;
+    let sink_tainted_args = context.sink_tainted_args;
+    let semantics = sink_rule
+        .analysis_semantics
+        .as_ref()?
+        .character_constraint
+        .as_ref()?;
+    for &function in candidate_funcs {
+        let Some(decl) = ws.exact_decl(SymbolId::new(function.raw())) else {
+            continue;
+        };
+        let Some(file_index) = ws.exact_decl_index_shared(decl.span.file) else {
+            continue;
+        };
+        for fact in file_index
+            .character_constraints
+            .iter()
+            .filter(|fact| fact.function_span == decl.span)
+        {
+            let domain = character_domain_excludes(&fact.domain, &semantics.required_excluded_characters);
+            let input = character_constraint_input_is_tainted(
+                &file_index,
+                &decl,
+                fact,
+                source,
+                source_func,
+                function,
+                taint_path,
+            );
+            let output = character_constraint_output_reaches_lineage(
+                ws,
+                &file_index,
+                &decl,
+                fact,
+                tainted_call_spans,
+                taint_path,
+                semantics.required_enclosing_literal_delimiter.as_deref(),
+            );
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "character_constraint_candidate function={} span={:?} domain={} input={} output={}",
+                decl.name,
+                fact.transform_span,
+                domain,
+                input,
+                output
+            );
+            if !domain || !input || !output {
+                continue;
+            }
+            let mut finding = finding_for_guard_span_in_workspace(
+                ws,
+                sink,
+                fact.transform_span,
+                "engine.sanitizer.character_constraint",
+                sink_rule.tag.as_deref()?,
+                "compiler-proven-character-constraint",
+            )?;
+            finding.sanitised_arg_indices = sink_tainted_args
+                .iter()
+                .filter_map(|argument| u32::try_from(argument.index).ok())
+                .collect();
+            return Some(finding);
+        }
+    }
+    if semantics.required_enclosing_literal_delimiter.is_none() {
+        for &caller_func in candidate_funcs {
+            let Some(caller) = ws.exact_decl(SymbolId::new(caller_func.raw())) else {
+                continue;
+            };
+            if !span_contains(caller.span, sink.span) {
+                continue;
+            }
+            let Some(file_index) = ws.exact_decl_index_shared(caller.span.file) else {
+                continue;
+            };
+            let tainted_targets = sink_tainted_args
+                .iter()
+                .flat_map(tainted_arg_target_keys)
+                .collect::<AHashSet<_>>();
+            let tainted_parameters = caller
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(index, parameter)| {
+                    let from_path = taint_path.iter().any(|step| {
+                        step.callee == caller.name
+                            && step
+                                .tainted_args
+                                .iter()
+                                .any(|argument| argument.param_name == *parameter || argument.index == index)
+                    });
+                    let from_source = source_func == caller_func
+                        && place_depends_on_match_span(
+                            &file_index,
+                            parameter,
+                            sink.span,
+                            source.span,
+                            &mut AHashSet::new(),
+                        );
+                    (from_path || from_source).then_some(parameter.as_str())
+                })
+                .collect::<Vec<_>>();
+            if tainted_parameters.is_empty() && source_func != caller_func {
+                continue;
+            }
+            let graph = ws.cached_resolved_call_graph();
+            for composition in file_index.string_compositions.iter().filter(|composition| {
+                composition.container_span.start < sink.span.start
+                    && composition
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| tainted_targets.contains(target))
+            }) {
+                for call_span in composition.parts.iter().filter_map(|part| match part {
+                    bonsai_lang_api::StringCompositionPart::Call { span }
+                    | bonsai_lang_api::StringCompositionPart::CallOrLiteral { span, .. } => Some(*span),
+                    _ => None,
+                }) {
+                    let targets = graph
+                        .callees_of(caller_func)
+                        .filter(|edge| edge.precision.is_semantic() && edge.span == call_span)
+                        .map(|edge| edge.to)
+                        .collect::<AHashSet<_>>();
+                    let mut targets = targets.into_iter();
+                    let Some(helper_func) = targets.next() else {
+                        continue;
+                    };
+                    if targets.next().is_some() {
+                        continue;
+                    }
+                    let Some(helper) = ws.exact_decl(SymbolId::new(helper_func.raw())) else {
+                        continue;
+                    };
+                    let Some(helper_index) = ws.exact_decl_index_shared(helper.span.file) else {
+                        continue;
+                    };
+                    for fact in helper_index.character_constraints.iter().filter(|fact| {
+                        fact.function_span == helper.span
+                            && matches!(fact.output, bonsai_lang_api::CharacterConstraintOutput::Return)
+                            && character_domain_excludes(
+                                &fact.domain,
+                                &semantics.required_excluded_characters,
+                            )
+                    }) {
+                        let Some(input_index) = fact.input_param_index else {
+                            continue;
+                        };
+                        let Some(argument) = bonsai_lang_api::call_argument_value_fact(
+                            &file_index.call_argument_values,
+                            call_span,
+                            input_index,
+                        ) else {
+                            continue;
+                        };
+                        let from_tainted_parameter = tainted_parameters.iter().any(|parameter| {
+                            expression_flow_depends_on_place(
+                                &argument.value_flow,
+                                parameter,
+                                call_span,
+                                &file_index,
+                                &mut AHashSet::new(),
+                            )
+                        });
+                        let from_local_source = source_func == caller_func
+                            && expression_flow_depends_on_match_span(
+                                &argument.value_flow,
+                                &file_index,
+                                call_span,
+                                source.span,
+                            );
+                        if !from_tainted_parameter && !from_local_source {
+                            continue;
+                        }
+                        let mut finding = finding_for_guard_span_in_workspace(
+                            ws,
+                            sink,
+                            fact.transform_span,
+                            "engine.sanitizer.character_constraint",
+                            sink_rule.tag.as_deref()?,
+                            "compiler-proven-character-constraint",
+                        )?;
+                        finding.sanitised_arg_indices = sink_tainted_args
+                            .iter()
+                            .filter_map(|argument| u32::try_from(argument.index).ok())
+                            .collect();
+                        return Some(finding);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn same_origin_path_constraint_sanitizer(
+    context: &CompilerGuardContext<'_>,
+) -> Option<FindingMatch> {
+    let ws = context.ws;
+    let source = context.source;
+    let source_func = context.source_func;
+    let sink = context.sink;
+    let sink_rule = context.sink_rule;
+    let candidate_funcs = context.candidate_funcs;
+    let taint_path = context.taint_path;
+    let sink_tainted_args = context.sink_tainted_args;
+    let required = sink_rule
+        .analysis_semantics
+        .as_ref()?
+        .same_origin_path_constraint
+        .as_ref()?;
+    for &function in candidate_funcs {
+        let decl = ws.exact_decl(SymbolId::new(function.raw()))?;
+        let file_index = ws.exact_decl_index_shared(decl.span.file)?;
+        for fact in file_index
+            .same_origin_path_constraints
+            .iter()
+            .filter(|fact| fact.function_span == decl.span)
+        {
+            if (required.require_scheme_rejection && !fact.rejects_scheme)
+                || (required.require_authority_rejection && !fact.rejects_authority)
+                || (required.require_absolute_path && !fact.requires_absolute_path)
+                || (required.require_scheme_relative_rejection && !fact.rejects_scheme_relative_path)
+            {
+                continue;
+            }
+            let Some(parameter) = decl.params.get(fact.input_param_index) else {
+                continue;
+            };
+            if !taint_path.iter().any(|step| {
+                step.callee == decl.name
+                    && step.tainted_args.iter().any(|argument| {
+                        argument.param_name == *parameter || argument.index == fact.input_param_index
+                    })
+            }) {
+                continue;
+            }
+            let mut finding = finding_for_guard_span_in_workspace(
+                ws,
+                sink,
+                fact.guard_span,
+                "engine.sanitizer.same_origin_path_constraint",
+                sink_rule.tag.as_deref()?,
+                "compiler-proven-same-origin-path-constraint",
+            )?;
+            finding.sanitised_arg_indices = sink_tainted_args
+                .iter()
+                .filter_map(|argument| u32::try_from(argument.index).ok())
+                .collect();
+            return Some(finding);
+        }
+    }
+    for &caller_func in candidate_funcs {
+        let Some(caller) = ws.exact_decl(SymbolId::new(caller_func.raw())) else {
+            continue;
+        };
+        if !span_contains(caller.span, sink.span) {
+            continue;
+        }
+        let Some(file_index) = ws.exact_decl_index_shared(caller.span.file) else {
+            continue;
+        };
+        let tainted_parameters = caller
+            .params
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| {
+                taint_path
+                    .iter()
+                    .any(|step| {
+                        step.callee == caller.name
+                            && step
+                                .tainted_args
+                                .iter()
+                                .any(|argument| argument.param_name == *parameter || argument.index == index)
+                    })
+                    .then_some(parameter.as_str())
+            })
+            .collect::<Vec<_>>();
+        if tainted_parameters.is_empty() && source_func != caller_func {
+            continue;
+        }
+        let mut calls = Vec::new();
+        collect_structured_calls(&caller.flow_events, &mut calls);
+        let Some(sink_call) = calls
+            .iter()
+            .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))
+        else {
+            continue;
+        };
+        for sink_argument_index in sink_tainted_args.iter().map(|argument| argument.index) {
+            let Some(sink_argument) = bonsai_lang_api::call_argument_value_fact(
+                &file_index.call_argument_values,
+                sink_call.span,
+                sink_argument_index,
+            ) else {
+                continue;
+            };
+            let Some(helper_call_span) = sink_argument.direct_call_span else {
+                continue;
+            };
+            let targets = ws
+                .cached_resolved_call_graph()
+                .callees_of(caller_func)
+                .filter(|edge| edge.precision.is_semantic() && edge.span == helper_call_span)
+                .map(|edge| edge.to)
+                .collect::<AHashSet<_>>();
+            let mut targets = targets.into_iter();
+            let Some(helper_func) = targets.next() else {
+                continue;
+            };
+            if targets.next().is_some() {
+                continue;
+            }
+            let Some(helper) = ws.exact_decl(SymbolId::new(helper_func.raw())) else {
+                continue;
+            };
+            let Some(helper_index) = ws.exact_decl_index_shared(helper.span.file) else {
+                continue;
+            };
+            for fact in helper_index
+                .same_origin_path_constraints
+                .iter()
+                .filter(|fact| fact.function_span == helper.span)
+            {
+                if (required.require_scheme_rejection && !fact.rejects_scheme)
+                    || (required.require_authority_rejection && !fact.rejects_authority)
+                    || (required.require_absolute_path && !fact.requires_absolute_path)
+                    || (required.require_scheme_relative_rejection && !fact.rejects_scheme_relative_path)
+                {
+                    continue;
+                }
+                let Some(argument) = bonsai_lang_api::call_argument_value_fact(
+                    &file_index.call_argument_values,
+                    helper_call_span,
+                    fact.input_param_index,
+                ) else {
+                    continue;
+                };
+                let from_tainted_parameter = tainted_parameters.iter().any(|parameter| {
+                    expression_flow_depends_on_place(
+                        &argument.value_flow,
+                        parameter,
+                        helper_call_span,
+                        &file_index,
+                        &mut AHashSet::new(),
+                    )
+                });
+                let from_local_source = source_func == caller_func
+                    && expression_flow_depends_on_match_span(
+                        &argument.value_flow,
+                        &file_index,
+                        helper_call_span,
+                        source.span,
+                    );
+                if !from_tainted_parameter && !from_local_source {
+                    continue;
+                }
+                let mut finding = finding_for_guard_span_in_workspace(
+                    ws,
+                    sink,
+                    fact.guard_span,
+                    "engine.sanitizer.same_origin_path_constraint",
+                    sink_rule.tag.as_deref()?,
+                    "compiler-proven-same-origin-path-constraint",
+                )?;
+                finding.sanitised_arg_indices = sink_tainted_args
+                    .iter()
+                    .filter_map(|argument| u32::try_from(argument.index).ok())
+                    .collect();
+                return Some(finding);
+            }
+        }
+    }
+    None
+}
+
+fn character_domain_excludes(
+    domain: &bonsai_lang_api::CharacterConstraintDomain,
+    required: &[String],
+) -> bool {
+    match domain {
+        bonsai_lang_api::CharacterConstraintDomain::ExcludesExact { characters } => {
+            required.iter().all(|character| characters.contains(character))
+        }
+        bonsai_lang_api::CharacterConstraintDomain::AllowOnly {
+            classes,
+            exact_characters,
+        } => required.iter().all(|required| {
+            !exact_characters.contains(required)
+                && required.chars().next().is_some_and(|character| {
+                    !classes.iter().any(|class| match class {
+                        bonsai_lang_api::CharacterClass::Alphabetic => character.is_alphabetic(),
+                        bonsai_lang_api::CharacterClass::Alphanumeric => character.is_alphanumeric(),
+                        bonsai_lang_api::CharacterClass::Digit => character.is_numeric(),
+                    })
+                })
+        }),
+    }
+}
+
+fn character_constraint_input_is_tainted(
+    file_index: &bonsai_lang_api::DeclIndex,
+    decl: &bonsai_lang_api::Decl,
+    fact: &bonsai_lang_api::CharacterConstraintFact,
+    source: &RuleMatch,
+    source_func: FuncId,
+    function: FuncId,
+    taint_path: &[TaintPropagationStep],
+) -> bool {
+    if source_func == function
+        && place_depends_on_match_span(
+            file_index,
+            &fact.input_place,
+            fact.transform_span,
+            source.span,
+            &mut AHashSet::new(),
+        )
+    {
+        return true;
+    }
+    fact.input_param_index
+        .and_then(|index| decl.params.get(index))
+        .is_some_and(|parameter| {
+            taint_path.iter().any(|step| {
+                step.callee == decl.name
+                    && step.tainted_args.iter().any(|argument| {
+                        argument.param_name == *parameter
+                            || argument.index == fact.input_param_index.unwrap_or(usize::MAX)
+                    })
+            })
+        })
+}
+
+fn place_depends_on_match_span(
+    file_index: &bonsai_lang_api::DeclIndex,
+    place: &str,
+    before: Span,
+    match_span: Span,
+    visited: &mut AHashSet<String>,
+) -> bool {
+    let Some(place) = clean_overwrite_target_key(place) else {
+        return false;
+    };
+    if !visited.insert(place.clone()) {
+        return false;
+    }
+    let assignment = file_index
+        .assignment_values
+        .iter()
+        .filter(|assignment| {
+            assignment.assignment_span.start < before.start
+                && assignment
+                    .target
+                    .as_deref()
+                    .and_then(clean_overwrite_target_key)
+                    .as_deref()
+                    == Some(place.as_str())
+        })
+        .max_by_key(|assignment| (assignment.assignment_span.start, assignment.assignment_span.end));
+    let result = assignment.is_some_and(|assignment| {
+        assignment.call_sites.iter().any(|call| {
+            spans_overlap(*call, match_span)
+                || span_contains(*call, match_span)
+                || span_contains(match_span, *call)
+        }) || assignment.call_sites.iter().any(|call_expression| {
+            file_index.call_receivers.iter().any(|receiver| {
+                receiver.role == bonsai_lang_api::CallReceiverRole::Value
+                    && span_contains(*call_expression, receiver.call_span)
+                    && expression_flow_depends_on_match_span(
+                        &receiver.value_flow,
+                        file_index,
+                        assignment.assignment_span,
+                        match_span,
+                    )
+            })
+        }) || assignment.value_flow.source_names.iter().any(|source| {
+            place_depends_on_match_span(
+                file_index,
+                source,
+                assignment.assignment_span,
+                match_span,
+                visited,
+            )
+        })
+    });
+    visited.remove(&place);
+    result
+}
+
+fn expression_flow_depends_on_match_span(
+    flow: &bonsai_lang_api::ExpressionFlow,
+    file_index: &bonsai_lang_api::DeclIndex,
+    before: Span,
+    match_span: Span,
+) -> bool {
+    flow.place
+        .iter()
+        .chain(flow.source_names.iter())
+        .any(|place| place_depends_on_match_span(file_index, place, before, match_span, &mut AHashSet::new()))
+        || flow
+            .aggregate_fields
+            .iter()
+            .any(|field| expression_flow_depends_on_match_span(&field.value, file_index, before, match_span))
+        || flow
+            .tuple_items
+            .iter()
+            .chain(flow.spreads.iter())
+            .any(|item| expression_flow_depends_on_match_span(item, file_index, before, match_span))
+}
+
+fn character_constraint_output_reaches_lineage(
+    ws: &Workspace,
+    file_index: &bonsai_lang_api::DeclIndex,
+    decl: &bonsai_lang_api::Decl,
+    fact: &bonsai_lang_api::CharacterConstraintFact,
+    tainted_call_spans: &AHashSet<Span>,
+    taint_path: &[TaintPropagationStep],
+    required_delimiter: Option<&str>,
+) -> bool {
+    match &fact.output {
+        bonsai_lang_api::CharacterConstraintOutput::Return => {
+            required_delimiter.is_none()
+                && fact
+                    .input_param_index
+                    .and_then(|index| decl.params.get(index))
+                    .is_some_and(|parameter| {
+                        taint_path.iter().any(|step| {
+                            step.callee == decl.name
+                                && step.tainted_args.iter().any(|argument| {
+                                    argument.param_name == *parameter
+                                        || Some(argument.index) == fact.input_param_index
+                                })
+                        })
+                    })
+        }
+        bonsai_lang_api::CharacterConstraintOutput::Assignment { target } => file_index
+            .call_argument_values
+            .iter()
+            .filter(|argument| {
+                fact.transform_span.start < argument.call_span.start
+                    && argument.call_span.end <= decl.span.end
+                    && (tainted_call_spans.contains(&argument.call_span)
+                        || compiler_call_is_on_taint_path(ws, decl, argument.call_span, taint_path))
+            })
+            .any(|argument| {
+                required_delimiter.map_or_else(
+                    || {
+                        expression_flow_depends_on_place(
+                            &argument.value_flow,
+                            target,
+                            argument.call_span,
+                            file_index,
+                            &mut AHashSet::new(),
+                        )
+                    },
+                    |delimiter| {
+                        expression_flow_depends_on_delimited_place(
+                            &argument.value_flow,
+                            target,
+                            delimiter,
+                            argument.call_span,
+                            file_index,
+                            &mut AHashSet::new(),
+                        )
+                    },
+                )
+            }),
+    }
+}
+
+fn compiler_call_is_on_taint_path(
+    ws: &Workspace,
+    decl: &bonsai_lang_api::Decl,
+    call_span: Span,
+    taint_path: &[TaintPropagationStep],
+) -> bool {
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    let Some(call) = calls.iter().find(|call| call.span == call_span) else {
+        return false;
+    };
+    let Ok(snapshot) = ws.vfs().snapshot(call_span.file) else {
+        return false;
+    };
+    let location = bonsai_common::cached_span_map_arc(call_span.file, snapshot.version, &snapshot.text)
+        .line_col(call_span.start);
+    taint_path.iter().any(|step| {
+        step.caller == decl.name
+            && callee_spelling_tail(&step.callee) == callee_spelling_tail(call.name)
+            && step.line == location.line
+            && step.column == location.column
+    })
+}
+
+fn expression_flow_depends_on_delimited_place(
+    flow: &bonsai_lang_api::ExpressionFlow,
+    wanted: &str,
+    delimiter: &str,
+    before: Span,
+    file_index: &bonsai_lang_api::DeclIndex,
+    visited: &mut AHashSet<String>,
+) -> bool {
+    for place in flow
+        .place
+        .iter()
+        .chain(flow.source_names.iter())
+        .filter_map(|place| clean_overwrite_target_key(place))
+    {
+        if place == wanted || !visited.insert(place.clone()) {
+            continue;
+        }
+        let assignment = file_index
+            .assignment_values
+            .iter()
+            .filter(|assignment| {
+                assignment.assignment_span.start < before.start
+                    && assignment
+                        .target
+                        .as_deref()
+                        .and_then(clean_overwrite_target_key)
+                        .as_deref()
+                        == Some(place.as_str())
+            })
+            .max_by_key(|assignment| (assignment.assignment_span.start, assignment.assignment_span.end));
+        let safe = assignment.is_some_and(|assignment| {
+            file_index.string_compositions.iter().any(|composition| {
+                composition.container_span == assignment.assignment_span
+                    && composition.target.as_deref() == Some(place.as_str())
+                    && composition_encloses_only_place(&composition.parts, wanted, delimiter)
+            }) || expression_flow_depends_on_delimited_place(
+                &assignment.value_flow,
+                wanted,
+                delimiter,
+                assignment.assignment_span,
+                file_index,
+                visited,
+            )
+        });
+        visited.remove(&place);
+        if safe {
+            return true;
+        }
+    }
+    flow.aggregate_fields.iter().any(|field| {
+        expression_flow_depends_on_delimited_place(
+            &field.value,
+            wanted,
+            delimiter,
+            before,
+            file_index,
+            visited,
+        )
+    }) || flow.tuple_items.iter().chain(flow.spreads.iter()).any(|item| {
+        expression_flow_depends_on_delimited_place(item, wanted, delimiter, before, file_index, visited)
+    })
+}
+
+fn composition_encloses_only_place(
+    parts: &[bonsai_lang_api::StringCompositionPart],
+    wanted: &str,
+    delimiter: &str,
+) -> bool {
+    let mut inside = false;
+    let mut saw_wanted = false;
+    for part in parts {
+        match part {
+            bonsai_lang_api::StringCompositionPart::Literal { value } => {
+                if value.matches(delimiter).count() % 2 == 1 {
+                    inside = !inside;
+                }
+            }
+            bonsai_lang_api::StringCompositionPart::Place { place } if place == wanted && inside => {
+                saw_wanted = true;
+            }
+            bonsai_lang_api::StringCompositionPart::Place { .. }
+            | bonsai_lang_api::StringCompositionPart::PlaceOrLiteral { .. }
+            | bonsai_lang_api::StringCompositionPart::Call { .. }
+            | bonsai_lang_api::StringCompositionPart::CallOrLiteral { .. } => return false,
+        }
+    }
+    saw_wanted && !inside
+}
+
+fn expression_flow_depends_on_place(
+    flow: &bonsai_lang_api::ExpressionFlow,
+    wanted: &str,
+    before: Span,
+    file_index: &bonsai_lang_api::DeclIndex,
+    visited: &mut AHashSet<String>,
+) -> bool {
+    let direct = flow
+        .place
+        .iter()
+        .chain(flow.source_names.iter())
+        .filter_map(|place| clean_overwrite_target_key(place))
+        .any(|place| place == wanted);
+    if direct {
+        return true;
+    }
+    for place in flow
+        .place
+        .iter()
+        .chain(flow.source_names.iter())
+        .filter_map(|place| clean_overwrite_target_key(place))
+    {
+        if !visited.insert(place.clone()) {
+            continue;
+        }
+        let depends = file_index
+            .assignment_values
+            .iter()
+            .filter(|assignment| {
+                assignment.assignment_span.start < before.start
+                    && assignment
+                        .target
+                        .as_deref()
+                        .and_then(clean_overwrite_target_key)
+                        .as_deref()
+                        == Some(place.as_str())
+            })
+            .max_by_key(|assignment| (assignment.assignment_span.start, assignment.assignment_span.end))
+            .is_some_and(|assignment| {
+                expression_flow_depends_on_place(
+                    &assignment.value_flow,
+                    wanted,
+                    assignment.assignment_span,
+                    file_index,
+                    visited,
+                )
+            });
+        visited.remove(&place);
+        if depends {
+            return true;
+        }
+    }
+    flow.aggregate_fields
+        .iter()
+        .any(|field| expression_flow_depends_on_place(&field.value, wanted, before, file_index, visited))
+        || flow
+            .tuple_items
+            .iter()
+            .chain(flow.spreads.iter())
+            .any(|item| expression_flow_depends_on_place(item, wanted, before, file_index, visited))
 }
 
 #[derive(Copy, Clone)]
@@ -1620,9 +2389,6 @@ fn path_containment_guard_condition(
     let Some(condition) = branch_condition_fact_for_span(condition_facts, branch.span) else {
         return false;
     };
-    if condition.polarity != BranchConditionPolarity::Negated {
-        return false;
-    }
     let query = ContainmentCheckQuery {
         condition_span: condition.condition_span,
         candidate,
@@ -1630,7 +2396,69 @@ fn path_containment_guard_condition(
         containment_check,
         boundary_places,
     };
-    containment_check_call_before_body(events, &query)
+    let Some(containment_call) = containment_check_call_before_body(events, &query) else {
+        return false;
+    };
+    if condition.polarity == BranchConditionPolarity::Negated {
+        return true;
+    }
+    condition.expression.as_ref().is_some_and(|expression| {
+        path_containment_rejection_is_exact(expression, containment_call, candidate, base)
+    })
+}
+
+/// Prove the common boundary-safe rejection form:
+///
+/// `candidate != base && !contains(candidate, base + separator)`
+///
+/// When the true arm exits abruptly, reaching the following sink means either
+/// exact-base equality or boundary-aware containment. The frontend owns the
+/// boolean/equality syntax; this proof only consumes its typed expression.
+fn path_containment_rejection_is_exact(
+    expression: &ConditionExpressionFact,
+    containment_call: Span,
+    candidate: &str,
+    base: &str,
+) -> bool {
+    let ConditionExpressionFact::All { operands, .. } = expression else {
+        return false;
+    };
+    if operands.len() != 2 {
+        return false;
+    }
+    let rejects_non_contained = operands.iter().any(|operand| {
+        matches!(
+            operand,
+            ConditionExpressionFact::Not { operand, .. }
+                if matches!(operand.as_ref(), ConditionExpressionFact::Atom { span }
+                    if span_contains(*span, containment_call))
+        )
+    });
+    let rejects_non_base = operands.iter().any(|operand| {
+        let ConditionExpressionFact::Equality {
+            relation: ConditionEquality::NotEqual,
+            left,
+            right,
+            ..
+        } = operand
+        else {
+            return false;
+        };
+        (condition_operand_is_exact_place(left, candidate) && condition_operand_is_exact_place(right, base))
+            || (condition_operand_is_exact_place(left, base)
+                && condition_operand_is_exact_place(right, candidate))
+    });
+    rejects_non_contained && rejects_non_base
+}
+
+fn condition_operand_is_exact_place(operand: &ConditionOperandFact, expected: &str) -> bool {
+    operand
+        .value_flow
+        .place
+        .as_deref()
+        .and_then(clean_overwrite_target_key)
+        .as_deref()
+        == Some(expected)
 }
 
 #[derive(Copy, Clone)]
@@ -1642,7 +2470,10 @@ struct ContainmentCheckQuery<'a> {
     boundary_places: &'a [String],
 }
 
-fn containment_check_call_before_body(events: &[FlowEvent], query: &ContainmentCheckQuery<'_>) -> bool {
+fn containment_check_call_before_body(
+    events: &[FlowEvent],
+    query: &ContainmentCheckQuery<'_>,
+) -> Option<Span> {
     for event in events {
         match event {
             FlowEvent::Call {
@@ -1681,7 +2512,7 @@ fn containment_check_call_before_body(events: &[FlowEvent], query: &ContainmentC
                         .iter()
                         .all(|boundary| argument.source_names.iter().any(|source| source == boundary))
                 {
-                    return true;
+                    return Some(*span);
                 }
             }
             FlowEvent::Branch {
@@ -1689,15 +2520,15 @@ fn containment_check_call_before_body(events: &[FlowEvent], query: &ContainmentC
                 else_events,
                 ..
             } => {
-                if containment_check_call_before_body(then_events, query)
-                    || containment_check_call_before_body(else_events, query)
+                if let Some(span) = containment_check_call_before_body(then_events, query)
+                    .or_else(|| containment_check_call_before_body(else_events, query))
                 {
-                    return true;
+                    return Some(span);
                 }
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if containment_check_call_before_body(body, query) {
-                    return true;
+                if let Some(span) = containment_check_call_before_body(body, query) {
+                    return Some(span);
                 }
             }
             FlowEvent::Try {
@@ -1706,17 +2537,17 @@ fn containment_check_call_before_body(events: &[FlowEvent], query: &ContainmentC
                 finally_events,
                 ..
             } => {
-                if [body, catch_events, finally_events]
+                if let Some(span) = [body, catch_events, finally_events]
                     .into_iter()
-                    .any(|region| containment_check_call_before_body(region, query))
+                    .find_map(|region| containment_check_call_before_body(region, query))
                 {
-                    return true;
+                    return Some(span);
                 }
             }
             _ => {}
         }
     }
-    false
+    None
 }
 
 pub(super) fn configured_argument_factory_guard_sanitizer(
@@ -1810,6 +2641,60 @@ pub(super) fn configured_argument_factory_guard_sanitizer(
         sink_rule.tag.as_deref()?,
         "compiler-proven-configured-argument-factory",
     )
+}
+
+pub(super) fn configured_call_argument_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    let guard = sink_rule
+        .analysis_semantics
+        .as_ref()?
+        .configured_call_argument_guard
+        .as_ref()?;
+    let sink_decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let mut calls = Vec::new();
+    collect_structured_calls(&sink_decl.flow_events, &mut calls);
+    let sink_call = calls
+        .iter()
+        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let configuration = sink_call.args.get(guard.configuration_argument_index)?;
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let fact = bonsai_lang_api::call_argument_value_fact(
+        &file_index.call_argument_values,
+        sink_call.span,
+        guard.configuration_argument_index,
+    )?;
+    if guard.required_fields.is_empty()
+        || !guard.required_fields.iter().all(|required| {
+            fact.exact_static_aggregate_fields
+                .iter()
+                .any(|field| field.path == required.path && field.value == required.value)
+        })
+    {
+        return None;
+    }
+    let sanitised_arg_indices: Vec<u32> = sink_tainted_args
+        .iter()
+        .filter(|tainted| guard.guarded_value_argument_indices.contains(&tainted.index))
+        .filter_map(|tainted| u32::try_from(tainted.index).ok())
+        .collect();
+    if sanitised_arg_indices.is_empty() {
+        return None;
+    }
+    let mut finding = finding_for_guard_span_in_workspace(
+        ws,
+        sink,
+        configuration.span,
+        "engine.sanitizer.configured_call_argument_guard",
+        sink_rule.tag.as_deref()?,
+        "compiler-proven-configured-call-argument",
+    )?;
+    finding.sanitised_arg_indices = sanitised_arg_indices;
+    Some(finding)
 }
 
 fn latest_structured_assignment_to(events: &[FlowEvent], before: Span, place: &str) -> Option<Span> {
@@ -2018,8 +2903,8 @@ pub(super) fn url_reconstruction_guard_sanitizer(
     if sink_rule.tag.as_deref() != Some("ssrf") {
         return None;
     }
-    let helper_func = url_reconstruction_helper_for_sink(ws, sink_func, sink, guard, sink_tainted_args)?;
-    let guard_span = compiler_proven_url_reconstruction_guard(ws, helper_func, guard)?;
+    let target = url_reconstruction_target_for_sink(ws, sink_func, sink, guard, sink_tainted_args)?;
+    let guard_span = compiler_proven_url_reconstruction_guard(ws, target, guard)?;
     let mut finding = finding_for_guard_span_in_workspace(
         ws,
         sink,
@@ -2036,13 +2921,21 @@ pub(super) fn url_reconstruction_guard_sanitizer(
     Some(finding)
 }
 
-fn url_reconstruction_helper_for_sink(
+#[derive(Copy, Clone)]
+struct UrlReconstructionTarget {
+    function: FuncId,
+    /// Assignment that binds the reconstructed value. `None` means the
+    /// reconstructed value is the helper's sole return expression.
+    output_span: Option<Span>,
+}
+
+fn url_reconstruction_target_for_sink(
     ws: &Workspace,
     sink_func: FuncId,
     sink: &RuleMatch,
     guard: &crate::rule::UrlReconstructionGuardSemantics,
     sink_tainted_args: &[TaintedArgInfo],
-) -> Option<FuncId> {
+) -> Option<UrlReconstructionTarget> {
     let sink_decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let sink_file_index = ws.exact_decl_index_shared(sink.span.file)?;
     let mut sink_calls = Vec::new();
@@ -2068,6 +2961,28 @@ fn url_reconstruction_helper_for_sink(
         .filter(|argument| argument.index == guard.sink_argument_index)
         .flat_map(tainted_arg_target_keys)
         .collect();
+    if let Some(argument_place) = sink_argument
+        .place
+        .as_deref()
+        .and_then(clean_overwrite_target_key)
+    {
+        if tainted_targets.contains(&argument_place) {
+            if let Some(composition) = sink_file_index
+                .string_compositions
+                .iter()
+                .filter(|fact| {
+                    fact.container_span.start < sink.span.start
+                        && fact.target.as_deref() == Some(argument_place.as_str())
+                })
+                .max_by_key(|fact| (fact.container_span.start, fact.container_span.end))
+            {
+                return Some(UrlReconstructionTarget {
+                    function: sink_func,
+                    output_span: Some(composition.container_span),
+                });
+            }
+        }
+    }
     let helper_call = sink_calls
         .iter()
         .filter(|call| {
@@ -2098,15 +3013,18 @@ fn url_reconstruction_helper_for_sink(
     if helper_targets.next().is_some() {
         return None;
     }
-    Some(helper_func)
+    Some(UrlReconstructionTarget {
+        function: helper_func,
+        output_span: None,
+    })
 }
 
 fn compiler_proven_url_reconstruction_guard(
     ws: &Workspace,
-    helper_func: FuncId,
+    target: UrlReconstructionTarget,
     guard: &crate::rule::UrlReconstructionGuardSemantics,
 ) -> Option<Span> {
-    let helper_decl = ws.exact_decl(SymbolId::new(helper_func.raw()))?;
+    let helper_decl = ws.exact_decl(SymbolId::new(target.function.raw()))?;
     if helper_decl.params.len() != 1 {
         return None;
     }
@@ -2119,16 +3037,27 @@ fn compiler_proven_url_reconstruction_guard(
         &mut helper_assignments,
     );
     helper_assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    let output_span = if let Some(span) = target.output_span {
+        span
+    } else {
+        let mut returns = Vec::new();
+        collect_return_bindings(&helper_decl.flow_events, &mut returns);
+        let [(return_span, _)] = returns.as_slice() else {
+            return None;
+        };
+        *return_span
+    };
     let parser_assignment = helper_assignments.iter().rev().find(|assignment| {
-        assignment.source_call.is_some_and(|call| {
-            rule_target_matches_call(call, &[], &guard.parser)
-                && assignment
-                    .source_call_args
-                    .first()
-                    .and_then(|argument| clean_overwrite_target_key(argument))
-                    .as_deref()
-                    == Some(input.as_str())
-        })
+        assignment.span.start < output_span.start
+            && assignment.source_call.is_some_and(|call| {
+                rule_target_matches_call(call, &[], &guard.parser)
+                    && assignment
+                        .source_call_args
+                        .first()
+                        .and_then(|argument| clean_overwrite_target_key(argument))
+                        .as_deref()
+                        == Some(input.as_str())
+            })
     })?;
     let parsed = clean_overwrite_target_key(parser_assignment.target)?;
 
@@ -2140,16 +3069,11 @@ fn compiler_proven_url_reconstruction_guard(
     }
     let mut branches = Vec::new();
     collect_all_structured_branches(&helper_decl.flow_events, &mut branches);
-    let mut returns = Vec::new();
-    collect_return_bindings(&helper_decl.flow_events, &mut returns);
-    let [(return_span, _)] = returns.as_slice() else {
-        return None;
-    };
     let scheme_guard = branches
         .iter()
         .filter(|branch| {
             parser_assignment.span.start < branch.span.start
-                && branch.span.start < return_span.start
+                && branch.span.start < output_span.start
                 && branch_arm_abruptly_exits(branch.then_events)
         })
         .find(|branch| {
@@ -2169,7 +3093,7 @@ fn compiler_proven_url_reconstruction_guard(
         .iter()
         .filter(|branch| {
             scheme_guard.span.start <= branch.span.start
-                && branch.span.start < return_span.start
+                && branch.span.start < output_span.start
                 && branch_arm_abruptly_exits(branch.then_events)
         })
         .find(|branch| {
@@ -2188,29 +3112,32 @@ fn compiler_proven_url_reconstruction_guard(
                     )
                 })
         })?;
-    let composition = helper_file_index
-        .string_compositions
-        .iter()
-        .find(|fact| fact.container_span == *return_span)?;
-    if !url_reconstruction_composition_is_exact(composition, &parsed, guard) {
+    let composition = helper_file_index.string_compositions.iter().find(|fact| {
+        fact.container_span == output_span
+            || spans_overlap(fact.container_span, output_span)
+            || span_contains(fact.container_span, output_span)
+            || span_contains(output_span, fact.container_span)
+    })?;
+    if !url_reconstruction_composition_is_exact(composition, &parsed, guard, &helper_calls) {
         return None;
     }
-    let scheme_field = guard.scheme.component.field.as_deref()?;
-    let host_field = guard.host_allowlist.component.field.as_deref()?;
-    let path_field = guard.path_component.field.as_deref()?;
-    if [
-        parsed.clone(),
-        format!("{parsed}.{scheme_field}"),
-        format!("{parsed}.{host_field}"),
-        format!("{parsed}.{path_field}"),
-    ]
-    .iter()
-    .any(|place| {
+    let mut immutable_places = vec![parsed.clone()];
+    immutable_places.extend(
+        [
+            guard.scheme.component.field.as_deref(),
+            guard.host_allowlist.component.field.as_deref(),
+            guard.path_component.field.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|field| format!("{parsed}.{field}")),
+    );
+    if immutable_places.iter().any(|place| {
         place_is_assigned_between(
             &helper_decl.flow_events,
             place,
             parser_assignment.span.end,
-            return_span.start,
+            output_span.start,
         )
     }) {
         return None;
@@ -2241,37 +3168,90 @@ fn url_reconstruction_composition_is_exact(
     composition: &bonsai_lang_api::StringCompositionFact,
     parsed: &str,
     guard: &crate::rule::UrlReconstructionGuardSemantics,
+    calls: &[StructuredCall<'_>],
 ) -> bool {
-    let [StringCompositionPart::Literal { value: prefix }, StringCompositionPart::Place { place: host }, StringCompositionPart::PlaceOrLiteral {
-        place: path,
-        fallback,
-    }] = composition.parts.as_slice()
-    else {
+    let [StringCompositionPart::Literal { value: prefix }, host, path] = composition.parts.as_slice() else {
         return false;
     };
     let Some(scheme) = prefix.strip_suffix("://") else {
         return false;
     };
-    let Some(scheme_field) = guard.scheme.component.field.as_deref() else {
-        return false;
-    };
-    let Some(host_field) = guard.host_allowlist.component.field.as_deref() else {
-        return false;
-    };
-    let Some(path_field) = guard.path_component.field.as_deref() else {
-        return false;
-    };
+    let host_matches = string_composition_part_reads_url_component(
+        host,
+        parsed,
+        &guard.host_allowlist.component,
+        calls,
+        None,
+    );
+    let path_matches = string_composition_part_reads_url_component(
+        path,
+        parsed,
+        &guard.path_component,
+        calls,
+        Some(&guard.path_fallback),
+    );
     guard
         .scheme
         .allowed_values
         .iter()
         .any(|allowed| allowed == scheme)
-        && host == &format!("{parsed}.{host_field}")
-        && path == &format!("{parsed}.{path_field}")
-        && fallback == &guard.path_fallback
-        && scheme_field != host_field
-        && scheme_field != path_field
-        && host_field != path_field
+        && host_matches
+        && path_matches
+}
+
+fn string_composition_part_reads_url_component(
+    part: &StringCompositionPart,
+    parsed: &str,
+    component: &crate::rule::UrlComponentSemantics,
+    calls: &[StructuredCall<'_>],
+    fallback: Option<&str>,
+) -> bool {
+    match (part, fallback) {
+        (StringCompositionPart::Place { place }, None) => component
+            .field
+            .as_deref()
+            .is_some_and(|field| place == &format!("{parsed}.{field}")),
+        (
+            StringCompositionPart::PlaceOrLiteral {
+                place,
+                fallback: actual,
+            },
+            Some(required),
+        ) => {
+            actual == required
+                && component
+                    .field
+                    .as_deref()
+                    .is_some_and(|field| place == &format!("{parsed}.{field}"))
+        }
+        (StringCompositionPart::Call { span }, None) => {
+            url_component_call_matches(*span, parsed, component, calls)
+        }
+        (
+            StringCompositionPart::CallOrLiteral {
+                span,
+                fallback: actual,
+            },
+            Some(required),
+        ) => actual == required && url_component_call_matches(*span, parsed, component, calls),
+        _ => false,
+    }
+}
+
+fn url_component_call_matches(
+    span: Span,
+    parsed: &str,
+    component: &crate::rule::UrlComponentSemantics,
+    calls: &[StructuredCall<'_>],
+) -> bool {
+    let Some(accessor) = component.accessor.as_ref() else {
+        return false;
+    };
+    calls.iter().any(|call| {
+        call.span == span
+            && call.receiver.and_then(clean_overwrite_target_key).as_deref() == Some(parsed)
+            && rule_target_matches_call(call.name, call.receiver_types, accessor)
+    })
 }
 
 fn url_guard_root_place(
@@ -3732,6 +4712,17 @@ fn finding_for_guard_span_in_workspace(
         .unwrap_or_default()
         .trim()
         .to_string();
+    let enclosing_fn = ws
+        .exact_decl_index_shared(span.file)
+        .and_then(|index| {
+            index
+                .defs
+                .iter()
+                .filter(|decl| span_contains(decl.body_span.unwrap_or(decl.span), span))
+                .min_by_key(|decl| decl.span.len())
+                .map(|decl| decl.name.clone())
+        })
+        .or_else(|| hit.enclosing_fn.clone());
     Some(FindingMatch {
         origin: MatchOrigin::EngineSanitizer,
         rule_id: rule_id.to_string(),
@@ -3739,7 +4730,7 @@ fn finding_for_guard_span_in_workspace(
         line,
         column,
         text,
-        enclosing_fn: hit.enclosing_fn.clone(),
+        enclosing_fn,
         tag: Some(tag.to_string()),
         severity: None,
         category: Some(category.to_string()),

@@ -258,6 +258,12 @@
     kind: return
     target:
       regex: '(?is)<\s*(?:!doctype|html|body|script|div|span|p|a|img|svg|iframe|h[1-6]|ul|ol|li|table|form|input|textarea|button|br|hr)\b|&lt;'
+  analysis_semantics:
+    # Prefer the exact raw-HTML composition boundary when that same proven
+    # XSS flow is later passed to a framework transport sink. The engine
+    # still requires a strict compiler-call-chain prefix; unrelated XSS
+    # sinks and the distinct SSTI parse sink remain separate findings.
+    sink_terminal_priority: 100
   match_examples:
   - name: raw html helper return with tainted expression
     code: |

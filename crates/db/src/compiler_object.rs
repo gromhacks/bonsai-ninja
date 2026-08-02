@@ -51,7 +51,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 20;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 22;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;
@@ -219,9 +219,53 @@ struct LegacyCompilerObjectFileMetadataV11 {
 pub(crate) struct CompilerObjectStore {
     reader: FactStoreReader,
     metadata: CompilerObjectMetadata,
+    attribution_indexes: parking_lot::Mutex<CompilerAttributionIndexCache>,
+    attribution_index_budget_bytes: u64,
     /// Keeps a scoped compiler session's directory alive until the last
     /// reader is dropped. Persistent workspace sidecars leave this empty.
     _temporary_root: Option<Arc<tempfile::TempDir>>,
+}
+
+#[derive(Debug)]
+struct CachedCompilerAttributionIndex {
+    index: Arc<CompilerAttributionIndex>,
+    estimated_bytes: u64,
+}
+
+#[derive(Debug)]
+struct CompilerAttributionIndexCache {
+    entries: lru::LruCache<FileId, CachedCompilerAttributionIndex>,
+    estimated_bytes: u64,
+}
+
+impl Default for CompilerAttributionIndexCache {
+    fn default() -> Self {
+        Self {
+            entries: lru::LruCache::unbounded(),
+            estimated_bytes: 0,
+        }
+    }
+}
+
+fn compiler_attribution_index_cache_budget_bytes() -> u64 {
+    const DEFAULT_BYTES: u64 = 16 * 1024 * 1024;
+    const MIN_BYTES: u64 = 1024 * 1024;
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+    bonsai_common::effective_memory_limit_bytes()
+        .map(|limit| (limit / 256).clamp(MIN_BYTES, MAX_BYTES))
+        .unwrap_or(DEFAULT_BYTES)
+}
+
+fn estimated_compiler_attribution_index_bytes(index: &CompilerAttributionIndex) -> u64 {
+    u64::try_from(std::mem::size_of::<CompilerAttributionIndex>())
+        .unwrap_or(u64::MAX)
+        .saturating_add(
+            u64::try_from(index.frames.capacity())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(
+                    u64::try_from(std::mem::size_of::<CompilerAttributionFrame>()).unwrap_or(u64::MAX),
+                ),
+        )
 }
 
 impl CompilerObjectStore {
@@ -254,6 +298,8 @@ impl CompilerObjectStore {
         Ok(Self {
             reader,
             metadata,
+            attribution_indexes: parking_lot::Mutex::new(CompilerAttributionIndexCache::default()),
+            attribution_index_budget_bytes: compiler_attribution_index_cache_budget_bytes(),
             _temporary_root: temporary_root,
         })
     }
@@ -456,10 +502,19 @@ impl CompilerObjectStore {
     fn load_attribution_index(
         &self,
         descriptor: &SourceDescriptor,
-    ) -> std::io::Result<Option<CompilerAttributionIndex>> {
+    ) -> std::io::Result<Option<Arc<CompilerAttributionIndex>>> {
         let Some(metadata) = self.metadata_for(descriptor) else {
             return Ok(None);
         };
+        if let Some(index) = self
+            .attribution_indexes
+            .lock()
+            .entries
+            .get(&descriptor.file)
+            .map(|entry| Arc::clone(&entry.index))
+        {
+            return Ok(Some(index));
+        }
         if metadata.attribution_payload_len < ATTRIBUTION_PAYLOAD_PREFIX_BYTES as u32 {
             return Err(invalid_data("compiler-object attribution payload is truncated"));
         }
@@ -485,6 +540,31 @@ impl CompilerObjectStore {
         let mut index: CompilerAttributionIndex = wire::decode(&index_bytes).map_err(invalid_wire)?;
         index.frames_payload_offset = frames_payload_offset;
         validate_compiler_attribution_index(&index, metadata)?;
+        let index = Arc::new(index);
+        let estimated_bytes = estimated_compiler_attribution_index_bytes(&index);
+        if self.attribution_index_budget_bytes != 0 && estimated_bytes <= self.attribution_index_budget_bytes
+        {
+            let mut cache = self.attribution_indexes.lock();
+            if let Some(existing) = cache.entries.get(&descriptor.file) {
+                return Ok(Some(Arc::clone(&existing.index)));
+            }
+            cache.estimated_bytes = cache.estimated_bytes.saturating_add(estimated_bytes);
+            if let Some((_file, replaced)) = cache.entries.push(
+                descriptor.file,
+                CachedCompilerAttributionIndex {
+                    index: Arc::clone(&index),
+                    estimated_bytes,
+                },
+            ) {
+                cache.estimated_bytes = cache.estimated_bytes.saturating_sub(replaced.estimated_bytes);
+            }
+            while cache.estimated_bytes > self.attribution_index_budget_bytes {
+                let Some((_file, evicted)) = cache.entries.pop_lru() else {
+                    break;
+                };
+                cache.estimated_bytes = cache.estimated_bytes.saturating_sub(evicted.estimated_bytes);
+            }
+        }
         Ok(Some(index))
     }
 
@@ -2289,6 +2369,14 @@ mod tests {
             .load_attribution_index(&descriptor)
             .expect("load frame index")
             .expect("frame index");
+        let reused_index = original
+            .load_attribution_index(&descriptor)
+            .expect("reuse frame index")
+            .expect("cached frame index");
+        assert!(
+            Arc::ptr_eq(&index, &reused_index),
+            "immutable frame directories should decode once per live compiler generation"
+        );
         assert_eq!(index.frames.len(), 2);
         let first_span = index.frames[0].declaration_span;
         let second_span = index.frames[1].declaration_span;

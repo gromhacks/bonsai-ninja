@@ -48,6 +48,10 @@ impl DeclIndex {
                         place.shrink_to_fit();
                         fallback.shrink_to_fit();
                     }
+                    crate::StringCompositionPart::Call { .. } => {}
+                    crate::StringCompositionPart::CallOrLiteral { fallback, .. } => {
+                        fallback.shrink_to_fit();
+                    }
                 }
             }
             fact.parts.shrink_to_fit();

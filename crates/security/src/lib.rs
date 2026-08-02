@@ -67,13 +67,15 @@ pub use report::{
     SecurityReport,
 };
 pub use rule::{
-    AnalysisSemantics, ArgTaintedSpec, ConfiguredArgumentFactoryGuardSemantics, ConstraintKind,
-    ContextFlowRole, ContextFlowSemantics, FlowClass, GuardProfile, MatchKind, MatchOrigin, MatchSpec,
+    AnalysisSemantics, ArgTaintedSpec, CharacterConstraintSemantics, ConfiguredArgumentFactoryGuardSemantics,
+    ConfiguredCallArgumentGuardSemantics, ConstraintKind, ContextFlowRole, ContextFlowSemantics,
+    DynamicKeyDenylistGuardSemantics, FlowClass, GuardProfile, MatchKind, MatchOrigin, MatchSpec,
     MustAliasSpec, NoSqlFilterSemantics, ParameterizedQuerySemantics, PathConsumerContainmentGuardSemantics,
     PathContainmentGuardSemantics, PayloadType, PostSinkPolicy, RelativePathContainmentGuardSemantics,
-    RequiredNamedArgumentSemantics, RequiresStateSpec, Rule, RuleConstraint, RuleKind, RuleTarget,
-    RuntimeTypeSpec, Severity, TrustClass, UrlComponentSemantics, UrlDnsGuardSemantics,
-    UrlGuardRootSemantics, UrlHostAllowlistSemantics, UrlNetworkGuardSemantics,
-    UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics, UrlSchemeGuardSemantics,
+    RequiredAggregateFieldSemantics, RequiredNamedArgumentSemantics, RequiresStateSpec, Rule, RuleConstraint,
+    RuleKind, RuleTarget, RuntimeTypeSpec, SameOriginPathConstraintSemantics, Severity, TrustClass,
+    UrlComponentSemantics, UrlDnsGuardSemantics, UrlGuardRootSemantics, UrlHostAllowlistSemantics,
+    UrlNetworkGuardSemantics, UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics,
+    UrlSchemeGuardSemantics,
 };
 pub use sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};

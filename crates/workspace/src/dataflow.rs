@@ -113,8 +113,8 @@ pub struct SerializableSnapshot {
 }
 
 /// Caller-defined table id for the dataflow fact-store sidecar.
-/// Distinguishes a dataflow fact-store from a value-flow one when
-/// they share the `.bonsai/` directory.
+/// Distinguishes a dataflow fact-store from a value-flow one when they share
+/// one workspace namespace below the operating-system cache root.
 const DATAFLOW_FACTSTORE_TABLE_ID: u32 = 2;
 
 /// Pipeline-hash field in the factstore header. Folds the matcher

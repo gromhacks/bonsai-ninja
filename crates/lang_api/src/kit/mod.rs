@@ -79,8 +79,9 @@ pub use runtime_types::extract_runtime_type_narrowing_facts;
 
 pub(crate) use direct_calls::extract_direct_call_info;
 use direct_calls::{
-    extract_dart_selector_call_info, first_call_descendant, next_named_sibling_within,
-    parameter_list_is_variadic, qualified_method_name_node, synthetic_function_name,
+    direct_call_wrapper_kind, extract_dart_selector_call_info, first_call_descendant, grouping_list_kind,
+    next_named_sibling_within, parameter_list_is_variadic, qualified_method_name_node,
+    synthetic_function_name,
 };
 use identifiers::has_direct_child_kind;
 use param_extraction::extract_param_names;
@@ -4524,6 +4525,18 @@ pub fn extract_call_argument_value_facts(
     defs: &[crate::Decl],
     src: &[u8],
 ) -> Vec<crate::CallArgumentValueFact> {
+    fn direct_call_callee_span(node: Node<'_>, file: FileId, src: &[u8]) -> Option<Span> {
+        if COMMON_CALL_KINDS.contains(&node.kind()) {
+            return parsed_call_target(&node, src).map(|target| span_of(file, &target.node));
+        }
+        let single_expr_grouping = grouping_list_kind(node.kind()) && node.named_child_count() == 1;
+        if !direct_call_wrapper_kind(node.kind()) && !single_expr_grouping {
+            return None;
+        }
+        let child = first_named_child(&node)?;
+        direct_call_callee_span(child, file, src)
+    }
+
     fn collect_requests(events: &[FlowEvent], out: &mut Vec<(Span, usize, Span)>) {
         for event in events {
             match event {
@@ -4585,26 +4598,34 @@ pub fn extract_call_argument_value_facts(
 
     let mut facts = Vec::new();
     for (call_span, argument_index, argument_span) in requests {
-        let value_flow = nodes_by_span
+        let selected = nodes_by_span
             .get(&(argument_span.start, argument_span.end))
             .and_then(|nodes| {
                 nodes
                     .iter()
-                    .map(|node| expression_flow_from_node(argument_value_node(*node), file, src))
-                    .max_by_key(|flow| {
+                    .map(|node| {
+                        let value = argument_value_node(*node);
+                        (
+                            expression_flow_from_node(value, file, src),
+                            direct_call_callee_span(value, file, src),
+                        )
+                    })
+                    .max_by_key(|(flow, _)| {
                         (
                             flow.aggregate_fields.len() + flow.tuple_items.len() + flow.spreads.len(),
                             usize::from(!flow.is_empty()),
                         )
                     })
             });
-        if let Some(value_flow) = value_flow.filter(|flow| !flow.is_empty()) {
+        if let Some((value_flow, direct_call_span)) = selected.filter(|(flow, _)| !flow.is_empty()) {
             facts.push(crate::CallArgumentValueFact {
                 call_span,
                 argument_index,
                 argument_span,
+                direct_call_span,
                 value_flow,
                 static_value: None,
+                exact_static_aggregate_fields: Vec::new(),
             });
         }
     }
@@ -4695,25 +4716,36 @@ pub fn populate_call_argument_static_values(
     }
 
     for (call_span, argument_index, argument_span) in requests {
-        let Some(static_value) = argument_nodes
-            .get(&(argument_span.start, argument_span.end))
-            .and_then(|node| decode(argument_value_node(*node), src))
-        else {
+        let Some(argument_node) = argument_nodes.get(&(argument_span.start, argument_span.end)) else {
             continue;
         };
+        let value_node = argument_value_node(*argument_node);
+        let static_value = decode(value_node, src);
+        let exact_static_aggregate_fields =
+            expression_flow::exact_static_aggregate_fields(value_node, src, decode).unwrap_or_default();
+        if static_value.is_none() && exact_static_aggregate_fields.is_empty() {
+            continue;
+        }
         if let Some(fact) = index
             .call_argument_values
             .iter_mut()
             .find(|fact| fact.call_span == call_span && fact.argument_index == argument_index)
         {
-            fact.static_value = Some(static_value);
+            fact.static_value = static_value;
+            fact.exact_static_aggregate_fields = exact_static_aggregate_fields;
         } else {
             index.call_argument_values.push(crate::CallArgumentValueFact {
                 call_span,
                 argument_index,
                 argument_span,
+                direct_call_span: if COMMON_CALL_KINDS.contains(&value_node.kind()) {
+                    parsed_call_target(&value_node, src).map(|target| span_of(file, &target.node))
+                } else {
+                    None
+                },
                 value_flow: Default::default(),
-                static_value: Some(static_value),
+                static_value,
+                exact_static_aggregate_fields,
             });
         }
     }
@@ -5434,6 +5466,9 @@ pub fn decl_index_with_handler(
         string_compositions: Vec::new(),
         finite_literal_selections: Vec::new(),
         character_substitutions: Vec::new(),
+        character_constraints: Vec::new(),
+        same_origin_path_constraints: Vec::new(),
+        dynamic_key_filters: Vec::new(),
         runtime_type_narrowings,
         branch_conditions,
         aggregate_layouts: Vec::new(),

@@ -278,7 +278,7 @@ fn compact_sidecar(path: &str) -> String {
     let Some(file_name) = path.rsplit(['/', '\\']).next().filter(|name| !name.is_empty()) else {
         return path.to_string();
     };
-    format!(".bonsai/{file_name}")
+    format!("$CACHE_DIR/{file_name}")
 }
 
 #[cfg(test)]
@@ -322,7 +322,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "taint graph cache: disk hit · resident config refreshed · sidecar .bonsai/taint_graph.v9.taint-analysis.0123456789abcdef.factstore · 6 disk entries · resident before 0/0 · total before 0 · 0 temp files removed · write-through on"
+            "taint graph cache: disk hit · resident config refreshed · sidecar $CACHE_DIR/taint_graph.v9.taint-analysis.0123456789abcdef.factstore · 6 disk entries · resident before 0/0 · total before 0 · 0 temp files removed · write-through on"
         );
         assert!(!rendered.contains("/tmp/work"));
         assert!(!rendered.contains("disk_entries="));
@@ -337,7 +337,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "taint graph cache: disk hit · sidecar .bonsai/taint_graph.v9.taint-analysis.0123456789abcdef.factstore · 6 disk entries"
+            "taint graph cache: disk hit · sidecar $CACHE_DIR/taint_graph.v9.taint-analysis.0123456789abcdef.factstore · 6 disk entries"
         );
         assert!(!rendered.contains(r"C:\work"));
         assert!(!rendered.contains("disk_entries="));

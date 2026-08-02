@@ -2148,6 +2148,17 @@ pub enum StringCompositionPart {
         place: String,
         fallback: String,
     },
+    /// Result of one exact call expression in the composition. The rulepack
+    /// assigns security meaning to the callee/receiver; the adapter records
+    /// only the parsed value relationship.
+    Call {
+        span: Span,
+    },
+    /// Exact call result with a language-level null/falsey fallback.
+    CallOrLiteral {
+        span: Span,
+        fallback: String,
+    },
 }
 
 /// A complete string composition lowered from one parsed expression.
@@ -2157,6 +2168,10 @@ pub struct StringCompositionFact {
     pub container_span: Span,
     /// The exact parsed value-expression node.
     pub value_span: Span,
+    /// Assignment target when the composition is bound before use. Return
+    /// compositions leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     pub parts: Vec<StringCompositionPart>,
 }
 
@@ -2195,6 +2210,82 @@ pub struct CharacterSubstitutionFact {
     pub input_param_index: usize,
     pub table: String,
     pub domain: CharacterSubstitutionDomain,
+}
+
+/// Language-runtime character classes whose output alphabet is exact.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CharacterClass {
+    Alphabetic,
+    Alphanumeric,
+    Digit,
+}
+
+/// Compiler-proven alphabet constraint produced by a local transform.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CharacterConstraintDomain {
+    /// Output consists only of characters accepted by these runtime classes
+    /// or the listed exact scalar characters.
+    AllowOnly {
+        classes: Vec<CharacterClass>,
+        exact_characters: Vec<String>,
+    },
+    /// Every listed character is absent from the output.
+    ExcludesExact { characters: Vec<String> },
+}
+
+/// Where a character-constrained value is produced.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CharacterConstraintOutput {
+    Assignment { target: String },
+    Return,
+}
+
+/// A complete Tree-sitter/runtime proof that one value has a constrained
+/// output alphabet. API spellings and regex syntax stay in the adapter.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterConstraintFact {
+    pub function_span: Span,
+    pub transform_span: Span,
+    pub input_place: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_param_index: Option<usize>,
+    pub output: CharacterConstraintOutput,
+    pub domain: CharacterConstraintDomain,
+}
+
+/// Compiler/runtime proof that a helper returns only a same-origin absolute
+/// path or a static fallback. The owning adapter proves each language's URL
+/// and string predicate syntax; shared analysis consumes this summary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SameOriginPathConstraintFact {
+    pub function_span: Span,
+    pub guard_span: Span,
+    pub input_param_index: usize,
+    pub rejects_scheme: bool,
+    pub rejects_authority: bool,
+    pub requires_absolute_path: bool,
+    pub rejects_scheme_relative_path: bool,
+}
+
+/// Exact summary of a local helper that drops a finite set of dynamic keys
+/// before reconstructing an object. The adapter proves loop/control/write
+/// ordering and whether nested values pass through the same helper.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DynamicKeyFilterFact {
+    pub function_span: Span,
+    pub guard_span: Span,
+    pub input_param_index: usize,
+    /// Constructor that owns the exact static denylist. The adapter records
+    /// syntax identity only; the rulepack decides whether that constructor is
+    /// meaningful for a particular sink.
+    pub collection_constructor: String,
+    /// Membership predicate that rejects each denylisted key.
+    pub membership_check: String,
+    pub rejected_exact_values: Vec<String>,
+    pub recursive: bool,
 }
 
 /// One branch-local runtime type refinement proven by parsed guard syntax.
@@ -2404,10 +2495,29 @@ pub struct CallArgumentValueFact {
     pub call_span: Span,
     pub argument_index: usize,
     pub argument_span: Span,
+    /// Callee span when the complete argument expression is one direct call
+    /// (possibly through a transparent language wrapper). Nested calls do
+    /// not populate this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_call_span: Option<Span>,
     pub value_flow: ExpressionFlow,
     /// Exact scalar value decoded by the owning language frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_value: Option<StaticScalarValue>,
+    /// Complete, spread-free aggregate fields whose scalar values were
+    /// decoded by the owning language frontend. Field names and literals
+    /// come from Tree-sitter nodes; consumers must not parse `value_text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exact_static_aggregate_fields: Vec<StaticAggregateFieldValue>,
+}
+
+/// One exact field in a compiler-lowered aggregate call argument.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaticAggregateFieldValue {
+    /// Field path from the argument root. Nested aggregates use one segment
+    /// per statically named field.
+    pub path: Vec<String>,
+    pub value: StaticScalarValue,
 }
 
 /// Language-decoded scalar literal used by exact semantic guards.
@@ -2593,6 +2703,15 @@ pub struct DeclIndex {
     /// Local character-substitution helper summaries decoded from syntax.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub character_substitutions: Vec<CharacterSubstitutionFact>,
+    /// Exact local alphabet constraints lowered by the owning frontend.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub character_constraints: Vec<CharacterConstraintFact>,
+    /// Exact same-origin path summaries lowered by the owning frontend.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub same_origin_path_constraints: Vec<SameOriginPathConstraintFact>,
+    /// Exact local dynamic-key filter summaries lowered by the frontend.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dynamic_key_filters: Vec<DynamicKeyFilterFact>,
     /// Parsed branch-local type refinements keyed by their guarded arm.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_type_narrowings: Vec<RuntimeTypeNarrowingFact>,

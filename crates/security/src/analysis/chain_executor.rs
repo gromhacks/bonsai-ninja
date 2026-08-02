@@ -373,7 +373,7 @@ impl SourceGroupExecutor<'_> {
             );
             return false;
         }
-        if prototype_pollution_sink_is_guarded(self.ws, sink_rule, sink) {
+        if prototype_pollution_sink_is_guarded(self.ws, sink_rule, sink, call) {
             bonsai_diagnostics::debug_log!(
                 "security-taint",
                 "sink_match_guarded source_rule={} sink_rule={} caller={} call={} span={:?}",

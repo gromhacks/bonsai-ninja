@@ -888,7 +888,10 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
         || semantics.dynamic_key_denylist_guard.is_some()
         || semantics.receiver_factory_guard.is_some()
         || semantics.configured_argument_factory_guard.is_some()
+        || semantics.configured_call_argument_guard.is_some()
         || semantics.character_escape.is_some()
+        || semantics.character_constraint.is_some()
+        || semantics.same_origin_path_constraint.is_some()
         || semantics.url_network_guard.is_some()
         || semantics.url_reconstruction_guard.is_some()
         || semantics.context_flow.is_some()
@@ -900,7 +903,61 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             "error",
             "invalid-analysis-semantics",
             Some(rule),
-            "sink_terminal_priority, guard_profile, path_containment_guard, path_consumer_containment_guard, relative_path_containment_guard, parameterized_query, nosql_filter, dynamic_key_denylist_guard, receiver_factory_guard, configured_argument_factory_guard, character_escape, url_network_guard, url_reconstruction_guard, context_flow, and post_sink_policy are only valid on sink rules",
+            "sink_terminal_priority, guard_profile, path_containment_guard, path_consumer_containment_guard, relative_path_containment_guard, parameterized_query, nosql_filter, dynamic_key_denylist_guard, receiver_factory_guard, configured_argument_factory_guard, configured_call_argument_guard, character_escape, character_constraint, same_origin_path_constraint, url_network_guard, url_reconstruction_guard, context_flow, and post_sink_policy are only valid on sink rules",
+        );
+    }
+    if let Some(guard) = semantics.configured_call_argument_guard.as_ref() {
+        let invalid = guard.guarded_value_argument_indices.is_empty()
+            || guard.required_fields.is_empty()
+            || guard
+                .required_fields
+                .iter()
+                .any(|field| field.path.is_empty() || field.path.iter().any(|part| part.trim().is_empty()));
+        if invalid {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-analysis-semantics",
+                Some(rule),
+                "configured_call_argument_guard requires guarded value indices and non-empty exact field paths",
+            );
+        }
+    }
+    if semantics.character_constraint.as_ref().is_some_and(|guard| {
+        guard.required_excluded_characters.is_empty()
+            || guard
+                .required_excluded_characters
+                .iter()
+                .any(|character| character.chars().count() != 1)
+            || guard
+                .required_enclosing_literal_delimiter
+                .as_ref()
+                .is_some_and(|delimiter| delimiter.chars().count() != 1)
+    }) {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "character_constraint requires non-empty single-character exclusions and, when present, a single-character enclosing delimiter",
+        );
+    }
+    if semantics
+        .same_origin_path_constraint
+        .as_ref()
+        .is_some_and(|guard| {
+            !guard.require_scheme_rejection
+                && !guard.require_authority_rejection
+                && !guard.require_absolute_path
+                && !guard.require_scheme_relative_rejection
+        })
+    {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-analysis-semantics",
+            Some(rule),
+            "same_origin_path_constraint must require at least one proven boundary",
         );
     }
     let path_profile = semantics.guard_profile == Some(GuardProfile::PythonPathContainment);
@@ -1126,13 +1183,15 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             || !callable_target(&guard.membership_check)
             || guard.rejected_exact_values.is_empty()
             || guard.rejected_exact_values.iter().any(String::is_empty)
+            || (guard.require_recursive_filter && guard.filtered_value_argument_index.is_none())
+            || (!guard.require_recursive_filter && guard.filtered_value_argument_index.is_some())
         {
             push_validation_issue(
                 issues,
                 "error",
                 "invalid-analysis-semantics",
                 Some(rule),
-                "dynamic_key_denylist_guard requires callable constructor/membership targets and non-empty rejected_exact_values",
+                "dynamic_key_denylist_guard requires callable constructor/membership targets, non-empty rejected_exact_values, and a filtered_value_argument_index exactly when recursive filtering is required",
             );
         }
         for (role, target) in [
@@ -1363,12 +1422,13 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                     .as_ref()
                     .is_some_and(|regex| !regex.trim().is_empty())
         };
-        let exact_field = |component: &crate::rule::UrlComponentSemantics| {
-            component
-                .field
-                .as_ref()
-                .is_some_and(|field| !field.trim().is_empty())
-                && component.accessor.is_none()
+        let exact_component = |component: &crate::rule::UrlComponentSemantics| match (
+            component.field.as_deref(),
+            component.accessor.as_ref(),
+        ) {
+            (Some(field), None) => !field.trim().is_empty(),
+            (None, Some(accessor)) => callable_target(accessor),
+            _ => false,
         };
         let required_names: AHashSet<_> = guard
             .required_sink_named_arguments
@@ -1376,18 +1436,26 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
             .map(|argument| argument.name.trim())
             .collect();
         if !callable_target(&guard.parser)
-            || !exact_field(&guard.scheme.component)
-            || guard.scheme.comparison_predicate.is_some()
+            || !exact_component(&guard.scheme.component)
+            || guard
+                .scheme
+                .comparison_predicate
+                .as_ref()
+                .is_some_and(|target| !callable_target(target))
             || guard.scheme.allowed_values.is_empty()
             || guard.scheme.allowed_values.iter().any(|value| value.is_empty())
-            || !exact_field(&guard.host_allowlist.component)
-            || guard.host_allowlist.membership_predicate.is_some()
+            || !exact_component(&guard.host_allowlist.component)
+            || guard
+                .host_allowlist
+                .membership_predicate
+                .as_ref()
+                .is_some_and(|target| !callable_target(target))
             || guard
                 .host_allowlist
                 .static_collection_factories
                 .iter()
                 .any(|target| !callable_target(target))
-            || !exact_field(&guard.path_component)
+            || !exact_component(&guard.path_component)
             || guard.path_fallback.is_empty()
             || required_names.len() != guard.required_sink_named_arguments.len()
             || required_names.iter().any(|name| name.is_empty())
@@ -1397,7 +1465,7 @@ fn validate_analysis_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue
                 "error",
                 "invalid-analysis-semantics",
                 Some(rule),
-                "url_reconstruction_guard requires callable parser/static-collection targets, exact field components, non-empty allowed schemes/path fallback, and unique non-empty sink argument names",
+                "url_reconstruction_guard requires callable parser/static-collection targets, exact field-or-accessor components, non-empty allowed schemes/path fallback, and unique non-empty sink argument names",
             );
         }
         for (role, target) in std::iter::once(("parser", &guard.parser)).chain(

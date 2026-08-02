@@ -66,6 +66,13 @@ before opening the IDG, batch-resolve matching AST spans, and reuse a sparse
 backward target-demand proof. Reintroducing one unrestricted closure per
 lexical hit is both a latency and peak-memory regression.
 
+The same gate protects two warm-start complexity bounds. Dense IDG compiler
+headers remain fixed-width and buffered rather than being decoded through a
+generic row/object codec, and occurrence deduplication remains an exact hash
+identity operation rather than a scan of all previously emitted hits. These
+are representation and algorithm constraints only; neither permits a semantic
+cap, approximate equality, or skipped integrity validation.
+
 Default warm ceilings are 15 seconds for semantic index reuse and 30 seconds
 for each query/analysis command. Dedicated slower performance hosts can
 calibrate `BONSAI_ES_WARM_INDEX_MAX_SECS`,

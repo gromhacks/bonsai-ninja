@@ -2773,7 +2773,7 @@ const IDG_WORKSPACE_TABLE_ID: u32 = 101;
 // distinct so compiler demand preserves boundary direction; sparse call-return
 // spans stay body projections and unified node directories use bounded
 // counting partitions so the resident compiler core remains proportional.
-const IDG_WORKSPACE_VERSION: u32 = 22;
+const IDG_WORKSPACE_VERSION: u32 = 23;
 const IDG_QUERY_ACCELERATOR_CONTAINER_VERSION: u32 = 1;
 const IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES: u64 = 256 * 1024 * 1024;
 

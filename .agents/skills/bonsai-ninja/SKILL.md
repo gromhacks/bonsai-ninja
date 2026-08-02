@@ -278,6 +278,10 @@ For each reported issue, retain:
 - precision and completeness;
 - reviewed page or cursor coverage.
 
+Treat `TAINT TRANSFORM` / `taint-transform` steps as propagation evidence,
+not sanitization. Only `SANITIZER` steps and `sanitizer_rule_ids` can explain a
+sanitized status.
+
 Reopen evidence:
 
 ```shell

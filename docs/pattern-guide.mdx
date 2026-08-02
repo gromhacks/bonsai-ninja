@@ -498,11 +498,13 @@ the engine must not hardcode every library method.
   description: "URLDecoder.decode(s, charset) preserves taint from s."
 ```
 
-Keep these as sanitizer/passthrough rules with a non-crediting tag such
-as `passthrough-decode` or `passthrough-transform`; they are transfer
-facts, not evidence that a sink has been sanitized. Do not replace this
-with a generic engine heuristic, because unrelated application methods
-with similar names may validate, ignore, or transform different operands.
+These transfer declarations live in the sanitizer rule directory for pack
+compatibility, but they are passthrough rules with a non-crediting tag such as
+`passthrough-decode` or `passthrough-transform`. They are rendered and emitted
+as `TAINT TRANSFORM` / `taint-transform`, never as sanitizer evidence. Do not
+replace this with a generic engine heuristic, because unrelated application
+methods with similar names may validate, ignore, or transform different
+operands.
 The matcher normalizes common qualified-name separators (`.`, `::`, `->`,
 and Erlang `:`), so structured callee attributes can represent language
 surface syntax without hardcoding that API in Rust code.
@@ -514,6 +516,16 @@ argument slots in the rulepack, for example Objective-C
 arguments with `call_result_passthrough_args: [1, 2, 3, 4, 5]`. The rule
 should carry a passthrough tag such as `passthrough-transform` so it
 extends flow without granting sanitizer clearance.
+
+For hand-written guards, do not add the local helper name to a global
+sanitizer inventory. Use a sink's typed `analysis_semantics` only when the
+relevant adapter emits an exact value-shape summary. Supported proof families
+include `character_constraint`, `same_origin_path_constraint`,
+`dynamic_key_denylist_guard`, `configured_call_argument_guard`, and
+`url_reconstruction_guard`. Each family fails closed on ambiguity or partial
+syntax and must have a positive and a one-condition-broken negative test. See
+[Security Specification](security-spec.mdx#compiler-proven-guard-semantics)
+and [Adapter Contract](contributing/adapter-contract.mdx#value-shape-summary-contract).
 
 For receiver-return transforms, use
 `taint_semantics.call_result_passthrough_receiver: true` instead of a

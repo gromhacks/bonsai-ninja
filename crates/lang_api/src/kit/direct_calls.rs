@@ -100,11 +100,11 @@ pub(crate) fn extract_direct_call_info(node: &Node<'_>, src: &[u8]) -> Option<(O
 /// exactly ONE expression it is a transparent wrapper around that single
 /// expression; with more than one it is a genuine multi-value series and
 /// must not be collapsed to its first call.
-fn grouping_list_kind(kind: &str) -> bool {
+pub(super) fn grouping_list_kind(kind: &str) -> bool {
     matches!(kind, "expression_list" | "expressions" | "expression_series")
 }
 
-fn direct_call_wrapper_kind(kind: &str) -> bool {
+pub(super) fn direct_call_wrapper_kind(kind: &str) -> bool {
     matches!(
         kind,
         "field_expression"
