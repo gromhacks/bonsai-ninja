@@ -30,22 +30,26 @@ pub use idg_api::{
 };
 pub use idg_build::{
     build_resolved_call_graph_snapshot, build_resolved_call_graph_snapshot_for_files,
-    compiler_idg_file_semantics, compiler_idg_service, ensure_idg_service,
+    build_resolved_call_graph_snapshot_with_headers, compiler_idg_file_semantics, compiler_idg_service,
+    ensure_idg_service,
 };
 pub use idg_query::{
-    IdgReturnQuery, IdgTaintQuery, IdgTaintSeed, IdgTaintSource, IdgTaintTargets, IdgTaintTransfers,
+    IdgReturnQuery, IdgTaintCallScope, IdgTaintQuery, IdgTaintSeed, IdgTaintSource, IdgTaintTargets,
+    IdgTaintTransfers,
 };
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{
     apply_configured_transfer_fixpoint, compose_idg_seed_nodes, compose_idg_seed_nodes_with_decl,
     default_entry_graph_seed, default_entry_taint_seed, entry_taint_call_records_from_idg,
     entry_taint_call_records_from_idg_query, entry_taint_graph_from_idg, entry_taint_graph_from_idg_query,
-    inspect_entry_taint_graph_from_idg_with_target_funcs, merge_into, name_reachable_through_chain_kinded,
-    name_reachable_through_decl_kinded, name_reachable_through_file_kinded,
-    name_reachable_through_func_kinded, source_seed_reaches_return_from_idg,
-    source_seed_reaches_return_from_idg_query, taint_facts_and_graph_for_entry,
-    taint_facts_and_graph_for_entry_with_caches, taint_facts_for_entry, EntryTaintGraph, FactKind,
-    IdgSeedRequest, KindedTokens, TaintedCallEdge, TokenSet,
+    inspect_entry_taint_graph_from_idg_with_target_funcs,
+    inspect_entry_taint_graph_from_idg_with_target_funcs_and_lineage,
+    inspect_entry_taint_graph_from_idg_with_target_funcs_and_lineage_with_caches, merge_into,
+    name_reachable_through_chain_kinded, name_reachable_through_decl_kinded,
+    name_reachable_through_file_kinded, name_reachable_through_func_kinded,
+    source_seed_reaches_return_from_idg, source_seed_reaches_return_from_idg_query,
+    taint_facts_and_graph_for_entry, taint_facts_and_graph_for_entry_with_caches, taint_facts_for_entry,
+    EntryTaintGraph, FactKind, IdgSeedRequest, KindedTokens, TaintedCallEdge, TokenSet,
 };
 pub use value_flow::{
     value_flow_for_function, value_flow_for_function_with_caches, ProvenanceMarker, ProvenanceSet,

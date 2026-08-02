@@ -65,6 +65,39 @@ fn callable_func_ids(db: &AnalyzerDb) -> Vec<FuncId> {
 }
 
 #[test]
+fn structural_flow_ids_distinguish_same_named_declarations() {
+    let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
+    let db = build_db_with(
+        &[
+            ("a.py", "def run():\n    return 1\n"),
+            ("b.py", "def run():\n    return 2\n"),
+        ],
+        adapter,
+    );
+    let global = db.global_index();
+    let mut runs = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .filter(|decl| decl.name == "run")
+        .map(|decl| FuncId::new(decl.symbol.raw()))
+        .collect::<Vec<_>>();
+    runs.sort_by_key(|func| func.raw());
+    assert_eq!(runs.len(), 2);
+
+    let first = compute_structural_flow_id(global.as_ref(), &db, db.vfs(), &[runs[0]]);
+    let second = compute_structural_flow_id(global.as_ref(), &db, db.vfs(), &[runs[1]]);
+    assert_ne!(
+        first, second,
+        "same display names in different compiler declarations need distinct stable ids"
+    );
+    assert_eq!(
+        first,
+        compute_structural_flow_id(global.as_ref(), &db, db.vfs(), &[runs[0]]),
+        "the same exact compiler path must hash deterministically"
+    );
+}
+
+#[test]
 fn batch_labels_match_scalar_labels() {
     let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
     let db = build_db_with(
@@ -260,7 +293,7 @@ fn sidecar_rejects_changed_dependency_metadata() {
         adapter.clone(),
     );
     let root = tempdir_for_test("flow-ids-sidecar-deps");
-    std::fs::create_dir(root.join(".bonsai")).expect("create .bonsai");
+    crate::cache_fingerprint::register_workspace_cache_root(&root).expect("bind workspace cache");
     std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"demo\"\n").expect("write pyproject");
     let path = FlowIdCache::sidecar_path(&root);
 

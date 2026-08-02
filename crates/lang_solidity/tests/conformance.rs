@@ -43,6 +43,61 @@ fn solidity_adapter_populates_parameter_type_aliases() {
 }
 
 #[test]
+fn solidity_library_is_a_type_owner_for_class_side_dispatch() {
+    let adapter = bonsai_lang_solidity::SolidityAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("Demo.sol"),
+        "library Util { function helper(string memory p) internal pure { sink(p); } } \
+         contract Demo { function entry(string memory args) public pure { Util.helper(args); } }",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let library = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Util")
+        .expect("library declaration");
+    assert_eq!(library.kind, DeclKind::Class);
+    let helper = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "helper")
+        .expect("library function");
+    assert_eq!(helper.parent, Some(library.symbol));
+    assert!(
+        helper
+            .qualified_name
+            .as_deref()
+            .is_some_and(|name| name.ends_with("::Util::helper")),
+        "library function should carry lexical owner identity: {:?}",
+        helper.qualified_name
+    );
+
+    let entry = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "entry")
+        .expect("entry function");
+    assert!(entry.flow_events.iter().any(|event| {
+        matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                receiver: Some(receiver),
+                ..
+            } if name == "Util.helper" && receiver == "Util"
+        )
+    }));
+}
+
+#[test]
 fn solidity_adapter_call_result_assignment_uses_call_metadata_only() {
     let adapter = bonsai_lang_solidity::SolidityAdapter::new();
     let vfs = Vfs::new();

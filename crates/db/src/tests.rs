@@ -492,6 +492,62 @@ fn scoped_workspace_reuses_complete_objects_by_stable_file_identity() {
 }
 
 #[test]
+fn scoped_semantic_session_lazily_reuses_complete_objects_by_stable_file_identity() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let full_vfs = Arc::new(Vfs::new());
+    let first_path = root.path().join("first.py");
+    let candidate_path = root.path().join("candidate.py");
+    full_vfs.write(
+        first_path.to_string_lossy().into_owned(),
+        "def first():\n    return 1\n",
+    );
+    let candidate = full_vfs.write(
+        candidate_path.to_string_lossy().into_owned(),
+        "def candidate():\n    return 2\n",
+    );
+    let declaration_calls = Arc::new(AtomicUsize::new(0));
+    let import_calls = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(CountingPythonAdapter {
+        declaration_calls: Arc::clone(&declaration_calls),
+        import_calls,
+    }));
+    let full_db = AnalyzerDb::new(full_vfs, Arc::clone(&registry));
+    full_db.set_workspace_root(root.path().to_path_buf());
+    assert_eq!(
+        full_db
+            .save_compiler_object_sidecar(root.path())
+            .expect("save complete compiler objects"),
+        2
+    );
+    assert_eq!(declaration_calls.load(Ordering::SeqCst), 2);
+
+    let scoped_vfs = Arc::new(Vfs::new());
+    scoped_vfs.write_with_id(
+        candidate,
+        candidate_path.to_string_lossy().into_owned(),
+        "def candidate():\n    return 2\n",
+    );
+    let scoped_db = AnalyzerDb::new(scoped_vfs, registry);
+    scoped_db.set_scoped_workspace_root(root.path().to_path_buf());
+    assert_eq!(
+        scoped_db
+            .ensure_compiler_object_session(&[candidate])
+            .expect("reuse complete compiler generation lazily"),
+        0,
+        "a semantic phase must open matching persisted objects instead of rebuilding a scoped session"
+    );
+    assert!(scoped_db.compiler_file_object_uncached(candidate).is_some());
+    assert_eq!(
+        declaration_calls.load(Ordering::SeqCst),
+        2,
+        "lazy scoped semantic reuse must not re-run the Tree-sitter adapter"
+    );
+}
+
+#[test]
 fn scoped_compiler_object_session_reuses_ir_without_publishing_a_partial_sidecar() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -586,6 +642,37 @@ fn compiler_object_generation_preserves_parser_diagnostics() {
             .iter()
             .any(|diagnostic| diagnostic.code.as_deref() == Some("syntax-error")),
         "object diagnostics must publish through the ordinary database facade"
+    );
+}
+
+#[test]
+fn successful_compiler_lowering_records_empty_diagnostic_coverage() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("clean.py");
+    let vfs = Arc::new(Vfs::new());
+    let file = vfs.write(
+        path.to_string_lossy().into_owned(),
+        "def clean():\n    return 1\n",
+    );
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+    let db = AnalyzerDb::new(Arc::clone(&vfs), registry);
+
+    assert!(!db.compiler_diagnostics_are_current(file));
+    assert!(db.compiler_syntax_header_uncached(file).is_some());
+    assert!(
+        db.compiler_diagnostics_are_current(file),
+        "a successful zero-diagnostic lowering must satisfy later coverage audits"
+    );
+
+    vfs.write(
+        path.to_string_lossy().into_owned(),
+        "def changed():\n    return 2\n",
+    );
+    db.invalidate_file(file);
+    assert!(
+        !db.compiler_diagnostics_are_current(file),
+        "editing a file must invalidate its diagnostic coverage marker"
     );
 }
 

@@ -51,3 +51,92 @@ fun apply(value: String): String {
     assert!(aliases[0].2.is_empty());
     assert_eq!(aliases[0].3, &Some(AssignValueKind::CallableReference));
 }
+
+#[test]
+fn singleton_object_owns_methods_and_types_class_side_dispatch() {
+    use bonsai_lang_api::LanguageAdapter;
+    use std::sync::Arc;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(KotlinAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Singleton.kt",
+            "object Box { fun helper(p: String) { sink(p) } }\n\
+             fun entry(args: String) { Box.helper(args) }\n",
+        )],
+    );
+    let global = ws.db().global_index();
+    let object = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.kind == DeclKind::Class && decl.name == "Box")
+        .expect("singleton object declaration");
+    let helper = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "helper")
+        .expect("object method declaration");
+    assert_eq!(helper.kind, DeclKind::Method);
+    assert_eq!(helper.parent, Some(object.symbol));
+
+    let entry = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .expect("entry declaration");
+    let call = entry
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call {
+                name,
+                receiver,
+                receiver_types,
+                ..
+            } if name == "Box.helper" => Some((receiver, receiver_types)),
+            _ => None,
+        })
+        .expect("class-side call fact");
+    assert_eq!(call.0.as_deref(), Some("Box"));
+    assert_eq!(call.1, &["Box"]);
+}
+
+#[test]
+fn singleton_object_does_not_steal_nested_local_function_ownership() {
+    use bonsai_lang_api::LanguageAdapter;
+    use std::sync::Arc;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(KotlinAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Nested.kt",
+            "object Box {\n\
+                 fun helper(p: String) {\n\
+                   fun nested(q: String) { sink(q) }\n\
+                   nested(p)\n\
+                 }\n\
+             }\n",
+        )],
+    );
+    let global = ws.db().global_index();
+    let object = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.kind == DeclKind::Class && decl.name == "Box")
+        .expect("singleton object declaration");
+    let helper = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "helper")
+        .expect("direct object method");
+    let nested = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "nested")
+        .expect("nested local function");
+    assert_eq!(helper.parent, Some(object.symbol));
+    assert_eq!(nested.parent, Some(helper.symbol));
+    assert_ne!(nested.parent, Some(object.symbol));
+}

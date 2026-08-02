@@ -157,6 +157,13 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn is_test_rs_source(path: &Path) -> bool {
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    path.components().any(|part| part.as_os_str() == "tests")
+        || file_name == "tests.rs"
+        || file_name.ends_with("_tests.rs")
+}
+
 fn production_analysis_complete_true_occurrences(root: &Path) -> BTreeSet<String> {
     let mut files = Vec::new();
     collect_rs_files(&root.join("crates"), &mut files);
@@ -600,6 +607,9 @@ fn taint_crate_has_no_language_name_branches() {
         .collect::<Vec<_>>();
     let mut violations: Vec<String> = Vec::new();
     for path in &files {
+        if is_test_rs_source(path) {
+            continue;
+        }
         let text = read(path);
         // Strip everything after a `#[cfg(test)]` annotation — test
         // modules are allowed to mention concrete adapter crates
@@ -868,7 +878,7 @@ fn taint_crate_has_no_concrete_adapter_imports_in_runtime() {
     let mut violations: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&taint_src).expect("read taint src") {
         let path = entry.expect("dir entry").path();
-        if path.extension().is_none_or(|x| x != "rs") {
+        if path.extension().is_none_or(|x| x != "rs") || is_test_rs_source(&path) {
             continue;
         }
         let text = read(&path);
@@ -1448,6 +1458,21 @@ fn syntax_inventory_commands_never_materialize_workspace_bodies() {
             "{name} must stream file-local Tree-sitter IR and apply query predicates before collecting output rows"
         );
     }
+
+    let imports = read(&root.join("crates/browse/src/imports.rs"));
+    let imports_body = function_body(&imports, "imports");
+    let linkage_init = imports_body
+        .find("then(|| ws.compiler_linkage_index())")
+        .expect("imports with flow bindings must initialize linkage");
+    let parallel_loop = imports_body
+        .find(".par_iter()")
+        .expect("imports must retain parallel file streaming");
+    assert!(
+        linkage_init < parallel_loop
+            && !function_body(&imports, "resolve_workspace_module_bindings")
+                .contains("compiler_linkage_index()"),
+        "imports must initialize lazy workspace linkage before entering its Rayon file loop"
+    );
 
     let cli_browse = read(&root.join("crates/cli/src/commands/browse.rs"));
     assert!(
@@ -2568,8 +2593,8 @@ fn public_idg_taint_wrappers_are_semantic_by_default() {
 /// A canonical IDG query already owns the compact, exact compiler linkage
 /// used to build or validate that graph. Query execution must reuse it rather
 /// than materializing a second workspace-wide body index. Exact function
-/// bodies are streamed by the attribution cache only for functions that
-/// contribute rendered evidence.
+/// bodies are not required for rulepack-free inspect seeding or rendered call
+/// attribution; function frames are decoded only for contributing evidence.
 #[test]
 fn idg_taint_queries_reuse_canonical_linkage_without_global_body_materialization() {
     let root = repo_root();
@@ -2578,7 +2603,6 @@ fn idg_taint_queries_reuse_canonical_linkage_without_global_body_materialization
     let summaries = read(&root.join("crates/taint/src/idg_api/summary.rs"));
 
     for function in [
-        "inspect_entry_taint_graph_from_idg_with_target_funcs",
         "source_seed_reaches_return_from_idg_query",
         "entry_taint_call_records_from_idg_query",
         "entry_taint_graph_from_idg_query",
@@ -2593,10 +2617,34 @@ fn idg_taint_queries_reuse_canonical_linkage_without_global_body_materialization
             "{function} must not materialize every workspace body during an IDG query"
         );
     }
+    let inspect_wrapper = function_body(&reachable, "inspect_entry_taint_graph_from_idg_with_target_funcs");
+    let inspect_implementation = function_body(
+        &reachable,
+        "inspect_entry_taint_graph_from_idg_with_target_funcs_and_lineage_with_caches",
+    );
     assert!(
-        function_body(&reachable, "inspect_entry_taint_graph_from_idg_with_target_funcs")
+        inspect_wrapper.contains("inspect_entry_taint_graph_from_idg_with_target_funcs_and_lineage")
+            && inspect_implementation.contains("global_linkage_index()")
+            && !inspect_implementation.contains("db.global_index()"),
+        "rulepack-free inspect wrappers must terminate at the canonical IDG compiler linkage"
+    );
+    assert!(
+        function_body(
+            &reachable,
+            "inspect_entry_taint_graph_from_idg_with_target_funcs_and_lineage_with_caches"
+        )
+        .contains("read_or_write_names_of_func")
+            && function_body(
+                &reachable,
+                "inspect_entry_taint_graph_from_idg_with_target_funcs_and_lineage_with_caches"
+            )
+            .contains("IdgTaintSource::precomposed")
+            && !function_body(
+                &reachable,
+                "inspect_entry_taint_graph_from_idg_with_target_funcs_and_lineage_with_caches"
+            )
             .contains("exact_decl_for_func"),
-        "rulepack-free inspect must preserve local AST seed semantics with one exact compiler body"
+        "rulepack-free inspect must seed from exact IDG places and compact params without reopening compiler bodies"
     );
 
     for function in [
@@ -2754,12 +2802,12 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
             && call_records_body.contains("renderable_cross_calls_from_closure")
             && closure_compiler_body.contains("apply_configured_transfer_fixpoint")
             && closure_compiler_body.contains("closure_evidence_with_targets")
-            && closure_compiler_body.contains("symbolic_cross_calls")
-            && cross_call_compiler_body
-                .contains("cross_call_edges_in_reachable_nodes_filtered_with_max_precision")
+            && closure_compiler_body.contains("cross_calls: evidence.cross_calls")
+            && cross_call_compiler_body.contains("let mut edges = cross_calls")
+            && !cross_call_compiler_body.contains("cross_call_edges_in_reachable_nodes")
             && cross_call_compiler_body.contains("is_renderable_call")
             && cross_call_compiler_body.contains("lineage_funcs"),
-        "IDG call-record export used by source-analysis must preserve symbolic provenance, support target/lineage cuts and configured transfers, and never render projected heap state as a call"
+        "IDG call-record export used by source-analysis must retain traversed scalar and symbolic provenance without a second workspace scan, support target/lineage cuts and configured transfers, and never render projected heap state as a call"
     );
 
     let trace_call_body = function_body(&workspace_trace, "emit_call");
@@ -2799,10 +2847,10 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
         cli_inspect.contains("analysis_complete: bool")
             && cli_inspect.contains("analysis_incomplete_reasons: Vec<String>")
             && cli_inspect.contains("refresh_inspect_completeness")
-            && cli_inspect.contains("inspect occurrence flow evidence capped by")
-            && cli_inspect.contains("inspect decl flow evidence capped by")
-            && cli_inspect.contains("inspect hit list capped by"),
-        "inspect must expose top-level completeness metadata for capped hit/flow evidence"
+            && !cli_inspect.contains("inspect occurrence flow evidence capped by")
+            && !cli_inspect.contains("inspect decl flow evidence capped by")
+            && !cli_inspect.contains("inspect hit list capped by"),
+        "inspect must expose top-level completeness metadata without semantic hit/flow caps"
     );
     let inspect_call_span_body = function_body(&inspect_call_edges, "find_call_span_to_func");
     assert!(
@@ -2849,14 +2897,17 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
             && !security_taint_body.contains("Unknown"),
         "security taint-analysis must run one semantic taint precision mode without exposing diagnostic precision filters"
     );
-    let export_callgraph_body = function_body(&native_export, "export_structural_callgraph_indices");
+    let export_callgraph_body = function_body(&native_export, "export_structural_callgraph_count");
     assert!(
         export_callgraph_body.contains("edge.precision.is_semantic()"),
         "native export structural callgraph must emit semantic call edges only"
     );
-    let export_taint_call_edges_body = function_body(&native_export, "export_taint_call_edge_indices");
     assert!(
-        export_taint_call_edges_body.contains("edge.precision.is_semantic()"),
+        native_export.contains("struct ExportTaintCallEdgesStreaming")
+            && native_export
+                .matches("filter(|edge| edge.precision.is_semantic())")
+                .count()
+                >= 4,
         "native export taint call_edges must emit semantic call edges only"
     );
 
@@ -2874,21 +2925,20 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     let dump_taint_body = function_body(&browse_taint, "dump_taint");
     assert!(
         dump_taint_body.contains("ws.exact_decl(source_symbol)")
-            && dump_taint_body.contains("default_entry_taint_seed(source_decl)")
+            && dump_taint_body.contains("default_entry_taint_seed(source_decl.as_ref())")
             && dump_taint_body.contains("compose_idg_seed_nodes_with_decl")
-            && dump_taint_body.contains("source_decl,"),
+            && dump_taint_body.contains("source_decl.as_ref(),"),
         "dump-taint must stream the selected Tree-sitter body into default-seed derivation and canonical IDG seed composition"
     );
     assert!(
         dump_taint_body.contains("forward_closure_evidence_with_max_precision")
-            && dump_taint_body.contains("symbolic_cross_calls")
+            && dump_taint_body.contains("closure_evidence.cross_calls")
             && dump_taint_body.contains("Some(SEMANTIC_FLOW_MAX_PRECISION)"),
-        "dump-taint must compute its seed closure and symbolic provenance inside the semantic precision scope"
+        "dump-taint must compute its seed closure and traversed call provenance inside the semantic precision scope"
     );
     assert!(
-        dump_taint_body.contains("cross_call_edges_in_reachable_nodes_with_max_precision")
-            && dump_taint_body.contains("Some(SEMANTIC_FLOW_MAX_PRECISION)"),
-        "dump-taint must filter cross-call evidence to semantic precision"
+        !dump_taint_body.contains("cross_call_edges_in_reachable_nodes_with_max_precision"),
+        "dump-taint must consume provenance captured by the closure instead of rescanning the workspace IDG"
     );
     assert!(
         !dump_taint_body.contains("with_max_precision(&seed_nodes, None")
@@ -2951,14 +3001,17 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     );
     let main_body = read(&root.join("crates/cli/src/main.rs"));
     assert!(
-        main_body.contains("(usize::MAX, usize::MAX, usize::MAX)") && !main_body.contains("usize::MAX / 16"),
-        "inspect --all must pass uncapped max_flows/max_entry_probes/max_hits"
+        !export_args.contains("max_flows:")
+            && !export_args.contains("max_entry_probes:")
+            && !export_args.contains("max_hits:")
+            && !main_body.contains("usize::MAX / 16"),
+        "inspect must not expose semantic max-flow, probe, or hit caps"
     );
     assert!(
         !export_args.contains("complete_chains: bool")
             && sdk.contains("impl Default for NativeExportOptions")
             && !sdk.contains("pub complete_chains: bool")
-            && main_body.contains("cmd_export(&workspace, full_propagations, all, format)"),
+            && main_body.contains("cmd_export(&workspace, full_propagations, format)"),
         "CLI and default SDK export must always use the exact compressed chain relation without a cap-oriented mode switch"
     );
     let chain_enumerator_body = read(&root.join("crates/callgraph/src/chains.rs"));
@@ -3092,7 +3145,7 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
         body.contains("SyntaxFlowQuery::new")
             && body.contains("ws.syntax_flow_session")
             && body.contains("ws.syntax_flow_graph")
-            && body.contains("semantic_flow_stats.record_plan(&graph.plan)"),
+            && body.contains("semantic_flow_stats.record_plan(&plan)"),
         "inspect_taint_flows must ask the workspace syntax-flow facade for short-lived exact semantic sessions and retain planner metadata"
     );
     assert!(
@@ -3131,12 +3184,12 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
             && render_function.contains("ws.exact_decl_index_shared(file)")
             && !render_function.contains("global_index()")
             && function_body(&workspace, "exact_decl_index_shared")
-                .contains("compiler_header_index()")
+                .contains("compiler_index_for_exact_bodies()")
             && !function_body(&workspace, "exact_decl_index_shared")
-                .contains("compiler_linkage_index()")
-            && function_body(&workspace, "exact_decl").contains("compiler_header_index()")
+                .contains("global_index()")
+            && function_body(&workspace, "exact_decl").contains("compiler_index_for_exact_bodies()")
             && !function_body(&workspace, "exact_decl").contains("compiler_linkage_index()"),
-        "inspect must use compact compiler headers for matching and hydrate only selected exact file bodies in syntax and semantic modes"
+        "inspect must use compact compiler headers for matching and hydrate selected exact file bodies through the active header/linkage generation"
     );
     for forbidden in [
         "dataflow().graph_for",
@@ -3154,18 +3207,22 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
     let flow_query = read(&root.join("crates/workspace/src/flow_query.rs"));
     let inspect_query = read(&root.join("crates/inspect/src/query.rs"));
     let session = function_body(&flow_query, "syntax_flow_session");
+    let compile_session = function_body(&flow_query, "compile_syntax_flow_session");
     assert!(
         session.contains("target_emission_resolved_call_graph")
             && session.contains("source_reachable_resolved_call_graph")
             && session.contains("source_funcs.iter().all(|func| target_funcs.contains(func))")
-            && session.contains("corridor.linkage_index.clone()")
-            && session.contains(
+            && session.contains("compile_syntax_flow_session(corridor)")
+            && compile_session.contains("corridor.linkage_index.clone()")
+            && compile_session.contains(
                 "build_for_persistence_streaming_with_file_semantics_and_options_for_files_and_funcs",
             )
-            && session.contains("tempfile::Builder::new()")
-            && session.contains("IdgQueryService::load_from_disk")
+            && compile_session.contains("tempfile::Builder::new()")
+            && compile_session.contains("IdgQueryService::load_from_disk")
             && !session.contains(".take(")
-            && !session.contains(".truncate("),
+            && !session.contains(".truncate(")
+            && !compile_session.contains(".take(")
+            && !compile_session.contains(".truncate("),
         "cold targeted inspect must stream one exact source-to-target IDG corridor through an unpublished paged session without semantic work caps"
     );
     assert!(
@@ -3191,12 +3248,16 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
         "inspect target slicing must be driven by compiler symbols and adapter-emitted output capability, never API names or source spelling"
     );
     assert!(
-        body.contains("ws.syntax_flow_session(&entries, targets)")
+        body.contains("ws.syntax_flow_session")
+            && body.contains("syntax_flow_target_nodes_by_source_with_session")
+            && body.contains("syntax_flow_target_relevance_with_session")
+            && body.contains("syntax_flow_relevant_sources_with_session")
             && body
-                .find("ws.syntax_flow_session(&entries, targets)")
-                .zip(body.find("for entry in entries"))
-                .is_some_and(|(session, entries)| session < entries),
-        "cold inspect must build one paged exact corridor and share it across every requested entry closure"
+                .find("let session")
+                .zip(body.find("syntax_flow_target_nodes_by_source_with_session"))
+                .zip(body.find("let analyze_entry"))
+                .is_some_and(|((session, targets), analyze)| session < targets && targets < analyze),
+        "inspect must share one paged exact corridor, resolve exact target nodes, and reject compiler-proven irrelevant sources before per-entry closure"
     );
 }
 
@@ -3279,21 +3340,26 @@ fn retrieval_streams_callgraph_candidates_by_compiler_unit() {
         "retrieval may index the shared callgraph by compact ordinals, but must not materialize whole-workspace candidate strings"
     );
     assert!(
-        retrieval.contains("edge_indices: &[usize]") && collect.contains("candidate_terms(groups, \"edge\")"),
-        "retrieval must derive semantic edge terms while processing one compiler unit"
+        retrieval.contains("edge_indices: &[usize]")
+            && collect.contains("candidate_terms(groups, \"edge\")")
+            && retrieval.contains("span_map: Option<&bonsai_common::SpanMap>")
+            && !collect.contains("span_doc_fields")
+            && !collect.contains("vfs()"),
+        "retrieval must derive semantic edge terms from one file-local span map without repeating source hashing or VFS lookup per edge"
     );
     assert!(
         build.contains("edge_indices.remove(file)")
-            && build.contains("syntax_indexes_uncached(file)")
+            && build.contains("compiler_browse_header_uncached(file)")
             && build.contains("release_global_index()")
             && build.contains("builder.push(doc)")
             && !build.contains("build_edge_candidate_groups")
+            && !build.contains("syntax_indexes_uncached")
             && !build.contains("db().global_index()"),
-        "retrieval must consume and intern each exact per-file compiler unit instead of retaining a global declaration body or second callgraph projection"
+        "retrieval must consume each independently decodable exact browse projection instead of retaining a global declaration body or second callgraph projection"
     );
     assert!(
-        batch_width.contains("compiler_worker_count"),
-        "retrieval compiler-unit concurrency must honor the process memory budget without limiting semantic facts"
+        batch_width.contains("candidate_index_worker_count"),
+        "retrieval candidate concurrency must honor its measured process memory profile without limiting semantic facts"
     );
 }
 
@@ -3307,6 +3373,8 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
     let csr = read(&root.join("crates/idg/src/csr.rs"));
 
     let load = function_body(&compiler_object, "compressed_payload");
+    let load_object_payload = function_body(&compiler_object, "compressed_object_payload");
+    let load_browse = function_body(&compiler_object, "load_browse");
     let metadata_for = function_body(&compiler_object, "metadata_for");
     let prepare = function_body(&compiler_object, "prepare_compiler_object");
     let save = function_body(&compiler_object, "save_compiler_object_sidecar");
@@ -3319,7 +3387,13 @@ fn compiler_objects_are_exact_single_frontend_inputs() {
             && metadata_for.contains("metadata.path == descriptor.path")
             && metadata_for.contains("metadata.language == descriptor.language")
             && metadata_for.contains("metadata.source_digest == descriptor.source_digest")
-            && load.contains("digest_bytes(&hit.payload)")
+            && load.contains("self.compressed_object_payload(descriptor, metadata)")
+            && load_object_payload.contains("digest_bytes(&hit.payload)")
+            && load_browse.contains("self.compressed_browse_payload(metadata)")
+            && load_browse.contains("wire::decode")
+            && prepare.contains("CompilerBrowseHeader::from_indexes")
+            && prepare.contains("browse_payload_digest")
+            && write_generation.contains("browse_key(descriptor.file)")
             && prepare.matches("ensure_source_version").count() == 3
             && prepare.contains("Ok(Some(prepared)) => {")
             && save.contains("write_compiler_object_generation")
@@ -3386,8 +3460,8 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         ),
         (
             "global index",
-            function_body(&db, "global_index_worker_count"),
-            "compiler_worker_count",
+            function_body(&db, "build_streaming_global_index"),
+            "compiler_weighted_batches",
         ),
         (
             "compiler objects",
@@ -3397,7 +3471,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         (
             "callgraph",
             function_body(&callgraph, "callgraph_resolver_worker_count"),
-            "compiler_worker_count",
+            "callgraph_worker_count",
         ),
         (
             "IDG transfer",
@@ -3410,7 +3484,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 &security_matcher,
                 "match_rules_against_facts_with_progress_and_mode",
             ),
-            "syntax_weighted_batches",
+            "syntax_worker_count_for_sources",
         ),
     ] {
         assert!(
@@ -3445,13 +3519,17 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             .contains("snapshot.text.len()"),
         "broad syntax matching must schedule actual source-unit sizes against the live resident working set"
     );
+    assert!(
+        function_body(&workspace, "stream_supported_source_files").contains("source_ingestion_batches")
+            && function_body(&resources, "source_ingestion_batches")
+                .contains("current_process_resident_bytes"),
+        "raw compiler input reads must use the live memory budget without changing VFS publication order"
+    );
     let package_contexts = function_body(&security_matcher, "build_language_import_package_contexts");
     let package_context_prewarm =
         function_body(&security_matcher, "prewarm_language_import_package_contexts");
-    let compiler_session_prewarm = function_body(
-        &security_matcher,
-        "prepare_compiler_object_session_for_header_prewarm",
-    );
+    let compiler_session_prewarm =
+        function_body(&security_matcher, "prepare_compiler_object_session_for_body_scan");
     let compiler_session = function_body(&compiler_object, "ensure_compiler_object_session");
     let compiler_import_header = function_body(&compiler_object, "compiler_import_index_uncached");
     let compiler_syntax_header = function_body(&compiler_object, "compiler_syntax_header_uncached");
@@ -3471,18 +3549,19 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && package_context_prewarm.contains("include_workspace_package_context")
             && !package_context_prewarm.contains("has_package_text_anchors")
             && broad_matcher.contains("prewarm_language_import_package_contexts")
-            && broad_matcher.contains("prepare_compiler_object_session_for_header_prewarm")
+            && broad_matcher.contains("prepare_compiler_object_session_for_body_scan")
             && broad_matcher.contains("prewarmed_import_contexts.get(language.as_str())")
             && compiler_session_prewarm.contains("FactRetention::Transient")
             && compiler_session_prewarm.contains("ensure_compiler_object_session")
             && compiler_session.contains("store.covers(&descriptors)")
+            && compiler_session.contains("CompilerObjectStore::open_reusable(&root)")
+            && compiler_session.contains("workspace_root()")
             && compiler_session.contains("tempfile::Builder::new()")
             && compiler_session.contains("write_compiler_object_generation")
             && compiler_import_header.contains("store.load_imports(&descriptor)")
             && compiler_syntax_header.contains("store.load_syntax(&descriptor)")
             && compiler_object.contains("imports_digest")
             && compiler_object.contains("syntax_digest")
-            && !compiler_session.contains("workspace_root")
             && !compiler_session.contains("compiler_object_sidecar_path")
             && security_matcher.contains("new_with_oversized_singleton")
             && security_matcher
@@ -3491,37 +3570,48 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 == 1
             && !security_matcher.contains("WORKSPACE_IMPORT_PACKAGE_CONTEXT_CACHE")
             && !security_matcher.contains("COMPONENT_IMPORT_PACKAGE_CONTEXT_CACHE"),
-        "workspace and component package evidence must reuse integrity-checked import headers from one exact scoped compiler-object generation before declaration bodies are decoded"
+        "workspace/component package evidence must use exact import projections, while a scoped compiler-object session is reserved for files that survive header planning"
     );
     assert!(
         broad_matcher
             .matches("compiler_file_object_uncached(file)")
             .count()
-            == 2
+            == 1
             && broad_matcher
                 .matches("remap_decl_index_to_headers")
                 .count()
-                == 2
+                == 1
             && broad_matcher
                 .matches("file_imports: file_imports.as_ref()")
                 .count()
-                == 2
+                == 1
+            && broad_matcher.matches("scan_planned_file(").count() == 2
             && broad_matcher.contains("filtered_rule_refs_for_text")
             && broad_matcher.contains("filtered_rule_refs_for_syntax_header")
             && broad_matcher.contains("compiler_syntax_header_uncached(file)")
+            && broad_matcher
+                .find("let raw_scan_files")
+                .zip(broad_matcher.find("prepare_compiler_object_session_for_body_scan"))
+                .is_some_and(|(raw, compiler)| raw < compiler)
+            && broad_matcher
+                .find("let mut scan_plan")
+                .zip(broad_matcher.find("prepare_compiler_object_session_for_body_scan"))
+                .is_some_and(|(headers, compiler)| headers < compiler)
             && broad_matcher.contains("imports_by_file.get(&file)")
             && !broad_matcher.contains("scan_decl_index")
             && remap_compiler_object.contains("headers.remap_file_to_existing_symbols(index)")
             && !remap_compiler_object.contains("decl_index_uncached")
             && !remap_compiler_object.contains("compiler_file_object"),
-        "each serial or parallel matcher body path must decode one exact compiler object per surviving header plan and reuse its imports without reparsing"
+        "serial and parallel matcher schedules must share one exact compiler-object body scanner and reuse its imports without reparsing"
     );
     assert!(
         function_body(&workspace, "parser_incomplete_reasons_for_files")
             .contains("visit_compiler_file_objects_uncached")
+            && function_body(&workspace, "parser_incomplete_reasons_for_files")
+                .contains("compiler_diagnostics_are_current")
             && function_body(&workspace, "diagnostics")
                 .contains("visit_compiler_file_objects_uncached"),
-        "whole-workspace diagnostics and completeness checks must use the same exact memory-aware compiler schedule"
+        "whole-workspace diagnostics and completeness checks must reuse exact per-snapshot coverage before scheduling unchecked compiler objects"
     );
     assert!(
         function_body(&security_execution, "build_findings_chain_aware")
@@ -3556,9 +3646,14 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
     assert!(
         function_body(&db, "build_global_header_index").contains("insert_header_preprocessed")
             && function_body(&taint_idg, "build_resolved_call_graph_snapshot_scoped")
-                .contains("decl_index_remapped_to_headers")
+                .contains("build_resolved_call_graph_snapshot_with_headers_scoped")
             && !function_body(&taint_idg, "build_resolved_call_graph_snapshot_scoped")
                 .contains("global_index()")
+            && function_body(
+                &taint_idg,
+                "build_resolved_call_graph_snapshot_with_headers_scoped"
+            )
+            .contains("decl_index_remapped_to_headers")
             && function_body(&workspace, "source_reachable_resolved_call_graph_with_scope")
                 .contains("build_with_file_semantics_for_funcs_streaming_with_context")
             && function_body(&workspace, "source_reachable_resolved_call_graph_with_scope")
@@ -3595,7 +3690,26 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
     assert!(
         function_body(&workspace, "build_and_persist_idg_sidecar").contains("compiler_linkage_index()")
             && function_body(&workspace, "build_and_persist_idg_sidecar")
-                .contains("build_for_persistence_streaming_with_file_semantics_and_options")
+                .contains("build_for_persistence_streaming_with_callgraph_relation_and_file_semantics_and_options")
+            && function_body(&workspace, "build_and_persist_idg_sidecar")
+                .contains("CallgraphQueryService::open_checked")
+            && function_body(&workspace, "build_and_persist_idg_sidecar")
+                .contains("compile_default_query_accelerator")
+            && function_body(&workspace, "build_and_persist_idg_sidecar")
+                .contains("install_query_accelerator")
+            && function_body(&workspace, "build_and_persist_idg_sidecar")
+                .find("install_query_accelerator")
+                .zip(
+                    function_body(&workspace, "build_and_persist_idg_sidecar")
+                        .find("save_into_disk")
+                )
+                .is_some_and(|(install, save)| install < save)
+            && function_body(&idg_service, "load_from_disk")
+                .contains("PersistedQueryAccelerator::decode")
+            && function_body(&idg_workspace, "load_query_from_disk")
+                .contains("metadata.func_segments")
+            && !function_body(&idg_workspace, "load_query_from_disk")
+                .contains("segment_view")
             && function_body(&idg, "lower_transfer_segment_batch").contains("body_for_file")
             && function_body(&index, "insert_linkage_header_preprocessed")
                 .contains("decl.flow_events.clear()")
@@ -3623,7 +3737,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 .contains("span_contains(*arg_span, *target_span)")
             && !function_body(&workspace, "call_edge_passes_target_callback")
                 .contains("callable_reference_variants"),
-        "IDG persistence must retain linkage headers and stream exact compiler-object bodies at segment boundaries"
+        "IDG persistence must retain linkage headers, stream exact compiler-object bodies, consume the partitioned call relation at segment boundaries, and publish a validated query-ready fixed point that warm opens do not reconstruct from every body"
     );
     let stitch = function_body(&idg_builder, "stitch_idg_from_spooled_segment_batches");
     assert!(
@@ -3658,8 +3772,12 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
             && function_body(&idg_builder, "place_inter_edge").contains("push_cross_file_edge")
             && function_body(&idg_builder, "from_workspace_for_segments_streaming")
                 .contains("visit_cross_file_edges")
-            && function_body(&idg_builder, "field_place_keys_for_propagation")
+            && !function_body(&idg_builder, "field_place_keys_for_propagation")
                 .contains("visit_transforms")
+            && !function_body(&idg_builder, "stitch_field_argument_forwarding")
+                .contains("stitch_symbolic_field_fallbacks")
+            && function_body(&idg_service, "symbolic_forward_closure_nodes")
+                .contains("self.workspace.symbolic_field()")
             && function_body(&idg_workspace, "save_workspace_parts")
                 .contains("into_factstore_writer")
             && function_body(&idg_workspace, "save_workspace_parts").contains("spool.write_chunks")
@@ -3667,7 +3785,7 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 .contains("FactStoreWriter::create_from_prepared")
             && function_body(&factstore_writer, "create_from_prepared").contains("prepared.relocate")
             && !idg_workspace.contains("fn streamed_entry"),
-        "sidecar persistence must adopt already-encoded compiler segments and stream bounded cross-edge and symbolic-transform chunks instead of retaining or recopying the complete graph"
+        "sidecar persistence must adopt already-encoded compiler segments, stream bounded cross-edge/symbolic-transform chunks, and never re-index the symbolic product as duplicate concrete fallback edges"
     );
     assert!(
         symbolic.contains("pub arg_idx: u32")
@@ -3681,7 +3799,8 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
         idg.contains("struct CallerCallSiteEdges")
             && idg.contains("call_edge_site_cache: RwLock<Option<CallerCallSiteEdges>>")
             && function_body(&idg, "with_call_edges_at_site").contains("visit(hit.rows_at_site(site))")
-            && function_body(&idg, "call_edges_for_caller").contains("call_graph.callees_of(caller)")
+            && function_body(&idg, "call_edges_for_caller")
+                .contains("call_graph.visit_callees(caller")
             && function_body(&idg, "call_edges_for_caller").contains("out.finish()")
             && function_body(&idg, "rows_at_site").contains("partition_point")
             && !idg.contains("struct CallSiteEdgeIndex")
@@ -3715,22 +3834,30 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
 fn first_class_path_and_slice_use_syntax_derived_indexes_only() {
     let root = repo_root();
     let paths_rs = read(&root.join("crates/browse/src/paths.rs"));
+    let cli_path = read(&root.join("crates/cli/src/commands/path.rs"));
     let path_body = live_code(function_body(&paths_rs, "paths"));
     let path_graph_body = live_code(function_body(&paths_rs, "semantic_path_graph"));
     let path_finalize_body = live_code(function_body(&paths_rs, "finalize_outcome"));
     assert!(
-        path_body.contains("semantic_path_graph(ws)") && path_body.contains("enumerate_paths_resolved("),
+        path_body.contains("semantic_path_graph(ws, &from_funcs, &graph_targets, warmed_idg.as_deref())")
+            && path_body.contains("enumerate_paths_resolved("),
         "path queries must enumerate the shared semantic path graph and report resolution coverage"
     );
     assert!(
         path_graph_body.contains("ws.cached_resolved_call_graph()")
+            && path_graph_body.contains("persisted_resolved_call_graph_between")
             && path_graph_body.contains("idg.semantic_cross_call_edges_with_max_precision(")
             && path_graph_body.contains("call_edge_from_idg_cross_call("),
-        "path semantic graph must start from the cached resolved callgraph and augment with warmed IDG cross-call edges"
+        "path semantic graph must prefer exact partitioned relations, fall back to the cached resolved graph, and augment with warmed IDG cross-call edges"
     );
     assert!(
-        path_finalize_body.contains("resolution_coverage(")
-            && path_finalize_body.contains("unresolved call site(s)"),
+        cli_path.matches("open_project_path_query(root)?").count() >= 2
+            && !cli_path.contains("mark_endpoint_candidate_scope"),
+        "retrieval path candidates must fall back to the complete lazy compiler snapshot unless an exact partitioned graph answered the query"
+    );
+    assert!(
+        path_finalize_body.contains("resolution_incomplete_reasons_for_funcs(")
+            && path_finalize_body.contains("resolution_scope"),
         "path query completeness must include resolver coverage gaps"
     );
     for forbidden in [
@@ -4018,16 +4145,18 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
             && index_body.contains("if options.prewarm_dataflow")
             && index_body.contains("open_project_dataflow_prewarm(root)?")
             && index_body.contains("open_project_parse_only(root)?")
-            && function_body(&diagnostics, "run_semantic_workers").contains("std::env::current_exe()")
+            && function_body(&diagnostics, "run_semantic_workers").contains("semantic_phase_plan")
             && function_body(&diagnostics, "run_semantic_workers")
+                .contains("std::env::current_exe()")
+            && function_body(&diagnostics, "semantic_phase_plan")
                 .contains("SemanticWorkerPhase::Compiler")
-            && function_body(&diagnostics, "run_semantic_workers")
+            && function_body(&diagnostics, "semantic_phase_plan")
                 .contains("SemanticWorkerPhase::Retrieval")
-            && function_body(&diagnostics, "run_semantic_workers")
+            && function_body(&diagnostics, "semantic_phase_plan")
                 .contains("SemanticWorkerPhase::Callgraph")
-            && function_body(&diagnostics, "run_semantic_workers")
+            && function_body(&diagnostics, "semantic_phase_plan")
                 .contains("SemanticWorkerPhase::Linkage")
-            && function_body(&diagnostics, "run_semantic_workers").contains("SemanticWorkerPhase::Idg"),
+            && function_body(&diagnostics, "semantic_phase_plan").contains("SemanticWorkerPhase::Idg"),
         "cmd_index must keep default/structural-only runs parse-only and isolate exact semantic phases in worker processes"
     );
     assert!(
@@ -4122,22 +4251,27 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
             && linkage.contains("save_compiler_linkage_sidecar")
             && !frontend.contains("build_and_persist_idg_sidecar")
             && idg.contains("validate_idg_sidecar_layout")
-            && idg.contains("load_callgraph_sidecar_checked")
+            && idg.contains("callgraph_sidecar_is_current")
+            && idg.contains("save_callgraph_sidecar")
             && idg.contains("load_compiler_linkage_sidecar_checked")
             && idg.contains("build_and_persist_idg_sidecar")
             && idg.contains("write_manifest"),
         "compiler objects, retrieval, callgraph, linkage, and IDG persistence must be independently executable exact phases"
     );
     let workers = function_body(&diagnostics, "run_semantic_workers");
+    let phase_plan = function_body(&diagnostics, "semantic_phase_plan");
+    let phase_process = function_body(&diagnostics, "run_semantic_phase_process");
     assert!(
-        workers.contains("Command::new(&executable)")
-            && workers.contains("SemanticWorkerPhase::Compiler")
-            && workers.contains("SemanticWorkerPhase::Retrieval")
-            && workers.contains("SemanticWorkerPhase::Callgraph")
-            && workers.contains("SemanticWorkerPhase::Linkage")
-            && workers.contains("SemanticWorkerPhase::Idg")
-            && workers.contains("command.status()?")
-            && workers.contains("if !status.success()"),
+        workers.contains("semantic_phase_plan")
+            && workers.contains("run_semantic_phase_process")
+            && phase_plan.contains("SemanticWorkerPhase::Compiler")
+            && phase_plan.contains("SemanticWorkerPhase::Retrieval")
+            && phase_plan.contains("SemanticWorkerPhase::Callgraph")
+            && phase_plan.contains("SemanticWorkerPhase::Linkage")
+            && phase_plan.contains("SemanticWorkerPhase::Idg")
+            && phase_process.contains("Command::new(executable)")
+            && phase_process.contains("command.status()?")
+            && phase_process.contains("if !status.success()"),
         "CLI semantic prewarm must run exact phases sequentially across OS-reclaimed process boundaries"
     );
     let generation_is_current = function_body(&diagnostics, "semantic_generation_is_current");
@@ -4151,7 +4285,6 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
             && !workers.contains(".truncate("),
         "semantic workers must publish one coherent current generation without a retry or semantic-work cap"
     );
-    let phase_plan = function_body(&diagnostics, "semantic_phase_plan");
     assert!(
         phase_plan
             .find("SemanticWorkerPhase::Compiler")
@@ -4168,8 +4301,9 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     assert!(
         linkage_sidecar.contains("files: Vec<(u32, String, u64)>")
             && linkage_sidecar.contains("wire::encode_struct_map_to_writer(output, linkage.as_ref())")
-            && linkage_sidecar.contains("&index.header_projection()")
-            && linkage_sidecar.contains("HEADER_KEY")
+            && linkage_sidecar.contains("header_partition_key(file)")
+            && linkage_sidecar.contains("index.file_index(FileId::new(file))")
+            && linkage_sidecar.contains("header_files: Vec<u32>")
             && linkage_sidecar.contains("RECEIVER_ANCESTRY_KEY")
             && linkage_sidecar.contains("index.receiver_ancestry()")
             && index.contains("by_file.sort_unstable_by_key(|(file, _)| file.raw())")
@@ -4203,9 +4337,10 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     let unified = function_body(&idg_service, "build_unified");
     let local_lookup = function_body(&idg_service, "local_node_for");
     assert!(
-        unified.contains(
-            "func_node_rows.sort_unstable_by_key(|(func, place, node)| (func.raw(), place.0, node.0))"
-        )
+        unified.contains("let mut write_offsets = offsets[")
+            && unified.contains("for (seg_id, segment) in self.workspace.segment_views()")
+            && unified.contains("func_nodes[start..end].sort_unstable_by_key")
+            && unified.contains("drop(write_offsets)")
             && local_lookup.contains("binary_search_by_key")
             && !idg_service.contains("segment.nodes.lookup(func, pid)"),
         "warm query lookup must use compact exact per-function ordering, not linear segment scans or full reverse hash tables"
@@ -4222,18 +4357,22 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
     let hydrate = function_body(&workspace, "load_idg_sidecar");
     assert!(
         hydrate
-            .find("compiler_linkage_index()")
-            .is_some_and(|linkage| hydrate
+            .find("compiler_header_index()")
+            .is_some_and(|headers| hydrate
                 .find("IdgQueryService::load_from_disk")
-                .is_some_and(|idg| linkage < idg)),
-        "warm query open must finish streamed Tree-sitter linkage before hydrating the live IDG"
+                .is_some_and(|idg| headers < idg))
+            && !hydrate.contains("compiler_linkage_index()"),
+        "warm query open must load stable compiler headers without retaining call-linkage beside the live IDG"
     );
     let streaming_imports = function_body(&db, "imports_for_uncached");
+    let cached_imports = function_body(&db, "import_index");
     let seed_callgraph = function_body(&workspace, "seed_resolved_call_graph");
     let release_callgraph = function_body(&workspace, "release_resolved_call_graph_cache");
     let cached_callgraph = function_body(&workspace, "cached_resolved_call_graph");
     assert!(
         streaming_imports.contains("import_index_uncached(file)")
+            && cached_imports.contains("compiler_import_index_uncached(file)")
+            && !cached_imports.contains("extract_imports")
             && !streaming_imports.contains("build_import_index_uncached(file)")
             && seed_callgraph.contains("dataflow.seed_call_graph(graph.clone())")
             && seed_callgraph.contains("flow_ids.seed_call_graph(graph.clone())")
@@ -4280,7 +4419,8 @@ fn semantic_prewarm_isolates_workspace_phases_by_peak_memory() {
         taint_graph.contains("RefCell<Option<ExportTaintChainsAndFlowLabels>>")
             && taint_graph.contains("self.chain_rows.borrow_mut().take()")
             && taint_graph.contains("flow_ids().release_resident_labels()")
-            && taint_graph.contains("self.return_taint_by_func.borrow_mut().take()")
+            && taint_graph.contains("release_compiler_header_cache()")
+            && taint_graph.contains("drop(return_taint_by_func)")
             && chains < release_bodies
             && release_bodies < open_idg,
         "native export must serialize/drop callgraph presentation rows and file-local compiler bodies before opening the exact IDG phase"
@@ -4354,15 +4494,16 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
         broad_matcher
             .matches("compiler_file_object_uncached(file)")
             .count()
-            == 2
+            == 1
             && broad_matcher
                 .matches("remap_decl_index_to_headers")
                 .count()
-                == 2
+                == 1
             && broad_matcher
                 .matches("file_imports: file_imports.as_ref()")
                 .count()
-                == 2
+                == 1
+            && broad_matcher.matches("scan_planned_file(").count() == 2
             && broad_matcher
                 .matches("syntax_target_possible_in_text")
                 .count()
@@ -4434,14 +4575,17 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
     let reverse_symbolic = read(&repo_root().join("crates/idg/src/reverse_symbolic_index.rs"));
     let target_relevance = function_body(&idg, "target_relevance_in_func_scope");
     assert!(
-        target_relevance.contains("reach.backward_neighbours(node)")
-            && target_relevance.contains("contextual.reverse_contextual.get(&node)")
+        target_relevance.contains("contextual.reach.visit_backward(node")
+            && function_body(&idg, "visit_backward").contains("reach.backward_neighbours(node)")
+            && target_relevance.contains("contextual.reverse_heap.visit(node")
+            && target_relevance.contains("contextual.reverse_calls.visit(node")
+            && target_relevance.contains("contextual.reverse_returns.visit(node")
             && target_relevance.contains("runtime.aggregate_inputs.get(&node)")
+            && target_relevance.contains("Self::symbolic_facts_for_node(&unified, &runtime, node)")
             && target_relevance.contains("runtime.reverse_transforms.visit_incoming(base")
             && target_relevance.contains(".reverse_scalar_transforms")
             && target_relevance.contains(".visit_incoming(")
-            && target_relevance.contains("node_is_allowed")
-            && target_relevance.contains("base_is_allowed"),
+            && target_relevance.contains("node_is_allowed"),
         "IDG target demand must reverse ordinary, aggregate, access-path, and scalar-return compiler relations"
     );
     let target_relevance_relation = struct_body(&idg, "IdgTargetRelevance");
@@ -4625,12 +4769,17 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
     ] {
         let source = read(&repo_root().join(path));
         assert!(
-            source.contains("compiler_linkage_index()")
-                && source.contains("exact_decl_index_shared(")
-                && !source.contains("global_index()"),
-            "{path} must export exact AST facts through the memory-scheduled body cache without materializing every workspace body"
+            source.contains("exact_decl_index_shared(") && !source.contains("global_index()"),
+            "{path} must stream exact AST facts through the memory-scheduled body cache without materializing every workspace body"
         );
     }
+    let exact_body_headers = function_body(&workspace, "compiler_index_for_exact_bodies");
+    assert!(
+        exact_body_headers.contains("idg_service()")
+            && exact_body_headers.contains("global_linkage_index()")
+            && !exact_body_headers.contains("global_index()"),
+        "exact-body export beside an open IDG must reuse the graph's compact linkage generation"
+    );
 
     let exact_body_cache = read(&repo_root().join("crates/workspace/src/exact_body_cache.rs"));
     assert!(
@@ -4696,20 +4845,27 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
     );
 
     let taint_reachable = read(&repo_root().join("crates/taint/src/reachable.rs"));
+    let compiler_object = read(&repo_root().join("crates/db/src/compiler_object.rs"));
     let attribution = function_body(&taint_reachable, "cached_function_attribution");
+    let compiler_attribution = function_body(&compiler_object, "compiler_function_attribution_uncached");
+    let attribution_load = function_body(&compiler_object, "load_function_attribution");
     assert!(
-        attribution.contains("decl_index_remapped_to_headers(global, file)")
-            && attribution.contains("build_function_call_event_summaries")
-            && attribution.contains(".find(|decl| decl.symbol.raw() == func.raw())")
-            && !attribution.contains(".defs.iter().map("),
-        "compact taint queries must distill only the requested function from an exact Tree-sitter body"
+        attribution.contains("compiler_function_attribution_uncached(file, declaration.span)")
+            && attribution.contains("build_function_call_event_summaries_from_attribution")
+            && !attribution.contains("decl_index_remapped_to_headers")
+            && attribution_load.contains("attribution_payload_range")
+            && !attribution_load.contains("compressed_object_payload")
+            && compiler_attribution.contains("load_attribution_index(&descriptor)")
+            && compiler_attribution.contains("load_function_attribution")
+            && compiler_attribution.contains("CompilerAttribution::from_decl_index"),
+        "compact taint queries must range-decode one exact adapter attribution frame independently of sibling/full compiler bodies"
     );
     let distilled = function_body(&taint_reachable, "build_function_call_event_summaries");
     assert!(
         distilled.contains("collect_call_event_summaries")
             && distilled.contains("collect_return_spans")
             && distilled.contains("collect_write_event_summaries"),
-        "all rendered call/write/return evidence must survive the transient exact-body boundary"
+        "the full-index compatibility path must preserve the same call/write/return evidence"
     );
     let attribution_cache = struct_body(&taint_reachable, "IdgAttributionCaches");
     let attribution_insert = function_body(&taint_reachable, "insert_attribution");
@@ -4720,7 +4876,7 @@ fn security_and_export_idg_consumers_never_materialize_workspace_bodies() {
             && attribution_insert.contains("estimated_function_call_event_summaries_bytes")
             && attribution_insert.contains("pop_lru()")
             && attribution_insert.contains("estimated_bytes > self.budget_bytes"),
-        "shared AST attribution must be byte-weighted and evictable; function counts are not a memory bound"
+        "shared compiler attribution must be byte-weighted and evictable; function counts are not a memory bound"
     );
     let taint_index = read(&repo_root().join("crates/workspace/src/taint_index.rs"));
     let resident_insert = function_body(&taint_index, "insert_resident");
@@ -4948,7 +5104,7 @@ fn syntax_index_parallelism_is_not_project_size_capped() {
 
     for (source, function) in [
         (&workspace, "workspace_parse_worker_count"),
-        (&database, "global_index_worker_count"),
+        (&database, "global_index_cpu_workers"),
         (&security_matcher, "matcher_worker_count"),
         (&security_analysis, "source_analysis_worker_count"),
         (&security_analysis, "security_taint_worker_count"),
@@ -5195,7 +5351,7 @@ fn unified_taint_closure_is_uncapped_compiler_dataflow() {
         "exact symbolic closure node/fact states and frontiers must use external-memory compiler relations, not unbounded resident collections"
     );
     assert!(
-        idg_service.contains("let mut symbolic_cross_calls = AHashSet::new()")
+        idg_service.contains("let mut cross_calls = AHashSet::new()")
             && function_body(&idg_service, "record_symbolic_cross_call")
                 .contains("out.insert(CrossCallEdge"),
         "symbolic cross-call evidence must deduplicate when a transform fires, not retain one duplicate row per field/context state"

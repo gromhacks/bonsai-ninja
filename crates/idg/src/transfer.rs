@@ -673,6 +673,19 @@ pub struct CallSiteRef {
     pub unresolved_receiver_result_passthrough: bool,
 }
 
+/// Sparse caller binding for a value emitted through a callee's `Yield`
+/// endpoint.
+///
+/// Yield consumers are rare compared with ordinary calls, so storing this on
+/// every [`CallSiteRef`] materially inflates large workspaces. Transfer keeps
+/// only the adapter-proven bindings that exist; Phase 3 merge-joins this
+/// sorted relation with the sorted call-site stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct YieldResultRef {
+    pub(crate) site: CallSiteId,
+    pub(crate) target_node: NodeId,
+}
+
 /// One throw event recorded by the transfer pass for Phase 3 to
 /// stitch cross-function `Throw → Catch` edges.
 #[derive(Clone, Debug)]
@@ -871,6 +884,8 @@ pub struct TransferOutput {
     pub edges: Vec<IdgEdge>,
     /// Call sites encountered, for Phase 3 stitching.
     pub call_sites: Vec<CallSiteRef>,
+    /// Sparse yielded-value bindings keyed by exact call-site span.
+    pub(crate) yield_results: Vec<YieldResultRef>,
     /// Throw sites encountered, for Phase 3 stitching.
     pub throw_sites: Vec<ThrowSite>,
     /// Scalar return projections. Phase 3 uses these to map
@@ -914,6 +929,7 @@ impl TransferOutput {
             nodes: NodeDict::new(),
             edges: Vec::new(),
             call_sites: Vec::new(),
+            yield_results: Vec::new(),
             throw_sites: Vec::new(),
             return_field_projections: Vec::new(),
             return_passthrough_param_indices: Vec::new(),
@@ -1156,6 +1172,17 @@ pub(crate) fn transfer_function_for_with_compiled_options_and_syntax_facts(
         .call_sites
         .sort_by_key(|site| (site.site.0.file.raw(), site.site.0.start, site.site.0.end));
     ctx.out.call_sites.dedup_by_key(|site| site.site.0);
+    ctx.out.yield_results.sort_unstable_by_key(|binding| {
+        (
+            binding.site.0.file.raw(),
+            binding.site.0.start,
+            binding.site.0.end,
+            binding.target_node.0,
+        )
+    });
+    ctx.out
+        .yield_results
+        .dedup_by_key(|binding| (binding.site, binding.target_node));
     bridge_expression_value_calls(&mut ctx);
     bridge_compound_expression_calls(&mut ctx);
     out
@@ -2887,6 +2914,7 @@ fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCal
         source_name,
         source_call,
         source_names,
+        value_kind,
         ..
     } = events.get(index)?
     else {
@@ -2913,7 +2941,9 @@ fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCal
         else {
             continue;
         };
-        if span_contains_or_equal(*assign_span, *call_span)
+        if (span_contains_or_equal(*assign_span, *call_span)
+            || (matches!(value_kind, Some(AssignValueKind::YieldResult))
+                && span_contains_or_equal(*call_span, *assign_span)))
             && assign_sources_match_call(source_call.as_deref(), source_name.as_deref(), source_names, name)
         {
             return Some(AssignCallSiteHint {
@@ -2935,7 +2965,9 @@ fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCal
         else {
             continue;
         };
-        if span_contains_or_equal(*assign_span, *call_span)
+        if (span_contains_or_equal(*assign_span, *call_span)
+            || (matches!(value_kind, Some(AssignValueKind::YieldResult))
+                && span_contains_or_equal(*call_span, *assign_span)))
             && assign_sources_match_call(source_call.as_deref(), source_name.as_deref(), source_names, name)
         {
             return Some(AssignCallSiteHint {
@@ -2958,8 +2990,9 @@ fn collect_assignment_call_sites(
             FlowEvent::Assign {
                 span,
                 source_call: Some(_),
+                value_kind,
                 ..
-            } => {
+            } if !matches!(value_kind, Some(AssignValueKind::YieldResult)) => {
                 out.insert(assign_call_site_hint(events, index).map_or(*span, |hint| hint.site_span));
             }
             FlowEvent::Assign { span, value_kind, .. }
@@ -3294,6 +3327,7 @@ fn walk_assign(
         if !callee.is_empty() {
             let site_span = source_call_site_hint.map(|hint| hint.site_span).unwrap_or(span);
             let site = CallSiteId(site_span);
+            let is_yield_result = matches!(value_kind, Some(AssignValueKind::YieldResult));
             let mut arg_nodes: SmallVec<[NodeId; 4]> = SmallVec::new();
             for (idx, arg) in source_call_args.iter().enumerate() {
                 let arg_idx = u32::try_from(idx).unwrap_or(u32::MAX);
@@ -3313,7 +3347,18 @@ fn walk_assign(
                 }
             }
             let ret_node = ctx.intern_node(Place::CallRet { site });
-            if !rhs_is_finite_literal_selection {
+            if is_yield_result {
+                // A block/generator parameter receives a value emitted by
+                // the callee's Yield endpoint, not the callable's ordinary
+                // Return value and never a generic argument passthrough.
+                // Record only the destination that actually exists. Phase 3
+                // merge-joins this sparse relation with the sibling call and
+                // stitches `callee.Yield -> write`.
+                ctx.out.yield_results.push(YieldResultRef {
+                    site,
+                    target_node: write_node,
+                });
+            } else if !rhs_is_finite_literal_selection {
                 // Only a root binding owns the complete returned value.
                 // Assigning a call result into `base.field` participates in
                 // the existing finite projection-demand closure; treating
@@ -3637,9 +3682,15 @@ fn walk_call(
     let mut receiver_arg_node = None;
     let mut receiver_storage_base = None;
     if matches!(call_kind, CallKind::Method) {
-        let receiver_flow =
-            call_receiver_fact_for_span(ctx.call_receivers, span).map(|fact| fact.value_flow.clone());
-        if receiver_flow.is_some() || receiver.is_some_and(|recv| !recv.is_empty()) {
+        let receiver_fact = call_receiver_fact_for_span(ctx.call_receivers, span);
+        let receiver_is_namespace = receiver_fact
+            .is_some_and(|fact| matches!(fact.role, bonsai_lang_api::CallReceiverRole::Namespace));
+        let receiver_flow = receiver_fact
+            .filter(|_| !receiver_is_namespace)
+            .map(|fact| fact.value_flow.clone());
+        if !receiver_is_namespace
+            && (receiver_flow.is_some() || receiver.is_some_and(|recv| !recv.is_empty()))
+        {
             let recv_meta = crate::edge::EdgeMeta {
                 precision: Precision::Exact,
                 kind: IdgEdgeKind::IntraRead,

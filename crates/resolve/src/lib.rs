@@ -1627,6 +1627,38 @@ fn peer_partial_class_matches(
     class_decl.module_path.matches(&peer_decl.module_path)
 }
 
+/// Whether two class-like declarations denote the same semantic type family.
+///
+/// Languages with split declarations (for example an Objective-C interface
+/// and implementation, or C# partial classes) intentionally assign each CST
+/// declaration a distinct [`SymbolId`]. Receiver-evidence filters must compare
+/// their compiler identity rather than the raw symbol or they can resolve a
+/// method through one declaration and then discard it because its parent is a
+/// peer declaration. Empty module identities remain file-local; non-empty
+/// identities must match exactly under [`ModulePath::matches`].
+#[must_use]
+pub fn class_symbols_share_semantic_identity(global: &GlobalIndex, left: SymbolId, right: SymbolId) -> bool {
+    if left == right {
+        return true;
+    }
+    let Some(left_decl) = global.decl_of(left) else {
+        return false;
+    };
+    let Some(right_decl) = global.decl_of(right) else {
+        return false;
+    };
+    let class_like = |decl: &bonsai_lang_api::Decl| {
+        matches!(
+            decl.kind,
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+        )
+    };
+    class_like(left_decl)
+        && class_like(right_decl)
+        && left_decl.name == right_decl.name
+        && peer_partial_class_matches(left_decl, left, right_decl, right, global)
+}
+
 fn class_decl_has_owned_callable_body(
     global: &GlobalIndex,
     class_sym: SymbolId,

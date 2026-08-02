@@ -10,6 +10,16 @@ with `--output-path <PATH>`. This replaces shell redirection for JSON,
 SARIF, DOT, GraphML, Cypher, and text output; progress and diagnostics
 still use stderr.
 
+Use the global `--html-output <PATH>` option for a standalone themed HTML
+report of any command's human-readable view. HTML output escapes source text,
+contains no scripts or external assets, and does not change the command's
+analysis scope. `--html-output` and `--output-path` are mutually exclusive.
+
+```bash
+bonsai-ninja security ./src taint-analysis --profile production \
+  --html-output bonsai-security.html
+```
+
 Text and row/object JSON commands are token-budgeted by default. Small
 JSON results keep their native shape; larger results return page metadata
 and the current rows or JSON lines. Use `--page next` or the printed
@@ -52,8 +62,8 @@ handle_request -> run_pipeline -> orchestrate -> execute
 
 `export --format networkx`, `graphml`, and `cypher` project the same workspace graph into graph-tooling formats.
 
-Native `export --all` preserves exhaustive semantics in an exact compressed
-form when a derived path family could be quadratic. Add
+Native `export` preserves exhaustive semantics in an exact compressed form
+when a derived path family could be quadratic. Add
 `--full-propagations` only when a downstream consumer explicitly requires
 every materialized propagation record; compression changes representation,
 not graph meaning.

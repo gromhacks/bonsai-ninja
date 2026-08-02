@@ -1,8 +1,8 @@
-//! `bonsai-ninja cache <stats|clear|rebuild>` — operate on the
-//! on-disk `.bonsai/` directory. The directory stores persisted
-//! analysis sidecars such as the dataflow taint graph and the warmed
-//! export JSON; `cache stats` reports artifact paths and byte sizes,
-//! `cache clear` removes them, and `cache rebuild` refreshes them.
+//! `bonsai-ninja cache <stats|clear|rebuild>` — operate on the external
+//! OS cache directory for a workspace. It stores persisted analysis
+//! sidecars such as the dataflow taint graph and warmed export JSON;
+//! `cache stats` reports artifact paths and byte sizes, `cache clear`
+//! removes them, and `cache rebuild` refreshes them.
 //!
 //! In-process chain / downstream / reachable-names caches are
 //! per-run and drop at process exit; [`cmd_cache`] prints a closing
@@ -19,7 +19,7 @@ use super::export::warm_export_cache_for_project;
 use super::open_project_index_only;
 
 /// Handler for `bonsai-ninja cache <stats|clear|rebuild>`. Operates
-/// on the on-disk `.bonsai/` cache under the target workspace.
+/// on the workspace's content-keyed external OS cache directory.
 /// In-process chain caches are per-run and drop at exit; this handler
 /// always reminds the user of that in its final "note" line so nobody
 /// mistakes `cache clear` for an in-memory reset.
@@ -59,18 +59,28 @@ fn cache_stats(workspace: Option<std::path::PathBuf>, format: BrowseFormat) -> R
     }
     print_kv("scope", "in-process (per command invocation)");
     print_kv(
-        "reachable cap",
+        "reachable memo entries",
         &bonsai_sdk::cache::REACHABLE_CACHE_CAP.to_string(),
     );
-    print_kv("chains cap", &bonsai_sdk::cache::CHAINS_CACHE_CAP.to_string());
     print_kv(
-        "downstream cap",
+        "chains memo entries",
+        &bonsai_sdk::cache::CHAINS_CACHE_CAP.to_string(),
+    );
+    print_kv(
+        "downstream memo entries",
         &bonsai_sdk::cache::DOWNSTREAM_CACHE_CAP.to_string(),
     );
-    print_kv("callees cap", &bonsai_sdk::cache::CALLEES_CACHE_CAP.to_string());
     print_kv(
-        "enclosing cap",
+        "callees memo entries",
+        &bonsai_sdk::cache::CALLEES_CACHE_CAP.to_string(),
+    );
+    print_kv(
+        "enclosing memo entries",
         &bonsai_sdk::cache::ENCLOSING_CACHE_CAP.to_string(),
+    );
+    print_kv(
+        "memo semantics",
+        "eviction recomputes exact facts; analysis is not capped",
     );
     let no_cache_env_set = std::env::var("BONSAI_NO_CACHE")
         .ok()
@@ -252,8 +262,8 @@ fn cache_clear(workspace: Option<std::path::PathBuf>, dataflow_only: bool) -> Re
     let stats = cache.stats()?;
     stage.finish();
     if dataflow_only {
-        // Remove just the dataflow sidecar, leaving the rest
-        // of `.bonsai/` intact.
+        // Remove just the dataflow sidecars, leaving the other external
+        // workspace cache artifacts intact.
         if stats.dataflow_sidecar_exists || stats.dataflow_factstore_sidecar_exists {
             let freed = stats
                 .dataflow_sidecar_bytes

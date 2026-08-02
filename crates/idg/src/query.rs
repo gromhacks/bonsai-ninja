@@ -30,7 +30,7 @@ use bonsai_common::Precision;
 
 /// Cached bitvector adjacency for one IDG. Built once from the
 /// flat edge list; queries reuse it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ReachabilityIndex {
     forward: EdgeCsr,
     backward: EdgeCsr,
@@ -93,6 +93,13 @@ impl ReachabilityIndex {
         }
     }
 
+    /// Validate an independently decoded query representation before reuse.
+    pub(crate) fn is_valid_for(&self, expected_nodes: usize) -> bool {
+        self.n_nodes == expected_nodes
+            && self.forward.is_valid_for(expected_nodes)
+            && self.backward.is_valid_for(expected_nodes)
+    }
+
     /// Construct the index from compact `(from, to, precision)` edge
     /// records. Reachability ignores precision; precision-scoped
     /// traversals keep their own side adjacency.
@@ -135,6 +142,16 @@ impl ReachabilityIndex {
 
     pub(crate) fn backward_neighbours(&self, node: NodeId) -> &[u32] {
         self.backward.neighbours(node)
+    }
+
+    /// Borrow the compact directional relations for persistence.
+    ///
+    /// Query accelerators keep CSR directories resident while paging the
+    /// fixed-width target arrays. Exposing the canonical arrays here avoids
+    /// reconstructing or duplicating the compiler relation during
+    /// publication.
+    pub(crate) fn persisted_relations(&self) -> (&EdgeCsr, &EdgeCsr) {
+        (&self.forward, &self.backward)
     }
 
     /// Forward closure restricted to `allowed` nodes.

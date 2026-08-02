@@ -18,9 +18,8 @@ use super::browse::{effective_limit, truncate};
 use super::{
     apply_text_limit, bonsai_for_cli, emit_json_paged_cached, emit_json_value_paged_cached, nearest_names,
     open_project_index_matching_literal, open_project_index_matching_path,
-    open_project_index_only as open_project, open_project_index_only_with_rulepack,
-    open_project_index_retrieval_candidates_with_rulepack, page_info_to_json, paged_json_incomplete_reasons,
-    short_file,
+    open_project_index_only as open_project, open_project_index_only_with_rulepack, page_info_to_json,
+    paged_json_incomplete_reasons, paging_with_row_limit, short_file,
 };
 
 pub(crate) fn cmd_dump_callgraph(
@@ -29,6 +28,7 @@ pub(crate) fn cmd_dump_callgraph(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let stage = progress::ScopedSpinner::new("collecting call graph");
     let cached_rows = bonsai_for_cli().callgraph_summary_from_cache(root)?;
     let fallback_project = if cached_rows.is_none() {
@@ -108,6 +108,7 @@ pub(crate) fn cmd_dump_edges(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let (project, _footer) = open_project(root)?;
     let filters = bonsai_sdk::EdgesFilters {
         from: from_filter,
@@ -184,6 +185,7 @@ pub(crate) fn cmd_dump_resolution(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let (project, _footer) = open_project(root)?;
     let filters = bonsai_sdk::ResolutionCoverageFilters {
         file: file_filter,
@@ -380,7 +382,6 @@ pub(crate) fn cmd_dump_ast(
     compact: bool,
     max_depth: Option<usize>,
     node_id_filter: Option<&str>,
-    limit: usize,
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
@@ -455,8 +456,7 @@ pub(crate) fn cmd_dump_ast(
             }
         }
         BrowseFormat::Text => {
-            let (shown, truncated) = apply_text_limit(&file_dumps, effective_limit(limit, &paging_cfg));
-            let lines = render_ast_text_lines(&shown, compact, file_dumps.len());
+            let lines = render_ast_text_lines(&file_dumps, compact, file_dumps.len());
             page_cache::emit_paged_text(
                 root_dir,
                 &lines,
@@ -472,7 +472,6 @@ pub(crate) fn cmd_dump_ast(
                     for line in paged {
                         cli_println!("{line}");
                     }
-                    render_truncation_notice(shown.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja dump-ast <workspace>");
                     Ok(())
                 },
@@ -815,19 +814,14 @@ pub(crate) fn cmd_dump_taint(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (retrieval_query, retrieval_file) = dump_taint_retrieval_query(source_name);
-    let (project, _footer) = match open_project_index_retrieval_candidates_with_rulepack(
-        root,
-        retrieval_query,
-        bonsai_sdk::SearchFilters {
-            file: retrieval_file,
-            ..Default::default()
-        },
-        None,
-    )? {
-        Some(project) => project,
-        None => open_project_index_only_with_rulepack(root, None)?,
-    };
+    // Taint reachability is semantic, not retrieval-shaped. A retrieval-only
+    // workspace contains the source candidate but cannot compile a cold
+    // source-to-callee corridor until a partitioned callgraph happens to
+    // exist. That made cold and warm runs disagree while both claimed
+    // completeness. Open the complete lazy compiler snapshot here: bodies
+    // remain streamed, and `source_flow_session` narrows exact work to the
+    // source-reachable fixed point without making all bodies resident.
+    let (project, _footer) = open_project_index_only_with_rulepack(root, None)?;
     let filters = bonsai_sdk::TaintFilters {
         source: source_name,
         seeds: seeds.to_vec(),
@@ -882,20 +876,6 @@ pub(crate) fn cmd_dump_taint(
         },
     }
     Ok(())
-}
-
-fn dump_taint_retrieval_query(source: &str) -> (&str, Option<&str>) {
-    let Some((head, name)) = source.rsplit_once(':') else {
-        return (source, None);
-    };
-    if head.is_empty() || name.is_empty() || name.contains(['/', '\\']) {
-        return (source, None);
-    }
-    let file = match head.rsplit_once(':') {
-        Some((path, line)) if !path.is_empty() && line.parse::<u32>().is_ok() => path,
-        _ => head,
-    };
-    (name, Some(file))
 }
 
 fn render_taint_report_json_paged(

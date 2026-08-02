@@ -3,7 +3,12 @@
 //! Rows are keyed by `(base, field, producer node)`. Exact field and whole-base
 //! target relevance therefore share one canonical relation.
 
-use crate::external_relation::{ExternalRecord, ExternalSorter, SortedExternalRelation};
+use crate::external_relation::{
+    ExternalRecord, ExternalSorter, PersistedExternalRelation, SortedExternalRelation,
+};
+use crate::workspace::QueryAcceleratorBlobReader;
+use std::fs::File;
+use std::sync::Arc;
 
 const RECORD_BYTES: usize = 12;
 const RUN_ROWS: usize = 131_072;
@@ -51,6 +56,21 @@ pub(crate) struct FactSourceIndex(SortedExternalRelation<FactSourceRecord>);
 impl FactSourceIndex {
     pub(crate) fn empty() -> Self {
         Self(SortedExternalRelation::empty())
+    }
+
+    pub(crate) fn persisted_metadata(&self) -> PersistedExternalRelation {
+        self.0.persisted_metadata()
+    }
+
+    pub(crate) fn snapshot_file(&self) -> std::io::Result<Arc<File>> {
+        self.0.snapshot_file()
+    }
+
+    pub(crate) fn from_persisted(
+        metadata: PersistedExternalRelation,
+        storage: QueryAcceleratorBlobReader,
+    ) -> Result<Self, &'static str> {
+        SortedExternalRelation::from_persisted(metadata, storage).map(Self)
     }
 
     pub(crate) fn visit_key(&self, key: u64, mut visit: impl FnMut(u32)) {

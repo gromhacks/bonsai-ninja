@@ -168,6 +168,38 @@ fn stale_attribution_build_cannot_repopulate_a_cleared_generation() {
 }
 
 #[test]
+fn persisted_compiler_attribution_matches_direct_adapter_ir_projection() {
+    let vfs = Arc::new(Vfs::new());
+    let file = vfs.write(
+        "fixture.py".to_string(),
+        Arc::<str>::from(
+            "def route(payload):\n    saved = transform(payload)\n    repo.send(saved)\n    return saved\n",
+        ),
+    );
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+    let db = bonsai_db::AnalyzerDb::new(vfs, registry);
+    let index = db.decl_index_uncached(file).expect("python compiler IR");
+    let declaration = index
+        .defs
+        .iter()
+        .find(|declaration| declaration.name == "route")
+        .expect("route declaration");
+
+    let direct = build_function_call_event_summaries(declaration, &index.call_receivers);
+    let compiler = bonsai_lang_api::CompilerAttribution::from_decl_index(&index);
+    let projected = compiler
+        .function_at_span(declaration.span)
+        .map(build_function_call_event_summaries_from_attribution)
+        .expect("compact function attribution");
+
+    assert_eq!(
+        direct, projected,
+        "the independently decodable payload must preserve exact call/write semantics"
+    );
+}
+
+#[test]
 fn token_descendant_seeds_require_wildcard_and_exclude_clean_writes() {
     let func = FuncId::new(1);
     let mut segment = IdgSegment::new();
@@ -1112,7 +1144,6 @@ fn call_result_passthrough_regex_alternatives_do_not_prefilter_to_last_branch() 
 fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
     let db = empty_db();
     let global = db.global_index();
-    let idg = service_from_segment(IdgSegment::new());
     let outer_call_span = Span::new(FileId::new(0), 0, 1);
     let outer_arg_span = Span::new(FileId::new(0), 0, 20);
     let nested_call_span = Span::new(FileId::new(0), 2, 12);
@@ -1151,7 +1182,6 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
             },
         )]),
     );
-    let mut function_summary_cache = AHashMap::default();
     let mut callee_name_cache = CalleeNameCache::default();
     let source_call_spans: ahash::AHashSet<Span> = ahash::AHashSet::default();
 
@@ -1162,10 +1192,10 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
             0,
             &call_summary,
             &CrossCallTransitIndex::default(),
-            &idg,
+            &AHashSet::default(),
+            &AHashMap::default(),
             global.as_ref(),
             &mut call_summary_cache,
-            &mut function_summary_cache,
             &compiled,
             &mut callee_name_cache,
             &source_call_spans,
@@ -1178,7 +1208,6 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
 fn unmodeled_nested_call_return_is_pruned_as_clean() {
     let db = empty_db();
     let global = db.global_index();
-    let idg = service_from_segment(IdgSegment::new());
     let outer_call_span = Span::new(FileId::new(0), 0, 1);
     let outer_arg_span = Span::new(FileId::new(0), 0, 20);
     let nested_call_span = Span::new(FileId::new(0), 2, 14);
@@ -1210,7 +1239,6 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
             },
         )]),
     );
-    let mut function_summary_cache = AHashMap::default();
     let mut callee_name_cache = CalleeNameCache::default();
     let source_call_spans: ahash::AHashSet<Span> = ahash::AHashSet::default();
 
@@ -1221,10 +1249,10 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
             0,
             &call_summary,
             &CrossCallTransitIndex::default(),
-            &idg,
+            &AHashSet::default(),
+            &AHashMap::default(),
             global.as_ref(),
             &mut call_summary_cache,
-            &mut function_summary_cache,
             &[],
             &mut callee_name_cache,
             &source_call_spans,
@@ -1234,10 +1262,95 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
 }
 
 #[test]
+fn nested_call_cleanliness_follows_exact_call_return_closure_membership() {
+    let db = empty_db();
+    let global = db.global_index();
+    let func = FuncId::new(0);
+    let outer_call_span = Span::new(FileId::new(0), 0, 4);
+    let outer_arg_span = Span::new(FileId::new(0), 5, 24);
+    let nested_call_span = Span::new(FileId::new(0), 5, 16);
+    let mut segment = IdgSegment::new();
+    let place = segment.intern_place(Place::CallRet {
+        site: CallSiteId(nested_call_span),
+    });
+    segment.intern_node(func, place);
+    segment.record_func(func);
+    let idg = service_from_segment(segment);
+    let return_node = idg
+        .call_ret_node_at_site(func, nested_call_span)
+        .expect("nested call has an exact compiler return node");
+    let call_ret_nodes = idg.call_ret_nodes_for_funcs(&AHashSet::from_iter([func]));
+    let call_summary = CallEventSummary {
+        call_kind: bonsai_lang_api::CallKind::Function,
+        name: "sink".to_string(),
+        args_value_text: vec!["helper(cmd)".to_string()],
+        args_span: vec![outer_arg_span],
+        args_place: vec![None],
+        args_source_names: vec![vec!["cmd".to_string()]],
+        receiver: None,
+        receiver_source_names: Vec::new(),
+        receiver_types: Vec::new(),
+    };
+    let mut call_summary_cache = call_summary_cache_for(
+        func,
+        AHashMap::from_iter([(
+            nested_call_span,
+            CallEventSummary {
+                name: "helper".to_string(),
+                call_kind: bonsai_lang_api::CallKind::Function,
+                args_value_text: vec!["cmd".to_string()],
+                args_span: vec![Span::new(FileId::new(0), 12, 15)],
+                args_place: vec![None],
+                args_source_names: vec![vec!["cmd".to_string()]],
+                receiver: None,
+                receiver_source_names: Vec::new(),
+                receiver_types: Vec::new(),
+            },
+        )]),
+    );
+    let mut tainted_closure = AHashSet::default();
+    tainted_closure.insert(return_node);
+
+    assert!(
+        !tainted_arg_is_clean_nested_call_return(
+            func,
+            outer_call_span,
+            0,
+            &call_summary,
+            &CrossCallTransitIndex::default(),
+            &tainted_closure,
+            &call_ret_nodes,
+            global.as_ref(),
+            &mut call_summary_cache,
+            &[],
+            &mut CalleeNameCache::default(),
+            &AHashSet::default(),
+        ),
+        "a nested CallRet reached by the fixed point is tainted output"
+    );
+    assert!(
+        tainted_arg_is_clean_nested_call_return(
+            func,
+            outer_call_span,
+            0,
+            &call_summary,
+            &CrossCallTransitIndex::default(),
+            &AHashSet::default(),
+            &call_ret_nodes,
+            global.as_ref(),
+            &mut call_summary_cache,
+            &[],
+            &mut CalleeNameCache::default(),
+            &AHashSet::default(),
+        ),
+        "the same nested CallRet outside the fixed point is clean output"
+    );
+}
+
+#[test]
 fn clean_nested_call_does_not_prune_independent_compound_operand() {
     let db = empty_db();
     let global = db.global_index();
-    let idg = service_from_segment(IdgSegment::new());
     let outer_call_span = Span::new(FileId::new(0), 0, 4);
     let outer_arg_span = Span::new(FileId::new(0), 5, 45);
     let nested_call_span = Span::new(FileId::new(0), 5, 18);
@@ -1277,10 +1390,10 @@ fn clean_nested_call_does_not_prune_independent_compound_operand() {
             0,
             &call_summary,
             &CrossCallTransitIndex::default(),
-            &idg,
+            &AHashSet::default(),
+            &AHashMap::default(),
             global.as_ref(),
             &mut call_summary_cache,
-            &mut AHashMap::default(),
             &[],
             &mut CalleeNameCache::default(),
             &ahash::AHashSet::default(),
@@ -1293,7 +1406,6 @@ fn clean_nested_call_does_not_prune_independent_compound_operand() {
 fn ast_lowered_nested_projection_place_is_not_pruned_as_unknown_return() {
     let db = empty_db();
     let global = db.global_index();
-    let idg = service_from_segment(IdgSegment::new());
     let call_summary = CallEventSummary {
         call_kind: bonsai_lang_api::CallKind::Function,
         name: "sink_cmd".to_string(),
@@ -1313,10 +1425,10 @@ fn ast_lowered_nested_projection_place_is_not_pruned_as_unknown_return() {
             0,
             &call_summary,
             &CrossCallTransitIndex::default(),
-            &idg,
+            &AHashSet::default(),
+            &AHashMap::default(),
             global.as_ref(),
             &mut CallEventSummaryCache::default(),
-            &mut AHashMap::default(),
             &[],
             &mut CalleeNameCache::default(),
             &ahash::AHashSet::default(),
@@ -1329,7 +1441,6 @@ fn ast_lowered_nested_projection_place_is_not_pruned_as_unknown_return() {
 fn semantic_argument_covering_its_call_is_not_treated_as_a_nested_return() {
     let db = empty_db();
     let global = db.global_index();
-    let idg = service_from_segment(IdgSegment::new());
     let call_span = Span::new(FileId::new(0), 10, 30);
     let call_summary = CallEventSummary {
         call_kind: bonsai_lang_api::CallKind::Function,
@@ -1353,10 +1464,10 @@ fn semantic_argument_covering_its_call_is_not_treated_as_a_nested_return() {
             0,
             &call_summary,
             &CrossCallTransitIndex::default(),
-            &idg,
+            &AHashSet::default(),
+            &AHashMap::default(),
             global.as_ref(),
             &mut call_summary_cache,
-            &mut AHashMap::default(),
             &[],
             &mut CalleeNameCache::default(),
             &ahash::AHashSet::default(),

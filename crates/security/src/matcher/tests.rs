@@ -667,9 +667,10 @@ description: impossible target
         ..Default::default()
     };
 
-    let filtered =
-        batch.filtered_rule_refs_for_syntax_header(refs, &syntax, None, &AHashSet::new(), "python");
+    let (filtered, deferred) =
+        batch.filtered_rule_refs_for_syntax_header(refs, &syntax, None, &AHashSet::new(), "python", true);
 
+    assert!(!deferred);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].rule.id, "python.test.clean");
 }
@@ -715,11 +716,86 @@ description: static import target
         }],
     };
 
-    let filtered =
-        batch.filtered_rule_refs_for_syntax_header(refs, &syntax, Some(&imports), &AHashSet::new(), "java");
+    let (filtered, deferred) = batch.filtered_rule_refs_for_syntax_header(
+        refs,
+        &syntax,
+        Some(&imports),
+        &AHashSet::new(),
+        "java",
+        true,
+    );
 
+    assert!(!deferred);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].rule.id, "java.test.string_format");
+}
+
+#[test]
+fn compiler_syntax_header_defers_only_calls_receiver_ancestry_can_change() {
+    let rule = rule_from_yaml(
+        r#"
+id: java.test.base_run
+enabled: true
+language: java
+tag: test
+severity: info
+match:
+  kind: call
+  callee:
+    attribute: [Base, run]
+description: inherited target
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let prepared = PreparedRule::new(&rule).expect("rule prepares");
+    let refs = vec![&prepared];
+    let batch = PreparedRuleBatch::new(&refs, empty_factory_returns());
+    let inherited_candidate = CompilerSyntaxHeader {
+        calls: vec![bonsai_lang_api::CompilerCallHeader {
+            name: "child.run".to_string(),
+            receiver: Some("child".to_string()),
+            receiver_types: vec!["Child".to_string()],
+            call_kind: CallKind::Method,
+        }],
+        ..Default::default()
+    };
+
+    let (filtered, deferred) = batch.filtered_rule_refs_for_syntax_header(
+        refs.clone(),
+        &inherited_candidate,
+        None,
+        &AHashSet::new(),
+        "java",
+        false,
+    );
+    assert!(filtered.is_empty());
+    assert!(
+        deferred,
+        "Child.run may become Base.run after exact ancestry expansion"
+    );
+
+    let unrelated_method = CompilerSyntaxHeader {
+        calls: vec![bonsai_lang_api::CompilerCallHeader {
+            name: "child.stop".to_string(),
+            receiver: Some("child".to_string()),
+            receiver_types: vec!["Child".to_string()],
+            call_kind: CallKind::Method,
+        }],
+        ..Default::default()
+    };
+    let (filtered, deferred) = batch.filtered_rule_refs_for_syntax_header(
+        refs,
+        &unrelated_method,
+        None,
+        &AHashSet::new(),
+        "java",
+        false,
+    );
+    assert!(filtered.is_empty());
+    assert!(
+        !deferred,
+        "receiver ancestry cannot turn an unrelated method name into the rule target"
+    );
 }
 
 #[test]

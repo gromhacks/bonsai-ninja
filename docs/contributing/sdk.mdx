@@ -116,7 +116,8 @@ state, and write-through sidecar finish status. The CLI renders those notes
 on stderr; SDK callers can route the same stream into logs or embedding UI.
 Taint-graph write-through is enabled by default so a second process can
 hydrate exact graphs from config-specific
-`.bonsai/taint_graph.v*.<mode>.<config>.factstore` files; set
+mode/config-specific `taint_graph.v*.<mode>.<config>.factstore` files in the
+external workspace cache; set
 `BONSAI_TAINT_GRAPH_PERSIST=0` only for disk-constrained runs.
 
 ### Workspace open events
@@ -381,11 +382,11 @@ dataflow, flow-id, callgraph, and IDG sidecars should be built up front. The
 per-entry compatibility value-flow projection remains on demand because
 eagerly closing the whole IDG once per callable is quadratic-scale work. SDK
 full-prewarm opens also refresh compiler-object/callgraph/linkage/IDG/retrieval coverage
-and publish `.bonsai/manifest.json`, so subsequent cache stats can validate
+and publish the external workspace-cache `manifest.json`, so subsequent cache stats can validate
 every produced sidecar instead of treating them as orphaned files.
 Security `taint_analysis*` and `source_analysis*` facades refresh the same
 manifest after their exact source-seeded taint graph write-through finishes,
-so the current `.bonsai/taint_graph.v*.<mode>.<config>.factstore` shows as
+so the current external-cache `taint_graph.v*.<mode>.<config>.factstore` shows as
 validated reusable state on the next `cache.stats()` call. Source-analysis
 and taint-analysis use distinct config-qualified files and do not overwrite
 each other's warm facts.
@@ -460,7 +461,7 @@ semantic sidecars, including retrieval, built up front. Use
 heavier all-entry dataflow/flow-id prewarm. Legacy per-entry value-flow graphs
 are projected from the canonical IDG only when a compatibility client asks.
 The semantic index path
-and SDK full-prewarm path write `.bonsai/manifest.json` after the reusable
+and SDK full-prewarm path write the external-cache `manifest.json` after the reusable
 sidecars are produced; `Project::cache().read_manifest()` returns the same
 cache coverage and fingerprint metadata surfaced by CLI
 `cache stats --format json`.

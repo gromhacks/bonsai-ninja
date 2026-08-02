@@ -29,6 +29,26 @@ pub fn compute_group_id(shared_suffix: &[String]) -> String {
     format!("G:{:016x}", fnv1a_names64(shared_suffix))
 }
 
+/// Stable id for a structural flow group.
+///
+/// Structural member `F:` ids already encode exact compiler identities, so
+/// hashing the ordered member set prevents same-name suffixes in unrelated
+/// modules from sharing a `G:` id. Security groups retain
+/// [`compute_group_id`] because they have a separate taint-path identity
+/// contract.
+#[must_use]
+pub fn compute_structural_group_id(member_flow_ids: &[String]) -> String {
+    // A group is a set. Rendering order is deterministic today, but must not
+    // leak into identity if a parallel collector or ranking policy changes.
+    let mut members = member_flow_ids.to_vec();
+    members.sort();
+    members.dedup();
+    let mut tokens = Vec::with_capacity(members.len() + 1);
+    tokens.push("bonsai.structural-group.v2".to_string());
+    tokens.extend(members);
+    format!("G:{:016x}", fnv1a_names64(&tokens))
+}
+
 /// Minimal identity surface for a raw taint-flow row.
 ///
 /// The CLI, security analysis, SDK, and future graph exports can have

@@ -694,8 +694,6 @@ macro_rules! complex_e2e_tests {
                         "--query",
                         ".+",
                         "--regex",
-                        "--max-flows",
-                        "3",
                         "--format",
                         "json",
                     ]) else {
@@ -908,10 +906,11 @@ fn flows_chain_matches_inspect_chain_on_complex() {
     );
 }
 
-/// Export's `chains` table must resolve to the same set of
-/// function names that `inspect` walks internally. We pick a sink
-/// on a known chain and verify both views see the same upstream
-/// entry points.
+/// Export's compressed callgraph must contain every edge in the exact chain
+/// that `inspect` walks internally. Native export deliberately does not
+/// enumerate concrete path rows: the complete path language is represented by
+/// function and edge facts, which downstream consumers can traverse without
+/// an engine-side path cap.
 #[test]
 fn export_chains_resolve_to_inspect_chain_names() {
     let Some(_) = bin_path() else { return };
@@ -930,26 +929,61 @@ fn export_chains_resolve_to_inspect_chain_names() {
             Some((id, n.to_string()))
         })
         .collect();
-    let chains_for_execute = tg["chains"]
+    assert_eq!(tg["chains_mode"], "compressed_callgraph");
+    assert!(tg["chains"].as_array().is_some_and(Vec::is_empty));
+
+    let Some((inspect_out, _, inspect_code)) = run(&[
+        "inspect",
+        &w,
+        "--query",
+        "execute",
+        "--graph-flow",
+        "--format",
+        "json",
+        "--all",
+    ]) else {
+        return;
+    };
+    assert_eq!(inspect_code, 0);
+    let inspected: serde_json::Value = serde_json::from_str(&inspect_out).unwrap();
+    let chain_names: Vec<String> = inspected["decl_hits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|hit| hit["flows"].as_array().into_iter().flatten())
+        .find_map(|flow| {
+            flow["chain"].as_array().map(|chain| {
+                chain
+                    .iter()
+                    .filter_map(|name| name.as_str().map(String::from))
+                    .collect()
+            })
+        })
+        .expect("inspect produced no chain to execute");
+
+    let exported_edges: std::collections::HashSet<(u64, u64)> = tg["call_edges"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|c| c.get("target").and_then(|t| t.as_str()) == Some("execute"))
-        .cloned()
-        .expect("mega_flow chains missing target=execute");
-    let first_chain = chains_for_execute["chains"]
-        .as_array()
-        .unwrap()
-        .first()
-        .expect("no chains to execute")
-        .as_array()
-        .unwrap()
-        .clone();
-    let chain_names: Vec<String> = first_chain
-        .iter()
-        .filter_map(|v| v.as_u64())
-        .filter_map(|id| id_to_name.get(&id).cloned())
+        .filter_map(|edge| Some((edge["from"].as_u64()?, edge["to"].as_u64()?)))
         .collect();
+    for pair in chain_names.windows(2) {
+        let from_ids = id_to_name
+            .iter()
+            .filter_map(|(&id, name)| (name == &pair[0]).then_some(id));
+        let to_ids = id_to_name
+            .iter()
+            .filter_map(|(&id, name)| (name == &pair[1]).then_some(id))
+            .collect::<Vec<_>>();
+        assert!(
+            from_ids
+                .into_iter()
+                .any(|from| { to_ids.iter().any(|to| exported_edges.contains(&(from, *to))) }),
+            "exported compressed callgraph is missing inspect edge {} -> {}",
+            pair[0],
+            pair[1]
+        );
+    }
     assert!(chain_names.contains(&"execute".to_string()));
     assert!(
         chain_names

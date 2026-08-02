@@ -7,11 +7,15 @@
 //! the taint crate's canonical propagation rules.
 
 use crate::Workspace;
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use bonsai_common::FuncId;
 use std::sync::Arc;
 
 pub use bonsai_taint::{EntryTaintGraph, TaintedCall, TaintedCallEdge, TaintedCallKind};
+
+/// Exact target nodes grouped by syntax owner, plus owners whose spans do not
+/// map to a scalar IDG node.
+pub type SyntaxFlowTargetsBySource = (AHashMap<FuncId, Vec<bonsai_idg::WsNodeId>>, AHashSet<FuncId>);
 
 /// Backend used to answer a syntax-flow query.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -92,7 +96,10 @@ impl SyntaxFlowCacheStatus {
 #[derive(Copy, Clone, Debug)]
 pub struct SyntaxFlowQuery<'a> {
     pub entry: FuncId,
+    pub target_nodes: Option<&'a [bonsai_idg::WsNodeId]>,
     pub target_funcs: Option<&'a AHashSet<FuncId>>,
+    pub lineage_funcs: Option<&'a AHashSet<FuncId>>,
+    pub target_relevance: Option<&'a bonsai_idg::IdgTargetRelevance>,
     pub prefer_warmed_idg: bool,
     pub session: Option<&'a SyntaxFlowSession>,
 }
@@ -102,15 +109,41 @@ impl<'a> SyntaxFlowQuery<'a> {
     pub const fn new(entry: FuncId) -> Self {
         Self {
             entry,
+            target_nodes: None,
             target_funcs: None,
+            lineage_funcs: None,
+            target_relevance: None,
             prefer_warmed_idg: false,
             session: None,
         }
     }
 
     #[must_use]
+    pub const fn target_nodes(mut self, target_nodes: Option<&'a [bonsai_idg::WsNodeId]>) -> Self {
+        self.target_nodes = target_nodes;
+        self
+    }
+
+    #[must_use]
     pub const fn target_funcs(mut self, target_funcs: Option<&'a AHashSet<FuncId>>) -> Self {
         self.target_funcs = target_funcs;
+        self
+    }
+
+    #[must_use]
+    pub const fn lineage_funcs(mut self, lineage_funcs: Option<&'a AHashSet<FuncId>>) -> Self {
+        self.lineage_funcs = lineage_funcs;
+        self
+    }
+
+    /// Reuse one conservative backward demand proof across an entry batch.
+    /// The exact forward closure still validates every admitted path.
+    #[must_use]
+    pub const fn target_relevance(
+        mut self,
+        target_relevance: Option<&'a bonsai_idg::IdgTargetRelevance>,
+    ) -> Self {
+        self.target_relevance = target_relevance;
         self
     }
 
@@ -321,6 +354,42 @@ impl Workspace {
         self.reopen_query_workspace_for_graph(graph, "target inspect workspace")
     }
 
+    /// Exact compiler function neighborhood for target-oriented inspection.
+    ///
+    /// The persisted call-linkage partitions contain every semantic caller
+    /// chain reaching the targets plus their direct semantic callees. This is
+    /// a query scope, not a work limit: failure to open a fresh partition
+    /// returns `None` so callers can fall back to the complete workspace.
+    #[must_use]
+    pub fn target_inspect_lineage_funcs(
+        &self,
+        target_funcs: &[FuncId],
+        max_precision: Option<bonsai_common::Precision>,
+    ) -> Option<AHashSet<FuncId>> {
+        if target_funcs.is_empty() {
+            return None;
+        }
+        let service = self.callgraph_query_service()?;
+        let graph = match service.materialize_reaching_with_direct_callees(target_funcs, max_precision) {
+            Ok(graph) => graph,
+            Err(error) => {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "target inspect function scope rejected: {}",
+                    error
+                );
+                return None;
+            }
+        };
+        let mut funcs: AHashSet<FuncId> = graph.nodes().iter().map(|node| node.func).collect();
+        for edge in &graph.inner().edges {
+            funcs.insert(edge.from);
+            funcs.insert(edge.to);
+        }
+        funcs.extend(target_funcs.iter().copied());
+        Some(funcs)
+    }
+
     fn persisted_source_flow_corridor(
         &self,
         source_funcs: &[FuncId],
@@ -491,7 +560,7 @@ impl Workspace {
         }
         let corridor = self
             .persisted_source_flow_corridor(source_funcs, max_precision)
-            .unwrap_or_else(|| self.source_reachable_resolved_call_graph(source_funcs, &[], max_precision));
+            .unwrap_or_else(|| self.source_reachable_query_call_graph(source_funcs, &[], max_precision));
         self.compile_syntax_flow_session(corridor)
     }
 
@@ -521,6 +590,146 @@ impl Workspace {
         self.compile_syntax_flow_session(corridor)
     }
 
+    /// Compile one reusable backward demand relation for a warmed-IDG entry
+    /// batch. This is an exact compiler optimization: the proof may retain
+    /// extra states, but it can never discard a realizable path to a target.
+    #[must_use]
+    pub fn syntax_flow_target_relevance(
+        &self,
+        target_nodes: &[bonsai_idg::WsNodeId],
+        target_funcs: &AHashSet<FuncId>,
+        lineage_funcs: Option<&AHashSet<FuncId>>,
+    ) -> Option<bonsai_idg::IdgTargetRelevance> {
+        self.syntax_flow_target_relevance_with_session(target_nodes, target_funcs, lineage_funcs, None)
+    }
+
+    /// Session-aware form of [`Self::syntax_flow_target_relevance`]. A cold
+    /// inspect batch must derive its target demand from the same exact scoped
+    /// compiler graph it will query, rather than falling back to function-only
+    /// matching merely because no global IDG is installed.
+    #[must_use]
+    pub fn syntax_flow_target_relevance_with_session(
+        &self,
+        target_nodes: &[bonsai_idg::WsNodeId],
+        target_funcs: &AHashSet<FuncId>,
+        lineage_funcs: Option<&AHashSet<FuncId>>,
+        session: Option<&SyntaxFlowSession>,
+    ) -> Option<bonsai_idg::IdgTargetRelevance> {
+        if target_nodes.is_empty() && target_funcs.is_empty() {
+            return None;
+        }
+        let global_idg = self.db().idg_service();
+        let idg = global_idg
+            .as_deref()
+            .or_else(|| session.map(SyntaxFlowSession::idg))?;
+        let max_precision = Some(bonsai_common::Precision::Narrowed);
+        Some(
+            if let Some(lineage_funcs) = lineage_funcs.filter(|funcs| !funcs.is_empty()) {
+                idg.target_relevance_within_funcs_with_max_precision(
+                    target_nodes,
+                    Some(target_funcs),
+                    lineage_funcs,
+                    max_precision,
+                )
+            } else {
+                idg.target_relevance_with_max_precision(target_nodes, Some(target_funcs), max_precision)
+            },
+        )
+    }
+
+    /// Source-rooted target demand for one syntax owner. This preserves exact
+    /// compiler call/return direction, so a broad batch does not let one
+    /// owner's target pull unrelated callers into another owner's closure.
+    #[must_use]
+    pub fn syntax_flow_source_target_relevance_with_session(
+        &self,
+        source: FuncId,
+        target_nodes: &[bonsai_idg::WsNodeId],
+        target_funcs: &AHashSet<FuncId>,
+        lineage_funcs: &AHashSet<FuncId>,
+        session: Option<&SyntaxFlowSession>,
+    ) -> Option<bonsai_idg::IdgTargetRelevance> {
+        if target_nodes.is_empty() && target_funcs.is_empty() || lineage_funcs.is_empty() {
+            return None;
+        }
+        let global_idg = self.db().idg_service();
+        let idg = global_idg
+            .as_deref()
+            .or_else(|| session.map(SyntaxFlowSession::idg))?;
+        Some(idg.target_relevance_from_source_within_funcs_with_max_precision(
+            source,
+            target_nodes,
+            Some(target_funcs),
+            lineage_funcs,
+            Some(bonsai_common::Precision::Narrowed),
+        ))
+    }
+
+    /// Filter a multi-entry syntax-flow batch through one already-computed
+    /// backward target-demand relation using only compact IDG headers.
+    #[must_use]
+    pub fn syntax_flow_relevant_sources(
+        &self,
+        source_funcs: &[FuncId],
+        relevance: &bonsai_idg::IdgTargetRelevance,
+    ) -> Option<Vec<FuncId>> {
+        self.syntax_flow_relevant_sources_with_session(source_funcs, relevance, None)
+    }
+
+    /// Session-aware form of [`Self::syntax_flow_relevant_sources`].
+    #[must_use]
+    pub fn syntax_flow_relevant_sources_with_session(
+        &self,
+        source_funcs: &[FuncId],
+        relevance: &bonsai_idg::IdgTargetRelevance,
+        session: Option<&SyntaxFlowSession>,
+    ) -> Option<Vec<FuncId>> {
+        let global_idg = self.db().idg_service();
+        let idg = global_idg
+            .as_deref()
+            .or_else(|| session.map(SyntaxFlowSession::idg))?;
+        Some(idg.funcs_admitted_by_target_relevance(source_funcs, relevance))
+    }
+
+    /// Resolve syntax spans to exact IDG endpoints. Spans without an IDG
+    /// carrier remain explicit function fallbacks, so attribution gaps may
+    /// reduce pruning but can never make the query incomplete.
+    #[must_use]
+    pub fn syntax_flow_target_nodes(
+        &self,
+        targets: &[(FuncId, bonsai_common::Span)],
+    ) -> Option<(Vec<bonsai_idg::WsNodeId>, AHashSet<FuncId>)> {
+        self.syntax_flow_target_nodes_with_session(targets, None)
+    }
+
+    /// Session-aware form of [`Self::syntax_flow_target_nodes`].
+    #[must_use]
+    pub fn syntax_flow_target_nodes_with_session(
+        &self,
+        targets: &[(FuncId, bonsai_common::Span)],
+        session: Option<&SyntaxFlowSession>,
+    ) -> Option<(Vec<bonsai_idg::WsNodeId>, AHashSet<FuncId>)> {
+        let global_idg = self.db().idg_service();
+        let idg = global_idg
+            .as_deref()
+            .or_else(|| session.map(SyntaxFlowSession::idg))?;
+        Some(idg.nodes_and_unresolved_funcs_at_spans(targets))
+    }
+
+    /// Session-aware exact target attribution grouped by syntax owner.
+    #[must_use]
+    pub fn syntax_flow_target_nodes_by_source_with_session(
+        &self,
+        targets: &[(FuncId, bonsai_common::Span)],
+        session: Option<&SyntaxFlowSession>,
+    ) -> Option<SyntaxFlowTargetsBySource> {
+        let global_idg = self.db().idg_service();
+        let idg = global_idg
+            .as_deref()
+            .or_else(|| session.map(SyntaxFlowSession::idg))?;
+        Some(idg.nodes_by_func_and_unresolved_at_spans(targets))
+    }
+
     /// Return the canonical syntax-shaped taint graph for `query`.
     ///
     /// This never builds the IDG. If a caller has already warmed the
@@ -530,15 +739,27 @@ impl Workspace {
     #[must_use]
     pub fn syntax_flow_graph(&self, query: SyntaxFlowQuery<'_>) -> SyntaxFlowGraph {
         let idg_available = self.db().idg_service().is_some();
-        let target_cut_size = query.target_funcs.map(|targets| targets.len());
+        let target_cut_size = match (query.target_nodes, query.target_funcs) {
+            (Some(nodes), Some(funcs)) => Some(nodes.len().saturating_add(funcs.len())),
+            (Some(nodes), None) => Some(nodes.len()),
+            (None, Some(funcs)) => Some(funcs.len()),
+            (None, None) => None,
+        };
         if query.prefer_warmed_idg {
             if let Some(idg) = self.db().idg_service() {
-                let graph = bonsai_taint::inspect_entry_taint_graph_from_idg_with_target_funcs(
-                    query.entry,
-                    query.target_funcs,
-                    self.db(),
-                    idg.as_ref(),
-                );
+                let graph =
+                    bonsai_taint::inspect_entry_taint_graph_from_idg_with_target_funcs_and_lineage_with_caches(
+                        query.entry,
+                        bonsai_taint::IdgTaintTargets {
+                            nodes: query.target_nodes,
+                            funcs: query.target_funcs,
+                            lineage_funcs: query.lineage_funcs,
+                            relevance: query.target_relevance,
+                        },
+                        self.db(),
+                        idg.as_ref(),
+                        Some(self.inter_taint_caches()),
+                    );
                 return SyntaxFlowGraph {
                     graph: Arc::new(graph),
                     backend: SyntaxFlowBackend::WarmedIdgTargetCut,
@@ -558,12 +779,19 @@ impl Workspace {
 
         let dataflow_hit = self.dataflow().has_entry(query.entry);
         if let Some(session) = query.session {
-            let graph = bonsai_taint::inspect_entry_taint_graph_from_idg_with_target_funcs(
-                query.entry,
-                query.target_funcs,
-                self.db(),
-                session.idg.as_ref(),
-            );
+            let graph =
+                bonsai_taint::inspect_entry_taint_graph_from_idg_with_target_funcs_and_lineage_with_caches(
+                    query.entry,
+                    bonsai_taint::IdgTaintTargets {
+                        nodes: query.target_nodes,
+                        funcs: query.target_funcs,
+                        lineage_funcs: query.lineage_funcs,
+                        relevance: query.target_relevance,
+                    },
+                    self.db(),
+                    session.idg.as_ref(),
+                    Some(self.inter_taint_caches()),
+                );
             return SyntaxFlowGraph {
                 graph: Arc::new(graph),
                 backend: SyntaxFlowBackend::ScopedIdgTargetCut,

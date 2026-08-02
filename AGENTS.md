@@ -16,6 +16,8 @@ missing. For scripts use `--format json --no-color --no-progress`; add
 `--all` or `--context uncapped` only for intentional exhaustive
 artifacts. For LLM-readable text use `--no-color --no-progress
 --context 16k`.
+Use `--html-output <file>` for a standalone themed human report; it wraps the
+selected command's text view and must never enable additional analysis.
 For save-time workflows, keep `index <workspace> --watch --no-progress`
 running; command and SDK facades refresh saved file changes before they
 render.
@@ -23,13 +25,20 @@ render.
 and builds declaration/import indexes without forcing a whole-workspace
 semantic prewarm. Use `index <workspace> --semantic` only when you
 intentionally want structural semantic sidecars and
-`.bonsai/manifest.json` built up front; commands still validate sidecar
+the external workspace-cache `manifest.json` built up front; commands still validate sidecar
 headers/payloads before reuse and compute requested exact facts on demand.
 Retrieval is candidate lookup only: search and literal-filtered browse can
 reuse a fresh sidecar before candidate lookup, and large-workspace inspect can
 use a warmed sidecar only before opening a scoped workspace. Rendered facts
 still hydrate through canonical APIs, and scoped query workspaces do not
 publish partial retrieval sidecars under the full workspace cache.
+
+Analysis sidecars live in a canonical-path-keyed OS cache directory, not in
+the inspected repository; `cache stats <workspace>` reports it and
+`BONSAI_WORKSPACE_DIR` overrides it. The cache root carries a locked canonical
+workspace binding so dependency-manifest freshness cannot be lost when a
+sidecar path is outside the source tree. Workspace-local rule overlays remain
+under `<workspace>/.bonsai/rules/` and are not analysis caches.
 
 Treat the analyzer as a compiler pipeline. Each language adapter owns its
 Tree-sitter grammar, source-syntax recognition, declaration/import lowering,
@@ -56,6 +65,11 @@ weight or serialize units, but must never cap semantic work. After the
 isolated workers finish, the parent validates that every sidecar describes one
 current workspace snapshot and reruns the exact sequence if a file changed
 between phases.
+Semantic prewarm also persists the compact function/node directories and
+default semantic contextual fixed point derived from that exact graph. Warm
+open validates the query accelerator and must not decode every IDG segment to
+rebuild those structures. A canonical graph without the optional accelerator
+is a valid cold-query artifact, but it does not satisfy `index --semantic`.
 
 External-memory IDG structures must be lazy. Resident-only fixed points start
 with empty sparse sets/frontiers; Bloom filters, positive caches, dense
@@ -98,6 +112,21 @@ while walking compiler IR, before allocating result rows. Never initialize a
 lazy workspace-wide cache from inside a Rayon file loop. Scoped query
 workspaces preserve the full workspace's deterministic `FileId` ordinal so
 they can reuse content-addressed compiler objects without reparsing.
+
+Security endpoint planning is also staged. Apply raw/import/syntax-target
+filters before global receiver ancestry. Open ancestry only when a typed
+adapter-emitted call has a matching method whose verdict can change through a
+base class, or an explicit receiver-type constraint can change. Rerun those
+candidates with the exact base map before body matching. Treat clean compiler
+diagnostic coverage as real per-snapshot state: completion audits compile only
+unchecked files, and edits invalidate both coverage and diagnostic rows.
+Retain exact syntax/import headers for ancestry-deferred candidates and recheck
+those headers after enrichment; do not reopen their compiler objects or rerun
+already-proven non-deferred plans. Raw workspace reads may overlap in
+memory-weighted windows, but VFS publication remains in canonical path order.
+Broad matcher bodies run in one continuous pool sized against the largest
+actual source units that may overlap; do not reintroduce per-CPU-batch
+barriers.
 
 Performance gates measure completed exact work; they never terminate, skip, or
 cap analysis. When query/cache/engine code changes, build release and run
@@ -157,8 +186,11 @@ Understand behavior:
 explicitly add rulepack-free raw taint paths. These flags change output scope,
 not analysis accuracy: emitted graph facts still use the exact/narrowed static
 evidence contract. Inspect raw taint paths go through the workspace syntax-flow
-facade: a warmed IDG target cut is used only when already available, otherwise
-the canonical cached dataflow graph is used.
+facade. Syntax discovery records exact matching Tree-sitter spans and releases
+body/callgraph caches before a persisted IDG opens. A warm query batch resolves
+those spans to typed target nodes and reuses one sparse backward demand proof;
+a sidecar miss builds an exact query-scoped source/target IDG, with the
+canonical cached dataflow graph retained only as the compatibility fallback.
 
 Record understanding as:
 

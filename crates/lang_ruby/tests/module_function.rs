@@ -95,3 +95,18 @@ end
         "module_function flips the scope; foo declared after is Public"
     );
 }
+
+#[test]
+fn module_owned_callables_carry_ast_namespace_in_module_path() {
+    let db = db_with("module Tokenizer\n  def self.each_token(cmd)\n    cmd\n  end\nend\n");
+    let global = db.global_index();
+    let method = global
+        .find_by_name("each_token")
+        .iter()
+        .find_map(|symbol| global.decl_of(*symbol))
+        .expect("module singleton method");
+    assert_eq!(
+        method.module_path.segments.last().map(String::as_str),
+        Some("Tokenizer")
+    );
+}

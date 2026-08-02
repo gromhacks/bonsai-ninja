@@ -41,6 +41,23 @@ fn empty_decl(sym: u32, name: &str) -> Decl {
     }
 }
 
+#[test]
+fn storage_normalization_memo_scales_by_bytes_without_capping_analysis() {
+    assert_eq!(
+        storage_normalization_cache_capacity_for_limit(Some(3 * 1024 * 1024 * 1024)),
+        12_288
+    );
+    assert_eq!(
+        storage_normalization_cache_capacity_for_limit(Some(64 * 1024 * 1024)),
+        MIN_STORAGE_NORMALIZATION_CACHE_ENTRIES,
+        "constrained machines retain a small memo and recompute evicted syntax paths"
+    );
+    assert_eq!(
+        storage_normalization_cache_capacity_for_limit(None),
+        MAX_STORAGE_NORMALIZATION_CACHE_ENTRIES
+    );
+}
+
 /// Mock resolver: a fixed map from (caller_func, callee_name)
 /// to candidate FuncIds. All resolved as Direct + Exact.
 struct MockResolver {
@@ -1590,6 +1607,94 @@ fn whole_object_symbolic_read_does_not_erase_exact_projection() {
     let ([live, dead], _) = symbolic_field_forwarding_reachability_for_reads(&["arg", "arg.live"], false);
     assert_eq!(live, AHashSet::from([0, 1]));
     assert_eq!(dead, AHashSet::from([0]));
+}
+
+#[test]
+fn symbolic_argument_relation_replaces_concrete_fallback_without_losing_projection() {
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["box".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Call {
+            span: span(12, 20),
+            name: "observe".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(14, 19),
+                name: None,
+                value_text: "box.cmd".to_string(),
+                place: Some("box.cmd".to_string()),
+                source_names: vec!["box.cmd".to_string()],
+            }],
+        },
+        FlowEvent::Call {
+            span: span(30, 40),
+            name: "helper".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(32, 38),
+                name: None,
+                value_text: "box".to_string(),
+                place: Some("box".to_string()),
+                source_names: vec!["box".to_string()],
+            }],
+        },
+    ];
+    let mut callee = empty_decl(2, "helper");
+    callee.params = vec!["arg".to_string()];
+    callee.flow_events = vec![FlowEvent::Call {
+        span: span(60, 72),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(65, 71),
+            name: None,
+            value_text: "arg.cmd".to_string(),
+            place: Some("arg.cmd".to_string()),
+            source_names: vec!["arg.cmd".to_string()],
+        }],
+    }];
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "helper", vec![FuncId::new(2)]);
+    let ws = stitch_idg_with_field_forwarding_mode(
+        vec![transfer_function_for(&caller), transfer_function_for(&callee)],
+        &resolver,
+        &StaticF2S(AHashMap::from([
+            (FuncId::new(1), SegmentId(0)),
+            (FuncId::new(2), SegmentId(1)),
+        ])),
+        true,
+        true,
+    );
+
+    assert!(
+        !ws.cross_file()
+            .edges
+            .iter()
+            .any(|edge| edge.edge.meta.kind == IdgEdgeKind::InterFieldCallArg),
+        "complete adapters must not duplicate symbolic argument transforms as concrete fallback edges"
+    );
+    let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+    let seeds = service.read_or_write_nodes_for_names(FuncId::new(1), &["box.cmd".to_string()]);
+    assert!(
+        !seeds.is_empty(),
+        "caller projected read must be represented in compiler IR"
+    );
+    let reached = service.forward_closure(&seeds);
+    assert!(
+        reached
+            .iter()
+            .any(|node| { service.call_arg_identity(*node) == Some((FuncId::new(2), span(60, 72), 0)) }),
+        "the symbolic fixed point must carry box.cmd into helper arg.cmd without a duplicate concrete edge"
+    );
 }
 
 #[test]

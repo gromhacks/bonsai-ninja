@@ -18,7 +18,7 @@ use crate::matcher::{
     match_rules_against_facts_for_taint_support_with_progress_on_files,
     match_rules_against_facts_for_taint_with_progress_on_files,
     match_rules_against_facts_with_progress_on_files, rule_match_passes_constraints_with_taint_view,
-    rule_target_matches_call, InterTaintView, RuleMatch, RuntimeDisabledRule,
+    rule_target_matches_call, InterTaintView, RuleConstraintTaintContext, RuleMatch, RuntimeDisabledRule,
 };
 use crate::rule::{
     ConstraintKind, ContextFlowRole, FlowClass, GuardProfile, MatchKind, MatchOrigin,
@@ -1326,14 +1326,27 @@ where
     sort_matches(&mut sanitizer_hits);
     sort_matches(&mut pattern_sink_hits);
 
-    let unattributed_source_matches = source_hits
-        .iter()
-        .filter(|source| func_id_for_match(ws, source).is_none())
-        .count();
-    let unattributed_sink_matches = sink_hits
-        .iter()
-        .filter(|sink| func_id_for_match(ws, sink).is_none())
-        .count();
+    // Function attribution can affect completeness only when at least one
+    // source/sink pair exists. With either endpoint set empty, no semantic
+    // path can exist, so opening the complete linkage graph solely to label
+    // the non-empty side cannot change the analysis result.
+    let has_endpoint_pair = !source_hits.is_empty() && !sink_hits.is_empty();
+    let unattributed_source_matches = if has_endpoint_pair {
+        source_hits
+            .iter()
+            .filter(|source| func_id_for_match(ws, source).is_none())
+            .count()
+    } else {
+        0
+    };
+    let unattributed_sink_matches = if has_endpoint_pair {
+        sink_hits
+            .iter()
+            .filter(|sink| func_id_for_match(ws, sink).is_none())
+            .count()
+    } else {
+        0
+    };
     let chain_build = build_findings_chain_aware(ChainAnalysisRequest {
         ws,
         source_hits: &source_hits,

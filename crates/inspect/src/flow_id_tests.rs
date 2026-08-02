@@ -1,4 +1,7 @@
-use super::{compute_flow_labels, compute_taint_flow_id, sibling_suffix, TaintFlowIdentityStep};
+use super::{
+    compute_flow_labels, compute_structural_group_id, compute_taint_flow_id, sibling_suffix,
+    TaintFlowIdentityStep,
+};
 
 #[derive(Clone)]
 struct TestTaintStep {
@@ -99,6 +102,21 @@ fn mix_of_split_and_lone() {
         chain(&["entry_b", "p2", "sink_y"]),
     ]);
     assert_eq!(labels, vec!["1", "2a", "2b"]);
+}
+
+#[test]
+fn structural_group_id_is_set_order_independent() {
+    let first = vec!["F:1111".to_string(), "F:2222".to_string()];
+    let reversed = vec!["F:2222".to_string(), "F:1111".to_string()];
+    let duplicated = vec!["F:1111".to_string(), "F:2222".to_string(), "F:1111".to_string()];
+    assert_eq!(
+        compute_structural_group_id(&first),
+        compute_structural_group_id(&reversed)
+    );
+    assert_eq!(
+        compute_structural_group_id(&first),
+        compute_structural_group_id(&duplicated)
+    );
 }
 
 #[test]

@@ -305,7 +305,7 @@ impl<'a> TraceBuilder<'a> {
         // Build a new frame; bind parameter names to concrete callables
         // when the argument at that position resolves to one.
         let mut frame = CallFrame {
-            types: types_from_decl(&decl),
+            types: types_from_decl(decl),
             ..Default::default()
         };
         let binding_exact = caller.and_then(|func| {
@@ -534,7 +534,7 @@ impl<'a> TraceBuilder<'a> {
                 let caller_exact = self
                     .workspace
                     .exact_decl_with_headers(SymbolId::new(func.raw()), Arc::clone(&self.headers));
-                let caller_decl = caller_exact.as_ref().map(|exact| &**exact);
+                let caller_decl = caller_exact.as_deref();
                 let assigned_callable = source_name
                     .as_deref()
                     .and_then(|name| caller_decl.and_then(|decl| self.resolve_callable_by_name(name, decl)));

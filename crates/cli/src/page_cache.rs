@@ -3,7 +3,8 @@
 //! Pagination cursors are useful only if turning the page is cheap. The
 //! row/flow analysis has already happened on page 1, so page 2 should
 //! not reopen a large workspace and recompute the same report. This
-//! module stores fully rendered pages under `.bonsai/page-cache.v5`
+//! module stores fully rendered pages under the external workspace cache's
+//! `page-cache.v5` directory
 //! keyed by the normalized command line (with `--page` removed) and
 //! source/rulepack/dependency freshness fingerprints.
 
@@ -34,10 +35,31 @@ thread_local! {
 }
 
 const EAGER_PAGE_LIMIT: u64 = 4;
-// Page boundaries are part of the cached rendering contract. Version 10 uses
-// physical table-line costs instead of charging every cell as though it wraps
-// independently, preventing severe under-filled pages on wide inventories.
-const RENDER_CACHE_VERSION: u32 = 10;
+// Page boundaries and semantic command planning are part of the cached
+// rendering contract. Version 11 invalidates pages produced by the former
+// retrieval-scoped cold dump-taint path, which could omit cross-file
+// propagations before a callgraph sidecar existed.
+const RENDER_CACHE_VERSION: u32 = 11;
+
+/// Stable structural ids are hashes of rendered chains, so the id alone
+/// cannot be inverted into the target declaration that made the query
+/// narrow. Remember the originating syntax query when `inspect` emits an
+/// `F:`/`G:` id. `show` can then reopen the exact scoped compiler query
+/// instead of probing the unrelated security engine or enumerating every
+/// callable in a large workspace.
+const STRUCTURAL_ID_HINTS_KEY: u64 = 0x5354_5255_4354_4944;
+const STRUCTURAL_ID_HINTS_KIND: &str = "structural-id-hints-v1";
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct StructuralIdHint {
+    pub(crate) query: String,
+    pub(crate) regex: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct StructuralIdHints {
+    by_id: std::collections::BTreeMap<String, StructuralIdHint>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CachedPage {
@@ -297,6 +319,69 @@ pub(crate) fn read_keyed_payload<T: DeserializeOwned>(
     Ok(Some(serde_json::from_str(&file.value)?))
 }
 
+/// Persist query provenance for structural ids emitted by one exact inspect
+/// report. This is an optional acceleration cache: failure or an oversized
+/// registry never changes analysis results, and all entries are invalidated
+/// by the same binary/workspace/dependency fingerprints as rendered pages.
+pub(crate) fn remember_structural_id_hints<'a>(
+    workspace: &Path,
+    ids: impl IntoIterator<Item = &'a str>,
+    query: &str,
+    regex: bool,
+) {
+    if cache_disabled() || query.is_empty() {
+        return;
+    }
+    let mut registry = match read_keyed_payload::<StructuralIdHints>(
+        workspace,
+        STRUCTURAL_ID_HINTS_KEY,
+        STRUCTURAL_ID_HINTS_KIND,
+    ) {
+        Ok(Some(registry)) => registry,
+        Ok(None) => StructuralIdHints::default(),
+        Err(error) => {
+            tracing::debug!("structural id hint cache read failed: {error}");
+            StructuralIdHints::default()
+        }
+    };
+    let hint = StructuralIdHint {
+        query: query.to_string(),
+        regex,
+    };
+    let mut changed = false;
+    for id in ids {
+        if !matches!(id.split_once(':'), Some(("F" | "G", body)) if !body.is_empty()) {
+            continue;
+        }
+        if registry.by_id.get(id) != Some(&hint) {
+            registry.by_id.insert(id.to_string(), hint.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        if let Err(error) = save_keyed_payload(
+            workspace,
+            STRUCTURAL_ID_HINTS_KEY,
+            STRUCTURAL_ID_HINTS_KIND,
+            &registry,
+        ) {
+            tracing::debug!("structural id hint cache save failed: {error}");
+        }
+    }
+}
+
+/// Return the fresh originating query for an emitted structural id.
+pub(crate) fn structural_id_hint(workspace: &Path, id: &str) -> anyhow::Result<Option<StructuralIdHint>> {
+    Ok(
+        read_keyed_payload::<StructuralIdHints>(
+            workspace,
+            STRUCTURAL_ID_HINTS_KEY,
+            STRUCTURAL_ID_HINTS_KIND,
+        )?
+        .and_then(|registry| registry.by_id.get(id).cloned()),
+    )
+}
+
 /// Atomically write `value` as JSON to `path` via a temp file + rename,
 /// fsync'd so a crash can't leave a torn cache file. Shared by the page
 /// cache and the keyed-payload store.
@@ -389,6 +474,7 @@ where
     C: Fn(&T) -> u64,
     R: FnMut(&[T], &paging::PageInfo, &paging::PagingConfig) -> anyhow::Result<()>,
 {
+    let paging_started = std::time::Instant::now();
     // Secondary `--contains` / `--not-contains` filters run here, the
     // shared funnel for every row-based command's text AND json paths.
     // Drop the non-matching rows before pagination so page counts,
@@ -402,6 +488,13 @@ where
     });
     let rows: &[T] = filtered_storage.as_deref().unwrap_or(rows);
     let (_, current_info) = paging::paginate(rows, cfg, command, filters_hash, &row_cost_bytes)?;
+    bonsai_diagnostics::debug_log!(
+        "page-cache",
+        "{command} pagination planned: {:.3}s rows={} pages={}",
+        paging_started.elapsed().as_secs_f64(),
+        rows.len(),
+        current_info.total_pages
+    );
     let current_page = current_info.page_number;
     let mut cached_pages = Vec::new();
     let render_label = format!("rendering {command} page");
@@ -420,11 +513,24 @@ where
         });
     }
     render_stage.finish();
+    bonsai_diagnostics::debug_log!(
+        "page-cache",
+        "{command} eager pages rendered: {:.3}s pages={}",
+        paging_started.elapsed().as_secs_f64(),
+        cached_pages.len()
+    );
     let cache_stage = progress::ScopedSpinner::new("saving rendered page cache");
+    let save_started = std::time::Instant::now();
     if let Err(e) = save_pages(workspace, command, filters_hash, cached_pages.clone()) {
         tracing::debug!("page cache save failed: {e}");
     }
     cache_stage.finish();
+    bonsai_diagnostics::debug_log!(
+        "page-cache",
+        "{command} page cache saved: {:.3}s total={:.3}s",
+        save_started.elapsed().as_secs_f64(),
+        paging_started.elapsed().as_secs_f64()
+    );
     // Eager cache population renders nearby pages through the canonical
     // paginator. Those internal renders must not replace the user's actual
     // current page in `--page next` history.

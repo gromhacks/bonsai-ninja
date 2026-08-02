@@ -5,7 +5,6 @@
 //! token budget; larger or explicitly paged renders use `{rows, page}`.
 
 use anyhow::Result;
-use bonsai_lang_api::{DeclKind, FlowEvent};
 use bonsai_sdk::Workspace;
 use comfy_table::Cell;
 
@@ -20,7 +19,6 @@ use crate::{cli_println, ui};
 use super::{
     open_project_index_filtered_paths, open_project_index_matching_literal, open_project_index_matching_path,
     open_project_index_only as open_project, open_project_index_retrieval_candidates,
-    open_workspace_syntax_filtered_paths, open_workspace_syntax_only,
 };
 
 const BROWSE_LITERAL_PREFILTER_FILE_LIMIT: usize = 5_000;
@@ -235,25 +233,8 @@ pub(crate) fn cmd_defs(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.name.or(f.has_callee).or(f.has_param).or(f.has_decorator);
-    let large_workspace =
-        f.file.is_none() && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
-    if matches!(format, BrowseFormat::Text)
-        && !f.regex
-        && matches!(paging_cfg.page, paging::PageArg::First)
-        && !paging_cfg.all
-        && f.file.is_none()
-        && prefilter_literal.is_none()
-        && (!flows || large_workspace)
-    {
-        let include_filters: Vec<String> = f.file.into_iter().map(str::to_string).collect();
-        let (ws, _footer) = if include_filters.is_empty() {
-            open_workspace_syntax_only(root)?
-        } else {
-            open_workspace_syntax_filtered_paths(root, &include_filters, &[])?
-        };
-        return render_defs_streaming_first_page(&ws, f, limit, &paging_cfg, flows && large_workspace);
-    }
     let retrieval_kind = if f.name.is_some() {
         f.kind
     } else if f.has_callee.is_some() {
@@ -356,119 +337,6 @@ pub(crate) fn cmd_defs(
     Ok(())
 }
 
-fn render_defs_streaming_first_page(
-    ws: &bonsai_sdk::Workspace,
-    f: DefsFilters<'_>,
-    limit: usize,
-    paging_cfg: &paging::PagingConfig,
-    flows_omitted: bool,
-) -> Result<()> {
-    let budget_tokens = paging_cfg
-        .effective_budget()
-        .unwrap_or(paging::DEFAULT_CONTEXT_TEXT);
-    let max_rows = effective_limit(limit, paging_cfg);
-    let u = ui();
-    let mut table = u.table(&["name", "kind", "location", "signature", "callees"]);
-    let mut rows_rendered = 0usize;
-    let mut tokens_used = 0u64;
-    let mut stopped_for_budget = false;
-
-    let files = ws.vfs().all_files();
-    let scan_bar = progress::progress_bar("streaming definitions", files.len() as u64);
-    'files: for file_id in files {
-        scan_bar.inc(1);
-        let path = path_for_file_id(ws, file_id);
-        if f.file
-            .is_some_and(|needle| !bonsai_sdk::file_path_matches_filter(ws, &path, needle))
-        {
-            continue;
-        }
-        let Some(index) = ws.db().decl_index_uncached(file_id) else {
-            continue;
-        };
-        for decl in &index.defs {
-            let kind = decl_kind_string(decl.kind);
-            if f.kind
-                .is_some_and(|needle| !kind.contains(&needle.to_lowercase()))
-            {
-                continue;
-            }
-            if f.name.is_some_and(|needle| !decl.name.contains(needle)) {
-                continue;
-            }
-            if let Some(needle) = f.has_callee {
-                let mut callees = Vec::new();
-                collect_callees(&decl.flow_events, &mut callees);
-                if !callees.iter().any(|callee| callee.contains(needle)) {
-                    continue;
-                }
-            }
-            if let Some(needle) = f.has_decorator {
-                let decorators =
-                    bonsai_sdk::decl_decorator_names(ws, file_id, &index, decl.span, decl.name_span);
-                if !decorators.iter().any(|name| name.contains(needle)) {
-                    continue;
-                }
-            }
-            if let Some(needle) = f.has_param {
-                if !decl.params.iter().any(|param| param.contains(needle)) {
-                    continue;
-                }
-            }
-            let (line, column) = line_col_for_span(ws, decl.name_span);
-            let display_params = dedup_sigil_params(&decl.params);
-            let signature = if display_params.is_empty() {
-                format!("{}()", decl.name)
-            } else {
-                format!("{}({})", decl.name, display_params.join(", "))
-            };
-            let loc = format!("{}:{}:{}", short_file(&path), line, column);
-            let callees_cell = summarize_callees(decl, 3);
-            let row_cost = browse_table_row_cost(&[
-                decl.name.len(),
-                kind.len(),
-                loc.len(),
-                signature.len(),
-                callees_cell.len(),
-            ]);
-            let row_tokens = paging::bytes_to_tokens(row_cost);
-            if rows_rendered > 0
-                && (tokens_used.saturating_add(row_tokens) > budget_tokens
-                    || (max_rows != 0 && rows_rendered >= max_rows))
-            {
-                stopped_for_budget = true;
-                break 'files;
-            }
-            tokens_used = tokens_used.saturating_add(row_tokens);
-            table.add_row(vec![
-                Cell::new(u.name(&decl.name)),
-                Cell::new(u.kind(&kind)),
-                Cell::new(u.path(&loc)),
-                Cell::new(u.snippet(&signature, extension_for(&path))),
-                Cell::new(u.dim(&callees_cell)),
-            ]);
-            rows_rendered += 1;
-        }
-    }
-    scan_bar.finish_and_clear();
-
-    cli_println!("{table}");
-    if stopped_for_budget {
-        cli_println!(
-            "{}",
-            u.dim(&format!(
-                "({rows_rendered} definitions shown; more matches exist, narrow with --file/--name/--kind or use --all/JSON for exhaustive output)"
-            ))
-        );
-    } else {
-        cli_println!("{}", u.dim(&format!("({rows_rendered} definitions)")));
-    }
-    if flows_omitted {
-        render_large_workspace_flows_omitted_notice(u);
-    }
-    Ok(())
-}
-
 pub(crate) fn cmd_entrypoints(
     root: &std::path::Path,
     f: EntryPointsFilters<'_>,
@@ -476,6 +344,7 @@ pub(crate) fn cmd_entrypoints(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let (project, _footer) = if let Some(file) = f.file.filter(|file| !file.trim().is_empty()) {
         open_project_index_filtered_paths(root, &[file.to_string()], &[])?
     } else {
@@ -593,27 +462,6 @@ pub(crate) fn callee_summaries(ws: &Workspace, limit: usize) -> std::collections
     map
 }
 
-/// Short preview of a function's outgoing calls: the first `limit`
-/// callee names, joined with `→`, followed by an ellipsis if there are
-/// more. Returns an empty string for call-less bodies (e.g. classes).
-pub(crate) fn summarize_callees(decl: &bonsai_lang_api::Decl, limit: usize) -> String {
-    let mut names: Vec<String> = Vec::new();
-    collect_callees(&decl.flow_events, &mut names);
-    // De-duplicate while preserving order.
-    let mut seen = std::collections::HashSet::new();
-    names.retain(|n| seen.insert(n.clone()));
-    if names.is_empty() {
-        return String::new();
-    }
-    let total = names.len();
-    let shown: Vec<String> = names.into_iter().take(limit).collect();
-    if total > limit {
-        format!("{} (+{})", shown.join(" → "), total - limit)
-    } else {
-        shown.join(" → ")
-    }
-}
-
 /// UTF-8-safe middle truncation: keeps the first `n` characters and
 /// appends an ellipsis when `s` overflows. Counts by chars (not
 /// bytes) so slicing never falls inside a multi-byte character.
@@ -676,6 +524,16 @@ pub(crate) fn effective_limit(legacy_limit: usize, cfg: &paging::PagingConfig) -
     } else {
         legacy_limit
     }
+}
+
+/// Treat an explicit nonzero `--limit` as a maximum page size before rows
+/// are selected. Applying it after pagination silently discarded the tail of
+/// each page and made page/cursor coverage lossy. `--all` remains exhaustive.
+pub(crate) fn paging_with_row_limit(mut cfg: paging::PagingConfig, limit: usize) -> paging::PagingConfig {
+    if limit != 0 && !cfg.all {
+        cfg.page_size = Some(limit as u64);
+    }
+    cfg
 }
 
 /// Parse the four CLI paging flags into a [`paging::PagingConfig`].
@@ -999,6 +857,7 @@ pub(crate) fn cmd_calls(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.callee.or(f.caller);
     let (project, _footer, partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, Some("call"), f.file, f.regex)?;
@@ -1185,8 +1044,28 @@ where
         filters_hash,
         |line| line.len() as u64 + 8,
         |slice, info, _cfg| {
-            if !force_wrapper && page_covers_entire_result(info) {
-                cli_println!("{}", slice.join("\n"));
+            // Preserve the command's native JSON schema whenever the whole
+            // value fits. With an explicit paging request, add `page` beside
+            // the native object fields instead of turning the object into an
+            // array of JSON source lines.
+            if page_covers_entire_result(info) && !crate::filter::active().is_active() {
+                if !force_wrapper {
+                    cli_println!("{}", slice.join("\n"));
+                    return Ok(());
+                }
+                let mut native = serde_json::to_value(value)?;
+                match &mut native {
+                    serde_json::Value::Object(fields) => {
+                        fields.insert("page".to_string(), page_info_to_json(info));
+                    }
+                    _ => {
+                        native = serde_json::json!({
+                            "value": native,
+                            "page": page_info_to_json(info),
+                        });
+                    }
+                }
+                cli_println!("{}", serde_json::to_string_pretty(&native)?);
                 return Ok(());
             }
             let analysis_incomplete_reasons = paged_json_incomplete_reasons(command, info);
@@ -1310,31 +1189,8 @@ pub(crate) fn cmd_imports(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.module.or(f.alias);
-    let large_workspace =
-        f.file.is_none() && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
-    if matches!(format, BrowseFormat::Text)
-        && !f.regex
-        && matches!(paging_cfg.page, paging::PageArg::First)
-        && !paging_cfg.all
-        && f.file.is_none()
-        && (!flows || large_workspace)
-    {
-        let include_filters: Vec<String> = f.file.into_iter().map(str::to_string).collect();
-        let (ws, _footer) = if include_filters.is_empty() {
-            open_workspace_syntax_only(root)?
-        } else {
-            open_workspace_syntax_filtered_paths(root, &include_filters, &[])?
-        };
-        return render_imports_streaming_first_page(
-            root,
-            &ws,
-            f,
-            limit,
-            &paging_cfg,
-            flows && large_workspace,
-        );
-    }
     let (project, _footer, partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, Some("import"), f.file, f.regex)?;
     let flows = flows && !partial_workspace;
@@ -1368,7 +1224,6 @@ pub(crate) fn cmd_imports(
         let symbol = import.original_name.as_deref().unwrap_or("-");
         let kind = import_kind_label(import.is_wildcard, import.original_name.as_deref());
         let loc_len = short_file(&import.file).len() + 16;
-        let source_len = read_line(ws, &import.file, import.line).len();
         let flow_len = flow_cost_ann
             .as_ref()
             .map(|ann| import_flow_labels(ann, import).len().min(120))
@@ -1379,9 +1234,9 @@ pub(crate) fn cmd_imports(
             alias.len(),
             kind.len(),
             loc_len,
-            source_len,
             flow_len,
         ])
+        .saturating_add(source_line_estimated_cell_cost())
     };
     match format {
         BrowseFormat::Json => {
@@ -1462,173 +1317,6 @@ fn import_kind_label(is_wildcard: bool, original_name: Option<&str>) -> &'static
     }
 }
 
-fn render_imports_streaming_first_page(
-    _root: &std::path::Path,
-    ws: &bonsai_sdk::Workspace,
-    f: ImportsFilters<'_>,
-    limit: usize,
-    paging_cfg: &paging::PagingConfig,
-    flows_omitted: bool,
-) -> Result<()> {
-    let module_matches = |module: &str| -> bool { f.module.is_none_or(|needle| module.contains(needle)) };
-    let budget = paging_cfg.effective_budget();
-    let budget_tokens = budget.unwrap_or(paging::DEFAULT_CONTEXT_TEXT);
-    let max_rows = effective_limit(limit, paging_cfg);
-    let u = ui();
-    let headers = ["module", "symbol", "alias", "kind", "location", "code"];
-    let mut table = u.table(&headers);
-    let mut rows_rendered = 0usize;
-    let mut rows_seen = 0usize;
-    let mut tokens_used = 0u64;
-    let mut stopped_for_budget = false;
-
-    let files = ws.vfs().all_files();
-    let scan_bar = progress::progress_bar("streaming imports", files.len() as u64);
-    'files: for file_id in files {
-        scan_bar.inc(1);
-        let path = path_for_file_id(ws, file_id);
-        if f.file
-            .is_some_and(|needle| !bonsai_sdk::file_path_matches_filter(ws, &path, needle))
-        {
-            continue;
-        }
-        let Some(import_index) = ws.db().import_index_uncached(file_id) else {
-            continue;
-        };
-        for imp in import_index.imports {
-            if imp.scope.is_local() {
-                continue;
-            }
-            if !module_matches(&imp.module) {
-                continue;
-            }
-            if let Some(needle) = f.alias {
-                if !imp.alias.as_deref().is_some_and(|a| a.contains(needle)) {
-                    continue;
-                }
-            }
-            if f.wildcard && !imp.is_wildcard {
-                continue;
-            }
-            rows_seen += 1;
-            let line = line_for_span(ws, file_id, imp.span);
-            let alias = imp.alias.clone().unwrap_or_else(|| "-".to_string());
-            let symbol = imp.original_name.clone().unwrap_or_else(|| "-".to_string());
-            let kind = import_kind_label(imp.is_wildcard, imp.original_name.as_deref());
-            let loc = format!("{}:{}", short_file(&path), line);
-            let line_text = read_line_by_file_id(ws, file_id, line);
-            let row_cost = rendered_table_row_cost(&[
-                imp.module.len(),
-                symbol.len(),
-                alias.len(),
-                kind.len(),
-                loc.len(),
-                line_text.len().min(4_000),
-            ]);
-            let row_tokens = paging::bytes_to_tokens(row_cost);
-            if rows_rendered > 0
-                && (tokens_used.saturating_add(row_tokens) > budget_tokens
-                    || (max_rows != 0 && rows_rendered >= max_rows))
-            {
-                stopped_for_budget = true;
-                break 'files;
-            }
-            tokens_used = tokens_used.saturating_add(row_tokens);
-            let ext = extension_for(&path);
-            let code_cell = Cell::new(u.snippet(&line_text, ext));
-            table.add_row(vec![
-                Cell::new(u.name(&imp.module)),
-                Cell::new(u.dim(&symbol)),
-                Cell::new(u.dim(&alias)),
-                Cell::new(u.kind(kind)),
-                Cell::new(u.path(&loc)),
-                code_cell,
-            ]);
-            rows_rendered += 1;
-        }
-    }
-    scan_bar.finish_and_clear();
-
-    cli_println!("{table}");
-    if stopped_for_budget {
-        cli_println!(
-            "{}",
-            u.dim(&format!(
-                "({rows_rendered} imports shown; more matches exist, narrow with --file/--module/--alias or use --all/JSON for exhaustive output)"
-            ))
-        );
-    } else {
-        cli_println!("{}", u.dim(&format!("({rows_rendered} imports)")));
-    }
-    if rows_seen > rows_rendered && !stopped_for_budget {
-        render_truncation_notice(rows_rendered, Some(rows_seen - rows_rendered));
-    }
-    if flows_omitted {
-        render_large_workspace_flows_omitted_notice(u);
-    }
-    Ok(())
-}
-
-fn path_for_file_id(ws: &bonsai_sdk::Workspace, file_id: bonsai_common::FileId) -> String {
-    ws.vfs()
-        .path(file_id)
-        .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string())
-}
-
-fn line_col_for_span(ws: &bonsai_sdk::Workspace, span: bonsai_common::Span) -> (u32, u32) {
-    ws.vfs()
-        .snapshot(span.file)
-        .ok()
-        .map(|snapshot| {
-            let line_col = bonsai_common::SpanMap::new(snapshot.text.as_ref()).line_col(span.start);
-            (line_col.line, line_col.column)
-        })
-        .unwrap_or((0, 0))
-}
-
-fn decl_kind_string(kind: DeclKind) -> String {
-    format!("{kind:?}").to_lowercase()
-}
-
-fn render_large_workspace_flows_omitted_notice(u: &Ui) {
-    cli_println!(
-        "{}",
-        u.dim(
-            "flows column omitted for this large-workspace first page; use --all for exhaustive flow-annotated rows or inspect a narrower target"
-        )
-    );
-}
-
-fn read_line_by_file_id(ws: &bonsai_sdk::Workspace, file_id: bonsai_common::FileId, line: u32) -> String {
-    ws.vfs()
-        .snapshot(file_id)
-        .ok()
-        .and_then(|snapshot| {
-            snapshot
-                .text
-                .lines()
-                .nth(line.saturating_sub(1) as usize)
-                .map(|line| line.trim_end().to_string())
-        })
-        .unwrap_or_default()
-}
-
-fn line_for_span(
-    ws: &bonsai_sdk::Workspace,
-    file_id: bonsai_common::FileId,
-    span: bonsai_common::Span,
-) -> u32 {
-    ws.vfs()
-        .snapshot(file_id)
-        .ok()
-        .map(|snapshot| {
-            bonsai_common::SpanMap::new(snapshot.text.as_ref())
-                .line_col(span.start)
-                .line
-        })
-        .unwrap_or(0)
-}
-
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
 pub(crate) fn cmd_vars(
     root: &std::path::Path,
@@ -1638,6 +1326,7 @@ pub(crate) fn cmd_vars(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.name.or(f.source).or(f.in_fn);
     let (project, _footer, partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, Some("var"), f.file, f.regex)?;
@@ -1745,6 +1434,7 @@ pub(crate) fn cmd_strings(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.contains.or(f.in_fn);
     let (project, _footer, partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, Some("string"), f.file, f.regex)?;
@@ -1865,6 +1555,7 @@ pub(crate) fn cmd_comments(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.contains.or(f.in_fn);
     let (project, _footer, _partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, Some("comment"), f.file, f.regex)?;
@@ -1937,6 +1628,7 @@ pub(crate) fn cmd_args(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.callee.or(f.value).or(f.in_fn).or(f.keyword);
     let retrieval_kind = if f.callee.is_some() {
         Some("call")
@@ -2072,6 +1764,7 @@ pub(crate) fn cmd_operations(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let prefilter_literal = f.name.or(f.in_fn);
     let (project, _footer, partial_workspace) =
         open_browse_project_with_retrieval(root, prefilter_literal, Some("operation"), f.file, f.regex)?;
@@ -2207,26 +1900,9 @@ pub(crate) fn cmd_classes(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let (prefilter_literal, prefilter_regex) =
         f.name.map_or((f.has_method, false), |name| (Some(name), f.regex));
-    let large_workspace =
-        f.file.is_none() && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
-    if matches!(format, BrowseFormat::Text)
-        && !f.regex
-        && matches!(paging_cfg.page, paging::PageArg::First)
-        && !paging_cfg.all
-        && f.file.is_none()
-        && prefilter_literal.is_none()
-        && (!flows || large_workspace)
-    {
-        let include_filters: Vec<String> = f.file.into_iter().map(str::to_string).collect();
-        let (ws, _footer) = if include_filters.is_empty() {
-            open_workspace_syntax_only(root)?
-        } else {
-            open_workspace_syntax_filtered_paths(root, &include_filters, &[])?
-        };
-        return render_classes_streaming_first_page(&ws, f, limit, &paging_cfg, flows && large_workspace);
-    }
     let retrieval_kind = if f.has_method.is_some() {
         Some("method")
     } else {
@@ -2348,127 +2024,6 @@ pub(crate) fn cmd_classes(
     Ok(())
 }
 
-fn render_classes_streaming_first_page(
-    ws: &bonsai_sdk::Workspace,
-    f: ClassesFilters<'_>,
-    limit: usize,
-    paging_cfg: &paging::PagingConfig,
-    flows_omitted: bool,
-) -> Result<()> {
-    let budget_tokens = paging_cfg
-        .effective_budget()
-        .unwrap_or(paging::DEFAULT_CONTEXT_TEXT);
-    let max_rows = effective_limit(limit, paging_cfg);
-    let u = ui();
-    let mut table = u.table(&["name", "kind", "location", "#", "methods"]);
-    let mut rows_rendered = 0usize;
-    let mut tokens_used = 0u64;
-    let mut stopped_for_budget = false;
-
-    let files = ws.vfs().all_files();
-    let scan_bar = progress::progress_bar("streaming classes", files.len() as u64);
-    'files: for file_id in files {
-        scan_bar.inc(1);
-        let path = path_for_file_id(ws, file_id);
-        if f.file
-            .is_some_and(|needle| !bonsai_sdk::file_path_matches_filter(ws, &path, needle))
-        {
-            continue;
-        }
-        let Some(index) = ws.db().decl_index_uncached(file_id) else {
-            continue;
-        };
-        for class in &index.defs {
-            if !matches!(
-                class.kind,
-                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
-            ) {
-                continue;
-            }
-            let kind = decl_kind_string(class.kind);
-            if f.kind
-                .is_some_and(|needle| !kind.contains(&needle.to_lowercase()))
-            {
-                continue;
-            }
-            if f.name.is_some_and(|needle| !class.name.contains(needle)) {
-                continue;
-            }
-            let methods: Vec<String> = index
-                .defs
-                .iter()
-                .filter(|member| {
-                    matches!(
-                        member.kind,
-                        DeclKind::Method | DeclKind::Constructor | DeclKind::Function
-                    )
-                })
-                .filter(|member| member.parent == Some(class.symbol))
-                .map(|member| member.name.clone())
-                .collect();
-            if let Some(needle) = f.has_method {
-                if !methods.iter().any(|method| method.contains(needle)) {
-                    continue;
-                }
-            }
-            if let Some(min_count) = f.min_methods {
-                if methods.len() < min_count {
-                    continue;
-                }
-            }
-            let (line, _) = line_col_for_span(ws, class.name_span);
-            let loc = format!("{}:{}", short_file(&path), line);
-            let methods_cell = if methods.is_empty() {
-                u.dim("—")
-            } else {
-                let shown: Vec<String> = methods.iter().take(8).cloned().collect();
-                let rest = methods.len().saturating_sub(shown.len());
-                let mut s = shown.join("\n");
-                if rest > 0 {
-                    s.push_str(&format!("\n… +{rest} more"));
-                }
-                s
-            };
-            let row_cost =
-                browse_table_row_cost(&[class.name.len(), kind.len(), loc.len(), methods_cell.len(), 4]);
-            let row_tokens = paging::bytes_to_tokens(row_cost);
-            if rows_rendered > 0
-                && (tokens_used.saturating_add(row_tokens) > budget_tokens
-                    || (max_rows != 0 && rows_rendered >= max_rows))
-            {
-                stopped_for_budget = true;
-                break 'files;
-            }
-            tokens_used = tokens_used.saturating_add(row_tokens);
-            table.add_row(vec![
-                Cell::new(u.name(&class.name)),
-                Cell::new(u.kind(&kind)),
-                Cell::new(u.path(&loc)),
-                Cell::new(u.dim(&methods.len().to_string())),
-                Cell::new(methods_cell),
-            ]);
-            rows_rendered += 1;
-        }
-    }
-    scan_bar.finish_and_clear();
-
-    cli_println!("{table}");
-    if stopped_for_budget {
-        cli_println!(
-            "{}",
-            u.dim(&format!(
-                "({rows_rendered} types shown; more matches exist, narrow with --file/--name/--kind or use --all/JSON for exhaustive output)"
-            ))
-        );
-    } else {
-        cli_println!("{}", u.dim(&format!("({rows_rendered} types)")));
-    }
-    if flows_omitted {
-        render_large_workspace_flows_omitted_notice(u);
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
 pub(crate) fn cmd_refs(
     root: &std::path::Path,
@@ -2479,6 +2034,7 @@ pub(crate) fn cmd_refs(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let (project, _footer, partial_workspace) =
         open_browse_project_with_retrieval(root, Some(symbol), Some("ref"), f.file, f.regex)?;
     let flows = flows && !partial_workspace;
@@ -2568,6 +2124,7 @@ pub(crate) fn cmd_search(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let retrieval_project = if !f.regex
         && query.trim().len() >= 3
         && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT)
@@ -2669,10 +2226,6 @@ pub(crate) fn cmd_search(
         }
     }
     Ok(())
-}
-
-pub(crate) fn collect_callees(events: &[FlowEvent], out: &mut Vec<String>) {
-    out.extend(bonsai_sdk::collect_callee_names(events));
 }
 
 #[cfg(test)]

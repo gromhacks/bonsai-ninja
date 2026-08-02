@@ -313,7 +313,8 @@ shape:
    query lazy-build.
 2. **Sidecar persistence** — long-lived caches (`DataFlowCache`,
    `ValueFlowCache`, `TaintGraphIndex`) stream-write to
-   `<workspace>/.bonsai/<name>.v<version>.factstore` via
+   the workspace's canonical-path-keyed OS cache as
+   `<cache>/<name>.v<version>.factstore` via
    `bonsai_factstore::FactStoreWriter` with atomic-rename +
    `MATCHER_POLICY_FINGERPRINT` validation. Streaming keeps peak
    memory bounded by in-flight payload, not by the total cache.
@@ -332,7 +333,7 @@ Concrete wiring:
 |-------|------|----------------|--------------|
 | `CompiledFileObject` generation | `crates/db/src/compiler_object.rs` | first `index --semantic` worker; lazy one-file miss | SHA-256/path/adapter/ABI per object; atomic generation replacement |
 | compiler linkage | `crates/workspace/src/linkage_sidecar.rs` | semantic linkage worker | complete generation/source/dependency/pipeline identity |
-| workspace IDG | `crates/idg/src/workspace.rs` | semantic IDG worker or exact query miss | complete source/dependency/transfer pipeline identity |
+| workspace IDG + query accelerator | `crates/idg/src/workspace.rs`, `crates/idg/src/service.rs` | semantic IDG worker; exact query misses may publish the canonical graph without claiming semantic prewarm | complete source/dependency/transfer pipeline identity plus independently validated accelerator ABI |
 | `DataFlowCache` | `crates/workspace/src/dataflow.rs` | `prewarm_all` | per-FuncId via dependency files |
 | `ValueFlowCache` | `crates/workspace/src/value_flow.rs` | lazy `graph_for_with_caches`; explicit compatibility prewarm only | clear |
 | `FlowIdCache` | `crates/workspace/src/flow_ids.rs` | `prewarm_all` | clear |

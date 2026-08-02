@@ -430,7 +430,31 @@ impl GlobalIndex {
     /// invariant violation, so this method fails loudly rather than returning
     /// a partially remapped body and silently losing edges.
     #[must_use]
-    pub fn remap_file_to_existing_symbols(&self, mut index: DeclIndex) -> DeclIndex {
+    pub fn remap_file_to_existing_symbols(&self, index: DeclIndex) -> DeclIndex {
+        let mut index = self.remap_file_symbols_only(index);
+
+        // Header finalization knows every workspace base declaration. Apply
+        // the same cross-file receiver ancestry to the streamed body that a
+        // fully resident GlobalIndex would have published.
+        for decl in &mut index.defs {
+            enrich_receiver_types_in_events(&mut decl.flow_events, &self.finalized_bases_by_type);
+        }
+        index.compact_storage();
+        index
+    }
+
+    /// Rebind local declaration identities without adding workspace-global
+    /// semantic enrichment. Debug views of frontend HIR and CFG use this path
+    /// so they expose exactly the adapter-lowered body regardless of whether
+    /// the caller opened a full or retrieval-scoped workspace.
+    #[must_use]
+    pub fn remap_file_to_existing_symbols_frontend_only(&self, index: DeclIndex) -> DeclIndex {
+        let mut index = self.remap_file_symbols_only(index);
+        index.compact_storage();
+        index
+    }
+
+    fn remap_file_symbols_only(&self, mut index: DeclIndex) -> DeclIndex {
         dedup_decl_index_defs(&mut index);
         let file = index.file;
         let headers = self
@@ -455,14 +479,6 @@ impl GlobalIndex {
             local_to_global.insert(body.symbol, header.symbol);
         }
         remap_decl_index_symbols(&mut index, &local_to_global);
-
-        // Header finalization knows every workspace base declaration. Apply
-        // the same cross-file receiver ancestry to the streamed body that a
-        // fully resident GlobalIndex would have published.
-        for decl in &mut index.defs {
-            enrich_receiver_types_in_events(&mut decl.flow_events, &self.finalized_bases_by_type);
-        }
-        index.compact_storage();
         index
     }
 

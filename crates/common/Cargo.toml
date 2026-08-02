@@ -12,6 +12,7 @@ bonsai_hash = { workspace = true }
 serde = { workspace = true }
 rmp-serde = { workspace = true }
 tempfile = { workspace = true }
+dirs = { workspace = true }
 
 [lints]
 workspace = true

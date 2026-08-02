@@ -70,7 +70,7 @@ fn combined() -> CombinedFindingWithChain {
 
 #[test]
 fn zero_max_inlined_bodies_means_unbounded() {
-    assert_eq!(effective_max_inlined_bodies(None), 8);
+    assert_eq!(effective_max_inlined_bodies(None), usize::MAX);
     assert_eq!(effective_max_inlined_bodies(Some(3)), 3);
     assert_eq!(effective_max_inlined_bodies(Some(0)), usize::MAX);
 }

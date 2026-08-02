@@ -200,6 +200,74 @@ fn objc_sibling_project_classes_do_not_share_module_identity() {
 }
 
 #[test]
+fn objc_inheritance_and_local_receiver_type_are_ast_facts() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_objc::ObjCAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("Entry.m"),
+        "@interface Base : NSObject\n@end\n\
+         @interface Child : Base\n@end\n\
+         @implementation Child\n@end\n\
+         void entry(NSString *args) { Child *obj = [[Child alloc] init]; [obj helper:args]; }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let child_decls = idx
+        .defs
+        .iter()
+        .filter(|decl| decl.name == "Child")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        child_decls.len(),
+        2,
+        "interface and implementation are distinct CST declarations"
+    );
+    assert!(
+        child_decls
+            .iter()
+            .all(|decl| decl.bases.iter().any(|base| base == "Base")),
+        "both split declarations must retain the interface's exact superclass: {child_decls:#?}"
+    );
+
+    let entry = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "entry")
+        .expect("entry declaration");
+    assert!(
+        entry
+            .type_aliases
+            .iter()
+            .any(|alias| alias.name == "obj" && alias.type_name == "Child"),
+        "typed local declaration must lower to obj: Child: {:?}",
+        entry.type_aliases
+    );
+    assert!(
+        entry.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                receiver: Some(receiver),
+                ..
+            } if name == "obj.helper" && receiver == "obj"
+        )),
+        "message send must retain its receiver and selector: {:?}",
+        entry.flow_events
+    );
+}
+
+#[test]
 fn objc_message_compound_argument_uses_ast_place_and_sources() {
     use bonsai_diagnostics::DiagnosticSink;
     use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};

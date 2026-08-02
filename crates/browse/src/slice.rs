@@ -43,7 +43,7 @@ impl Default for SliceFilters<'_> {
             symbol: "",
             line: 0,
             file: None,
-            max_steps: 64,
+            max_steps: 0,
         }
     }
 }

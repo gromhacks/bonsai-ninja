@@ -151,6 +151,37 @@ pub(super) fn run_semantic_workers(root: &std::path::Path) -> Result<()> {
     }
 }
 
+/// Publish the compact semantic generation needed by exact graph-navigation
+/// queries, without also building or mapping the workspace IDG.
+///
+/// Target-oriented `inspect --graph-flow` needs compiler objects, the
+/// partitioned call graph, retrieval candidates, and stable linkage headers.
+/// Building those phases in isolated processes keeps parser and graph
+/// allocator peaks from accumulating in one long-lived CLI process. The
+/// resulting query can then hydrate only the target's exact caller/callee cut
+/// rather than opening every body in a large workspace.
+pub(super) fn run_graph_query_workers(root: &std::path::Path) -> Result<()> {
+    let executable = std::env::current_exe()?;
+    bonsai_for_cli().cache(root).maintain_persisted_sidecars()?;
+    loop {
+        let stats = semantic_cache_stats(&executable, root)?;
+        if graph_query_generation_is_current(&stats.validation) {
+            return Ok(());
+        }
+        for phase in graph_query_phase_plan(&stats.validation) {
+            run_semantic_phase_process(&executable, root, phase)?;
+        }
+        let validation = semantic_cache_stats(&executable, root)?.validation;
+        if graph_query_generation_is_current(&validation) {
+            return Ok(());
+        }
+        let retry = progress::ScopedSpinner::new(
+            "workspace changed between graph-query workers; rebuilding one coherent generation",
+        );
+        retry.finish();
+    }
+}
+
 fn run_semantic_phase_process(
     executable: &std::path::Path,
     root: &std::path::Path,
@@ -183,6 +214,26 @@ fn run_semantic_phase_process(
 
 fn semantic_generation_is_current(validation: &bonsai_sdk::CacheValidationReport) -> bool {
     validation.semantic_ready && validation.manifest_status == bonsai_sdk::CacheFreshnessStatus::Fresh
+}
+
+fn sidecar_is_fresh(validation: &bonsai_sdk::CacheValidationReport, name: &str) -> bool {
+    validation
+        .sidecars
+        .iter()
+        .find(|sidecar| sidecar.name == name)
+        .is_some_and(|sidecar| {
+            matches!(
+                sidecar.status,
+                bonsai_sdk::CacheFreshnessStatus::Fresh | bonsai_sdk::CacheFreshnessStatus::NotApplicable
+            )
+        })
+}
+
+fn graph_query_generation_is_current(validation: &bonsai_sdk::CacheValidationReport) -> bool {
+    ["compiler_objects", "callgraph", "retrieval", "linkage"]
+        .into_iter()
+        .all(|name| sidecar_is_fresh(validation, name))
+        && validation.manifest_status == bonsai_sdk::CacheFreshnessStatus::Fresh
 }
 
 fn semantic_cache_stats(
@@ -220,33 +271,24 @@ fn semantic_cache_stats(
 /// descriptive manifest never forces an otherwise current compiler phase to
 /// rerun.
 fn semantic_phase_plan(validation: &bonsai_sdk::CacheValidationReport) -> Vec<SemanticWorkerPhase> {
-    let sidecar_is_fresh = |name: &str| {
-        validation
-            .sidecars
-            .iter()
-            .find(|sidecar| sidecar.name == name)
-            .is_some_and(|sidecar| {
-                matches!(
-                    sidecar.status,
-                    bonsai_sdk::CacheFreshnessStatus::Fresh | bonsai_sdk::CacheFreshnessStatus::NotApplicable
-                )
-            })
-    };
-    let compiler_stale = !sidecar_is_fresh("compiler_objects");
+    let compiler_stale = !sidecar_is_fresh(validation, "compiler_objects");
     // Compiler-object storage is an independently versioned serialization of
     // adapter facts. Its storage ABI may change without changing callgraph,
     // linkage, retrieval, or IDG semantics; those artifacts carry their own
     // semantic ABIs and exact source fingerprints.
-    let callgraph_stale = !sidecar_is_fresh("callgraph");
-    let retrieval_stale = callgraph_stale || !sidecar_is_fresh("retrieval");
-    let linkage_stale = !sidecar_is_fresh("linkage");
-    let idg_stale = callgraph_stale || linkage_stale || !sidecar_is_fresh("idg");
+    let callgraph_stale = !sidecar_is_fresh(validation, "callgraph");
+    let retrieval_stale = callgraph_stale || !sidecar_is_fresh(validation, "retrieval");
+    let linkage_stale = !sidecar_is_fresh(validation, "linkage");
+    let idg_stale = callgraph_stale || linkage_stale || !sidecar_is_fresh(validation, "idg");
 
     let mut phases = [
         (SemanticWorkerPhase::Compiler, compiler_stale),
+        // Linkage publishes independently decodable declaration headers.
+        // Build it before callgraph so that worker streams only call bodies
+        // instead of first reconstructing the same workspace header table.
+        (SemanticWorkerPhase::Linkage, linkage_stale),
         (SemanticWorkerPhase::Callgraph, callgraph_stale),
         (SemanticWorkerPhase::Retrieval, retrieval_stale),
-        (SemanticWorkerPhase::Linkage, linkage_stale),
         (SemanticWorkerPhase::Idg, idg_stale),
     ]
     .into_iter()
@@ -258,6 +300,26 @@ fn semantic_phase_plan(validation: &bonsai_sdk::CacheValidationReport) -> Vec<Se
     if !idg_stale
         && (!phases.is_empty() || validation.manifest_status != bonsai_sdk::CacheFreshnessStatus::Fresh)
     {
+        phases.push(SemanticWorkerPhase::Manifest);
+    }
+    phases
+}
+
+fn graph_query_phase_plan(validation: &bonsai_sdk::CacheValidationReport) -> Vec<SemanticWorkerPhase> {
+    let compiler_stale = !sidecar_is_fresh(validation, "compiler_objects");
+    let callgraph_stale = !sidecar_is_fresh(validation, "callgraph");
+    let retrieval_stale = callgraph_stale || !sidecar_is_fresh(validation, "retrieval");
+    let linkage_stale = !sidecar_is_fresh(validation, "linkage");
+    let mut phases = [
+        (SemanticWorkerPhase::Compiler, compiler_stale),
+        (SemanticWorkerPhase::Linkage, linkage_stale),
+        (SemanticWorkerPhase::Callgraph, callgraph_stale),
+        (SemanticWorkerPhase::Retrieval, retrieval_stale),
+    ]
+    .into_iter()
+    .filter_map(|(phase, stale)| stale.then_some(phase))
+    .collect::<Vec<_>>();
+    if !phases.is_empty() || validation.manifest_status != bonsai_sdk::CacheFreshnessStatus::Fresh {
         phases.push(SemanticWorkerPhase::Manifest);
     }
     phases
@@ -305,6 +367,25 @@ fn context_row<T: Serialize>(category: &'static str, value: T) -> Result<Context
         category,
         value: serde_json::to_value(value)?,
     })
+}
+
+fn context_row_json_cost(row: &ContextRow) -> u64 {
+    let Ok(pretty) = serde_json::to_string_pretty(row) else {
+        return 512;
+    };
+    // The page renderer nests each pretty row under the root object's
+    // `rows` array. Account for the four extra indentation bytes on every
+    // rendered line plus the separating comma/newline. Pricing compact JSON
+    // here used to let `context --context 16k` emit ~20k tokens on
+    // Elasticsearch even though the paginator reported 15.5k.
+    let lines = pretty.split('\n').count();
+    pretty
+        .len()
+        .saturating_add(lines.saturating_mul(4))
+        // Array separators and the transition from an empty `rows: []`
+        // wrapper to a populated pretty array add a few more bytes. Keep a
+        // small per-row margin so the advertised ceiling remains a ceiling.
+        .saturating_add(16) as u64
 }
 
 pub(crate) fn cmd_context(root: &std::path::Path, paging_cfg: paging::PagingConfig) -> Result<()> {
@@ -373,7 +454,7 @@ pub(crate) fn cmd_context(root: &std::path::Path, paging_cfg: paging::PagingConf
         &paging_cfg,
         "context",
         filters_hash,
-        |row| serde_json::to_vec(row).map_or(256, |bytes| bytes.len()) as u64,
+        context_row_json_cost,
         |slice, info, _cfg| {
             let page_complete = info.page_number == 1 && info.is_last;
             if !force_wrapper && page_complete {
@@ -466,6 +547,29 @@ mod semantic_phase_tests {
     use std::path::PathBuf;
 
     #[test]
+    fn context_row_cost_covers_pretty_nested_json() {
+        let row = context_row(
+            "toolchain_manifest",
+            serde_json::json!({
+                "path": "services/search/build.gradle",
+                "kind": "gradle",
+                "nested": { "targets": ["main", "test"] }
+            }),
+        )
+        .expect("context row");
+        let with_row = serde_json::to_string_pretty(&serde_json::json!({ "rows": [&row] }))
+            .expect("serialize wrapped row");
+        let empty = serde_json::to_string_pretty(&serde_json::json!({ "rows": [] }))
+            .expect("serialize empty wrapper");
+        let cost = context_row_json_cost(&row) as usize;
+        let introduced = with_row.len().saturating_sub(empty.len());
+        assert!(
+            cost >= introduced,
+            "row pricing ({cost}) must cover the bytes introduced by nested pretty JSON ({introduced})"
+        );
+    }
+
+    #[test]
     fn dump_target_file_qualifier_understands_documented_disambiguators() {
         assert_eq!(
             bonsai_sdk::dump_callable_file_qualifier("server/src/App.java:42:dispatchRequest"),
@@ -536,6 +640,35 @@ mod semantic_phase_tests {
         assert!(!semantic_generation_is_current(&report));
         report.semantic_ready = true;
         assert!(semantic_generation_is_current(&report));
+    }
+
+    #[test]
+    fn graph_query_generation_does_not_require_idg() {
+        let current = CacheFreshnessStatus::Fresh;
+        let report = validation(current, current, current, current, CacheFreshnessStatus::Missing);
+        assert!(graph_query_generation_is_current(&report));
+        assert!(graph_query_phase_plan(&report).is_empty());
+    }
+
+    #[test]
+    fn graph_query_plan_builds_only_compact_navigation_sidecars() {
+        let current = CacheFreshnessStatus::Fresh;
+        let report = validation(
+            current,
+            CacheFreshnessStatus::Missing,
+            CacheFreshnessStatus::Missing,
+            CacheFreshnessStatus::Missing,
+            CacheFreshnessStatus::Missing,
+        );
+        assert_eq!(
+            graph_query_phase_plan(&report),
+            vec![
+                SemanticWorkerPhase::Linkage,
+                SemanticWorkerPhase::Callgraph,
+                SemanticWorkerPhase::Retrieval,
+                SemanticWorkerPhase::Manifest,
+            ]
+        );
     }
 
     #[test]

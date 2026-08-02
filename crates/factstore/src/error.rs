@@ -71,6 +71,21 @@ pub enum FactStoreError {
         row: usize,
     },
 
+    /// A caller requested a subrange outside one otherwise-valid payload.
+    #[error(
+        "payload range outside entry: key={key}, offset={offset}, length={length}, payload_length={payload_length}"
+    )]
+    BadPayloadRange {
+        /// Entry key supplied by the caller.
+        key: u64,
+        /// Requested byte offset relative to the payload start.
+        offset: u64,
+        /// Requested byte length.
+        length: u64,
+        /// Complete payload length recorded in the index.
+        payload_length: u64,
+    },
+
     /// Index entries were not sorted by `key` ascending. Lookups
     /// require sorted input for binary search.
     #[error("corrupt index: entries are not sorted by key ascending")]

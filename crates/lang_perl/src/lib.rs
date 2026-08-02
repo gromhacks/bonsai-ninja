@@ -248,6 +248,7 @@ impl LanguageAdapter for PerlAdapter {
                 }
             }
         }
+        promote_perl_oo_packages(&mut idx);
         // Recognised Perl lifecycle transitions. Perl is procedural;
         // method calls (`$fh->close`) land bare. `undef $x` is the
         // idiomatic Perl free, surfaced as a call to `undef`.
@@ -310,7 +311,7 @@ fn normalize_perl_package_call_kinds(events: &mut [FlowEvent]) {
                 normalize_perl_package_call_kinds(else_events);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                normalize_perl_package_call_kinds(body)
+                normalize_perl_package_call_kinds(body);
             }
             FlowEvent::Try {
                 body,
@@ -607,6 +608,36 @@ fn mark_perl_method_receiver_param(decl: &mut bonsai_lang_api::Decl) {
     // ordinary package functions keep positional argument binding.
     if matches!(first_param, "$self" | "self" | "$class" | "class") {
         decl.receiver_param_index = Some(0);
+    }
+}
+
+/// Reclassify syntax-proven Perl OO packages as type containers.
+///
+/// `package` is used both for plain namespaces and for Perl 5 classes. The
+/// grammar alone therefore lowers it initially as [`DeclKind::Module`]. A
+/// package becomes class-like only when its own compiler IR proves OO
+/// semantics: it declares a method with an explicit invocant or an ancestry
+/// relation (`use parent`, `use base`, or `@ISA`). This preserves ordinary
+/// package-function resolution while allowing `$obj->method(...)` to use the
+/// same typed receiver and inheritance machinery as other languages.
+fn promote_perl_oo_packages(idx: &mut DeclIndex) {
+    let oo_packages = idx
+        .defs
+        .iter()
+        .filter(|decl| decl.kind == DeclKind::Module)
+        .filter(|package| {
+            !package.bases.is_empty()
+                || idx.defs.iter().any(|decl| {
+                    decl.parent == Some(package.symbol)
+                        && (decl.receiver_param_index.is_some() || decl.kind == DeclKind::Constructor)
+                })
+        })
+        .map(|decl| decl.symbol)
+        .collect::<std::collections::HashSet<_>>();
+    for decl in &mut idx.defs {
+        if oo_packages.contains(&decl.symbol) {
+            decl.kind = DeclKind::Class;
+        }
     }
 }
 

@@ -1,9 +1,12 @@
 use super::{
-    build_filter_marker, import_hit_text, retrieval_prefilter_for_inspect_with_limit,
-    taint_flow_contains_needle, taint_flow_matches_query, walk_flow_hits, FlowHitWalkContext, HitOut,
-    InspectFilters, InspectTaintFlow, InspectTaintStep, InspectTaintedArg, Matcher,
+    build_filter_marker, dedup_structural_flows, import_hit_text, render_inspect_report_text,
+    retrieval_prefilter_for_inspect_with_limit, taint_flow_contains_needle, taint_flow_matches_query,
+    walk_flow_hits, FlowHitWalkContext, HitOut, InspectFilters, InspectFlowRendered, InspectJsonPageUnit,
+    InspectOut, InspectRenderOptions, InspectReport, InspectSummary, InspectTaintFlow, InspectTaintStep,
+    InspectTaintedArg, Matcher,
 };
 use crate::args::FactKindFilter;
+use crate::paging::{FormatClass, PageArg, PagingConfig};
 use bonsai_common::{FileId, FuncId, Span};
 use bonsai_lang_api::{CallKind, DeclKind, FlowEvent, ImportScope, ImportSpec};
 use bonsai_sdk::find_call_span_by_name;
@@ -353,7 +356,7 @@ fn inspect_retrieval_prefilter_uses_safe_empty_scope_for_no_candidates() {
 }
 
 #[test]
-fn inspect_retrieval_prefilter_skips_graph_flow_queries() {
+fn inspect_retrieval_prefilter_scopes_graph_flow_queries() {
     let root = tempdir_for_test("inspect-retrieval-graph-flow");
     std::fs::write(
         root.join("app.py"),
@@ -376,10 +379,7 @@ fn inspect_retrieval_prefilter_skips_graph_flow_queries() {
     )
     .expect("prefilter");
 
-    assert!(
-        filters.is_none(),
-        "graph-flow inspect must keep whole-workspace semantic evidence available"
-    );
+    assert_eq!(filters, Some(vec!["app.py".to_string()]));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -408,6 +408,161 @@ fn sample_taint_flow() -> InspectTaintFlow {
             }],
         }],
     }
+}
+
+fn sample_structural_flow(number: u32) -> InspectFlowRendered {
+    InspectFlowRendered {
+        flow_number: number,
+        flow_label: number.to_string(),
+        flow_id: format!("F:{number:016x}"),
+        chain: vec!["entry".to_string(), "target".to_string()],
+        chain_display: "entry -> target".to_string(),
+        precision: bonsai_common::Precision::Exact,
+        functions: Vec::new(),
+    }
+}
+
+#[test]
+fn inspect_text_pages_taint_rows_and_flowless_hits_losslessly() {
+    let mut taint_flows = Vec::new();
+    for index in 0..4 {
+        let mut flow = sample_taint_flow();
+        flow.taint_id = format!("T:page{index:04}");
+        flow.entry = format!("entry_{index}");
+        taint_flows.push(flow);
+    }
+    let hits = (0..4)
+        .map(|index| HitOut {
+            kind: "call".to_string(),
+            text: format!("page_hit_{index}"),
+            file: format!("src/page_{index}.py"),
+            line: index + 1,
+            column: 1,
+            in_function: None,
+            chains_preview: Vec::new(),
+            flows: Vec::new(),
+            groups: Vec::new(),
+            from_match: None,
+            to_match: None,
+        })
+        .collect::<Vec<_>>();
+    let report = InspectReport {
+        query: "page".to_string(),
+        analysis_complete: true,
+        hits,
+        taint_flows,
+        summary: super::InspectReportSummary {
+            total_hits: 4,
+            total_taint_flows: 4,
+            ..super::InspectReportSummary::default()
+        },
+        ..InspectReport::default()
+    };
+    let workspace = Workspace::new(bonsai_adapters::all_languages_registry());
+    let render = InspectRenderOptions {
+        compact: true,
+        ..InspectRenderOptions::default()
+    };
+
+    let mut pages = Vec::new();
+    let mut page_number = 1_u64;
+    loop {
+        let paging = PagingConfig::new(
+            Some(800),
+            PageArg::Number(page_number),
+            None,
+            false,
+            FormatClass::Text,
+        );
+        let mut info = None;
+        let output = crate::page_cache::capture(|| {
+            info = Some(render_inspect_report_text(
+                &workspace,
+                &report,
+                &render,
+                &paging,
+                Some("page"),
+                false,
+            )?);
+            Ok(())
+        })
+        .expect("render inspect page");
+        let info = info.expect("page info");
+        pages.push(output);
+        if info.is_last {
+            break;
+        }
+        assert!(
+            page_number < info.total_pages,
+            "non-last page must leave a later numeric page"
+        );
+        page_number += 1;
+    }
+
+    let joined = pages.join("\n");
+    for index in 0..4 {
+        let taint_id = format!("T:page{index:04}");
+        assert_eq!(
+            joined.matches(&taint_id).count(),
+            1,
+            "taint row {taint_id} must appear on exactly one reachable page"
+        );
+        let hit = format!("page_hit_{index}");
+        assert_eq!(
+            joined.matches(&hit).count(),
+            1,
+            "flowless syntax hit {hit} must appear on exactly one reachable page"
+        );
+    }
+}
+
+#[test]
+fn inspect_json_page_unit_serializes_one_flow_not_the_whole_declaration() {
+    let hit = InspectOut {
+        symbol: "target".to_string(),
+        kind: "method".to_string(),
+        file: "src/Target.java".to_string(),
+        line: 7,
+        column: 3,
+        params: Vec::new(),
+        direct_callers: Vec::new(),
+        callees: Vec::new(),
+        graph_flows_evaluated: true,
+        flows: vec![sample_structural_flow(1), sample_structural_flow(2)],
+        groups: Vec::new(),
+        summary: InspectSummary {
+            total_flows: 2,
+            max_chain_depth: 2,
+            unique_entry_points: 1,
+        },
+    };
+    let unit = InspectJsonPageUnit::Decl {
+        index: 0,
+        hit: &hit,
+        flow: hit.flows.first(),
+    };
+    let value = serde_json::to_value(unit).expect("serialize page unit");
+    assert_eq!(value["section"], "decl_hits");
+    assert_eq!(value["value"]["flows"].as_array().map(Vec::len), Some(1));
+    assert_eq!(value["value"]["flows"][0]["flow_id"], "F:0000000000000001");
+    assert_eq!(hit.flows.len(), 2, "pagination must not mutate the exact report");
+}
+
+#[test]
+fn exact_duplicate_structural_flows_collapse_before_paging() {
+    let first = sample_structural_flow(1);
+    let mut duplicate = first.clone();
+    duplicate.flow_label = "99".to_string();
+    duplicate.flow_number = 99;
+    let second = sample_structural_flow(2);
+    let mut flows = vec![first.clone(), duplicate, second.clone()];
+
+    dedup_structural_flows(&mut flows);
+
+    assert_eq!(flows.len(), 2);
+    assert_eq!(flows[0].flow_id, first.flow_id);
+    assert_eq!(flows[0].flow_number, first.flow_number);
+    assert_eq!(flows[1].flow_id, second.flow_id);
 }
 
 fn tempdir_for_test(name: &str) -> PathBuf {

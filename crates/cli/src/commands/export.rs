@@ -19,10 +19,9 @@ use crate::progress;
 pub(crate) fn cmd_export(
     root: &std::path::Path,
     full_propagations: bool,
-    compiled_propagations: bool,
     format: ExportFormat,
 ) -> Result<()> {
-    let cacheable_default_json = format == ExportFormat::Json && !full_propagations && !compiled_propagations;
+    let cacheable_default_json = format == ExportFormat::Json && !full_propagations;
     if cacheable_default_json {
         let stage = progress::ScopedSpinner::new("checking export cache");
         let cache_hit = output::with_writer(|writer| {
@@ -65,7 +64,7 @@ pub(crate) fn cmd_export(
     let export = project.export();
     let options = bonsai_sdk::NativeExportOptions {
         full_propagations,
-        compiled_propagations,
+        compiled_propagations: true,
     };
     write_native_json(&export, options)?;
     spin.finish();

@@ -41,6 +41,8 @@ fn scoped_query_preserves_complete_workspace_file_ids() {
     std::fs::write(&first, "def first():\n    return 1\n").expect("write first");
     std::fs::write(&candidate, "def second():\n    return 2\n").expect("write second");
 
+    let candidate = candidate.canonicalize().expect("canonical candidate path");
+
     let complete = Workspace::open_query(&root, registry()).expect("open complete workspace");
     let complete_candidate = complete.vfs().lookup(&candidate).expect("complete candidate id");
     let scoped = Workspace::open_query_filtered_paths_with_options(

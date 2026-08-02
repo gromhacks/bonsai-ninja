@@ -1,5 +1,5 @@
 use bonsai_db::AnalyzerDb;
-use bonsai_lang_api::{FlowEvent, LanguageRegistry};
+use bonsai_lang_api::{AssignValueKind, FlowEvent, LanguageRegistry};
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
 
@@ -183,6 +183,51 @@ end
     assert!(
         contains_loop(&events),
         "Ruby `items.each do` should emit a Loop event; events: {events:?}"
+    );
+}
+
+#[test]
+fn ruby_custom_block_parameter_is_bound_to_the_call_yield_endpoint() {
+    let events = ruby_decl_events(
+        r#"
+def helper(args)
+  yield args
+end
+
+def entry(args)
+  helper(args) do |value|
+    sink(value)
+  end
+end
+"#,
+        "entry",
+    );
+
+    let call_span = events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { span, name, .. } if name == "helper" => Some(*span),
+            _ => None,
+        })
+        .expect("helper call should be adapter-lowered");
+    let (binding_span, source_call) = events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_call,
+                value_kind: Some(AssignValueKind::YieldResult),
+                ..
+            } if target == "value" => Some((*span, source_call.as_deref())),
+            _ => None,
+        })
+        .expect("Ruby block parameter should be a typed yield-result binding");
+
+    assert_eq!(source_call, Some("helper"));
+    assert_eq!(
+        binding_span, call_span,
+        "yield-result binding must use the resolved AST call identity"
     );
 }
 

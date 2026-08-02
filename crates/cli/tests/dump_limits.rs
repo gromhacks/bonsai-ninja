@@ -1,15 +1,15 @@
-//! End-to-end tests locking in the `--limit` default on dump
-//! commands (`dump-edges`, `dump-callgraph`, `dump-ast`).
+//! End-to-end tests locking in lossless `--limit` page sizing on dump
+//! commands (`dump-edges`, `dump-callgraph`). `dump-ast` uses only the
+//! common context paginator because its unit is an AST line, not a file row.
 //!
 //! Without these caps, Redis emits megabytes of output per
 //! invocation — dump-edges alone produced ~13 MB / ~3 M tokens
 //! before. Each test asserts:
 //!
 //!   * the command runs without error on a small fixture;
-//!   * passing `--limit N` truncates to N rows / files and
-//!     prints the same "showing N of TOTAL" notice every
-//!     browse command uses;
-//!   * `--limit 0` is the explicit opt-out (uncapped);
+//!   * passing `--limit N` makes N the maximum rows per page without
+//!     dropping the remaining rows;
+//!   * `--limit 0` leaves page sizing to the context budget;
 //!   * `--format json --all` is the explicit exhaustive script
 //!     mode; default JSON may page when a result exceeds context.
 //!
@@ -75,16 +75,9 @@ fn dump_edges_limit_truncates_and_prints_notice() {
     let Some(out) = run(&["dump-edges", ws_str, "--limit", "2"]) else {
         return;
     };
-    // Truncation notice uses the shared helper — same wording across
-    // every capped command in the CLI. The text is part of the UX
-    // contract.
     assert!(
-        out.contains("showing 2 of"),
-        "dump-edges --limit 2 missed the truncation notice:\n{out}"
-    );
-    assert!(
-        out.contains("--limit 0, --all, or --context uncapped for all"),
-        "dump-edges truncation hint missing:\n{out}"
+        out.contains("page 1 of") && out.contains("next"),
+        "dump-edges --limit 2 must expose a lossless next page:\n{out}"
     );
 }
 
@@ -94,10 +87,10 @@ fn dump_edges_limit_zero_is_uncapped() {
     let Some(out) = run(&["dump-edges", ws.to_str().unwrap(), "--limit", "0"]) else {
         return;
     };
-    // Uncapped: no truncation notice regardless of the row count.
+    // No legacy row-truncation notice: context pagination is authoritative.
     assert!(
         !out.contains("showing"),
-        "dump-edges --limit 0 should NOT truncate or print the notice:\n{out}"
+        "dump-edges --limit 0 should not print a legacy truncation notice:\n{out}"
     );
 }
 
@@ -138,8 +131,8 @@ fn dump_callgraph_limit_truncates_and_prints_notice() {
         return;
     };
     assert!(
-        out.contains("showing 2 of"),
-        "dump-callgraph --limit 2 missed the truncation notice:\n{out}"
+        out.contains("page 1 of") && out.contains("next"),
+        "dump-callgraph --limit 2 must expose a lossless next page:\n{out}"
     );
 }
 
@@ -171,30 +164,33 @@ fn dump_callgraph_json_all_is_uncapped() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn dump_ast_limit_truncates_and_prints_notice() {
+fn dump_ast_rejects_removed_file_limit() {
     let ws = ws();
-    // Python micro has 4 files — cap to 1 to force truncation.
-    let Some(out) = run(&["dump-ast", ws.to_str().unwrap(), "--limit", "1"]) else {
+    let Some(bin) = bin_path() else {
         return;
     };
+    let output = Command::new(bin)
+        .args([
+            "dump-ast",
+            ws.to_str().unwrap(),
+            "--limit",
+            "1",
+            "--no-color",
+            "--no-progress",
+        ])
+        .output()
+        .expect("run dump-ast removed-limit check");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        out.contains("showing 1 of"),
-        "dump-ast --limit 1 missed the truncation notice:\n{out}"
+        !output.status.success() && stderr.contains("unexpected argument '--limit'"),
+        "dump-ast must rely on lossless context paging, not a file cap: {stderr}"
     );
 }
 
 #[test]
 fn dump_ast_json_all_is_uncapped() {
     let ws = ws();
-    let Some(out) = run(&[
-        "dump-ast",
-        ws.to_str().unwrap(),
-        "--format",
-        "json",
-        "--all",
-        "--limit",
-        "1",
-    ]) else {
+    let Some(out) = run(&["dump-ast", ws.to_str().unwrap(), "--format", "json", "--all"]) else {
         return;
     };
     let v: serde_json::Value =

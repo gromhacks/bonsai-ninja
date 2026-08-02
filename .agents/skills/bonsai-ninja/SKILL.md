@@ -46,6 +46,9 @@ For scripts and structured inspection, normally add:
 
 Use `--output-path <file>` for large artifacts instead of shell redirection
 when the command supports it.
+Use `--html-output <file>` only when a human-readable standalone report is
+the desired artifact; it preserves the selected command's scope and adds no
+analysis work.
 
 ## Non-Negotiable Reading Rules
 
@@ -80,7 +83,14 @@ you will issue several queries:
 ```
 
 Do not use `--semantic` merely to run `tree`, `context`, or one narrow syntax
-query.
+query. Semantic prewarm publishes a validated query-ready IDG representation;
+warm semantic commands reuse it instead of rebuilding the default fixed point
+from every source segment.
+
+Persisted analysis artifacts live in a canonical-path-keyed OS cache, not in
+the repository. `cache stats <workspace>` prints the exact directory;
+`BONSAI_WORKSPACE_DIR` supplies an explicit override. The repository-local
+`<workspace>/.bonsai/rules/` path is only a rule overlay.
 
 ## Choose The Smallest Command
 
@@ -166,8 +176,16 @@ Choose scope deliberately:
   analysis.
 - `--graph-flow` adds structural call-graph paths and source-body evidence.
 - `--taint-flow` explicitly adds rulepack-free raw taint-engine paths.
+- On a large repository, run `index <workspace> --semantic` before repeated
+  broad `--taint-flow` queries. Inspect still starts from the exact matching
+  syntax spans and pages only after all requested semantic work completes;
+  `--all` is never a performance or accuracy switch.
 - Use `--compact` with graph flows when you need path steps without inlined
   source bodies.
+- Reopen a structural `F:` or `G:` with `show` in the same workspace. Fresh
+  page metadata restores the original scoped query, so `show` does not need a
+  broad security scan. If an old ID has no provenance, rerun the narrowed
+  `inspect --query ... --graph-flow` command first.
 
 Use focused commands when you need one relation:
 
@@ -180,6 +198,10 @@ Use focused commands when you need one relation:
 ./target/release/bonsai-ninja read-file <workspace> <path> --lines A:B \
   --context 16k --no-color --no-progress
 ```
+
+`read-file --all` disables output paging only. It does not enable security or
+whole-workspace graph work; request overlays explicitly, and use
+`--max-inlined-bodies 0` only when every connected body is intentional.
 
 ## Debug A Code-Intelligence Disagreement
 

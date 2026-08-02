@@ -23,9 +23,6 @@ pub(crate) struct PathCommandOptions<'a> {
     pub(crate) from: &'a str,
     pub(crate) to: &'a str,
     pub(crate) regex: bool,
-    pub(crate) max_paths: usize,
-    pub(crate) max_depth: usize,
-    pub(crate) max_probes: usize,
     pub(crate) paging_cfg: paging::PagingConfig,
     pub(crate) format: BrowseFormat,
 }
@@ -35,9 +32,9 @@ pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) 
         from: options.from,
         to: options.to,
         regex: options.regex,
-        max_paths: options.max_paths,
-        max_depth: options.max_depth,
-        max_probes: options.max_probes,
+        max_paths: 0,
+        max_depth: 0,
+        max_probes: 0,
     };
     let stage = progress::ScopedSpinner::new("enumerating semantic paths");
     let endpoint_prefilter = !options.regex
@@ -69,7 +66,12 @@ pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) 
         {
             scoped
         } else {
-            mark_endpoint_candidate_scope(scoped)
+            // Raw/retrieval candidates are only a planning accelerator. They
+            // cannot prove that an intermediate path in another file does
+            // not exist. Without an integrity-checked partitioned graph,
+            // reopen the complete lazy compiler snapshot and answer exactly.
+            let (project, _footer) = open_project_path_query(root)?;
+            project.browse().paths(filters)?
         }
     } else {
         let (project, _footer) = open_project_path_query(root)?;
@@ -78,16 +80,10 @@ pub(crate) fn cmd_path(root: &std::path::Path, options: PathCommandOptions<'_>) 
     outcome.analysis_incomplete_reasons.sort();
     outcome.analysis_incomplete_reasons.dedup();
     stage.finish();
-    let max_paths_s = options.max_paths.to_string();
-    let max_depth_s = options.max_depth.to_string();
-    let max_probes_s = options.max_probes.to_string();
     let filters_hash = paging::hash_filters(&[
         ("from", options.from),
         ("to", options.to),
         ("regex", if options.regex { "1" } else { "0" }),
-        ("max_paths", max_paths_s.as_str()),
-        ("max_depth", max_depth_s.as_str()),
-        ("max_probes", max_probes_s.as_str()),
     ]);
     match options.format {
         BrowseFormat::Json => emit_path_json(root, &outcome, &options.paging_cfg, filters_hash),
@@ -124,45 +120,6 @@ fn endpoint_candidate_literals(from: &str, to: &str) -> Vec<String> {
     literals.sort();
     literals.dedup();
     literals
-}
-
-fn mark_endpoint_candidate_scope(mut outcome: PathOutcome) -> PathOutcome {
-    outcome
-        .backends
-        .retain(|backend| backend != "warmed-idg-cross-call");
-    if !outcome
-        .backends
-        .iter()
-        .any(|backend| backend == "endpoint-candidate-resolved-callgraph")
-    {
-        outcome
-            .backends
-            .insert(0, "endpoint-candidate-resolved-callgraph".to_string());
-    }
-    if outcome.paths.iter().all(|path| path.hops == 1) {
-        // One semantic edge is the global lower bound for two distinct
-        // callable endpoints. The endpoint files contain every AST call made
-        // by those source declarations, so the scoped compiler has proved the
-        // complete shortest result; unrelated longer routes cannot outrank it.
-        outcome.analysis_complete = outcome.analysis_incomplete_reasons.is_empty();
-        for path in &mut outcome.paths {
-            path.analysis_complete = outcome.analysis_complete;
-        }
-        return outcome;
-    }
-    let reason = "ranked path found in endpoint-candidate files; an equal or shorter route through other files was not ruled out"
-        .to_string();
-    outcome.analysis_complete = false;
-    outcome.analysis_incomplete_reasons.push(reason.clone());
-    outcome.analysis_incomplete_reasons.sort();
-    outcome.analysis_incomplete_reasons.dedup();
-    for path in &mut outcome.paths {
-        path.analysis_complete = false;
-        path.analysis_incomplete_reasons.push(reason.clone());
-        path.analysis_incomplete_reasons.sort();
-        path.analysis_incomplete_reasons.dedup();
-    }
-    outcome
 }
 
 fn emit_path_json(
@@ -338,8 +295,7 @@ fn counted(count: usize, singular: &str, plural: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_candidate_literals, mark_endpoint_candidate_scope};
-    use bonsai_sdk::{PathOutcome, PathRow};
+    use super::endpoint_candidate_literals;
 
     #[test]
     fn qualified_path_endpoints_retain_source_level_tokens() {
@@ -357,28 +313,5 @@ mod tests {
                 "server::RestController#dispatchRequest".to_string(),
             ]
         );
-    }
-
-    #[test]
-    fn direct_endpoint_path_is_a_complete_shortest_path() {
-        let outcome = PathOutcome {
-            paths: vec![PathRow {
-                path_id: "PTH:test".to_string(),
-                hops: 1,
-                precision: "exact".to_string(),
-                functions: Vec::new(),
-                edges: Vec::new(),
-                terminal_call: None,
-                analysis_complete: false,
-                analysis_incomplete_reasons: Vec::new(),
-            }],
-            ..PathOutcome::default()
-        };
-
-        let outcome = mark_endpoint_candidate_scope(outcome);
-
-        assert!(outcome.analysis_complete);
-        assert!(outcome.paths[0].analysis_complete);
-        assert!(outcome.analysis_incomplete_reasons.is_empty());
     }
 }

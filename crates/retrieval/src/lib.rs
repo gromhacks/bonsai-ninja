@@ -12,13 +12,16 @@ use bonsai_common::{cached_span_map_arc, wire, workspace_bonsai_dir, FileId, Pre
 use bonsai_factstore::{FactStoreReader, FactStoreWriter, LookupHit};
 use bonsai_hash::{fnv1a_bytes64, fnv1a_str_slice64, Hasher as StableHasher};
 use bonsai_lang_api::{
-    operations_from_flow_events, Decl, DeclKind, FlowEvent, ImportSpec, Operation, RefKind,
+    operations_from_flow_events, CompilerBrowseHeader, Decl, DeclKind, FlowEvent, ImportSpec, Operation,
+    RefKind,
 };
 use bonsai_workspace::Workspace;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 /// Retrieval sidecar schema version. Bump when [`FactDoc`] or
 /// [`FactSnapshot`] persistence semantics change.
@@ -62,7 +65,12 @@ use std::path::{Path, PathBuf};
 /// must never reuse a sidecar containing the former truncated identities.
 /// v15 rebuilds nested lambda/local-function and Perl package terms after
 /// compiler-object v15 corrected their lexical and package ownership.
-pub const RETRIEVAL_SCHEMA_VERSION: u32 = 15;
+/// v16 stores each document's unique fact id, stable ids, and normalized
+/// search text inline instead of hashing them into the shared string
+/// dictionary. These values are identities or file/kind projections and
+/// therefore cannot deduplicate; interning millions of semantic-edge ids made
+/// exact large-workspace builds serial without reducing the payload.
+pub const RETRIEVAL_SCHEMA_VERSION: u32 = 16;
 
 /// Factstore table id for retrieval snapshots.
 pub const RETRIEVAL_TABLE_ID: u32 = 0x5254_5631;
@@ -75,7 +83,7 @@ const CANDIDATE_PAGE_TARGET_BYTES: usize = 4 * 1024 * 1024;
 const PIPELINE_SALT: u64 = 0x7a91_5f4c_2d31_8870;
 const DEFAULT_ON_DEMAND_BUILD_FILE_LIMIT: usize = 512;
 
-/// Conventional retrieval sidecar path under `<workspace>/.bonsai/`.
+/// Conventional retrieval sidecar path in the workspace's external OS cache.
 #[must_use]
 pub fn retrieval_sidecar_path(workspace_root: &Path) -> PathBuf {
     workspace_bonsai_dir(workspace_root).join(format!("retrieval.v{RETRIEVAL_SCHEMA_VERSION}.factstore"))
@@ -133,7 +141,7 @@ struct CompactFactSnapshot {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct CompactFactDoc {
-    fact_id: u32,
+    fact_id: String,
     kind: u32,
     language: Option<u32>,
     file_path: u32,
@@ -142,14 +150,14 @@ struct CompactFactDoc {
     qualified_name: Option<u32>,
     enclosing_function: Option<u32>,
     enclosing_class: Option<u32>,
-    stable_ids: Vec<u32>,
+    stable_ids: Vec<String>,
     resolver_precision: Option<u32>,
     resolver_stage: Option<u32>,
     provenance: Option<u32>,
     confidence: Option<u8>,
     static_limits: Vec<u32>,
     incomplete_reasons: Vec<u32>,
-    normalized_search_text: u32,
+    normalized_search_text: String,
     content_fingerprint: u64,
     pipeline_fingerprint: u64,
 }
@@ -649,7 +657,7 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
 #[derive(Default)]
 struct FileCandidateTerms {
     terms: AHashSet<String>,
-    stable_ids: AHashSet<String>,
+    stable_ids: Vec<String>,
 }
 
 impl FileCandidateTerms {
@@ -662,8 +670,14 @@ impl FileCandidateTerms {
     }
 
     fn add_stable_id(&mut self, value: String) {
-        self.add(&value);
-        self.stable_ids.insert(value);
+        // Stable ids are exact identities, not source-language search terms.
+        // They have their own exact-match field and are included separately
+        // in candidate Bloom pages. Duplicating millions of unique edge ids
+        // into the lexical term set adds hashing, sorting, and payload bytes
+        // without enabling another supported query.
+        if self.stable_ids.last() != Some(&value) {
+            self.stable_ids.push(value);
+        }
     }
 }
 
@@ -672,92 +686,6 @@ fn candidate_terms<'a>(
     kind: &str,
 ) -> &'a mut FileCandidateTerms {
     groups.entry(kind.to_string()).or_default()
-}
-
-fn collect_flow_candidate_terms(
-    groups: &mut AHashMap<String, FileCandidateTerms>,
-    events: &[FlowEvent],
-    in_fn: &str,
-) {
-    for event in events {
-        match event {
-            FlowEvent::Call { name, args, .. } => {
-                let calls = candidate_terms(groups, "call");
-                calls.add(name);
-                calls.add(in_fn);
-                for arg in args {
-                    let args = candidate_terms(groups, "arg");
-                    args.add(&arg.value_text);
-                    args.add(in_fn);
-                    if let Some(name) = arg.name.as_deref() {
-                        args.add(name);
-                        args.add(&format!("{name}={}", arg.value_text));
-                    }
-                    if let Some(place) = arg.place.as_deref() {
-                        args.add(place);
-                    }
-                    for source in &arg.source_names {
-                        args.add(source);
-                    }
-                }
-            }
-            FlowEvent::Assign {
-                target,
-                source_name,
-                source_call,
-                source_call_args,
-                source_names,
-                ..
-            } => {
-                let vars = candidate_terms(groups, "var");
-                vars.add(target);
-                vars.add(in_fn);
-                let display_source = source_name
-                    .as_deref()
-                    .or(source_call.as_deref())
-                    .or_else(|| source_names.first().map(String::as_str));
-                if let Some(source) = display_source {
-                    vars.add(source);
-                    vars.add(&format!("{target} = {source}"));
-                }
-                if let Some(call) = source_call {
-                    let calls = candidate_terms(groups, "call");
-                    calls.add(call);
-                    calls.add(in_fn);
-                    for arg in source_call_args {
-                        candidate_terms(groups, "arg").add(arg);
-                    }
-                }
-                for source in source_names {
-                    let reads = candidate_terms(groups, "ref-read");
-                    reads.add(source);
-                    reads.add(in_fn);
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_flow_candidate_terms(groups, then_events, in_fn);
-                collect_flow_candidate_terms(groups, else_events, in_fn);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_flow_candidate_terms(groups, body, in_fn);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_flow_candidate_terms(groups, body, in_fn);
-                collect_flow_candidate_terms(groups, catch_events, in_fn);
-                collect_flow_candidate_terms(groups, finally_events, in_fn);
-            }
-            _ => {}
-        }
-    }
 }
 
 fn finish_file_candidate_groups(
@@ -774,31 +702,53 @@ fn finish_file_candidate_groups(
     for (kind, group) in groups {
         let mut terms: Vec<_> = group.terms.into_iter().collect();
         terms.sort_unstable();
-        let mut stable_ids: Vec<_> = group.stable_ids.into_iter().collect();
-        stable_ids.sort_unstable();
-        let normalized_search_text = terms.join(" ");
-        docs.push(FactDoc {
-            fact_id: fact_id_for_parts(&kind, file_path, span.line, span.column, "file-candidates"),
-            kind,
-            language: language.map(str::to_string),
-            file_path: file_path.to_string(),
-            span: span.clone(),
-            symbol_name: None,
-            qualified_name: None,
-            enclosing_function: None,
-            enclosing_class: None,
-            stable_ids,
-            resolver_precision: None,
-            resolver_stage: None,
-            provenance: Some("file-candidate-index".to_string()),
-            confidence: None,
-            static_limits: Vec::new(),
-            incomplete_reasons: Vec::new(),
-            normalized_search_text,
+        push_file_candidate_doc(
+            docs,
+            file_path,
+            language,
+            span.clone(),
             content_fingerprint,
             pipeline_fingerprint,
-        });
+            kind,
+            terms.join(" "),
+            group.stable_ids,
+        );
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_file_candidate_doc(
+    docs: &mut Vec<FactDoc>,
+    file_path: &str,
+    language: Option<&str>,
+    span: FactSpan,
+    content_fingerprint: u64,
+    pipeline_fingerprint: u64,
+    kind: String,
+    normalized_search_text: String,
+    stable_ids: Vec<String>,
+) {
+    docs.push(FactDoc {
+        fact_id: fact_id_for_parts(&kind, file_path, span.line, span.column, "file-candidates"),
+        kind,
+        language: language.map(str::to_string),
+        file_path: file_path.to_string(),
+        span,
+        symbol_name: None,
+        qualified_name: None,
+        enclosing_function: None,
+        enclosing_class: None,
+        stable_ids,
+        resolver_precision: None,
+        resolver_stage: None,
+        provenance: Some("file-candidate-index".to_string()),
+        confidence: None,
+        static_limits: Vec::new(),
+        incomplete_reasons: Vec::new(),
+        normalized_search_text,
+        content_fingerprint,
+        pipeline_fingerprint,
+    });
 }
 
 fn index_semantic_edges_by_file(call_graph: &ResolvedCallGraph) -> AHashMap<FileId, Vec<usize>> {
@@ -818,10 +768,11 @@ fn index_semantic_edges_by_file(call_graph: &ResolvedCallGraph) -> AHashMap<File
 }
 
 fn collect_edge_candidate_terms(
-    ws: &Workspace,
     call_graph: &ResolvedCallGraph,
     groups: &mut AHashMap<String, FileCandidateTerms>,
     edge_indices: &[usize],
+    file_path: &str,
+    span_map: Option<&bonsai_common::SpanMap>,
 ) {
     for &index in edge_indices {
         // These ordinals and endpoints were validated against the same
@@ -839,97 +790,14 @@ fn collect_edge_candidate_terms(
         edges.add(caller);
         edges.add(callee);
         edges.add(&format!("{caller} -> {callee}"));
-        let file_path = ws
-            .vfs()
-            .path(edge.span.file)
-            .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
-        let (span, _) = span_doc_fields(ws, edge.span);
+        let line_column = span_map.map(|map| map.line_col(edge.span.start));
         edges.add_stable_id(edge_id_for_parts(
             caller,
             callee,
-            &file_path,
-            span.line,
-            span.column,
+            file_path,
+            line_column.map_or(0, |position| position.line),
+            line_column.map_or(0, |position| position.column),
         ));
-    }
-}
-
-fn collect_decl_candidate_terms(groups: &mut AHashMap<String, FileCandidateTerms>, decl: &Decl) {
-    let kind = format!("{:?}", decl.kind).to_lowercase();
-    let declarations = candidate_terms(groups, &kind);
-    declarations.add(&decl.name);
-    if let Some(qualified) = decl.qualified_name.as_deref() {
-        declarations.add(qualified);
-    }
-    for param in &decl.params {
-        declarations.add(param);
-    }
-    for op in operations_from_flow_events(&decl.flow_events) {
-        let operations = candidate_terms(groups, "operation");
-        operations.add(op.kind.as_str());
-        operations.add(&decl.name);
-        if let Some(target) = op.target.as_deref() {
-            operations.add(target);
-        }
-        if let Some(detail) = op.detail.as_deref() {
-            operations.add(detail);
-        }
-        for operand in op.operands {
-            operations.add(&operand.name);
-            operations.add(operand.role.as_str());
-            operations.add(&format!("{}:{}", operand.role.as_str(), operand.name));
-        }
-    }
-    collect_flow_candidate_terms(groups, &decl.flow_events, &decl.name);
-}
-
-fn collect_import_candidate_terms(groups: &mut AHashMap<String, FileCandidateTerms>, import: &ImportSpec) {
-    let kind = if import.alias.is_some() {
-        "import-alias"
-    } else {
-        "import"
-    };
-    let imports = candidate_terms(groups, kind);
-    imports.add(&import.module);
-    if let Some(alias) = import.alias.as_deref() {
-        imports.add(alias);
-    }
-    if let Some(original) = import.original_name.as_deref() {
-        imports.add(original);
-    }
-}
-
-fn collect_index_candidate_terms(
-    groups: &mut AHashMap<String, FileCandidateTerms>,
-    index: &bonsai_lang_api::DeclIndex,
-) {
-    for reference in &index.refs {
-        let kind = match reference.kind {
-            RefKind::Read => "ref-read",
-            RefKind::Write => "ref-write",
-            RefKind::Call => "ref-call",
-            RefKind::Decorator => "ref-decorator",
-            _ => "ref",
-        };
-        candidate_terms(groups, kind).add(&reference.name);
-    }
-    for string in &index.strings {
-        let enclosing_function = enclosing_function_in_index(index, string.span);
-        let strings = candidate_terms(groups, "string");
-        strings.add(&string.text);
-        strings.add(&format!("{:?}", string.category).to_lowercase());
-        if let Some(function) = enclosing_function.as_deref() {
-            strings.add(function);
-        }
-    }
-    for comment in &index.comments {
-        let enclosing_function = enclosing_function_in_index(index, comment.span);
-        let comments = candidate_terms(groups, "comment");
-        comments.add(&comment.text);
-        comments.add(&format!("{:?}", comment.kind).to_lowercase());
-        if let Some(function) = enclosing_function.as_deref() {
-            comments.add(function);
-        }
     }
 }
 
@@ -938,8 +806,7 @@ struct FileCandidateInput<'a> {
     file_path: &'a str,
     pipeline: u64,
     edge_indices: &'a [usize],
-    index: Option<&'a bonsai_lang_api::DeclIndex>,
-    imports: &'a [ImportSpec],
+    browse: Option<&'a CompilerBrowseHeader>,
 }
 
 fn build_file_candidate_docs(
@@ -952,14 +819,13 @@ fn build_file_candidate_docs(
         file_path,
         pipeline,
         edge_indices,
-        index,
-        imports,
+        browse,
     } = input;
     let language = ws
         .db()
         .adapter_for(file)
         .map(|adapter| adapter.language_id().as_str().to_string());
-    let (file_span, content_fingerprint) = ws.vfs().snapshot(file).map_or_else(
+    let (file_span, content_fingerprint, span_map) = ws.vfs().snapshot(file).map_or_else(
         |_| {
             (
                 FactSpan {
@@ -968,9 +834,11 @@ fn build_file_candidate_docs(
                     ..FactSpan::default()
                 },
                 0,
+                None,
             )
         },
         |snapshot| {
+            let span_map = cached_span_map_arc(file, snapshot.version, &snapshot.text);
             (
                 FactSpan {
                     line: 1,
@@ -979,6 +847,7 @@ fn build_file_candidate_docs(
                     end: snapshot.text.len() as u64,
                 },
                 fnv1a_bytes64(snapshot.text.as_bytes()),
+                Some(span_map),
             )
         },
     );
@@ -994,17 +863,33 @@ fn build_file_candidate_docs(
         files.add(language);
     }
 
-    if let Some(index) = index {
-        for decl in &index.defs {
-            collect_decl_candidate_terms(&mut groups, decl);
+    collect_edge_candidate_terms(
+        call_graph,
+        &mut groups,
+        edge_indices,
+        file_path,
+        span_map.as_deref(),
+    );
+    let mut docs = Vec::with_capacity(
+        groups
+            .len()
+            .saturating_add(browse.map_or(0, |browse| browse.groups.len())),
+    );
+    if let Some(browse) = browse {
+        for projected in &browse.groups {
+            push_file_candidate_doc(
+                &mut docs,
+                file_path,
+                language.as_deref(),
+                file_span.clone(),
+                content_fingerprint,
+                pipeline,
+                projected.kind.clone(),
+                projected.terms.join(" "),
+                Vec::new(),
+            );
         }
-        collect_index_candidate_terms(&mut groups, index);
     }
-    for import in imports {
-        collect_import_candidate_terms(&mut groups, import);
-    }
-    collect_edge_candidate_terms(ws, call_graph, &mut groups, edge_indices);
-    let mut docs = Vec::with_capacity(groups.len());
     finish_file_candidate_groups(
         &mut docs,
         file_path,
@@ -1014,6 +899,7 @@ fn build_file_candidate_docs(
         pipeline,
         groups,
     );
+    docs.sort_unstable_by(|left, right| left.kind.cmp(&right.kind));
     docs
 }
 
@@ -1021,7 +907,7 @@ fn retrieval_file_batch_width() -> usize {
     // Candidate terms temporarily duplicate strings from one lowered compiler
     // unit. The shared profile controls concurrency only: every file and
     // semantic edge is still processed when constrained machines choose one.
-    bonsai_common::compiler_worker_count(rayon::current_num_threads().max(1))
+    bonsai_common::candidate_index_worker_count(rayon::current_num_threads().max(1))
 }
 
 /// Build the persisted candidate-only projection used to narrow files before
@@ -1030,9 +916,13 @@ fn retrieval_file_batch_width() -> usize {
 /// time instead of materializing a second whole-workspace graph. The batch
 /// width is a scheduling choice only and never limits files or facts.
 fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
+    let debug_build = bonsai_diagnostics::debug::is_enabled("retrieval-build");
+    let started = Instant::now();
     let pipeline = pipeline_hash_for_workspace(ws);
     let call_graph = ws.cached_resolved_call_graph();
+    let graph_ready = Instant::now();
     let mut edge_indices = index_semantic_edges_by_file(&call_graph);
+    let edges_ready = Instant::now();
     // The graph carries the compact endpoint identity this phase needs. Drop
     // the heavyweight workspace declaration-body cache before streaming
     // memory-bounded compiler-object units; later queries reconstruct it exactly.
@@ -1052,10 +942,21 @@ fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
         })
         .collect();
     files.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let files_ready = Instant::now();
 
     let mut builder = CompactFactSnapshotBuilder::new(RETRIEVAL_SCHEMA_VERSION, pipeline);
     let batch_width = retrieval_file_batch_width();
-    for batch in files.chunks(batch_width) {
+    // Keep several waves queued so one unusually large source file cannot
+    // strand the remaining workers at a barrier. Active compiler-object work
+    // is still bounded by `batch_width`; only the already-lowered candidate
+    // documents wait in this deterministic path-ordered window.
+    let queue_window = batch_width.saturating_mul(16).max(batch_width);
+    let mut doc_count = 0usize;
+    let browse_load_nanos = AtomicU64::new(0);
+    let doc_build_nanos = AtomicU64::new(0);
+    let task_nanos = AtomicU64::new(0);
+    let mut compact_push_nanos = 0_u64;
+    for batch in files.chunks(queue_window) {
         let inputs: Vec<_> = batch
             .iter()
             .map(|(path, file)| {
@@ -1069,9 +970,17 @@ fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
         let lowered: Vec<Vec<FactDoc>> = inputs
             .into_par_iter()
             .map(|(file, path, edges)| {
-                let (index, imports) = ws.db().syntax_indexes_uncached(file);
-                let imports = imports.map_or_else(Vec::new, |index| index.imports);
-                build_file_candidate_docs(
+                let task_started = Instant::now();
+                let browse_started = Instant::now();
+                let browse = ws.db().compiler_browse_header_uncached(file);
+                if debug_build {
+                    browse_load_nanos.fetch_add(
+                        u64::try_from(browse_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        Ordering::Relaxed,
+                    );
+                }
+                let docs_started = Instant::now();
+                let docs = build_file_candidate_docs(
                     ws,
                     &call_graph,
                     FileCandidateInput {
@@ -1079,20 +988,58 @@ fn build_persisted_candidate_snapshot(ws: &Workspace) -> CompactFactSnapshot {
                         file_path: path,
                         pipeline,
                         edge_indices: &edges,
-                        index: index.as_ref(),
-                        imports: &imports,
+                        browse: browse.as_ref(),
                     },
-                )
+                );
+                if debug_build {
+                    doc_build_nanos.fetch_add(
+                        u64::try_from(docs_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        Ordering::Relaxed,
+                    );
+                }
+                if debug_build {
+                    task_nanos.fetch_add(
+                        u64::try_from(task_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        Ordering::Relaxed,
+                    );
+                }
+                docs
             })
             .collect();
+        let push_started = Instant::now();
         for docs in lowered {
+            doc_count = doc_count.saturating_add(docs.len());
             for doc in docs {
                 builder.push(doc);
             }
         }
+        if debug_build {
+            compact_push_nanos = compact_push_nanos
+                .saturating_add(u64::try_from(push_started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        }
     }
-
-    builder.finish()
+    let bodies_ready = Instant::now();
+    let snapshot = builder.finish();
+    if debug_build {
+        bonsai_diagnostics::debug_log!(
+            "retrieval-build",
+            "candidate snapshot: total {:.3}s · graph {:.3}s · edge index {:.3}s · file table {:.3}s · browse projection {:.3}s · summed tasks {:.3}s · summed browse loads {:.3}s · summed doc builds {:.3}s · compact pushes {:.3}s · files {} · docs {} · workers {} · queue window {}",
+            started.elapsed().as_secs_f64(),
+            graph_ready.duration_since(started).as_secs_f64(),
+            edges_ready.duration_since(graph_ready).as_secs_f64(),
+            files_ready.duration_since(edges_ready).as_secs_f64(),
+            bodies_ready.duration_since(files_ready).as_secs_f64(),
+            task_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0,
+            browse_load_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0,
+            doc_build_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0,
+            compact_push_nanos as f64 / 1_000_000_000.0,
+            files.len(),
+            doc_count,
+            batch_width,
+            queue_window,
+        );
+    }
+    snapshot
 }
 
 /// Save a retrieval sidecar for `ws` under `workspace_root`.
@@ -1305,7 +1252,7 @@ impl CompactFactSnapshotBuilder {
 
     fn push(&mut self, doc: FactDoc) {
         self.docs.push(CompactFactDoc {
-            fact_id: self.strings.intern(doc.fact_id),
+            fact_id: doc.fact_id,
             kind: self.strings.intern(doc.kind),
             language: self.strings.intern_option(doc.language),
             file_path: self.strings.intern(doc.file_path),
@@ -1314,14 +1261,14 @@ impl CompactFactSnapshotBuilder {
             qualified_name: self.strings.intern_option(doc.qualified_name),
             enclosing_function: self.strings.intern_option(doc.enclosing_function),
             enclosing_class: self.strings.intern_option(doc.enclosing_class),
-            stable_ids: self.strings.intern_many(doc.stable_ids),
+            stable_ids: doc.stable_ids,
             resolver_precision: self.strings.intern_option(doc.resolver_precision),
             resolver_stage: self.strings.intern_option(doc.resolver_stage),
             provenance: self.strings.intern_option(doc.provenance),
             confidence: doc.confidence,
             static_limits: self.strings.intern_many(doc.static_limits),
             incomplete_reasons: self.strings.intern_many(doc.incomplete_reasons),
-            normalized_search_text: self.strings.intern(doc.normalized_search_text),
+            normalized_search_text: doc.normalized_search_text,
             content_fingerprint: doc.content_fingerprint,
             pipeline_fingerprint: doc.pipeline_fingerprint,
         });
@@ -1372,7 +1319,7 @@ impl CompactFactSnapshot {
             .into_iter()
             .map(|doc| {
                 Ok(FactDoc {
-                    fact_id: text(&strings, doc.fact_id)?,
+                    fact_id: doc.fact_id,
                     kind: text(&strings, doc.kind)?,
                     language: optional(&strings, doc.language)?,
                     file_path: text(&strings, doc.file_path)?,
@@ -1381,14 +1328,14 @@ impl CompactFactSnapshot {
                     qualified_name: optional(&strings, doc.qualified_name)?,
                     enclosing_function: optional(&strings, doc.enclosing_function)?,
                     enclosing_class: optional(&strings, doc.enclosing_class)?,
-                    stable_ids: many(&strings, doc.stable_ids)?,
+                    stable_ids: doc.stable_ids,
                     resolver_precision: optional(&strings, doc.resolver_precision)?,
                     resolver_stage: optional(&strings, doc.resolver_stage)?,
                     provenance: optional(&strings, doc.provenance)?,
                     confidence: doc.confidence,
                     static_limits: many(&strings, doc.static_limits)?,
                     incomplete_reasons: many(&strings, doc.incomplete_reasons)?,
-                    normalized_search_text: text(&strings, doc.normalized_search_text)?,
+                    normalized_search_text: doc.normalized_search_text,
                     content_fingerprint: doc.content_fingerprint,
                     pipeline_fingerprint: doc.pipeline_fingerprint,
                 })
@@ -1413,10 +1360,8 @@ impl CompactFactSnapshot {
             })
         };
         for doc in &self.docs {
-            validate_id(doc.fact_id)?;
             validate_id(doc.kind)?;
             validate_id(doc.file_path)?;
-            validate_id(doc.normalized_search_text)?;
             for id in [
                 doc.language,
                 doc.symbol_name,
@@ -1432,12 +1377,7 @@ impl CompactFactSnapshot {
             {
                 validate_id(id)?;
             }
-            for &id in doc
-                .stable_ids
-                .iter()
-                .chain(&doc.static_limits)
-                .chain(&doc.incomplete_reasons)
-            {
+            for &id in doc.static_limits.iter().chain(&doc.incomplete_reasons) {
                 validate_id(id)?;
             }
         }
@@ -1464,12 +1404,9 @@ impl CompactFactSnapshot {
                 continue;
             }
             if !text.is_empty() {
-                let searchable = self.string(doc.normalized_search_text)?;
-                let fact_id_matches = self.string(doc.fact_id)? == query.text.trim();
-                let stable_id_matches = doc
-                    .stable_ids
-                    .iter()
-                    .any(|&id| self.string(id).is_ok_and(|value| value == query.text.trim()));
+                let searchable = doc.normalized_search_text.as_str();
+                let fact_id_matches = doc.fact_id == query.text.trim();
+                let stable_id_matches = doc.stable_ids.iter().any(|id| id == query.text.trim());
                 if !fact_id_matches && !stable_id_matches && !searchable.contains(&text) {
                     continue;
                 }
@@ -1514,9 +1451,9 @@ fn write_candidate_pages(
         })
         .collect::<AHashMap<_, _>>();
     // Sort compact doc ordinals rather than cloning documents. Bloom filters
-    // are built one file at a time and streamed immediately,
-    // so peak memory follows the largest group instead of the workspace-wide
-    // inverted posting count.
+    // are independent per file, so build a bounded number in parallel and
+    // commit them in file order. The window keeps memory proportional to the
+    // active scheduler width while avoiding a serial trigram pass.
     let mut rows = snapshot
         .docs
         .iter()
@@ -1525,9 +1462,7 @@ fn write_candidate_pages(
         .collect::<std::io::Result<Vec<_>>>()?;
     rows.sort_unstable();
 
-    let mut page_keys = Vec::new();
-    let mut page = CandidateBloomPage::default();
-    let mut page_bytes = 0usize;
+    let mut groups = Vec::with_capacity(files.len());
     let mut offset = 0usize;
     while offset < rows.len() {
         let (file, _) = rows[offset];
@@ -1535,27 +1470,44 @@ fn write_candidate_pages(
             .iter()
             .position(|&(candidate_file, _)| candidate_file != file)
             .map_or(rows.len(), |relative| offset + relative);
-        let mut hashes = BTreeSet::new();
-        for &(_, doc_index) in &rows[offset..end] {
-            let doc = &snapshot.docs[doc_index];
-            for value in std::iter::once(snapshot.string(doc.normalized_search_text)?)
-                .chain(std::iter::once(snapshot.string(doc.fact_id)?))
-                .chain(doc.stable_ids.iter().filter_map(|id| snapshot.string(*id).ok()))
-            {
-                hashes.extend(trigram_hashes(&value.to_lowercase()));
-            }
-        }
-        let candidate = CandidateBloom::from_hashes(file, hashes)?;
-        let candidate_bytes = candidate.bits.len().saturating_mul(std::mem::size_of::<u64>());
-        if !page.entries.is_empty()
-            && page_bytes.saturating_add(candidate_bytes) > CANDIDATE_PAGE_TARGET_BYTES
-        {
-            write_candidate_page(writer, &mut page_keys, std::mem::take(&mut page))?;
-            page_bytes = 0;
-        }
-        page_bytes = page_bytes.saturating_add(candidate_bytes);
-        page.entries.push(candidate);
+        groups.push((file, offset, end));
         offset = end;
+    }
+
+    let workers = bonsai_common::candidate_index_worker_count(rayon::current_num_threads().max(1));
+    let queue_window = workers.saturating_mul(16).max(workers);
+    let mut page_keys = Vec::new();
+    let mut page = CandidateBloomPage::default();
+    let mut page_bytes = 0usize;
+    for window in groups.chunks(queue_window) {
+        let candidates = window
+            .par_iter()
+            .map(|&(file, start, end)| {
+                let mut hashes = BTreeSet::new();
+                for &(_, doc_index) in &rows[start..end] {
+                    let doc = &snapshot.docs[doc_index];
+                    for value in std::iter::once(doc.normalized_search_text.as_str())
+                        .chain(std::iter::once(doc.fact_id.as_str()))
+                        .chain(doc.stable_ids.iter().map(String::as_str))
+                    {
+                        hashes.extend(trigram_hashes(&value.to_lowercase()));
+                    }
+                }
+                CandidateBloom::from_hashes(file, hashes)
+            })
+            .collect::<Vec<_>>();
+        for candidate in candidates {
+            let candidate = candidate?;
+            let candidate_bytes = candidate.bits.len().saturating_mul(std::mem::size_of::<u64>());
+            if !page.entries.is_empty()
+                && page_bytes.saturating_add(candidate_bytes) > CANDIDATE_PAGE_TARGET_BYTES
+            {
+                write_candidate_page(writer, &mut page_keys, std::mem::take(&mut page))?;
+                page_bytes = 0;
+            }
+            page_bytes = page_bytes.saturating_add(candidate_bytes);
+            page.entries.push(candidate);
+        }
     }
     if !page.entries.is_empty() {
         write_candidate_page(writer, &mut page_keys, page)?;
@@ -1767,17 +1719,21 @@ fn save_docs_snapshot(
 }
 
 fn save_compact_snapshot(snapshot: CompactFactSnapshot, path: &Path) -> std::io::Result<usize> {
+    let debug_build = bonsai_diagnostics::debug::is_enabled("retrieval-build");
+    let started = Instant::now();
     let doc_count = snapshot.docs.len();
     let pipeline = snapshot.pipeline_fingerprint;
     let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1)?;
     wire::encode_to_writer(&mut encoder, &snapshot).map_err(invalid_data)?;
     let bytes = encoder.finish()?;
+    let snapshot_encoded = Instant::now();
     let body_hash = fnv1a_bytes64(&bytes);
     let writer = FactStoreWriter::create(path, RETRIEVAL_TABLE_ID, pipeline).map_err(map_factstore_io)?;
     writer
         .add_owned(SNAPSHOT_KEY, body_hash, bytes)
         .map_err(map_factstore_io)?;
     let directory = write_candidate_pages(&snapshot, &writer)?;
+    let pages_written = Instant::now();
     let directory_bytes = wire::encode(&directory).map_err(invalid_data)?;
     writer
         .add_owned(
@@ -1787,6 +1743,18 @@ fn save_compact_snapshot(snapshot: CompactFactSnapshot, path: &Path) -> std::io:
         )
         .map_err(map_factstore_io)?;
     writer.finish().map_err(map_factstore_io)?;
+    if debug_build {
+        bonsai_diagnostics::debug_log!(
+            "retrieval-build",
+            "candidate persist: total {:.3}s · snapshot encode {:.3}s · candidate pages {:.3}s · finalize {:.3}s · docs {} · pages {}",
+            started.elapsed().as_secs_f64(),
+            snapshot_encoded.duration_since(started).as_secs_f64(),
+            pages_written.duration_since(snapshot_encoded).as_secs_f64(),
+            Instant::now().duration_since(pages_written).as_secs_f64(),
+            doc_count,
+            directory.page_keys.len(),
+        );
+    }
     // A completed current-schema artifact supersedes older retrieval
     // factstores. Keep migration cleanup best-effort so a read-only cache
     // directory cannot turn a successful index build into a command failure.
@@ -2483,10 +2451,6 @@ fn class_name_for_decl(ws: &Workspace, decl: &Decl) -> Option<String> {
 fn enclosing_function_for_span(ws: &Workspace, span: Span) -> Option<String> {
     let global = ws.db().global_index();
     enclosing_function_in_decls(global.decls_in(span.file), span)
-}
-
-fn enclosing_function_in_index(index: &bonsai_lang_api::DeclIndex, span: Span) -> Option<String> {
-    enclosing_function_in_decls(&index.defs, span)
 }
 
 fn enclosing_function_in_decls(decls: &[Decl], span: Span) -> Option<String> {
@@ -3648,7 +3612,7 @@ interface HttpServerTransport {
             101,
             vec![sample_doc("handle_request", "function", 1)],
         );
-        compact.docs[0].fact_id = u32::MAX;
+        compact.docs[0].kind = u32::MAX;
         let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1).expect("zstd encoder");
         wire::encode_to_writer(&mut encoder, &compact).expect("encode compact snapshot");
         let bytes = encoder.finish().expect("finish compact snapshot");

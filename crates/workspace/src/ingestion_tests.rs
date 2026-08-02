@@ -182,6 +182,53 @@ fn single_file_local_id_maps_to_its_persisted_header_partition() {
 }
 
 #[test]
+fn single_file_query_resolves_a_unique_workspace_path_filter() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::create_dir_all(root.path().join("src")).expect("create source dir");
+    std::fs::write(
+        root.path().join("src/executor.py"),
+        "def execute():\n    return 1\n",
+    )
+    .expect("write nested source");
+
+    let scoped =
+        Workspace::open_query_matching_path(root.path(), python_registry(), Path::new("executor.py"))
+            .expect("resolve unique nested basename");
+    let paths = scoped
+        .vfs()
+        .all_files()
+        .into_iter()
+        .map(|file| scoped.vfs().path(file).expect("VFS path").as_ref().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        vec![root
+            .path()
+            .join("src/executor.py")
+            .canonicalize()
+            .expect("canonical fixture path")]
+    );
+}
+
+#[test]
+fn single_file_query_rejects_an_ambiguous_workspace_path_filter() {
+    let root = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::create_dir_all(root.path().join("one")).expect("create first dir");
+    std::fs::create_dir_all(root.path().join("two")).expect("create second dir");
+    std::fs::write(root.path().join("one/executor.py"), "def one():\n    return 1\n")
+        .expect("write first source");
+    std::fs::write(root.path().join("two/executor.py"), "def two():\n    return 2\n")
+        .expect("write second source");
+
+    let error = Workspace::open_query_matching_path(root.path(), python_registry(), Path::new("executor.py"))
+        .expect_err("ambiguous basename must fail closed");
+    let rendered = error.to_string();
+    assert!(rendered.contains("ambiguous"), "{rendered}");
+    assert!(rendered.contains("one/executor.py"), "{rendered}");
+    assert!(rendered.contains("two/executor.py"), "{rendered}");
+}
+
+#[test]
 fn streaming_ingest_parses_delimiter_text_in_strings_and_comments() {
     let root = tempfile::tempdir().expect("workspace tempdir");
     let string_delimiters = "(".repeat(2_100);

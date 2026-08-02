@@ -1,8 +1,30 @@
 use std::path::Path;
 
 use super::{
-    callable_reference_variants, is_bonsai_case_probe_path, qualified_names_match, short_qualified_tail,
+    callable_reference_variants, default_workspace_bonsai_dir, is_bonsai_case_probe_path,
+    qualified_names_match, short_qualified_tail,
 };
+
+#[test]
+fn default_workspace_cache_is_external_stable_and_namespaced() {
+    let cache_root = Path::new("/cache-root");
+    let first = default_workspace_bonsai_dir(Path::new("/work/acme project"), Some(cache_root));
+    let repeated = default_workspace_bonsai_dir(Path::new("/work/acme project"), Some(cache_root));
+    let other = default_workspace_bonsai_dir(Path::new("/other/acme project"), Some(cache_root));
+
+    assert_eq!(first, repeated);
+    assert!(first.starts_with(cache_root.join("bonsai-ninja/workspaces")));
+    assert!(
+        first
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("acme-project-")),
+        "{}",
+        first.display()
+    );
+    assert_ne!(first, other, "same basename in a different root must not collide");
+    assert!(!first.starts_with("/work/acme project"));
+}
 
 #[test]
 fn qualified_tail_uses_rightmost_supported_separator() {

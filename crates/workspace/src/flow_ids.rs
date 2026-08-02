@@ -37,12 +37,15 @@ const FLOW_IDS_TABLE_ID: u32 = 3;
 
 /// On-disk format version. Bump when the encoding changes so old
 /// sidecars are rejected on open.
+// v10 (2026-07-31): structural flow ids hash exact compiler declaration
+// identities instead of display-name sequences, eliminating overload/module
+// collisions and duplicate navigation ids.
 // v9 (2026-07-30): nested lexical endpoint identities changed with
 // compiler-object v13, so enumerated flow paths must be rebuilt.
 // v7 (2026-07-16): MessagePack replaces the retired binary codec.
 // v6 (2026-05-27): downstream of IDG/adapter semantic changes,
 // enumerated chains can differ, so reject older sidecars.
-pub const FLOW_IDS_CACHE_VERSION: u32 = 9;
+pub const FLOW_IDS_CACHE_VERSION: u32 = 10;
 
 /// Pipeline-hash field in the factstore header. Folds the matcher
 /// policy fingerprint into 64 bits and mixes in the current workspace
@@ -171,7 +174,7 @@ impl FlowIdCache {
         // — and therefore the flow id — matches what
         // `inspect --query <enclosing_fn>` would emit, so ids from
         // browse paste directly into `inspect --flow F:...`.
-        let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, headers.as_ref(), chains, options);
+        let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, headers.as_ref(), db, vfs, chains, options);
         let arc: Arc<[String]> = Arc::from(ids.into_boxed_slice());
         let mut inner = self.inner.write();
         inner.labels.insert(func, arc.clone());
@@ -231,7 +234,7 @@ impl FlowIdCache {
                 .map(|&f| {
                     let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
                     let (ids, label_trunc) =
-                        collect_flow_ids_for_chains(&cg, headers.as_ref(), chains, options);
+                        collect_flow_ids_for_chains(&cg, headers.as_ref(), db, vfs, chains, options);
                     (f, Arc::from(ids.into_boxed_slice()), trunc || label_trunc)
                 })
                 .collect();
@@ -292,7 +295,8 @@ impl FlowIdCache {
             .par_iter()
             .map(|&f| {
                 let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
-                let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, headers.as_ref(), chains, options);
+                let (ids, label_trunc) =
+                    collect_flow_ids_for_chains(&cg, headers.as_ref(), db, vfs, chains, options);
                 (f, Arc::from(ids.into_boxed_slice()), trunc || label_trunc)
             })
             .collect();
@@ -350,7 +354,7 @@ impl FlowIdCache {
         let computed: Vec<(FuncId, Arc<[String]>, bool)> = chain_sets
             .into_par_iter()
             .map(|(func, chains, chain_truncated)| {
-                let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, headers, chains, options);
+                let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, headers, db, vfs, chains, options);
                 (
                     func,
                     Arc::from(ids.into_boxed_slice()),
@@ -497,7 +501,8 @@ impl FlowIdCache {
             .map(|&f| {
                 let options = FlowIdLabelOptions::default();
                 let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
-                let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, global.as_ref(), chains, options);
+                let (ids, label_trunc) =
+                    collect_flow_ids_for_chains(&cg, global.as_ref(), db, vfs, chains, options);
                 on_each_done(f);
                 (f, Arc::from(ids.into_boxed_slice()), trunc || label_trunc)
             })
@@ -618,7 +623,8 @@ impl FlowIdCache {
             }
             let options = FlowIdLabelOptions::default();
             let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
-            let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, global.as_ref(), chains, options);
+            let (ids, label_trunc) =
+                collect_flow_ids_for_chains(&cg, global.as_ref(), db, vfs, chains, options);
             let entry = FlowIdEntry {
                 labels: ids,
                 truncated: trunc || label_trunc,
@@ -661,7 +667,7 @@ impl FlowIdCache {
         Ok(written)
     }
 
-    /// Conventional sidecar path under `workspace_root/.bonsai/`.
+    /// Conventional sidecar path in the external workspace cache.
     #[must_use]
     pub fn sidecar_path(workspace_root: &Path) -> PathBuf {
         workspace_bonsai_dir(workspace_root).join(format!("flow_ids.v{FLOW_IDS_CACHE_VERSION}.factstore"))
@@ -784,13 +790,14 @@ fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
 fn collect_flow_ids_for_chains(
     cg: &ResolvedCallGraph,
     headers: &GlobalIndex,
+    db: &AnalyzerDb,
+    vfs: &bonsai_vfs::Vfs,
     chains: Vec<Vec<FuncId>>,
     options: FlowIdLabelOptions,
 ) -> (Vec<String>, bool) {
     let mut seen: AHashSet<String> = AHashSet::new();
     let mut truncated = false;
     let mut call_paths = CallPathEnumerator::new(cg);
-    let mut names: AHashMap<FuncId, String> = AHashMap::new();
     'chains: for chain in chains {
         let (extended_paths, path_truncated) =
             call_paths.enumerate_from(&chain, options.downstream_depth, options.downstream_breadth);
@@ -798,20 +805,10 @@ fn collect_flow_ids_for_chains(
             truncated = true;
         }
         for extended in extended_paths {
-            let chain_names: Vec<String> = extended
-                .iter()
-                .map(|&fi| {
-                    names
-                        .entry(fi)
-                        .or_insert_with(|| func_display_name(headers, fi))
-                        .clone()
-                })
-                .filter(|n| !n.is_empty())
-                .collect();
-            if chain_names.is_empty() {
+            if extended.is_empty() {
                 continue;
             }
-            seen.insert(compute_flow_id(&chain_names));
+            seen.insert(compute_structural_flow_id(headers, db, vfs, &extended));
             if seen.len() >= options.max_labels_per_func {
                 truncated = true;
                 break 'chains;
@@ -913,11 +910,70 @@ fn resolved_callees_from_graph(cg: &ResolvedCallGraph, caller: FuncId) -> Vec<Fu
 /// Look up a function's display name in the compiler header table. Returns
 /// empty when the function id isn't known (for example, an unresolved
 /// external). Flow-id rendering never needs declaration bodies.
-fn func_display_name(headers: &GlobalIndex, func: FuncId) -> String {
-    headers
-        .decl_of(bonsai_common::SymbolId::new(func.raw()))
-        .map(|d| d.name.clone())
-        .unwrap_or_default()
+/// Stable structural `F:` id over exact compiler declaration identities.
+///
+/// Human display names are deliberately insufficient: overloads and same-name
+/// functions in different modules routinely produce the same name sequence.
+/// Each hop therefore contributes its adapter language, workspace-relative
+/// file, declaration kind/module/qualified name, and Tree-sitter name span.
+/// These are compiler headers, so callers never hydrate declaration bodies.
+#[must_use]
+pub fn compute_structural_flow_id(
+    headers: &GlobalIndex,
+    db: &AnalyzerDb,
+    vfs: &bonsai_vfs::Vfs,
+    chain: &[FuncId],
+) -> String {
+    let mut hasher = bonsai_hash::Hasher::new();
+    let mut absorb = |value: &str| {
+        hasher.absorb(value.as_bytes());
+        hasher.absorb_separator();
+    };
+    absorb("bonsai.structural-flow.v2");
+    let workspace_root = db.workspace_root();
+    for &func in chain {
+        absorb("hop");
+        let Some(decl) = headers.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
+            absorb("unknown-compiler-symbol");
+            absorb(&func.raw().to_string());
+            continue;
+        };
+        let file = decl.span.file;
+        let path = vfs.path(file).ok();
+        let stable_path = path.as_deref().map_or_else(
+            || format!("<file:{}>", file.raw()),
+            |path| {
+                workspace_root
+                    .as_deref()
+                    .and_then(|root| path.strip_prefix(root).ok())
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            },
+        );
+        absorb("language");
+        absorb(
+            db.adapter_for(file)
+                .map_or("<unknown-language>", |adapter| adapter.language_id().as_str()),
+        );
+        absorb("path");
+        absorb(&stable_path);
+        absorb("kind");
+        absorb(&format!("{:?}", decl.kind));
+        absorb("module-count");
+        absorb(&decl.module_path.segments.len().to_string());
+        for segment in &decl.module_path.segments {
+            absorb("module-segment");
+            absorb(segment);
+        }
+        absorb("qualified-name");
+        absorb(decl.qualified_name.as_deref().unwrap_or(&decl.name));
+        absorb("name-span-start");
+        absorb(&decl.name_span.start.to_string());
+        absorb("name-span-end");
+        absorb(&decl.name_span.end.to_string());
+    }
+    format!("F:{:016x}", hasher.finish())
 }
 
 /// Stable content-hash of a chain's display names. Frozen format:

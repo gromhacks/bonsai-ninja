@@ -705,29 +705,31 @@ fn index_prints_file_count() {
 fn index_structural_only_does_not_write_semantic_sidecars() {
     let tmp = tempdir_for_test("bonsai_index_structural_only");
     write_tiny_python_workspace(&tmp);
+    let cache = bonsai_common::workspace_bonsai_dir(&tmp);
+    let _ = std::fs::remove_dir_all(&cache);
 
     let Some(out) = run(&["index", tmp.to_str().unwrap(), "--structural-only"]) else {
         return;
     };
     assert!(out.contains("files"), "index summary missing: {out}");
     assert!(
-        !tmp.join(".bonsai/dataflow.v2.bin").exists(),
+        !cache.join("dataflow.v2.bin").exists(),
         "`index --structural-only` must not write the legacy dataflow sidecar"
     );
     assert!(
-        !tmp.join(".bonsai/dataflow.v3.factstore").exists(),
+        !cache.join("dataflow.v3.factstore").exists(),
         "`index --structural-only` must not write the factstore dataflow sidecar"
     );
     assert!(
-        !tmp.join(".bonsai/value_flow.v3.factstore").exists(),
+        !cache.join("value_flow.v3.factstore").exists(),
         "`index --structural-only` must not write the value-flow sidecar"
     );
     assert!(
-        !tmp.join(".bonsai/flow_ids.v3.factstore").exists(),
+        !cache.join("flow_ids.v3.factstore").exists(),
         "`index --structural-only` must not write the flow-id sidecar"
     );
     assert!(
-        !tmp.join(".bonsai/manifest.json").exists(),
+        !cache.join("manifest.json").exists(),
         "`index --structural-only` must not publish a semantic cache manifest"
     );
 }
@@ -736,29 +738,30 @@ fn index_structural_only_does_not_write_semantic_sidecars() {
 fn index_prewarm_dataflow_writes_factstore_sidecar() {
     let tmp = tempdir_for_test("bonsai_index_prewarm_dataflow");
     write_tiny_python_workspace(&tmp);
+    let cache = bonsai_common::workspace_bonsai_dir(&tmp);
+    let _ = std::fs::remove_dir_all(&cache);
 
     let Some(out) = run(&["index", tmp.to_str().unwrap(), "--prewarm-dataflow"]) else {
         return;
     };
     assert!(out.contains("files"), "index summary missing: {out}");
     assert!(
-        tmp.join(".bonsai/dataflow.v3.factstore").exists(),
+        cache.join("dataflow.v3.factstore").exists(),
         "`index --prewarm-dataflow` must write the streaming factstore sidecar"
     );
-    let manifest: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(tmp.join(".bonsai/manifest.json")).expect("read cache manifest"),
-    )
-    .expect("cache manifest JSON");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(cache.join("manifest.json")).expect("read cache manifest"))
+            .expect("cache manifest JSON");
     assert_eq!(
         manifest["coverage"]["legacy_dataflow_ready"], true,
         "`index --prewarm-dataflow` should report dataflow readiness for the current streaming factstore: {manifest:#?}"
     );
     assert!(
-        !tmp.join(".bonsai/value_flow.v3.factstore").exists(),
+        !cache.join("value_flow.v3.factstore").exists(),
         "`index --prewarm-dataflow` must not prewarm unrelated value-flow sidecars"
     );
     assert!(
-        !tmp.join(".bonsai/flow_ids.v3.factstore").exists(),
+        !cache.join("flow_ids.v3.factstore").exists(),
         "`index --prewarm-dataflow` must not prewarm unrelated flow-id sidecars"
     );
 }
@@ -929,7 +932,7 @@ fn path_and_slice_text_summaries_are_polished() {
         return;
     };
     assert!(
-        slice_out.contains("limit") && slice_out.contains("64 steps"),
+        slice_out.contains("limit") && slice_out.contains("uncapped"),
         "slice summary should render the step limit as prose:\n{slice_out}"
     );
     assert!(
@@ -1187,31 +1190,53 @@ def b_only(value):
 }
 
 #[test]
-fn trace_json_marks_analysis_incomplete_when_step_cap_hits() {
-    let ws = ws_path();
-    let Some(out) = run(&[
-        "trace",
-        ws.to_str().unwrap(),
-        "handle_request",
-        "--max-steps",
-        "1",
-        "--format",
-        "json",
-    ]) else {
+fn semantic_navigation_rejects_removed_analysis_caps() {
+    let Some(bin) = bin_path() else {
         return;
     };
-    let v: serde_json::Value = serde_json::from_str(&out).expect("trace JSON parses");
-    assert_eq!(
-        v["summary"]["analysis_complete"], false,
-        "trace must not claim completeness after max-steps truncation:\n{out}"
-    );
-    let reasons = v["summary"]["truncation_reasons"]
-        .as_array()
-        .expect("truncation_reasons array");
-    assert!(
-        reasons.iter().any(|reason| reason.as_str() == Some("max-steps")),
-        "trace must explain max-steps truncation reasons:\n{out}"
-    );
+    let workspace = ws_path();
+    let workspace = workspace.to_str().expect("utf-8 workspace");
+    let cases: &[(&[&str], &[&str])] = &[
+        (
+            &["trace", workspace, "handle_request"],
+            &[
+                "--max-depth",
+                "--max-steps",
+                "--max-branch-fanout",
+                "--max-loop-iters",
+            ],
+        ),
+        (
+            &[
+                "path",
+                workspace,
+                "--from",
+                "handle_request",
+                "--to",
+                "verify_token",
+            ],
+            &["--max-paths", "--max-depth", "--max-probes"],
+        ),
+        (
+            &["slice", workspace, "--symbol", "token", "--line", "1"],
+            &["--max-steps"],
+        ),
+    ];
+    for (prefix, flags) in cases {
+        for flag in *flags {
+            let mut args = prefix.to_vec();
+            args.extend([*flag, "1", "--no-color", "--no-progress"]);
+            let output = Command::new(&bin)
+                .args(args)
+                .output()
+                .expect("run removed analysis-cap check");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success() && stderr.contains("unexpected argument"),
+                "removed semantic cap {flag} must fail at argument parsing: {stderr}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1305,6 +1330,76 @@ fn diagnostics_runs_without_error() {
 }
 
 #[test]
+fn html_output_is_standalone_themed_and_escapes_source() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let workspace = tempdir_for_test("bonsai_html_output");
+    std::fs::write(
+        workspace.join("app.py"),
+        "def render():\n    return \"<unsafe>&value\"\n",
+    )
+    .expect("write HTML output fixture");
+    let report = workspace.join("report.html");
+    let output = Command::new(&bin)
+        .args([
+            "--theme",
+            "moss",
+            "read-file",
+            workspace.to_str().expect("workspace utf8"),
+            "app.py",
+            "--html-output",
+            report.to_str().expect("report utf8"),
+            "--no-progress",
+        ])
+        .output()
+        .expect("run HTML report");
+    assert!(
+        output.status.success(),
+        "HTML output failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty(), "HTML payload must go only to its file");
+    let html = std::fs::read_to_string(&report).expect("read HTML report");
+    assert!(html.starts_with("<!doctype html>"));
+    assert!(html.contains("bonsai-ninja") && html.contains("Moss theme"));
+    assert!(html.contains("&lt;unsafe&gt;&amp;value"));
+    assert!(html.ends_with("</body></html>\n"));
+
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn html_output_rejects_a_second_output_sink() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let workspace = ws_path();
+    let output_dir = tempdir_for_test("bonsai_conflicting_output");
+    let report = output_dir.join("report.html");
+    let json = output_dir.join("report.json");
+    let output = Command::new(&bin)
+        .args([
+            "defs",
+            workspace.to_str().expect("workspace utf8"),
+            "--html-output",
+            report.to_str().expect("report utf8"),
+            "--output-path",
+            json.to_str().expect("json utf8"),
+            "--no-progress",
+        ])
+        .output()
+        .expect("run conflicting output sinks");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("mutually exclusive"),
+        "conflict should be explicit: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(output_dir);
+}
+
+#[test]
 fn export_produces_valid_json() {
     let ws = ws_path();
     let Some(out) = run(&["export", ws.to_str().unwrap()]) else {
@@ -1317,30 +1412,21 @@ fn export_produces_valid_json() {
     );
     assert_eq!(
         value["analysis_scope"]["full_propagations"], false,
-        "default export scope should declare omitted propagation records"
+        "default export should keep concrete row expansion optional"
     );
     assert_eq!(
-        value["analysis_complete"], false,
-        "default export must not claim whole-document completeness when propagation records are omitted"
+        value["analysis_scope"]["propagations_mode"], "compiled_idg",
+        "default export should preserve the complete relation in compiler form"
     );
-    assert!(
-        value["analysis_incomplete_reasons"]
-            .as_array()
-            .is_some_and(|reasons| reasons.iter().any(|reason| reason
-                .as_str()
-                .is_some_and(|text| text.contains("--full-propagations")))),
-        "default export should expose top-level incomplete scope reasons"
+    assert_eq!(
+        value["analysis_complete"], true,
+        "default compiler-form export should be semantically complete"
     );
     assert_eq!(
         value["taint_graph"]["propagations_complete"], false,
-        "default export should not claim omitted propagation records are complete"
+        "concrete propagation rows remain unmaterialized in compiler form"
     );
-    assert!(
-        value["taint_graph"]["propagations_omitted_reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("--full-propagations")),
-        "default export should explain how to request exact propagation records"
-    );
+    assert!(value["taint_graph"]["propagations_omitted_reason"].is_null());
 }
 
 #[test]
@@ -1388,9 +1474,9 @@ fn export_full_propagations_materializes_exact_records() {
 }
 
 #[test]
-fn export_all_keeps_exact_propagation_language_in_compiler_form() {
+fn export_default_keeps_exact_propagation_language_in_compiler_form() {
     let ws = ws_path();
-    let Some(out) = run(&["export", ws.to_str().unwrap(), "--all"]) else {
+    let Some(out) = run(&["export", ws.to_str().unwrap()]) else {
         return;
     };
     let value: serde_json::Value = serde_json::from_str(&out).expect("export should be valid JSON");
@@ -1454,16 +1540,14 @@ fn export_default_never_caps_chain_evidence() {
     assert_eq!(v["flow_chains_truncated_targets"], 0);
     assert!(v["flow_chains"].as_array().is_some_and(Vec::is_empty));
     assert_eq!(
-        v["analysis_complete"], false,
-        "default export still reports omitted concrete propagation rows"
+        v["analysis_complete"], true,
+        "compiled graph representation must preserve complete semantics"
     );
     assert!(
         v["analysis_incomplete_reasons"]
             .as_array()
-            .is_some_and(|reasons| reasons.iter().any(|reason| reason
-                .as_str()
-                .is_some_and(|text| text.contains("taint_graph.propagations")))),
-        "default incompleteness must describe omitted propagation rows, not a chain cap"
+            .is_some_and(Vec::is_empty),
+        "compressed representation must not be reported as semantic truncation"
     );
 
     let tg = &v["taint_graph"];
@@ -1479,16 +1563,12 @@ fn export_default_uses_exact_compressed_graph() {
     const FAN_IN_CALLERS: usize = 300;
     write_fan_in_python_workspace(&tmp, FAN_IN_CALLERS);
 
-    for flag in [None, Some("--all")] {
-        let mut args = vec!["export", tmp.to_str().unwrap()];
-        if let Some(flag) = flag {
-            args.push(flag);
-        }
-        let Some(out) = run(&args) else {
+    {
+        let Some(out) = run(&["export", tmp.to_str().unwrap()]) else {
             return;
         };
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
-        let label = flag.unwrap_or("default");
+        let label = "default";
         assert_eq!(
             v["flow_chains_mode"], "compressed_callgraph",
             "{label} must avoid unbounded simple-path materialization"
@@ -1502,17 +1582,10 @@ fn export_default_uses_exact_compressed_graph() {
             0,
             "{label} must clear top-level chain truncation counts"
         );
-        if flag == Some("--all") {
-            assert_eq!(
-                v["analysis_complete"], true,
-                "--all should be complete for the fan-in audit fixture"
-            );
-        } else {
-            assert_eq!(
-                v["analysis_complete"], false,
-                "default export still omits concrete propagation records"
-            );
-        }
+        assert_eq!(
+            v["analysis_complete"], true,
+            "default compiler-form export should be complete for the fan-in fixture"
+        );
         assert!(
             v["flow_chains"].as_array().is_some_and(Vec::is_empty),
             "{label} should encode the chain language in the graph, not path rows"
@@ -1610,57 +1683,36 @@ fn export_entry_points_use_semantic_callgraph_not_bare_tail_matches() {
 }
 
 #[test]
-fn inspect_occurrence_hits_mark_capped_flow_evidence() {
+fn inspect_occurrence_flow_evidence_is_uncapped() {
     let tmp = tempdir_for_test("bonsai_inspect_occurrence_flow_completeness");
     write_fan_in_python_workspace(&tmp, 20);
 
-    let Some(out) = run_inspect_graph(
-        &tmp,
-        &[
-            "--query",
-            "sink",
-            "--kind",
-            "call",
-            "--max-flows",
-            "1",
-            "--format",
-            "json",
-        ],
-    ) else {
+    let Some(out) = run_inspect_graph(&tmp, &["--query", "sink", "--kind", "call", "--format", "json"])
+    else {
         return;
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
     assert_eq!(
-        v["analysis_complete"], false,
-        "inspect must not claim top-level completeness when occurrence flow evidence is capped:\n{out}"
+        v["analysis_complete"], true,
+        "exact inspect graph work should be complete without semantic caps:\n{out}"
     );
     let incomplete_reasons = v["analysis_incomplete_reasons"]
         .as_array()
         .expect("analysis_incomplete_reasons array");
     assert!(
-        incomplete_reasons.iter().any(|reason| {
-            reason.as_str().is_some_and(|reason| {
-                reason.contains("inspect occurrence flow evidence capped by max-flows cap")
-            })
-        }),
-        "inspect top-level incomplete reasons must name capped occurrence flow evidence:\n{out}"
+        incomplete_reasons.is_empty(),
+        "uncapped graph inspection must not report semantic truncation:\n{out}"
     );
-    assert!(
-        v["summary"]["flow_truncated_hits"].as_u64().unwrap_or(0) > 0,
-        "inspect summary must count occurrence hits with capped flow evidence:\n{out}"
-    );
-    let hit = v["hits"]
+    let flow_count = v["hits"]
         .as_array()
-        .unwrap()
-        .iter()
-        .find(|hit| hit["flow_truncated_by"].as_str().is_some())
-        .expect("at least one occurrence hit must explain flow truncation");
+        .into_iter()
+        .flatten()
+        .filter_map(|hit| hit["flows"].as_array())
+        .map(Vec::len)
+        .sum::<usize>();
     assert!(
-        hit["flow_truncated_by"]
-            .as_str()
-            .unwrap()
-            .contains("max-flows cap"),
-        "truncated occurrence hit must name the max-flows cap: {hit}"
+        flow_count > 1,
+        "fan-in fixture should retain multiple exact flows:\n{out}"
     );
 }
 
@@ -2933,7 +2985,7 @@ fn tree_default_and_all_modes_stay_structural() {
 }
 
 #[test]
-fn tree_all_lifts_the_child_limit() {
+fn tree_default_and_all_are_exhaustive() {
     let root = tempdir_for_test("tree-all-child-limit");
     for index in 0..201 {
         std::fs::write(root.join(format!("file_{index:03}.py")), "").expect("write tree fixture");
@@ -2946,13 +2998,13 @@ fn tree_all_lifts_the_child_limit() {
         serde_json::from_str(&default_out).expect("default tree JSON must parse");
     assert_eq!(
         default_json["summary"]["total_files"].as_u64(),
-        Some(200),
-        "default tree must honor its per-directory child cap"
+        Some(201),
+        "default tree must include every child"
     );
     assert_eq!(
         default_json["analysis_complete"].as_bool(),
-        Some(false),
-        "a capped structural tree must report itself incomplete"
+        Some(true),
+        "the default structural tree must report complete analysis"
     );
 
     let all_out =
@@ -2961,7 +3013,7 @@ fn tree_all_lifts_the_child_limit() {
     assert_eq!(
         all_json["summary"]["total_files"].as_u64(),
         Some(201),
-        "tree --all must lift the per-directory child cap"
+        "tree --all must preserve exhaustive traversal"
     );
     assert_eq!(
         all_json["analysis_complete"].as_bool(),
@@ -3143,6 +3195,51 @@ fn read_file_plain_json_uses_fast_file_local_view() {
         missing_or_empty_array("callers_in") && missing_or_empty_array("callees_out"),
         "plain read-file should stay file-local unless semantic body options are requested:\n{out}"
     );
+}
+
+#[test]
+fn read_file_line_range_keeps_native_json_and_only_intersecting_declarations() {
+    let root = tempdir_for_test("read-file-ranged-native-json");
+    let source = [
+        "def first():",
+        "    return 1",
+        "",
+        "",
+        "def second():",
+        "    return 2",
+        "",
+    ]
+    .join("\n");
+    std::fs::write(root.join("sample.py"), source).expect("write ranged source");
+
+    let Some(out) = run(&[
+        "read-file",
+        root.to_str().unwrap(),
+        "sample.py",
+        "--lines",
+        "1:2",
+        "--context",
+        "16k",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("read-file JSON must parse");
+    assert!(
+        parsed.get("json_lines").is_none(),
+        "an explicit context budget must preserve native JSON when the object fits:\n{out}"
+    );
+    assert_eq!(parsed["source"], "def first():\n    return 1");
+    let declarations = parsed["line_decl_index"]
+        .as_array()
+        .expect("line_decl_index array");
+    assert_eq!(
+        declarations.len(),
+        1,
+        "ranged reads must not include declarations outside the requested lines:\n{out}"
+    );
+    assert_eq!(declarations[0]["locator"]["decl"], "first");
 }
 
 #[test]
@@ -4020,47 +4117,6 @@ fn inspect_in_fn_filter_works_for_every_lang() {
     }
 }
 
-/// `--max-flows 1` caps per-hit flow enumeration to one. With a query
-/// that would naturally produce multiple flows, exactly one FLOW block
-/// per hit must be rendered.
-#[test]
-fn inspect_max_flows_caps_output_for_every_lang() {
-    for lang in LANG_MICROS {
-        let ws = lang_ws(lang);
-        let Some(out) = run_inspect_graph(&ws, &["--query", universal_query(), "--max-flows", "1"]) else {
-            return;
-        };
-        if out.contains("no matches") {
-            continue;
-        }
-        // For each `▸ hit` block, count FLOW entries up to the next hit.
-        let mut hit_count = 0usize;
-        let mut flows_per_hit: Vec<usize> = Vec::new();
-        let mut current = 0usize;
-        for line in out.lines() {
-            if line.starts_with("▸ hit ") {
-                if hit_count > 0 {
-                    flows_per_hit.push(current);
-                }
-                hit_count += 1;
-                current = 0;
-            } else if line.starts_with("FLOW ") {
-                current += 1;
-            }
-        }
-        if hit_count > 0 {
-            flows_per_hit.push(current);
-        }
-        for (i, n) in flows_per_hit.iter().enumerate() {
-            assert!(
-                *n <= 1,
-                "{lang}: hit #{} rendered {n} flows with --max-flows 1",
-                i + 1
-            );
-        }
-    }
-}
-
 /// `--format json` must produce valid JSON for every language fixture.
 #[test]
 fn inspect_format_json_valid_for_every_lang() {
@@ -4237,7 +4293,9 @@ fn lang_expectations() -> Vec<LangExpect> {
             sink: "system",
             import_mark: Some("sqlite3"),
             string_mark: Some("notify-admin"),
-            class_mark: Some("AuthService"),
+            // The fixture declares Ruby modules, not classes. The adapter must
+            // preserve that syntax distinction instead of guessing a class.
+            class_mark: None,
         },
         LangExpect {
             lang: "rust",
@@ -4864,29 +4922,35 @@ fn inspect_positional_symbol_works_for_every_lang() {
 // -----------------------------------------------------------------------------
 
 #[test]
-fn cache_stats_prints_caps_and_on_disk_path() {
+fn cache_stats_explains_memo_eviction_and_external_path() {
     let ws = ws_path();
     let Some(out) = run(&["cache", "stats", ws.to_str().unwrap()]) else {
         return;
     };
-    // Each cap line must surface so users can see what's in scope.
+    // Memo capacities are an implementation detail for retained reuse, not a
+    // semantic limit. The command must make that distinction explicit.
     for label in &[
         "scope",
-        "reachable cap",
-        "chains cap",
-        "downstream cap",
-        "callees cap",
-        "enclosing cap",
+        "reachable memo entries",
+        "chains memo entries",
+        "downstream memo entries",
+        "callees memo entries",
+        "enclosing memo entries",
+        "memo semantics",
         "BONSAI_NO_CACHE env",
         "on-disk cache",
         "cache manifest",
     ] {
         assert!(out.contains(label), "cache stats missing `{label}` line:\n{out}");
     }
-    // The on-disk path must point at a `.bonsai` dir under the workspace.
+    // Cache artifacts belong in the OS cache, never inside the source tree.
     assert!(
-        out.contains(".bonsai"),
-        "cache stats must surface the .bonsai path:\n{out}"
+        out.contains("bonsai-ninja") && out.contains("workspaces"),
+        "cache stats must surface the external workspace-cache path:\n{out}"
+    );
+    assert!(
+        !out.contains("reachable cap") && !out.contains("chains cap"),
+        "cache stats must not describe memo eviction as semantic caps:\n{out}"
     );
     assert!(
         !out.contains("manifest freshness  fresh:"),
@@ -4911,13 +4975,12 @@ fn cache_clear_no_op_when_dir_absent() {
 #[test]
 fn cache_clear_removes_existing_dir() {
     let tmp = tempdir_for_test("bonsai_cache_clear_present");
-    // Plant a fake on-disk cache the way a future tool might.
-    let cache_dir = tmp.join(".bonsai");
-    std::fs::create_dir_all(cache_dir.join("subdir")).expect("mkdir cache");
-    std::fs::write(cache_dir.join("subdir/file.bin"), b"some bytes").expect("write file");
     let stats = bonsai_sdk::WorkspaceCache::new(&tmp)
         .stats()
         .expect("cache stats");
+    let cache_dir = stats.bonsai_dir.clone();
+    std::fs::create_dir_all(cache_dir.join("subdir")).expect("mkdir cache");
+    std::fs::write(cache_dir.join("subdir/file.bin"), b"some bytes").expect("write file");
     std::fs::write(&stats.callgraph_sidecar, b"callgraph bytes").expect("write callgraph");
     std::fs::write(&stats.idg_sidecar, b"idg bytes").expect("write idg");
     assert!(cache_dir.exists(), "fixture setup failed");
@@ -4939,16 +5002,18 @@ fn cache_clear_removes_existing_dir() {
     );
     assert!(
         !cache_dir.exists(),
-        "cache clear must actually delete the .bonsai dir"
+        "cache clear must actually delete the external cache dir"
     );
 }
 
 #[test]
 fn cache_clear_dataflow_only_removes_factstore_sidecar() {
     let tmp = tempdir_for_test("bonsai_cache_clear_factstore");
-    let cache_dir = tmp.join(".bonsai");
-    std::fs::create_dir_all(&cache_dir).expect("mkdir cache");
-    let factstore = cache_dir.join("dataflow.v3.factstore");
+    let stats = bonsai_sdk::WorkspaceCache::new(&tmp)
+        .stats()
+        .expect("cache stats");
+    let factstore = stats.dataflow_factstore_sidecar;
+    std::fs::create_dir_all(factstore.parent().expect("factstore parent")).expect("mkdir cache");
     std::fs::write(&factstore, b"factstore bytes").expect("write factstore");
 
     let Some(out) = run(&["cache", "clear", tmp.to_str().unwrap(), "--dataflow-only"]) else {
@@ -5037,36 +5102,31 @@ fn inspect_all_flag_runs() {
 }
 
 #[test]
-fn inspect_max_entry_probes_flag_runs() {
-    let ws = ws_path();
-    let Some(out) = run_inspect_graph(&ws, &["--query", "verify_token", "--max-entry-probes", "10"]) else {
+fn inspect_rejects_removed_semantic_caps() {
+    let Some(bin) = bin_path() else {
         return;
     };
-    assert!(
-        out.contains("decl hit(s)"),
-        "--max-entry-probes broke output:\n{out}"
-    );
-}
-
-#[test]
-fn inspect_max_hits_flag_runs() {
     let ws = ws_path();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "token",
-        "--max-hits",
-        "2",
-    ]) else {
-        return;
-    };
-    // max-hits=2 must not crash even when there are more hits
-    // (the truncation banner should surface instead).
-    assert!(
-        out.contains("other hit(s)") || out.contains("truncated") || out.contains("decl hit"),
-        "--max-hits broke output:\n{out}"
-    );
+    for flag in ["--max-flows", "--max-entry-probes", "--max-hits"] {
+        let output = Command::new(&bin)
+            .args([
+                "inspect",
+                ws.to_str().expect("utf-8 workspace"),
+                "--query",
+                "verify_token",
+                flag,
+                "1",
+                "--no-color",
+                "--no-progress",
+            ])
+            .output()
+            .expect("run inspect removed-cap check");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success() && stderr.contains("unexpected argument"),
+            "removed semantic cap {flag} must fail at argument parsing: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -5798,7 +5858,13 @@ fn show_edge_id_reopens_dump_edges_drilldown() {
 #[test]
 fn show_taint_id_reopens_inspect_taint_drilldown() {
     let ws = ws_path();
-    let Some(full) = run(&["inspect", ws.to_str().unwrap(), "--query", "os.system"]) else {
+    let Some(full) = run(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--query",
+        "os.system",
+        "--taint-flow",
+    ]) else {
         return;
     };
     let ids = extract_taint_ids(&full);

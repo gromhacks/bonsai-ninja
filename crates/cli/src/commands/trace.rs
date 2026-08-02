@@ -28,6 +28,9 @@ const TRACE_SEMANTIC_CACHE_KIND: &str = "trace-result-v1";
 #[derive(Clone, Serialize)]
 struct TracePageRow<'a> {
     path: &'a PathSummary,
+    // One step is the smallest independently pageable trace fact. Keeping an
+    // entire path in one row made a single deep path exceed `--context` even
+    // though no semantic work was capped.
     steps: Vec<&'a TraceStep>,
     #[serde(skip)]
     cost: u64,
@@ -137,7 +140,11 @@ pub(crate) fn cmd_trace(
                             .flat_map(|step| [step.state_before, step.state_after])
                             .flatten()
                             .collect::<BTreeSet<_>>();
-                        let paths = slice.iter().map(|row| row.path).collect::<Vec<_>>();
+                        let mut seen_paths = BTreeSet::new();
+                        let paths = slice
+                            .iter()
+                            .filter_map(|row| seen_paths.insert(row.path.path_id).then_some(row.path))
+                            .collect::<Vec<_>>();
                         let steps = slice
                             .iter()
                             .flat_map(|row| row.steps.iter().copied())
@@ -145,15 +152,18 @@ pub(crate) fn cmd_trace(
                         let edges = trace
                             .edges
                             .iter()
-                            .filter(|edge| {
-                                step_ids.contains(&edge.from_step) && step_ids.contains(&edge.to_step)
-                            })
+                            // Assign each edge to the page containing its
+                            // destination. Cross-page boundary edges retain
+                            // their global step ids and every exact edge is
+                            // emitted once while pages are traversed.
+                            .filter(|edge| step_ids.contains(&edge.to_step))
                             .collect::<Vec<_>>();
                         let states = trace
                             .states
                             .iter()
                             .filter(|state| state_ids.contains(&state.id))
                             .collect::<Vec<_>>();
+                        let mut rendered_info = info.clone();
                         let wrapped = serde_json::json!({
                             "analysis_complete": analysis_incomplete_reasons.is_empty(),
                             "analysis_incomplete_reasons": analysis_incomplete_reasons,
@@ -167,7 +177,24 @@ pub(crate) fn cmd_trace(
                             "diagnostics": &trace.diagnostics,
                             "metadata": &trace.metadata,
                             "included_path_ids": path_ids,
-                            "page": page_info_to_json(info),
+                            "page": page_info_to_json(&rendered_info),
+                        });
+                        let first_render = serde_json::to_string_pretty(&wrapped)?;
+                        rendered_info.tokens_used = paging::bytes_to_tokens(first_render.len() as u64 + 1);
+                        let wrapped = serde_json::json!({
+                            "analysis_complete": analysis_incomplete_reasons.is_empty(),
+                            "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                            "trace_id": &trace.trace_id,
+                            "query": &trace.query,
+                            "summary": &trace.summary,
+                            "paths": paths,
+                            "steps": steps,
+                            "edges": edges,
+                            "states": states,
+                            "diagnostics": &trace.diagnostics,
+                            "metadata": &trace.metadata,
+                            "included_path_ids": path_ids,
+                            "page": page_info_to_json(&rendered_info),
                         });
                         cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
                         Ok(())
@@ -204,23 +231,22 @@ fn trace_page_rows(trace: &TraceResult) -> Vec<TracePageRow<'_>> {
     trace
         .paths
         .iter()
-        .map(|path| {
-            let steps = trace
+        .flat_map(|path| {
+            trace
                 .steps
                 .iter()
-                .filter(|step| step.path_id == path.path_id)
-                .collect::<Vec<_>>();
-            let cost = steps.iter().fold(256u64, |cost, step| {
-                cost.saturating_add(
-                    (step.message.len()
-                        + step.function.len()
-                        + step.file.len()
-                        + step.code.len()
-                        + step.notes.iter().map(String::len).sum::<usize>()
-                        + 192) as u64,
-                )
-            });
-            TracePageRow { path, steps, cost }
+                .filter(move |step| step.path_id == path.path_id)
+                .map(move |step| {
+                    // Pretty JSON repeats indentation and field names around
+                    // each step. Include conservative edge/state allowance so
+                    // the selected page stays inside its render budget.
+                    let serialized = serde_json::to_vec(step).map_or(0, |bytes| bytes.len());
+                    TracePageRow {
+                        path,
+                        steps: vec![step],
+                        cost: serialized.saturating_add(384) as u64,
+                    }
+                })
         })
         .collect()
 }

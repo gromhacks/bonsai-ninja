@@ -148,18 +148,18 @@ fn c_from_to_filter_across_sibling_subtrees() {
 }
 
 /// C `typedef struct { ... } Name;` — the struct is anonymous, the
-/// typedef name is a sibling. Must still be indexed as a Class decl.
+/// typedef name is a sibling. It must still be indexed as a Struct decl.
 #[test]
-fn c_typedef_struct_indexed_as_class() {
+fn c_typedef_struct_indexed_as_struct() {
     let w = ws_multi(c(), &[("/w/h.c", "typedef struct {\n    int id;\n} User;\n")]);
-    // Pass: at least one Class-kind decl named `User`.
+    // Pass: at least one C Struct-kind declaration named `User`.
     let global = w.db().global_index();
     let hit = global
         .find_by_name("User")
         .iter()
         .filter_map(|s| global.decl_of(*s))
-        .any(|d| matches!(d.kind, bonsai_lang_api::DeclKind::Class));
-    assert!(hit, "typedef struct `User` not indexed as Class");
+        .any(|d| matches!(d.kind, bonsai_lang_api::DeclKind::Struct));
+    assert!(hit, "typedef struct `User` not indexed as Struct");
 }
 
 /// No-false-positives: `--from X --to Y` where neither needle connects

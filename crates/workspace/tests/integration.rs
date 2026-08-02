@@ -117,11 +117,16 @@ fn edit_invalidates_flow_id_cache() {
         labels_before, labels_after,
         "flow id labels should be recomputed after an edit changes the caller chain"
     );
+    let headers = ws.db().build_global_header_index();
+    let expected_singleton = bonsai_workspace::flow_ids::compute_structural_flow_id(
+        headers.as_ref(),
+        ws.db(),
+        ws.vfs(),
+        &[sink_after],
+    );
     assert_eq!(
         labels_after,
-        vec![bonsai_workspace::flow_ids::compute_flow_id(&[String::from(
-            "sink"
-        )])],
+        vec![expected_singleton],
         "the stale entry -> sink call edge must not survive edit invalidation"
     );
 }

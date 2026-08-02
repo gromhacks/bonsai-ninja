@@ -353,11 +353,7 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     let closure_evidence =
         idg.forward_closure_evidence_with_max_precision(&seed_nodes, Some(SEMANTIC_FLOW_MAX_PRECISION));
     let closure_nodes = closure_evidence.nodes;
-    let mut cross_calls = idg.cross_call_edges_in_reachable_nodes_with_max_precision(
-        &closure_nodes,
-        Some(SEMANTIC_FLOW_MAX_PRECISION),
-    );
-    cross_calls.extend(closure_evidence.symbolic_cross_calls);
+    let mut cross_calls = closure_evidence.cross_calls;
     cross_calls.sort_unstable_by_key(|edge| {
         (
             edge.caller.raw(),

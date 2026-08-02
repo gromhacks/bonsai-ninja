@@ -8,14 +8,15 @@ use super::{
     collect_kinds, expression_flow_from_node, extend_alias_map_with_flow_events,
     extract_assignment_value_facts, extract_call_receiver_facts, extract_return_value_name,
     extract_rhs_expr_operands, extract_runtime_type_narrowing_facts, extract_string_literals,
-    language_from_pack, lower_local_closure_captures, node_text, normalize_call_name_whitespace,
-    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
-    receiver_projected_alias_matches, span_of, walk_flow_events, GENERIC_HANDLER,
-    SYNTHETIC_TUPLE_RESULT_PREFIX,
+    language_from_pack, lower_local_closure_captures, mark_namespace_call_receivers, node_text,
+    normalize_call_name_whitespace, normalize_call_result_assignment_sources,
+    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, span_of,
+    walk_flow_events, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
-    AliasTarget, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, Decl, DeclIndex, DeclKind,
-    FlowEvent, GrammarHandler, ModulePath, Visibility,
+    AliasTarget, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, CallReceiverFact,
+    CallReceiverRole, Decl, DeclIndex, DeclKind, ExpressionFlow, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, ModulePath, Visibility,
 };
 use bonsai_common::{FileId, Span, SymbolId};
 
@@ -1596,6 +1597,76 @@ fn lexical_callable_parent_stack_selects_nearest_ast_owner() {
     assert_eq!(parent_by_name["local"], Some(SymbolId::new(1)));
     assert_eq!(parent_by_name["<lambda>"], Some(SymbolId::new(2)));
     assert_eq!(parent_by_name["sibling"], None);
+}
+
+#[test]
+fn imported_namespace_receiver_is_non_value_unless_locally_shadowed() {
+    let file = FileId::new(0);
+    let call_span = Span::new(file, 40, 52);
+    let mut function = m9_func_decl(
+        1,
+        "restore",
+        None,
+        vec![FlowEvent::Call {
+            span: call_span,
+            name: "pickle.loads".to_string(),
+            receiver: Some("pickle".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        }],
+    );
+    function.span = Span::new(file, 20, 80);
+    function.body_span = Some(Span::new(file, 30, 80));
+    let receiver = CallReceiverFact {
+        call_span,
+        receiver_span: Span::new(file, 40, 46),
+        value_flow: ExpressionFlow::from_place("pickle"),
+        role: CallReceiverRole::Value,
+        static_value: None,
+    };
+    let imports = ImportIndex {
+        file,
+        imports: vec![ImportSpec {
+            span: Span::new(file, 0, 13),
+            module: "pickle".to_string(),
+            alias: Some("pickle".to_string()),
+            is_wildcard: false,
+            original_name: None,
+            scope: ImportScope::Module,
+        }],
+    };
+    let mut index = DeclIndex {
+        file,
+        defs: vec![function.clone()],
+        call_receivers: vec![receiver.clone()],
+        ..DeclIndex::default()
+    };
+
+    mark_namespace_call_receivers(&mut index, &imports);
+    assert_eq!(index.call_receivers[0].role, CallReceiverRole::Namespace);
+
+    function.flow_events.insert(
+        0,
+        FlowEvent::Assign {
+            span: Span::new(file, 32, 38),
+            target: "pickle".to_string(),
+            source_name: Some("runtime_value".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: None,
+        },
+    );
+    let mut shadowed = DeclIndex {
+        file,
+        defs: vec![function],
+        call_receivers: vec![receiver],
+        ..DeclIndex::default()
+    };
+    mark_namespace_call_receivers(&mut shadowed, &imports);
+    assert_eq!(shadowed.call_receivers[0].role, CallReceiverRole::Value);
 }
 
 // audit L3: `canonical_simple_type_name` must strip array / nullable /

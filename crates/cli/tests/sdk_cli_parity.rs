@@ -394,9 +394,11 @@ fn json_first_diff(left: &Value, right: &Value, path: &str) -> Option<String> {
             }
             if left.len() != right.len() {
                 return Some(format!(
-                    "{path}: array length differs, CLI={} SDK={}",
+                    "{path}: array length differs, CLI={} SDK={}; CLI values={}; SDK values={}",
                     left.len(),
-                    right.len()
+                    right.len(),
+                    summarize_json(&Value::Array(left.clone())),
+                    summarize_json(&Value::Array(right.clone())),
                 ));
             }
             None
@@ -429,6 +431,10 @@ fn normalized_index_stats(mut value: Value) -> Value {
     if let Value::Object(obj) = &mut value {
         obj.remove("cached_cfgs");
         obj.remove("cached_decl_indexes");
+        obj.remove("compiler_cache");
+        obj.remove("compiler_objects");
+        obj.remove("parsed_files");
+        obj.remove("reparsed_files");
     }
     normalized_json(value)
 }
@@ -1298,7 +1304,14 @@ fn inspect_structural_flow_ids_match_sdk_facade() {
     let workspace = "examples/python/micro";
     let target = "run_admin_command";
     let cli = run_cli(&[
-        "inspect", workspace, "--query", target, "--format", "json", "--all",
+        "inspect",
+        workspace,
+        "--query",
+        target,
+        "--graph-flow",
+        "--format",
+        "json",
+        "--all",
     ]);
     let sdk_targets = project
         .inspect()
@@ -1858,7 +1871,7 @@ fn native_export_json_cli_matches_sdk_for_every_language() {
             .export()
             .native_json(bonsai_sdk::NativeExportOptions {
                 full_propagations: false,
-                compiled_propagations: false,
+                compiled_propagations: true,
             })
             .unwrap_or_else(|err| panic!("{lang} sdk native export: {err}"));
         assert_json_eq(&format!("{lang} native export"), cli, sdk);

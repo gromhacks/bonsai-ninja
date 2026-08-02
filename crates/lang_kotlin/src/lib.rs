@@ -1,5 +1,5 @@
 //! Kotlin language adapter.
-use bonsai_common::FileId;
+use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, decl_index_with_handler, extract_imports_via,
     kit::{
@@ -768,20 +768,17 @@ fn collect_kotlin_type_aliases(
 fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
     let mut next_symbol_raw = idx.defs.iter().map(|d| d.symbol.raw()).max().map_or(0, |m| m + 1);
     for infix in collect_kinds(tree, &["infix_expression"]) {
-        // NOTE: `object Foo { ... }` actually surfaces the `object` keyword
-        // in the `operator` FIELD (see the kit's `pseudo_call.rs`
-        // detection), not as a child of kind `object_literal`, so this gate
-        // never matches and the synthesis is currently INERT. Enabling it
-        // (gating on the operator field) is correct in isolation but
-        // re-parents the object's methods under the synthesized class,
-        // which regresses interprocedural taint dispatch through
-        // `Foo.method(...)` (matrix cell R_06/kotlin: the call resolves to
-        // the method but no longer flows taint into its body). Making
-        // singleton-object method dispatch work end-to-end is the
-        // prerequisite for turning this on — left inert until then rather
-        // than shipping that regression.
+        // tree-sitter-kotlin exposes the `object` keyword through the
+        // infix expression's `operator` field. Some grammar revisions also
+        // retain a named `object_literal` child, so accept both exact CST
+        // shapes. The declaration and receiver-type passes below then treat
+        // `Box.helper(...)` as class-side dispatch using syntax-derived owner
+        // evidence; the shared resolver never needs a Kotlin name special
+        // case.
         let mut cursor = infix.walk();
-        let mut object_keyword = false;
+        let mut object_keyword = infix
+            .child_by_field_name("operator")
+            .is_some_and(|operator| node_text(&operator, src).trim() == "object");
         let mut name_node: Option<Node<'_>> = None;
         let mut lambda_node: Option<Node<'_>> = None;
         for child in infix.named_children(&mut cursor) {
@@ -838,9 +835,15 @@ fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree
             return_type: None,
             is_variadic: false,
         });
-        // Re-parent every method-like decl whose span is contained
-        // by the lambda body to the synthesized class.
+        // Re-parent the object body's direct function declarations to the
+        // synthesized class. The generic Kotlin lowering initially sees the
+        // object body as a lambda and may parent `helper` to its synthetic
+        // `<lambda>` declaration. The CST's direct `statements` children are
+        // the authoritative ownership fact, so replace that temporary parent
+        // for direct members while leaving lambdas nested inside a member
+        // attached to that member.
         let lambda_span = span_of(file, &lambda_node);
+        let direct_member_spans = kotlin_object_direct_function_spans(lambda_node, file);
         for decl in &mut idx.defs {
             if !matches!(
                 decl.kind,
@@ -848,15 +851,25 @@ fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree
             ) {
                 continue;
             }
-            if decl.parent.is_some() {
-                continue;
-            }
-            if decl.span.start >= lambda_span.start && decl.span.end <= lambda_span.end {
+            let is_synthetic_object_body = decl.span == lambda_span;
+            if is_synthetic_object_body || direct_member_spans.contains(&decl.span) {
                 decl.parent = Some(class_symbol);
                 decl.kind = DeclKind::Method;
             }
         }
     }
+}
+
+fn kotlin_object_direct_function_spans(lambda: Node<'_>, file: FileId) -> std::collections::HashSet<Span> {
+    let Some(statements) = first_named_child_of_kind(&lambda, "statements") else {
+        return std::collections::HashSet::new();
+    };
+    let mut cursor = statements.walk();
+    statements
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "function_declaration")
+        .map(|child| span_of(file, &child))
+        .collect()
 }
 
 fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {

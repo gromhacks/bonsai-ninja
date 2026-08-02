@@ -1,7 +1,12 @@
 //! Exact external reverse index for scalar-return access-path transforms.
 
-use crate::external_relation::{ExternalRecord, ExternalSorter, SortedExternalRelation};
+use crate::external_relation::{
+    ExternalRecord, ExternalSorter, PersistedExternalRelation, SortedExternalRelation,
+};
+use crate::workspace::QueryAcceleratorBlobReader;
 use bonsai_common::{FileId, Precision, Span};
+use std::fs::File;
+use std::sync::Arc;
 
 const RECORD_BYTES: usize = 33;
 const RUN_ROWS: usize = 100_000;
@@ -83,6 +88,21 @@ pub(crate) struct ReverseScalarTransformIndex(SortedExternalRelation<ReverseScal
 impl ReverseScalarTransformIndex {
     pub(crate) fn empty() -> Self {
         Self(SortedExternalRelation::empty())
+    }
+
+    pub(crate) fn persisted_metadata(&self) -> PersistedExternalRelation {
+        self.0.persisted_metadata()
+    }
+
+    pub(crate) fn snapshot_file(&self) -> std::io::Result<Arc<File>> {
+        self.0.snapshot_file()
+    }
+
+    pub(crate) fn from_persisted(
+        metadata: PersistedExternalRelation,
+        storage: QueryAcceleratorBlobReader,
+    ) -> Result<Self, &'static str> {
+        SortedExternalRelation::from_persisted(metadata, storage).map(Self)
     }
 
     pub(crate) fn visit_incoming(

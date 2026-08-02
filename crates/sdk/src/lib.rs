@@ -41,7 +41,7 @@ use std::{
 const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v13.json";
 const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v13.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
-const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v15";
+const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v16";
 const CACHE_MANIFEST_FILE: &str = "manifest.json";
 // v6 records an exact Git/HEAD/worktree source-state snapshot. Fresh CLI
 // processes can therefore reuse the manifest's complete compiler input table
@@ -79,10 +79,11 @@ pub use bonsai_browse::{
 };
 pub use bonsai_inspect::{
     chain_matches_filters, chain_matches_filters_for_hit, chain_to_names, compute_flow_id,
-    compute_flow_labels_from, compute_group_id, compute_taint_flow_id, find_call_span_by_name,
-    find_call_span_to_func_uncached, find_enclosing_func, func_display_name, matching_decls,
-    matching_func_ids, name_token_match, CallEdgeResolver, CallPathTruncation, ChainCache, FactKindFilter,
-    FilterHit, InspectFilters, Matcher, PrecisionFilter, ResolvedChain, TaintFlowIdentityStep,
+    compute_flow_labels_from, compute_group_id, compute_structural_group_id, compute_taint_flow_id,
+    find_call_span_by_name, find_call_span_to_func_uncached, find_enclosing_func, func_display_name,
+    matching_decls, matching_func_ids, name_token_match, CallEdgeResolver, CallPathTruncation, ChainCache,
+    FactKindFilter, FilterHit, InspectFilters, Matcher, PrecisionFilter, ResolvedChain,
+    TaintFlowIdentityStep,
 };
 pub use bonsai_security::{
     build_flow_bodies, canonical_sink_audit_applies, drain_runtime_disabled_rules,
@@ -103,6 +104,7 @@ pub use bonsai_security::{
 pub use bonsai_trace::{
     summarize_incomplete_reasons, PathSummary, PathTermination, TraceResult, TraceStep, TraceStepKind,
 };
+pub use bonsai_workspace::flow_ids::compute_structural_flow_id;
 pub use bonsai_workspace::value_flow::{
     ValueFlowCache, ValueFlowEdge, ValueFlowGraph, ValueFlowNode, ValueFlowNodeKind,
 };
@@ -375,7 +377,7 @@ impl Bonsai {
         filters: SearchFilters<'_>,
     ) -> Result<Option<Vec<String>>> {
         let root = root.as_ref();
-        let Some(scope) = self.retrieval_candidate_scope(root, query, filters)? else {
+        let Some(scope) = Self::retrieval_candidate_scope(root, query, filters)? else {
             return Ok(None);
         };
         let mut include_filters = scope
@@ -389,16 +391,14 @@ impl Bonsai {
     }
 
     fn retrieval_candidate_scope(
-        &self,
         root: &Path,
         query: &str,
         filters: SearchFilters<'_>,
     ) -> Result<Option<RetrievalCandidateScope>> {
-        self.retrieval_candidate_scope_for_queries(root, &[query], filters)
+        Self::retrieval_candidate_scope_for_queries(root, &[query], filters)
     }
 
     fn retrieval_candidate_scope_for_queries(
-        &self,
         root: &Path,
         queries: &[&str],
         filters: SearchFilters<'_>,
@@ -496,7 +496,7 @@ impl Bonsai {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let root = root.as_ref();
-        let Some(scope) = self.retrieval_candidate_scope(root, query, filters)? else {
+        let Some(scope) = Self::retrieval_candidate_scope(root, query, filters)? else {
             return Ok(None);
         };
         let options = self.apply_workspace_options(WorkspaceOpenOptions::lazy_query());
@@ -528,7 +528,7 @@ impl Bonsai {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let root = root.as_ref();
-        let Some(scope) = self.retrieval_candidate_scope_for_queries(root, queries, filters)? else {
+        let Some(scope) = Self::retrieval_candidate_scope_for_queries(root, queries, filters)? else {
             return Ok(None);
         };
         let options = self.apply_workspace_options(WorkspaceOpenOptions::lazy_query());
@@ -1601,6 +1601,9 @@ impl Project {
 }
 
 fn workspace_fingerprints_from_vfs(workspace: &Workspace) -> AHashMap<PathBuf, u64> {
+    if let Ok(fingerprints) = workspace.complete_source_content_hashes() {
+        return fingerprints.into_iter().collect();
+    }
     workspace
         .db()
         .vfs()
@@ -1864,7 +1867,12 @@ impl WorkspaceCache {
     #[must_use]
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
-            root: root.as_ref().to_path_buf(),
+            // Cache identity, manifest paths, source ledgers, and compiler
+            // module roots must agree even when the caller spells a workspace
+            // as `../project`. Persist the canonical absolute root whenever
+            // possible; `stable_root_path` also gives a stable absolute
+            // fallback for a not-yet-created path.
+            root: stable_root_path(root.as_ref()),
             rulepack_root: None,
             registry: bonsai_adapters::all_languages_registry(),
         }
@@ -1916,7 +1924,7 @@ impl WorkspaceCache {
     }
 
     fn raw_stats(&self) -> std::io::Result<CacheStats> {
-        let bonsai_dir = self.root.join(".bonsai");
+        let bonsai_dir = workspace_bonsai_dir(&self.root);
         let manifest = self.manifest_path();
         let dataflow_sidecar = bonsai_workspace::dataflow::DataFlowCache::sidecar_path(&self.root);
         let dataflow_factstore_sidecar =
@@ -1990,7 +1998,7 @@ impl WorkspaceCache {
 
     #[must_use]
     pub fn manifest_path(&self) -> PathBuf {
-        self.root.join(".bonsai").join(CACHE_MANIFEST_FILE)
+        workspace_bonsai_dir(&self.root).join(CACHE_MANIFEST_FILE)
     }
 
     pub fn manifest(&self) -> Result<CacheManifest> {
@@ -2087,7 +2095,7 @@ impl WorkspaceCache {
     }
 
     pub fn clear_all(&self) -> std::io::Result<()> {
-        let dir = self.root.join(".bonsai");
+        let dir = workspace_bonsai_dir(&self.root);
         if dir.exists() {
             fs::remove_dir_all(dir)?;
         }
@@ -2585,36 +2593,21 @@ fn cache_validation_report(
                 &source_files,
                 registry,
             );
-            let stale_reasons = sidecars
-                .iter()
-                .filter(|sidecar| {
-                    matches!(
-                        sidecar.status,
-                        CacheFreshnessStatus::Stale
-                            | CacheFreshnessStatus::Unvalidated
-                            | CacheFreshnessStatus::Error
-                    )
-                })
-                .filter_map(|sidecar| {
-                    sidecar
-                        .reason
-                        .as_ref()
-                        .map(|reason| format!("{}: {reason}", sidecar.name))
-                })
-                .collect();
-            (CacheFreshnessStatus::Fresh, sidecars, stale_reasons)
+            (CacheFreshnessStatus::Fresh, sidecars, Vec::new())
         }
         ManifestValidationState::Missing => (
             CacheFreshnessStatus::Missing,
             validate_independent_sidecars(
                 stats,
-                root,
-                idg_sidecar_applicable,
-                export_validation,
-                &source_files,
-                registry,
-                false,
-                "cache manifest is missing",
+                IndependentSidecarValidationContext {
+                    root,
+                    idg_sidecar_applicable,
+                    export_validation,
+                    source_files: &source_files,
+                    registry,
+                    compiler_inputs_match: false,
+                    manifest_reason: "cache manifest is missing",
+                },
             ),
             vec![
                 "cache manifest is missing; independently versioned sidecars were validated directly"
@@ -2628,13 +2621,15 @@ fn cache_validation_report(
             CacheFreshnessStatus::Stale,
             validate_independent_sidecars(
                 stats,
-                root,
-                idg_sidecar_applicable,
-                export_validation,
-                &source_files,
-                registry,
-                compiler_inputs_match,
-                "cache manifest is stale",
+                IndependentSidecarValidationContext {
+                    root,
+                    idg_sidecar_applicable,
+                    export_validation,
+                    source_files: &source_files,
+                    registry,
+                    compiler_inputs_match,
+                    manifest_reason: "cache manifest is stale",
+                },
             ),
             reasons,
         ),
@@ -2664,6 +2659,30 @@ fn cache_validation_report(
     let taint_graph_ready = validation_status(&sidecars, "taint_graph") == Some(CacheFreshnessStatus::Fresh);
     let export_ready = validation_status(&sidecars, "export_default") == Some(CacheFreshnessStatus::Fresh);
 
+    // A stale or missing aggregate manifest does not make independently
+    // versioned sidecar validation less important. Preserve both layers of
+    // evidence in the public summary so callers can distinguish workspace
+    // identity drift from the exact header/pipeline check that rejected a
+    // particular artifact. Sorting/deduplication below keeps the report
+    // stable.
+    stale_reasons.extend(
+        sidecars
+            .iter()
+            .filter(|sidecar| {
+                matches!(
+                    sidecar.status,
+                    CacheFreshnessStatus::Stale
+                        | CacheFreshnessStatus::Unvalidated
+                        | CacheFreshnessStatus::Error
+                )
+            })
+            .filter_map(|sidecar| {
+                sidecar
+                    .reason
+                    .as_ref()
+                    .map(|reason| format!("{}: {reason}", sidecar.name))
+            }),
+    );
     stale_reasons.sort();
     stale_reasons.dedup();
     CacheValidationReport {
@@ -2742,7 +2761,11 @@ fn validate_cache_manifest(
 
     let current_dependency_metadata = dependency_metadata_fingerprint(root);
     let current_rulepack = rulepack_root.map(rulepack_content_fingerprint).transpose();
+    let current_workspace_root = stable_root_path(root);
+    let workspace_identity_matches =
+        manifest.workspace_root == current_workspace_root && manifest.cache_dir == stats.bonsai_dir;
     let compiler_inputs_match = manifest.matcher_policy_fingerprint == MATCHER_POLICY_FINGERPRINT
+        && workspace_identity_matches
         && manifest.workspace_sources == current_sources
         && current_dependency_metadata
             .as_ref()
@@ -2766,6 +2789,20 @@ fn validate_cache_manifest(
     }
     if manifest.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {
         reasons.push("manifest matcher policy fingerprint does not match the running binary".to_string());
+    }
+    if manifest.workspace_root != current_workspace_root {
+        reasons.push(format!(
+            "manifest workspace root {} does not match {}",
+            manifest.workspace_root.display(),
+            current_workspace_root.display()
+        ));
+    }
+    if manifest.cache_dir != stats.bonsai_dir {
+        reasons.push(format!(
+            "manifest cache directory {} does not match {}",
+            manifest.cache_dir.display(),
+            stats.bonsai_dir.display()
+        ));
     }
     if manifest.workspace_sources != current_sources {
         reasons.push("workspace source content changed since the cache manifest was written".to_string());
@@ -3018,23 +3055,27 @@ fn validate_sidecar_payload(
     }
 }
 
-fn validate_independent_sidecars(
-    stats: &CacheStats,
-    root: &Path,
+struct IndependentSidecarValidationContext<'a> {
+    root: &'a Path,
     idg_sidecar_applicable: bool,
     export_validation: CacheSidecarValidation,
-    source_files: &[bonsai_workspace::SourceFileFingerprint],
-    registry: &LanguageRegistry,
+    source_files: &'a [bonsai_workspace::SourceFileFingerprint],
+    registry: &'a LanguageRegistry,
     compiler_inputs_match: bool,
-    manifest_reason: &str,
+    manifest_reason: &'a str,
+}
+
+fn validate_independent_sidecars(
+    stats: &CacheStats,
+    context: IndependentSidecarValidationContext<'_>,
 ) -> Vec<CacheSidecarValidation> {
     cache_validation_inputs(stats)
         .into_iter()
         .map(|input| {
             if input.name == "export_default" {
-                return export_validation.clone();
+                return context.export_validation.clone();
             }
-            if input.name == "idg" && !idg_sidecar_applicable {
+            if input.name == "idg" && !context.idg_sidecar_applicable {
                 return not_applicable_validation(input, "IDG sidecar is not applicable");
             }
             if !input.exists {
@@ -3044,10 +3085,10 @@ fn validate_independent_sidecars(
                     status: CacheFreshnessStatus::Missing,
                     exists: false,
                     bytes: input.bytes,
-                    reason: Some(format!("{manifest_reason}; sidecar is missing")),
+                    reason: Some(format!("{}; sidecar is missing", context.manifest_reason)),
                 };
             }
-            if matches!(input.name, "idg" | "taint_graph") && !compiler_inputs_match {
+            if matches!(input.name, "idg" | "taint_graph") && !context.compiler_inputs_match {
                 return CacheSidecarValidation {
                     name: input.name.to_string(),
                     path: input.path.to_path_buf(),
@@ -3055,11 +3096,13 @@ fn validate_independent_sidecars(
                     exists: true,
                     bytes: input.bytes,
                     reason: Some(format!(
-                        "{manifest_reason}; source/dependency/compiler inputs no longer match"
+                        "{}; source/dependency/compiler inputs no longer match",
+                        context.manifest_reason
                     )),
                 };
             }
-            let validation_error = validate_sidecar_payload(input, root, source_files, registry);
+            let validation_error =
+                validate_sidecar_payload(input, context.root, context.source_files, context.registry);
             CacheSidecarValidation {
                 name: input.name.to_string(),
                 path: input.path.to_path_buf(),
@@ -3304,11 +3347,11 @@ fn dir_size(path: &Path) -> std::io::Result<u64> {
 }
 
 fn default_export_cache_path(root: &Path) -> PathBuf {
-    root.join(".bonsai").join(DEFAULT_EXPORT_CACHE_FILE)
+    workspace_bonsai_dir(root).join(DEFAULT_EXPORT_CACHE_FILE)
 }
 
 fn default_export_cache_metadata_path(root: &Path) -> PathBuf {
-    root.join(".bonsai").join(DEFAULT_EXPORT_CACHE_METADATA_FILE)
+    workspace_bonsai_dir(root).join(DEFAULT_EXPORT_CACHE_METADATA_FILE)
 }
 
 fn unique_default_export_tmp_path(cache: &Path) -> PathBuf {
@@ -3670,8 +3713,10 @@ fn source_file_fingerprints_for_cache_validation(
     root: &Path,
     manifest: Option<&CacheManifest>,
 ) -> Result<Vec<bonsai_workspace::SourceFileFingerprint>> {
+    let stable_root = stable_root_path(root);
     let Some(manifest) = manifest.filter(|manifest| {
         manifest.schema_version == CACHE_MANIFEST_SCHEMA_VERSION
+            && manifest.workspace_root == stable_root
             && !manifest.workspace_source_files.is_empty()
     }) else {
         return source_file_fingerprints_from_disk(root);
@@ -3684,7 +3729,6 @@ fn source_file_fingerprints_for_cache_validation(
         return source_file_fingerprints_from_disk(root);
     }
 
-    let stable_root = stable_root_path(root);
     if manifest
         .git_source_state
         .as_ref()
@@ -4751,13 +4795,11 @@ pub struct Export<'a> {
 #[derive(Copy, Clone, Debug)]
 pub struct NativeExportOptions {
     /// Materialize exhaustive interprocedural propagation records.
-    /// Defaults to false because propagation records can be much
-    /// larger than the structural taint graph; omitted exports carry
-    /// `analysis_complete=false`, `propagations_complete=false`, and
-    /// omission reasons.
+    /// Defaults to false because concrete per-entry rows can be much larger
+    /// than the canonical compiler graph.
     pub full_propagations: bool,
     /// Keep the complete propagation relation in canonical compiler form.
-    /// This is the scalable exact mode used by CLI `export --all`.
+    /// This is the scalable exact mode used by the default CLI export.
     pub compiled_propagations: bool,
 }
 
@@ -4765,7 +4807,7 @@ impl Default for NativeExportOptions {
     fn default() -> Self {
         Self {
             full_propagations: false,
-            compiled_propagations: false,
+            compiled_propagations: true,
         }
     }
 }
@@ -4853,7 +4895,7 @@ impl Export<'_> {
 
     pub fn write_default_json_cache_streaming(&self, options: NativeExportOptions) -> Result<()> {
         anyhow::ensure!(
-            !options.full_propagations && !options.compiled_propagations,
+            !options.full_propagations && options.compiled_propagations,
             "default export cache can only store default native export scope"
         );
         let rulepack_root = self
@@ -4880,7 +4922,7 @@ impl Export<'_> {
         }
         self.write_default_json_cache_streaming(NativeExportOptions {
             full_propagations: false,
-            compiled_propagations: false,
+            compiled_propagations: true,
         })
     }
 
@@ -5357,6 +5399,7 @@ impl Inspect<'_> {
         let matcher = bonsai_inspect::Matcher::build(query.pattern, query.regex)?;
         let targets = bonsai_inspect::matching_func_ids(&self.project.workspace, &matcher);
         let cache = bonsai_inspect::ChainCache::new(&self.project.workspace);
+        let headers = self.project.workspace.compiler_header_index();
         let mut out = Vec::new();
         for target in targets {
             let (chains, truncation) = cache.chains_resolved(target, query.max_chains, query.max_probes);
@@ -5365,7 +5408,12 @@ impl Inspect<'_> {
                 .map(|chain| {
                     let names = bonsai_inspect::chain_to_names(&self.project.workspace, &chain.funcs);
                     InspectChain {
-                        flow_id: bonsai_inspect::compute_flow_id(&names),
+                        flow_id: bonsai_workspace::flow_ids::compute_structural_flow_id(
+                            headers.as_ref(),
+                            self.project.workspace.db(),
+                            self.project.workspace.vfs(),
+                            &chain.funcs,
+                        ),
                         funcs: chain.funcs.iter().map(|func| func.raw()).collect(),
                         names,
                         precision: format!("{:?}", chain.precision),
@@ -5435,7 +5483,7 @@ fn group_inspect_chains_by_suffix(chains: &[InspectChain]) -> Vec<InspectChainGr
         }
 
         groups.push(InspectChainGroup {
-            group_id: bonsai_inspect::compute_group_id(&shared_suffix),
+            group_id: bonsai_inspect::compute_structural_group_id(&member_flow_ids),
             member_flow_ids,
             shared_suffix,
             unique_prefixes,

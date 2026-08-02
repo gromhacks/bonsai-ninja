@@ -23,9 +23,9 @@ use bonsai_lang_api::{
     LanguageCapabilities, ModulePath,
 };
 use bonsai_resolve::{
-    build_shared_peer_class_index, callee_without_call_args, collect_method_candidates_for_class_cached,
-    enclosing_class_for_decl, export_name_variants, extend_alias_targets_with_declared_types,
-    is_super_receiver_with_tokens, module_path_parts,
+    build_shared_peer_class_index, callee_without_call_args, class_symbols_share_semantic_identity,
+    collect_method_candidates_for_class_cached, enclosing_class_for_decl, export_name_variants,
+    extend_alias_targets_with_declared_types, is_super_receiver_with_tokens, module_path_parts,
     module_target_exactly_matches_decl_module_path_with_syntax,
     module_target_matches_decl_module_path_with_syntax, module_target_matches_path, module_target_parts,
     module_target_parts_match_path_parts, namespace_alias_target_tail,
@@ -1834,9 +1834,11 @@ fn callgraph_resolver_worker_count() -> usize {
         .unwrap_or(available)
         .max(1)
         .min(available);
-    // Resolver workers own candidate and callable-binding caches. The shared
-    // compiler profile changes concurrency only; every caller is resolved.
-    bonsai_common::compiler_worker_count(requested)
+    // Resolver workers share immutable compiler indexes and own only one
+    // file's candidate/callable-binding caches. Use their measured resource
+    // profile instead of the heavier parser/lowering profile; scheduling
+    // changes concurrency only and every caller is still resolved.
+    bonsai_common::callgraph_worker_count(requested)
 }
 
 /// Walk one decl's `flow_events` and emit a [`CallEdge`] per resolved
@@ -2429,11 +2431,19 @@ fn add_assignment_call_edges(
         source_call: Some(name),
         source_call_args,
         span,
+        value_kind,
         ..
     } = event
     else {
         return;
     };
+    // A YieldResult assignment binds a Ruby/block-style yielded value to the
+    // block parameter. The outer Call event already represents the one real
+    // invocation. Treating this binding as another call fabricates a second
+    // edge at the block span and an empty tainted argument.
+    if matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::YieldResult)) {
+        return;
+    }
     let CallResolutionContext {
         from,
         caller_decl,
@@ -5421,10 +5431,12 @@ fn retain_semantic_receiver_evidenced_candidates(
         let Some(file) = global.declaring_file(sym) else {
             return false;
         };
-        if decl
-            .parent
-            .is_some_and(|method_parent| receiver_parent_symbols.contains(&method_parent))
-        {
+        if decl.parent.is_some_and(|method_parent| {
+            receiver_parent_symbols.contains(&method_parent)
+                || receiver_parent_symbols.iter().any(|receiver_parent| {
+                    class_symbols_share_semantic_identity(global, *receiver_parent, method_parent)
+                })
+        }) {
             return true;
         }
         receiver_matches_decl_module(&receiver, decl, file, path_for_file, module_path_syntax)

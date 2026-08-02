@@ -345,8 +345,8 @@ fn idg_service_drops_when_workspace_root_invalidated() {
     ws.release_idg_service_cache();
     assert!(ws.db().idg_service().is_none());
     assert!(
-        Arc::ptr_eq(&linkage, &ws.compiler_linkage_index()),
-        "releasing graph readers must retain the canonical compiler linkage"
+        Arc::ptr_eq(&linkage, &ws.compiler_header_index()),
+        "releasing graph readers must retain the canonical declaration/type headers"
     );
     let svc = ws.build_and_seed_idg_service();
     assert!(svc.segment_count() >= 1);
@@ -479,8 +479,9 @@ fn configured_scoped_idg_persists_once_and_reuses_the_paged_service() {
         "a persisted scoped graph must not replace the canonical default"
     );
 
-    let sidecars: Vec<_> = std::fs::read_dir(tmp.join(".bonsai"))
-        .expect("read .bonsai")
+    let cache_dir = bonsai_common::workspace_bonsai_dir(&tmp);
+    let sidecars: Vec<_> = std::fs::read_dir(&cache_dir)
+        .unwrap_or_else(|err| panic!("read workspace cache {}: {err}", cache_dir.display()))
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {

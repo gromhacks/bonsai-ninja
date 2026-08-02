@@ -333,8 +333,6 @@ fn inspect_paged_json_exposes_top_level_completeness() {
         "request",
         "--kind",
         "call",
-        "--max-hits",
-        "1",
         "--format",
         "json",
         "--context",
@@ -356,9 +354,9 @@ fn inspect_paged_json_exposes_top_level_completeness() {
         reasons.iter().any(|reason| {
             reason
                 .as_str()
-                .is_some_and(|reason| reason.contains("inspect hit list capped by max-hits output cap"))
+                .is_some_and(|reason| reason.contains("paged inspect result incomplete"))
         }),
-        "paged inspect JSON must carry inspect incompleteness reasons: {v:?}"
+        "paged inspect JSON must report that only the requested page is present: {v:?}"
     );
 }
 
@@ -372,8 +370,6 @@ fn trace_paged_json_exposes_top_level_completeness() {
         "--format",
         "json",
         "--context",
-        "1",
-        "--max-steps",
         "1",
     ]) else {
         return;
@@ -453,6 +449,52 @@ fn walking_pages_reproduces_uncapped_set() {
     assert_eq!(
         walked, baseline,
         "walking pages must reproduce every row from the uncapped run in order"
+    );
+}
+
+#[test]
+fn explicit_row_limit_is_a_lossless_page_size() {
+    let ws = ws();
+    let Some(baseline) = json_bare(&["calls", ws.to_str().unwrap(), "--format", "json", "--all"]) else {
+        return;
+    };
+    let baseline: Vec<String> = baseline.iter().map(row_fingerprint).collect();
+    assert!(baseline.len() > 2, "fixture must exercise multiple pages");
+
+    let mut walked = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..baseline.len() {
+        let mut args = vec![
+            "calls".to_string(),
+            ws.to_str().unwrap().to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+            "--limit".to_string(),
+            "2".to_string(),
+        ];
+        if let Some(cursor) = cursor.as_ref() {
+            args.push("--page".to_string());
+            args.push(cursor.clone());
+        }
+        let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+        let Some((rows, page)) = json_wrapped(&args_ref) else {
+            return;
+        };
+        assert!(rows.len() <= 2, "--limit must bound each page: {page:?}");
+        walked.extend(rows.iter().map(row_fingerprint));
+        if page.get("is_last").and_then(|value| value.as_bool()) == Some(true) {
+            break;
+        }
+        cursor = page
+            .get("next_cursor")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        assert!(cursor.is_some(), "non-final page must provide a cursor: {page:?}");
+    }
+
+    assert_eq!(
+        walked, baseline,
+        "--limit pages must preserve every row in canonical order"
     );
 }
 
@@ -1410,7 +1452,7 @@ fn security_page_turn_reuses_rendered_page_cache() {
     let _guard = page_cache_test_lock();
     let tmp = isolated_complex_ws("security-page-cache");
     let ws = tmp.path();
-    let cache_dir = ws.join(".bonsai/page-cache.v5");
+    let cache_dir = bonsai_common::workspace_bonsai_dir(ws).join("page-cache.v5");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let ws_str = ws.to_str().unwrap();
     let Some(first) = run(&["security", ws_str, "taint-analysis", "--context", "1k"]) else {
@@ -1453,7 +1495,7 @@ fn security_page_turn_reuses_rendered_page_cache() {
 }
 
 fn rendered_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option<bool> {
-    let cache_dir = ws.join(".bonsai/page-cache.v5");
+    let cache_dir = bonsai_common::workspace_bonsai_dir(ws).join("page-cache.v5");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let first = run(args)?;
     if !first.contains("page 1 of") || first.contains("page 1 of 1") {
@@ -1489,7 +1531,7 @@ fn rendered_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option
 }
 
 fn rendered_json_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option<bool> {
-    let cache_dir = ws.join(".bonsai/page-cache.v5");
+    let cache_dir = bonsai_common::workspace_bonsai_dir(ws).join("page-cache.v5");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let first = run(args)?;
     let first_json: serde_json::Value =
@@ -1542,7 +1584,7 @@ fn corrupt_rendered_page_cache_is_a_miss_not_a_command_failure() {
     let _guard = page_cache_test_lock();
     let tmp = isolated_complex_ws("corrupt-page-cache");
     let ws = tmp.path();
-    let cache_dir = ws.join(".bonsai/page-cache.v5");
+    let cache_dir = bonsai_common::workspace_bonsai_dir(ws).join("page-cache.v5");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let ws_str = ws.to_str().unwrap();
     let args = ["calls", ws_str, "--context", "1k"];

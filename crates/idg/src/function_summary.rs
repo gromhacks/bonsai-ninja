@@ -356,6 +356,7 @@ struct CompactAddressPagePair {
 const BOUNDARY_PARAM: u8 = 1;
 const BOUNDARY_RETURN: u8 = 2;
 const BOUNDARY_THROW: u8 = 3;
+const BOUNDARY_YIELD: u8 = 4;
 const COMPACT_ADDRESS_BYTES: usize = 9;
 
 /// Temporary compiler-object address pages used only while stitching call
@@ -442,12 +443,45 @@ fn edge_is_within_precision(edge: &IdgEdge, max_precision: Option<Precision>) ->
     max_precision.is_none_or(|max| edge.meta.precision <= max)
 }
 
-fn build_layout(workspace: &IdgWorkspace) -> (AHashMap<FuncId, FunctionLayout>, CompactAddressPager) {
+fn summary_segments(workspace: &IdgWorkspace, scope_funcs: Option<&AHashSet<FuncId>>) -> Vec<SegmentId> {
+    let mut segments: Vec<SegmentId> = match scope_funcs {
+        Some(funcs) => funcs
+            .iter()
+            .filter_map(|func| workspace.segment_for_func(*func))
+            .collect(),
+        None => (0..workspace.segment_count())
+            .filter_map(|index| u32::try_from(index).ok().map(SegmentId))
+            .collect(),
+    };
+    segments.sort_unstable_by_key(|segment| segment.0);
+    segments.dedup();
+    segments
+}
+
+fn build_layout(
+    workspace: &IdgWorkspace,
+    segments: &[SegmentId],
+    scope_funcs: Option<&AHashSet<FuncId>>,
+) -> (AHashMap<FuncId, FunctionLayout>, CompactAddressPager) {
     let mut layouts = AHashMap::default();
     let mut addresses = CompactAddressPager::new(workspace.segment_count());
-    for (segment_id, segment) in workspace.segment_views() {
+    for &segment_id in segments {
+        let Some(segment) = workspace.segment_view(segment_id) else {
+            continue;
+        };
         let mut segment_addresses = Vec::with_capacity(segment.nodes.nodes.len());
         for node in &segment.nodes.nodes {
+            if scope_funcs.is_some_and(|scope| !scope.contains(&node.func)) {
+                // Preserve segment-local node ordinals for cross-file edge
+                // lookup without allocating a function layout for nodes
+                // outside the exact query corridor.
+                segment_addresses.push(CompactAddress {
+                    func: node.func,
+                    compact: 0,
+                    boundary: 0,
+                });
+                continue;
+            }
             let layout = layouts
                 .entry(node.func)
                 .or_insert_with(|| FunctionLayout::new(segment_id));
@@ -466,6 +500,7 @@ fn build_layout(workspace: &IdgWorkspace) -> (AHashMap<FuncId, FunctionLayout>, 
                 Some(Place::Param { .. }) => BOUNDARY_PARAM,
                 Some(Place::Return) => BOUNDARY_RETURN,
                 Some(Place::Throw { .. }) => BOUNDARY_THROW,
+                Some(Place::Yield) => BOUNDARY_YIELD,
                 _ => 0,
             };
             segment_addresses.push(CompactAddress {
@@ -496,6 +531,7 @@ fn record_call_boundary(
     to_addresses: &[CompactAddress],
     edge: &IdgEdge,
     max_precision: Option<Precision>,
+    scope_funcs: Option<&AHashSet<FuncId>>,
 ) {
     if !edge_is_within_precision(edge, max_precision) || edge.meta.kind == IdgEdgeKind::IntraAggregateConsume
     {
@@ -507,6 +543,9 @@ fn record_call_boundary(
     let Some(to) = compact_address(to_addresses, edge.to) else {
         return;
     };
+    if scope_funcs.is_some_and(|scope| !(scope.contains(&from.func) && scope.contains(&to.func))) {
+        return;
+    }
 
     // Only structural formal/return places define compiler call-summary
     // boundaries. Compatibility field edges can carry the same edge kind but
@@ -515,6 +554,7 @@ fn record_call_boundary(
         IdgEdgeKind::InterCallArg => to.boundary == BOUNDARY_PARAM,
         IdgEdgeKind::InterReturn => from.boundary == BOUNDARY_RETURN,
         IdgEdgeKind::InterThrow => from.boundary == BOUNDARY_THROW,
+        IdgEdgeKind::InterYield => from.boundary == BOUNDARY_YIELD,
         _ => false,
     };
     if !structural {
@@ -530,14 +570,16 @@ fn record_call_boundary(
             },
             pair: (from.compact, to.compact),
         }),
-        IdgEdgeKind::InterReturn | IdgEdgeKind::InterThrow => outputs.push(BoundaryPairRow {
-            key: CallBoundaryKey {
-                caller: to.func,
-                callee: from.func,
-                span: edge.meta.via_span,
-            },
-            pair: (from.compact, to.compact),
-        }),
+        IdgEdgeKind::InterReturn | IdgEdgeKind::InterThrow | IdgEdgeKind::InterYield => {
+            outputs.push(BoundaryPairRow {
+                key: CallBoundaryKey {
+                    caller: to.func,
+                    callee: from.func,
+                    span: edge.meta.via_span,
+                },
+                pair: (from.compact, to.compact),
+            });
+        }
         _ => {}
     }
 }
@@ -735,6 +777,7 @@ fn compile_summaries_to_fixed_point(
 
 /// Batched ordinary summaries plus the functions whose result can depend on
 /// the symbolic access-path relation.
+#[derive(Clone)]
 pub(crate) struct ReturnSummaryBatch {
     pub(crate) indices: AHashMap<FuncId, Vec<u32>>,
     pub(crate) symbolic_sensitive: AHashSet<FuncId>,
@@ -760,7 +803,21 @@ pub(crate) fn return_taint_param_indices(
     funcs: &[FuncId],
     max_precision: Option<Precision>,
 ) -> ReturnSummaryBatch {
-    let (layouts, mut address_pages) = build_layout(workspace);
+    return_taint_param_indices_in_scope(workspace, funcs, None, max_precision)
+}
+
+/// Compile the same monotone function summaries inside an exact compiler
+/// function set. The scope changes which typed IR is part of the query; it is
+/// never a depth, iteration, or work budget, and every admitted recursive
+/// component still reaches its least fixed point.
+pub(crate) fn return_taint_param_indices_in_scope(
+    workspace: &IdgWorkspace,
+    funcs: &[FuncId],
+    scope_funcs: Option<&AHashSet<FuncId>>,
+    max_precision: Option<Precision>,
+) -> ReturnSummaryBatch {
+    let segments = summary_segments(workspace, scope_funcs);
+    let (layouts, mut address_pages) = build_layout(workspace, &segments, scope_funcs);
     bonsai_diagnostics::debug_log!(
         "idg-summary",
         "ordinary layout functions={} nodes={} params={} outputs={}",
@@ -774,7 +831,10 @@ pub(crate) fn return_taint_param_indices(
     );
     let mut boundary_inputs = BoundaryPairSpool::new();
     let mut boundary_outputs = BoundaryPairSpool::new();
-    for (segment_id, segment) in workspace.segment_views() {
+    for &segment_id in &segments {
+        let Some(segment) = workspace.segment_view(segment_id) else {
+            continue;
+        };
         let Some(addresses) = address_pages.page(segment_id) else {
             continue;
         };
@@ -786,6 +846,7 @@ pub(crate) fn return_taint_param_indices(
                 &addresses,
                 edge,
                 max_precision,
+                scope_funcs,
             );
         }
     }
@@ -831,6 +892,7 @@ pub(crate) fn return_taint_param_indices(
                     &pages.to,
                     &edge.edge,
                     max_precision,
+                    scope_funcs,
                 );
             }
         })
@@ -888,7 +950,8 @@ pub(crate) fn return_taint_param_indices(
     let requested_set: AHashSet<FuncId> = requested.iter().copied().collect();
     let mut indices: AHashMap<FuncId, Vec<u32>> =
         requested.iter().copied().map(|func| (func, Vec::new())).collect();
-    let symbolic_consumers = symbolic_consumer_nodes_streaming(workspace, max_precision);
+    let symbolic_consumers =
+        symbolic_consumer_nodes_streaming(workspace, &segments, scope_funcs, max_precision);
     bonsai_diagnostics::debug_log!(
         "idg-summary",
         "symbolic consumers functions={} nodes={}",
@@ -1023,6 +1086,8 @@ pub(crate) fn return_taint_param_indices(
 
 fn symbolic_consumer_nodes_streaming(
     workspace: &IdgWorkspace,
+    segments: &[SegmentId],
+    scope_funcs: Option<&AHashSet<FuncId>>,
     max_precision: Option<Precision>,
 ) -> AHashMap<FuncId, Vec<u32>> {
     let symbolic = workspace.symbolic_field();
@@ -1037,15 +1102,33 @@ fn symbolic_consumer_nodes_streaming(
                     .iter()
                     .filter(|transform| transform.kind == SymbolicFieldTransformKind::ScalarReturn)
                     .filter(|transform| max_precision.is_none_or(|max| transform.precision <= max))
+                    .filter(|transform| {
+                        scope_funcs.is_none_or(|scope| {
+                            symbolic
+                                .bases()
+                                .get(transform.source as usize)
+                                .is_some_and(|base| scope.contains(&base.func))
+                                && symbolic
+                                    .bases()
+                                    .get(transform.target as usize)
+                                    .is_some_and(|base| scope.contains(&base.func))
+                        })
+                    })
                     .map(|transform| (transform.target, transform.write_span)),
             );
             Ok(())
         })
         .expect("validated IDG symbolic relation remains readable");
     let mut consumers: AHashMap<FuncId, Vec<u32>> = AHashMap::default();
-    for (segment_id, segment) in workspace.segment_views() {
+    for &segment_id in segments {
+        let Some(segment) = workspace.segment_view(segment_id) else {
+            continue;
+        };
         let mut next_compact = AHashMap::<FuncId, u32>::default();
         for node in &segment.nodes.nodes {
+            if scope_funcs.is_some_and(|scope| !scope.contains(&node.func)) {
+                continue;
+            }
             let compact = next_compact.entry(node.func).or_default();
             let node_compact = *compact;
             *compact = compact

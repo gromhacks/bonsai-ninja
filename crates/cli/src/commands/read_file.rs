@@ -48,8 +48,7 @@ pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
     let needs_workspace_analysis = args.from.is_some()
         || args.to.is_some()
         || args.rules_dir.is_some()
-        || args.max_inlined_bodies.is_some()
-        || args.all;
+        || args.max_inlined_bodies.is_some();
     let (project, _footer) = if needs_workspace_analysis {
         open_project_index_only_with_rulepack(args.workspace, args.rules_dir)?
     } else {
@@ -61,11 +60,7 @@ pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
         line_range,
         from: args.from,
         to: args.to,
-        max_inlined_bodies: if args.all {
-            Some(0)
-        } else {
-            args.max_inlined_bodies
-        },
+        max_inlined_bodies: args.max_inlined_bodies,
     };
     let stage = progress::ScopedSpinner::new("building file view");
     let out = project.browse().read_file(filters)?;
@@ -529,7 +524,7 @@ fn render_text(out: &ReadFileOut, compact: bool) {
         if out.truncated.callers_dropped > 0 || out.truncated.callees_dropped > 0 {
             cli_println!(
                 "{}",
-                u.dim("rerun with --all or --max-inlined-bodies 0 to include every cross-file body")
+                u.dim("rerun with --max-inlined-bodies 0 to include every cross-file body")
             );
         }
     }

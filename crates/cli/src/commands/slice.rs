@@ -1,4 +1,4 @@
-//! `bonsai-ninja slice` — bounded backwards slice for one symbol at one line.
+//! `bonsai-ninja slice` — exact backwards slice for one symbol at one line.
 
 use anyhow::Result;
 use bonsai_sdk::{SliceFilters, SliceOutcome, SliceRow, SliceStep};
@@ -20,7 +20,6 @@ pub(crate) fn cmd_slice(
     symbol: &str,
     line: u32,
     file: Option<&str>,
-    max_steps: usize,
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
@@ -29,18 +28,16 @@ pub(crate) fn cmd_slice(
         symbol,
         line,
         file,
-        max_steps,
+        max_steps: 0,
     };
     let stage = progress::ScopedSpinner::new("slicing syntax flow");
     let outcome = project.browse().slices(filters);
     stage.finish();
     let line_s = line.to_string();
-    let max_steps_s = max_steps.to_string();
     let filters_hash = paging::hash_filters(&[
         ("symbol", symbol),
         ("line", line_s.as_str()),
         ("file", file.unwrap_or("")),
-        ("max_steps", max_steps_s.as_str()),
     ]);
     match format {
         BrowseFormat::Json => emit_slice_json(root, &outcome, &paging_cfg, filters_hash),

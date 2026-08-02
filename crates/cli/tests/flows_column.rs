@@ -520,17 +520,18 @@ fn inspect_folds_occurrence_hits_sharing_a_flow() {
     };
 
     // Context preservation: key occurrence-hit kinds from the
-    // flow's call path must still appear somewhere — either in
+    // flow's syntax and call path must still appear somewhere — either in
     // the hits table or in the `match points:` summary below the
     // folded flow. Context lost is the cardinal sin of the folded
     // view. (Post-accuracy-filter we no longer include sibling-
     // branch flows like get_user/verify_token on the command
-    // path, so checks focus on call-path tokens.)
+    // path. The external `request.args.get` source is source syntax inside
+    // the entry body, not a resolved hop in the structural call chain.)
     for needle in &[
         "var token",
         "var action",
         "call update_user",
-        "call request.args.get",
+        "request.args.get(\"token\")",
         "call os.system",
     ] {
         assert!(

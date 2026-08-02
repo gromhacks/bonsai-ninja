@@ -12,7 +12,7 @@ use bonsai_callgraph::{
 };
 use bonsai_common::{FuncId, Span};
 use bonsai_hash::fnv1a_names_low32;
-use bonsai_idg::CrossCallEdge;
+use bonsai_idg::{CrossCallEdge, IdgQueryService};
 use bonsai_inspect::{matching_func_ids_in_headers, Matcher};
 use bonsai_lang_api::{DeclKind, FlowEvent};
 use bonsai_workspace::Workspace;
@@ -107,6 +107,11 @@ struct TerminalCallTarget {
 
 /// Query source-to-target paths over resolved semantic callgraph edges.
 pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, regex::Error> {
+    // Retain one immutable graph generation for the complete query. Other
+    // compiler phases may release the DB's resident service slot to reduce
+    // peak memory, but that storage transition must not make endpoint lookup
+    // and path enumeration observe different semantic backends.
+    let warmed_idg = ws.db().idg_service();
     let from_matcher = Matcher::build(Some(filters.from), filters.regex)?;
     let to_matcher = Matcher::build(Some(filters.to), filters.regex)?;
     let fast_from = (!filters.regex)
@@ -178,12 +183,7 @@ pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, r
     }
     if from_funcs.is_empty() || (to_funcs.is_empty() && terminal_targets.is_empty()) {
         resolution_scope.extend(terminal_targets.iter().map(|target| target.func));
-        finalize_outcome(
-            ws,
-            &mut outcome,
-            PathTruncation::None,
-            resolution_scope.into_iter(),
-        );
+        finalize_outcome(ws, &mut outcome, PathTruncation::None, resolution_scope);
         return Ok(outcome);
     }
 
@@ -195,7 +195,7 @@ pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, r
     } else {
         to_funcs.clone()
     };
-    let path_graph = semantic_path_graph(ws, &from_funcs, &graph_targets);
+    let path_graph = semantic_path_graph(ws, &from_funcs, &graph_targets, warmed_idg.as_deref());
     outcome.backends.clone_from(&path_graph.backends);
     outcome.idg_available = path_graph.idg_available;
     outcome.idg_semantic_edges = path_graph.idg_semantic_edges;
@@ -260,7 +260,7 @@ pub fn paths(ws: &Workspace, filters: &PathFilters<'_>) -> Result<PathOutcome, r
     outcome.paths = rows;
     outcome.path_count = outcome.paths.len();
     outcome.analysis_incomplete_reasons.extend(hydration_reasons);
-    finalize_outcome(ws, &mut outcome, truncation, resolution_scope.into_iter());
+    finalize_outcome(ws, &mut outcome, truncation, resolution_scope);
     Ok(outcome)
 }
 
@@ -440,8 +440,13 @@ struct SemanticPathGraph {
     idg_semantic_edges: usize,
 }
 
-fn semantic_path_graph(ws: &Workspace, starts: &[FuncId], targets: &[FuncId]) -> SemanticPathGraph {
-    if ws.db().idg_service().is_none() {
+fn semantic_path_graph(
+    ws: &Workspace,
+    starts: &[FuncId],
+    targets: &[FuncId],
+    warmed_idg: Option<&IdgQueryService>,
+) -> SemanticPathGraph {
+    if warmed_idg.is_none() {
         if let Some(Ok(graph)) = ws.persisted_direct_call_graph_between(starts, targets) {
             if !graph.inner().edges.is_empty() {
                 return SemanticPathGraph {
@@ -466,7 +471,7 @@ fn semantic_path_graph(ws: &Workspace, starts: &[FuncId], targets: &[FuncId]) ->
     let mut backends = vec!["resolved-callgraph".to_string()];
     let mut idg_available = false;
     let mut idg_semantic_edges = 0usize;
-    if let Some(idg) = ws.db().idg_service() {
+    if let Some(idg) = warmed_idg {
         idg_available = true;
         for edge in idg.semantic_cross_call_edges_with_max_precision(Some(bonsai_common::Precision::Narrowed))
         {

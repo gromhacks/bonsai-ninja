@@ -157,9 +157,8 @@ IDs; reopen them with `show F:...` / `show G:...` or
 `security taint-analysis --flow F:...` / `--group G:...`.
 
 For code-navigation queries, `inspect` is rulepack-free by default: it
-shows syntax hits plus bounded taint paths and source-body flow evidence
-that contain the query. Add `--syntax-only` when you deliberately want
-indexed facts without flow evidence, `--taint-flow` to request bounded raw
+shows indexed syntax facts and source excerpts that contain the query.
+Add `--taint-flow` to request raw
 taint paths for large result sets, or `--graph-flow` to request structural
 source-body evidence for large result sets that would otherwise render
 syntax/index facts only. These flags change output scope, not analysis

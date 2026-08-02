@@ -102,6 +102,22 @@ impl IdgTaintTargets<'_> {
     }
 }
 
+/// Call-stack scope for a source-seeded closure.
+///
+/// Security sources may be discovered in a helper and therefore need to
+/// propagate into every resolved caller. Entry-oriented navigation instead
+/// treats the selected function as the root of execution: it may enter and
+/// return from callees, but it cannot escape into unrelated callers of that
+/// root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IdgTaintCallScope {
+    /// The source may propagate through every context justified by compiler
+    /// call/return relations.
+    AnyResolvedCaller,
+    /// The source function is the root of the query's call stack.
+    RootedAtSource,
+}
+
 /// Complete typed request for one IDG-backed taint closure.
 ///
 /// The request is a borrowed compiler-query descriptor: constructing it does
@@ -111,6 +127,7 @@ pub struct IdgTaintQuery<'a> {
     pub source: IdgTaintSource<'a>,
     pub transfers: IdgTaintTransfers<'a>,
     pub targets: IdgTaintTargets<'a>,
+    pub call_scope: IdgTaintCallScope,
     pub max_precision: Option<Precision>,
     pub db: &'a AnalyzerDb,
     /// Compiler linkage/body facts supplied by a workspace-scale caller.
@@ -133,6 +150,7 @@ impl<'a> IdgTaintQuery<'a> {
             source,
             transfers: IdgTaintTransfers::none(),
             targets: IdgTaintTargets::all_reachable(),
+            call_scope: IdgTaintCallScope::AnyResolvedCaller,
             max_precision: Some(Precision::Narrowed),
             db,
             global: None,
@@ -150,6 +168,15 @@ impl<'a> IdgTaintQuery<'a> {
     #[must_use]
     pub const fn with_targets(mut self, targets: IdgTaintTargets<'a>) -> Self {
         self.targets = targets;
+        self
+    }
+
+    /// Treat the source function as the execution entry for this query.
+    /// This selects context-matched compiler semantics; it does not cap
+    /// callees, recursion, paths, or fixed-point iterations.
+    #[must_use]
+    pub const fn rooted_at_source(mut self) -> Self {
+        self.call_scope = IdgTaintCallScope::RootedAtSource;
         self
     }
 

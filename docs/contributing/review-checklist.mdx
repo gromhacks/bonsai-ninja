@@ -122,12 +122,9 @@ class and verify each box.
 - [ ] **SDK parity intact.** `cargo test -p bonsai_cli --test
       sdk_cli_parity`.
 - [ ] **Pagination still works** for the affected command.
-- [ ] **Inspect mode contract holds.** Default targeted queries include
-      rulepack-free taint paths plus source-body flow evidence,
-      `--syntax-only` deliberately omits flow evidence from the output,
-      `--taint-flow` requests bounded raw taint paths, and `--graph-flow`
-      requests structural source-body evidence for large result sets that
-      would otherwise render syntax/index facts only. These flags change
+- [ ] **Inspect mode contract holds.** Default targeted queries are a light
+      indexed syntax/source view. `--taint-flow` requests raw taint paths, and
+      `--graph-flow` requests structural source-body evidence. These flags change
       output scope, not the exact/narrowed static-evidence contract.
 - [ ] **Stable ID routing holds.** `show F:`, `show G:`, `show T:`,
       `show E:`, `show N:`, `show S:`, and resolver-scoped `show R:`
@@ -203,6 +200,11 @@ class and verify each box.
       points do not reserve maximum spill pages, dense workspace bitsets,
       Bloom/positive caches, or temporary files. Promotion/spill is covered by
       unit and conformance tests and changes representation only.
+- [ ] **Semantic prewarm is query-ready.** The immutable IDG generation carries
+      its compact function/node directories and default semantic contextual
+      fixed point. Warm open validates the accelerator before reuse and does
+      not decode every source segment to rebuild it. A canonical-only sidecar
+      remains a valid cold graph but must not satisfy `index --semantic`.
 - [ ] **One canonical callgraph is shared.** Workspace callgraph publication
       seeds dataflow and flow-ID consumers with the same `Arc`; phase release
       drops all shared owners without discarding computed labels/facts.
@@ -221,6 +223,11 @@ class and verify each box.
       `IdgQueryService::global_linkage_index()` and streams exact attribution
       bodies on demand; it never calls `AnalyzerDb::global_index()` and
       materializes every body beside an already-open graph.
+- [ ] **Inspect syntax and IDG residency are sequential.** `inspect
+      --taint-flow` records exact AST target spans, releases syntax bodies and
+      graph caches, and only then opens the persisted IDG. Broad target sets
+      use one sparse backward demand proof plus exact forward closures; they
+      do not run an unrestricted whole-IDG closure once per lexical hit.
 - [ ] **Architecture invariant passes.** Run
       `cargo test --release -p bonsai_conformance --test
       architecture_invariants`.
@@ -231,13 +238,30 @@ class and verify each box.
       completed exact work and checks warm index, navigation, inspect,
       inventory, and production taint latency under the default 3 GiB
       scheduling budget; it never times out or truncates analysis.
+- [ ] **Broad matcher scheduling has no artificial barriers.** Raw source
+      ingestion uses memory-weighted parallel read windows but publishes VFS
+      entries in canonical order. Body matching sizes one continuous worker
+      pool against the largest actual source units that can overlap. Memory
+      changes concurrency and window size only, never files, rules, or facts.
+- [ ] **Cold security planning stays staged.** A fresh-cache production scan
+      applies raw/import/syntax-target filters before receiver ancestry,
+      requests ancestry only for typed method candidates it can change, and
+      reuses exact zero-or-more diagnostic coverage in the completion audit.
+      On the reference Elasticsearch checkout, compare against the recorded
+      2026-07-31 baseline (29.58 s, 708 MB peak RSS, 3 GiB scheduling budget)
+      and investigate material regressions rather than loosening the gate.
+      The same checkout's warm `security sinks --severity high --context 4k`
+      baseline is about 26.8 s command time / 27.0 s process wall time, 1.55 GiB
+      maximum RSS, 11,209 exact results, under the same 3 GiB budget. Its
+      emitted JSON SHA-256 is
+      `e41c820a82bfe0b60e6473e3680755a319567ad42272e416c06f238082d8b04c`.
 - [ ] **Large native export gate passes when relevant.** Export the complete
       sibling Elasticsearch checkout under a recorded scheduling budget,
       validate with `jq --stream`, and record bytes, wall time, physical
       footprint/RSS, dirty resident memory when available, swaps, hash, and
       incompleteness reasons. Confirm the three chain/flow modes are
       `compressed_callgraph`, truncation counters are zero, and no hidden
-      `.bonsai/export.default.*` cache was created.
+      `export.default.*` artifact was created in the workspace cache.
 - [ ] **Baseline changes are explained.** Record file count, cold versus warm
       state, wall time, physical footprint/RSS, swaps, and
       `analysis_complete`. Do not replace a regression with a looser SLO

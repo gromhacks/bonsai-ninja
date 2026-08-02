@@ -412,20 +412,6 @@ fn normalize_path_for_filter(value: &str) -> String {
     value.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::is_internal_tree_entry_name;
-
-    #[test]
-    fn scanner_state_and_pre_upgrade_backups_are_not_user_tree_entries() {
-        for name in [".bonsai", ".bonsai-agent", ".bonsai.pre-20260730-120000"] {
-            assert!(is_internal_tree_entry_name(name), "{name}");
-        }
-        assert!(!is_internal_tree_entry_name(".bonsaiignore"));
-        assert!(!is_internal_tree_entry_name(".bonsai-notes"));
-    }
-}
-
 fn tree_filters_hash(args: &TreeArgs<'_>) -> u64 {
     let max_depth = args.max_depth.map(|n| n.to_string()).unwrap_or_default();
     let exclude_file = args.exclude_file.join("\0");
@@ -523,5 +509,19 @@ fn render_node_lines(node: &StructuralTreeNode, prefix: &str, is_last: bool, lin
     for (child_index, child) in node.children.iter().enumerate() {
         let child_is_last = child_index == last;
         render_node_lines(child, &next_prefix, child_is_last, lines);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_internal_tree_entry_name;
+
+    #[test]
+    fn scanner_state_and_pre_upgrade_backups_are_not_user_tree_entries() {
+        for name in [".bonsai", ".bonsai-agent", ".bonsai.pre-20260730-120000"] {
+            assert!(is_internal_tree_entry_name(name), "{name}");
+        }
+        assert!(!is_internal_tree_entry_name(".bonsaiignore"));
+        assert!(!is_internal_tree_entry_name(".bonsai-notes"));
     }
 }

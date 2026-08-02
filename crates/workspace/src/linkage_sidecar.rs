@@ -77,7 +77,7 @@ struct LinkageMetadata {
     build_fingerprint: u64,
 }
 
-/// Conventional linkage artifact path under `<workspace>/.bonsai/`.
+/// Conventional linkage artifact path in the external workspace cache.
 #[must_use]
 pub fn linkage_sidecar_path(workspace_root: &Path) -> PathBuf {
     workspace_bonsai_dir(workspace_root).join(format!("linkage.v{LINKAGE_CACHE_VERSION}.factstore"))

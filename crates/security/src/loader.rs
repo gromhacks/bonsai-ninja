@@ -18,7 +18,6 @@
 
 use crate::rule::{MatchKind, Rule, RuleKind, Severity};
 use ahash::AHashMap;
-use bonsai_common::workspace_bonsai_dir;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -268,7 +267,10 @@ fn replace_or_push(bucket: &mut Vec<Rule>, incoming: Rule, overridden: &mut Vec<
 /// invariants (e.g. `@requires_admin`, `verify_csrf_token()`) as
 /// sanitizers without polluting the shipped global pack.
 pub fn load_workspace_local_rules(workspace: &Path) -> Result<Option<Rulepack>, LoadError> {
-    let local_root = workspace_bonsai_dir(workspace).join("rules");
+    // Local rules are user-authored project configuration, not disposable
+    // analysis cache. Keep this explicit repository path separate from the
+    // OS cache directory returned by `workspace_bonsai_dir`.
+    let local_root = workspace.join(".bonsai").join("rules");
     if !local_root.exists() {
         return Ok(None);
     }

@@ -345,12 +345,13 @@ fn real_main() -> Result<()> {
         std::env::set_var("BONSAI_MEMORY_BUDGET_MB", memory_budget_mb.to_string());
     }
     let theme = cli.theme.unwrap_or(Theme::Moss);
-    let _ = UI_CELL.set(Ui::new(cli.no_color, theme));
+    let html_output = cli.html_output.clone();
+    let _ = UI_CELL.set(Ui::new(cli.no_color || html_output.is_some(), theme));
     // Semantic compiler phases may run in child processes so the operating
     // system can reclaim allocator arenas between workspace-scale phases.
     // Mirror presentation flags into their standard environment forms before
     // dispatch so workers preserve the parent's output contract.
-    if cli.no_color {
+    if cli.no_color || html_output.is_some() {
         std::env::set_var("NO_COLOR", "1");
     }
     if cli.no_progress {
@@ -374,7 +375,7 @@ fn real_main() -> Result<()> {
     // Progress visibility is independent from color. `--no-color`
     // keeps progress visible in interactive terminals, but renders it
     // without ANSI color; `--no-progress` / `NO_PROGRESS` hide it.
-    progress::set_no_color(cli.no_color);
+    progress::set_no_color(cli.no_color || html_output.is_some());
     progress::set_no_progress(cli.no_progress);
     // Secondary output filters (`--contains` / `--not-contains`) are
     // global flags applied at render time. They're part of the
@@ -383,8 +384,13 @@ fn real_main() -> Result<()> {
     // the expensive taint *analysis* payload is keyed separately so it
     // is reused across filter changes.
     filter::init(&cli.contains, &cli.not_contains);
-    let output_path = command_output_path(&cli.command).map(std::path::Path::to_path_buf);
-    output::init(output_path.as_deref())?;
+    let command_output_path = command_output_path(&cli.command).map(std::path::Path::to_path_buf);
+    if html_output.is_some() && command_output_path.is_some() {
+        anyhow::bail!("--html-output and --output-path are mutually exclusive");
+    }
+    let output_path = html_output.as_ref().or(command_output_path.as_ref());
+    let html_theme = html_output.as_ref().map(|_| theme);
+    output::init(output_path.map(std::path::PathBuf::as_path), html_theme)?;
     if let Some(workspace) = command_workspace_for_page_cache(&cli.command) {
         if page_cache::replay_if_hit(workspace)? {
             output::finish()?;
@@ -423,28 +429,19 @@ fn real_main() -> Result<()> {
         ),
         Cmd::Trace {
             workspace,
-            symbol,
+            target,
             function,
             from,
             to,
             context,
             page,
             all,
-            max_depth,
-            max_steps,
-            max_branch_fanout,
-            max_loop_iters,
             format,
             output: _,
         } => {
-            let fn_arg = function.or(symbol);
+            let fn_arg = function.or(target);
             let paging = paging_from_cli_output(context.as_deref(), page.as_deref(), all, format)?;
-            let trace_opts = bonsai_sdk::CrossModuleOptions {
-                max_depth,
-                max_steps,
-                max_branch_fanout,
-                max_loop_iters,
-            };
+            let trace_opts = bonsai_sdk::CrossModuleOptions::default();
             cmd_trace(&workspace, fn_arg, from, to, paging, format, trace_opts)
         }
         Cmd::Path {
@@ -452,9 +449,6 @@ fn real_main() -> Result<()> {
             from,
             to,
             regex,
-            max_paths,
-            max_depth,
-            max_probes,
             context,
             page,
             all,
@@ -466,9 +460,6 @@ fn real_main() -> Result<()> {
                 from: &from,
                 to: &to,
                 regex,
-                max_paths,
-                max_depth,
-                max_probes,
                 paging_cfg: paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
                 format,
             },
@@ -478,7 +469,6 @@ fn real_main() -> Result<()> {
             symbol,
             line,
             file,
-            max_steps,
             context,
             page,
             all,
@@ -489,7 +479,6 @@ fn real_main() -> Result<()> {
             &symbol,
             line,
             file.as_deref(),
-            max_steps,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
             format,
         ),
@@ -604,7 +593,6 @@ fn real_main() -> Result<()> {
             compact,
             max_depth,
             node,
-            limit,
             context,
             page,
             all,
@@ -621,7 +609,6 @@ fn real_main() -> Result<()> {
                 compact,
                 max_depth,
                 node.as_deref(),
-                limit,
                 paging,
                 format,
             )
@@ -1040,9 +1027,6 @@ fn real_main() -> Result<()> {
             to_kind,
             file,
             in_fn,
-            max_flows,
-            max_entry_probes,
-            max_hits,
             all,
             compact,
             flow,
@@ -1088,15 +1072,6 @@ fn real_main() -> Result<()> {
                      or --taint-flow"
                 );
             }
-            // `--all` lifts every cap. The chain enumerator uses
-            // saturating math internally, so `usize::MAX` is the
-            // explicit uncapped value here rather than a large finite
-            // stand-in.
-            let (mf, mp, mh) = if all {
-                (usize::MAX, usize::MAX, usize::MAX)
-            } else {
-                (max_flows, max_entry_probes, max_hits)
-            };
             // `--flow <id>` on its own should still surface something
             // even when no `--query` / filters are set: enumerate every
             // decl + hit, then the flow-id filter in `cmd_inspect`
@@ -1111,7 +1086,6 @@ fn real_main() -> Result<()> {
             };
             let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             let taint_flow = taint_flow || taint_id_lookup;
-            let taint_flow_explicit = taint_flow;
             cmd_inspect(
                 &workspace,
                 InspectCommandOptions {
@@ -1119,13 +1093,9 @@ fn real_main() -> Result<()> {
                     is_regex: regex,
                     kind_filter: &kind,
                     filters,
-                    max_flows: mf,
-                    max_entry_probes: mp,
-                    max_hits: mh,
                     render,
                     graph_flow,
                     taint_flow,
-                    taint_flow_explicit,
                     paging_cfg: paging,
                     format,
                 },
@@ -1134,10 +1104,9 @@ fn real_main() -> Result<()> {
         Cmd::Export {
             workspace,
             full_propagations,
-            all,
             format,
             output: _,
-        } => cmd_export(&workspace, full_propagations, all, format),
+        } => cmd_export(&workspace, full_propagations, format),
         Cmd::Cache { action } => cmd_cache(action),
         Cmd::Security { workspace, action } => commands::security::cmd_security(&workspace, action),
         Cmd::Tree {

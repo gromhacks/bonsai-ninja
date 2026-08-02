@@ -297,7 +297,7 @@ fn resolve_single_callable(ws: &Workspace, symbol: &str) -> Result<Option<Decl>,
     let mut candidates: Vec<Decl> = bonsai_resolve::resolve_callable(&global, spec.name)
         .into_iter()
         .filter_map(|func| {
-            ws.exact_decl(bonsai_common::SymbolId::new(func.raw()))
+            ws.exact_frontend_decl(bonsai_common::SymbolId::new(func.raw()))
                 .map(|decl| (*decl).clone())
         })
         .filter(|decl| {

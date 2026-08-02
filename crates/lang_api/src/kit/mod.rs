@@ -4498,6 +4498,7 @@ pub fn extract_call_receiver_facts(
                 call_span,
                 receiver_span: span_of(file, &receiver),
                 value_flow,
+                role: crate::CallReceiverRole::Value,
                 static_value: None,
             });
         }
@@ -6336,6 +6337,111 @@ pub fn alias_map_from_import_specs(
     map
 }
 
+/// Classify imported namespace/type qualifiers as non-value call receivers.
+///
+/// Language adapters own both inputs: [`crate::ImportSpec`] records the local
+/// binding established by import syntax, and [`crate::CallReceiverFact`]
+/// records the exact receiver expression from Tree-sitter. This linker step
+/// joins those typed facts so IDG transfer does not invent a runtime receiver
+/// edge for calls such as `pickle.loads(data)` or `fmt.Println(value)`.
+///
+/// A local parameter or a non-import assignment with the same name is exact
+/// shadowing evidence and keeps the receiver value-bearing. Assignment events
+/// that contain the import anchor itself (for example CommonJS
+/// `const fs = require("fs")`) are part of the namespace binding, not a
+/// shadowing write.
+pub fn mark_namespace_call_receivers(index: &mut crate::DeclIndex, imports: &crate::ImportIndex) {
+    let mut namespace_spans = std::collections::HashMap::<String, Vec<Span>>::new();
+    for import in &imports.imports {
+        // `original_name` identifies a concrete imported member. Only a
+        // whole-module/type binding is a non-value qualifier.
+        if import.original_name.is_some() {
+            continue;
+        }
+        let Some(local) = import.alias.as_deref().filter(|local| !local.is_empty()) else {
+            continue;
+        };
+        namespace_spans
+            .entry(local.to_string())
+            .or_default()
+            .push(import.span);
+    }
+    if namespace_spans.is_empty() {
+        return;
+    }
+
+    for receiver in &mut index.call_receivers {
+        let base = receiver
+            .value_flow
+            .projection
+            .as_ref()
+            .map(|projection| projection.base.as_str())
+            .or(receiver.value_flow.place.as_deref());
+        let Some(base) = base else {
+            continue;
+        };
+        let Some(import_spans) = namespace_spans.get(base) else {
+            continue;
+        };
+        let owner = index
+            .defs
+            .iter()
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Module | DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) && span_contains(decl.body_span.unwrap_or(decl.span), receiver.receiver_span)
+            })
+            .min_by_key(|decl| {
+                let span = decl.body_span.unwrap_or(decl.span);
+                span.end.saturating_sub(span.start)
+            });
+        if owner.is_some_and(|decl| {
+            decl.params.iter().any(|param| param == base)
+                || flow_events_assign_name_outside_imports(&decl.flow_events, base, import_spans)
+        }) {
+            continue;
+        }
+        receiver.role = crate::CallReceiverRole::Namespace;
+    }
+}
+
+fn flow_events_assign_name_outside_imports(events: &[FlowEvent], name: &str, imports: &[Span]) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Assign { span, target, .. } | FlowEvent::AggregateAssign { span, target, .. }
+            if target == name =>
+        {
+            !imports.iter().any(|import| spans_overlap(*span, *import))
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            flow_events_assign_name_outside_imports(then_events, name, imports)
+                || flow_events_assign_name_outside_imports(else_events, name, imports)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            flow_events_assign_name_outside_imports(body, name, imports)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            flow_events_assign_name_outside_imports(body, name, imports)
+                || flow_events_assign_name_outside_imports(catch_events, name, imports)
+                || flow_events_assign_name_outside_imports(finally_events, name, imports)
+        }
+        _ => false,
+    })
+}
+
+fn spans_overlap(left: Span, right: Span) -> bool {
+    left.file == right.file && left.start <= right.end && right.start <= left.end
+}
+
 /// Derive a local module binding only when the normalized import target
 /// exposes an identifier directly. File-extension stripping is intentionally
 /// absent: adapters know whether a string is a file URI and must emit its
@@ -7627,12 +7733,18 @@ fn call_is_trpc_procedure_handler(name: &str) -> bool {
 
 fn emit_inline_closure_param_bindings_from_yield_call(
     lambda: Node<'_>,
-    file: FileId,
+    _file: FileId,
     src: &[u8],
     call_event: Option<&FlowEvent>,
     out: &mut Vec<FlowEvent>,
 ) {
-    let Some(FlowEvent::Call { name, args, .. }) = call_event else {
+    let Some(FlowEvent::Call {
+        span: call_span,
+        name,
+        args,
+        ..
+    }) = call_event
+    else {
         return;
     };
     let params = extract_param_names(&lambda, src);
@@ -7645,7 +7757,11 @@ fn emit_inline_closure_param_bindings_from_yield_call(
             continue;
         }
         out.push(FlowEvent::Assign {
-            span: span_of(file, &lambda),
+            // This binding is the yielded output of the enclosing call, so
+            // its semantic identity is that AST call site. The block span is
+            // only the lexical scope of the parameter and cannot resolve a
+            // callee in the callgraph.
+            span: *call_span,
             target: param,
             source_name: None,
             source_call: Some(name.clone()),

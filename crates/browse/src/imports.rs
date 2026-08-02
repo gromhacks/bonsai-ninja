@@ -210,7 +210,7 @@ fn push_unique_file(
 /// declares to `out`. No-op when the module string doesn't map to
 /// a workspace file (library / stdlib / FFI).
 fn resolve_workspace_module_bindings(
-    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
     resolver: &WorkspaceModuleResolver,
     importer_path: &str,
     module: &str,
@@ -355,7 +355,6 @@ fn resolve_workspace_module_bindings(
             }
         }
     }
-    let global = ws.compiler_linkage_index();
     for file in resolved {
         for decl in global.decls_in(file) {
             if !matches!(
@@ -388,6 +387,10 @@ pub fn imports(ws: &Workspace, f: &ImportsFilters<'_>) -> Result<Vec<ImportOut>,
     let resolver = f
         .resolve_workspace_bindings
         .then(|| WorkspaceModuleResolver::new(ws));
+    // Lazy workspace-wide cache construction must finish before the Rayon
+    // file loop. Initializing linkage recursively from a worker can exhaust
+    // the same pool while holding its write lock and deadlock peer workers.
+    let global = f.resolve_workspace_bindings.then(|| ws.compiler_linkage_index());
     let files: Vec<_> = ws.vfs().all_files();
     let mut out: Vec<ImportOut> = files
         .par_iter()
@@ -483,9 +486,9 @@ pub fn imports(ws: &Workspace, f: &ImportsFilters<'_>) -> Result<Vec<ImportOut>,
                     // rooted in the imported module's functions.
                     // Uniform across adapters — the module string
                     // is whatever the grammar surfaced verbatim.
-                    if let Some(resolver) = resolver.as_ref() {
+                    if let (Some(resolver), Some(global)) = (resolver.as_ref(), global.as_ref()) {
                         resolve_workspace_module_bindings(
-                            ws,
+                            global,
                             resolver,
                             &path,
                             &imp.module,
