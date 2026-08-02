@@ -132,14 +132,31 @@ pub(crate) fn function_summary_from_idg(
     idg: &IdgQueryService,
     func: FuncId,
 ) -> FunctionSummary {
+    function_summary_from_idg_in_scope(global, idg, func, None)
+}
+
+pub(crate) fn function_summary_from_idg_in_scope(
+    global: &GlobalIndex,
+    idg: &IdgQueryService,
+    func: FuncId,
+    allowed_funcs: Option<&ahash::AHashSet<FuncId>>,
+) -> FunctionSummary {
     let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
         return FunctionSummary::default();
     };
-    let returns_taint_of = idg
-        .return_taint_param_indices_for_funcs_with_max_precision(
+    let mut summaries = if let Some(allowed_funcs) = allowed_funcs {
+        idg.return_taint_param_indices_for_funcs_within_funcs_with_max_precision(
+            &[func],
+            allowed_funcs,
+            Some(bonsai_common::Precision::Narrowed),
+        )
+    } else {
+        idg.return_taint_param_indices_for_funcs_with_max_precision(
             &[func],
             Some(bonsai_common::Precision::Narrowed),
         )
+    };
+    let returns_taint_of = summaries
         .remove(&func)
         .unwrap_or_default()
         .into_iter()

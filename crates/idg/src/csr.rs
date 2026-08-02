@@ -26,7 +26,7 @@ use bonsai_common::Precision;
 /// Compressed-sparse-row adjacency. Built from a list of edges; one
 /// CSR for forward (`from → targets`), one for backward (`to →
 /// sources`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EdgeCsr {
     offsets: Vec<u32>,
     targets: Vec<u32>,
@@ -77,36 +77,50 @@ impl EdgeCsr {
     where
         F: Fn(&mut dyn FnMut(u32, u32)),
     {
-        let mut forward_offsets = vec![0_u32; n_nodes + 1];
-        let mut backward_offsets = vec![0_u32; n_nodes + 1];
+        // Store cumulative end positions in one word per node. Filling each
+        // adjacency backward turns those ends into starts in place, avoiding
+        // a second workspace-sized cursor vector for either direction.
+        let mut forward_offsets = vec![0_u32; n_nodes];
+        let mut backward_offsets = vec![0_u32; n_nodes];
         visit_pairs(&mut |from, to| {
             if (from as usize) >= n_nodes || (to as usize) >= n_nodes {
                 return;
             }
-            forward_offsets[from as usize + 1] += 1;
-            backward_offsets[to as usize + 1] += 1;
+            forward_offsets[from as usize] += 1;
+            backward_offsets[to as usize] += 1;
         });
         for index in 1..forward_offsets.len() {
             forward_offsets[index] += forward_offsets[index - 1];
             backward_offsets[index] += backward_offsets[index - 1];
         }
 
-        let mut forward_targets = vec![0_u32; *forward_offsets.last().unwrap_or(&0) as usize];
-        let mut backward_targets = vec![0_u32; *backward_offsets.last().unwrap_or(&0) as usize];
-        let mut forward_cursor = forward_offsets.clone();
-        let mut backward_cursor = backward_offsets.clone();
+        let forward_total = *forward_offsets.last().unwrap_or(&0);
+        let backward_total = *backward_offsets.last().unwrap_or(&0);
+        let mut forward_targets = vec![0_u32; forward_total as usize];
+        let mut backward_targets = vec![0_u32; backward_total as usize];
         visit_pairs(&mut |from, to| {
             if (from as usize) >= n_nodes || (to as usize) >= n_nodes {
                 return;
             }
-            let forward_position = forward_cursor[from as usize] as usize;
+            forward_offsets[from as usize] -= 1;
+            let forward_position = forward_offsets[from as usize] as usize;
             forward_targets[forward_position] = to;
-            forward_cursor[from as usize] += 1;
 
-            let backward_position = backward_cursor[to as usize] as usize;
+            backward_offsets[to as usize] -= 1;
+            let backward_position = backward_offsets[to as usize] as usize;
             backward_targets[backward_position] = from;
-            backward_cursor[to as usize] += 1;
         });
+        forward_offsets.push(forward_total);
+        backward_offsets.push(backward_total);
+        // Backward filling reverses each source's visitation order. Restore
+        // it so persisted accelerators and diagnostic traversal remain byte-
+        // deterministic with the canonical pair visitor.
+        for range in forward_offsets.windows(2) {
+            forward_targets[range[0] as usize..range[1] as usize].reverse();
+        }
+        for range in backward_offsets.windows(2) {
+            backward_targets[range[0] as usize..range[1] as usize].reverse();
+        }
 
         (
             Self {
@@ -131,27 +145,31 @@ impl EdgeCsr {
     where
         F: Fn(&mut dyn FnMut(u32, u32)),
     {
-        let mut offsets = vec![0_u32; n_nodes + 1];
+        let mut offsets = vec![0_u32; n_nodes];
         visit_pairs(&mut |from, to| {
             if (from as usize) >= n_nodes || (to as usize) >= n_nodes {
                 return;
             }
-            offsets[from as usize + 1] += 1;
+            offsets[from as usize] += 1;
         });
         for index in 1..offsets.len() {
             offsets[index] += offsets[index - 1];
         }
 
-        let mut targets = vec![0_u32; *offsets.last().unwrap_or(&0) as usize];
-        let mut cursor = offsets.clone();
+        let total = *offsets.last().unwrap_or(&0);
+        let mut targets = vec![0_u32; total as usize];
         visit_pairs(&mut |from, to| {
             if (from as usize) >= n_nodes || (to as usize) >= n_nodes {
                 return;
             }
-            let position = cursor[from as usize] as usize;
+            offsets[from as usize] -= 1;
+            let position = offsets[from as usize] as usize;
             targets[position] = to;
-            cursor[from as usize] += 1;
         });
+        offsets.push(total);
+        for range in offsets.windows(2) {
+            targets[range[0] as usize..range[1] as usize].reverse();
+        }
         Self {
             offsets,
             targets,
@@ -295,6 +313,21 @@ impl EdgeCsr {
         self.targets.len()
     }
 
+    /// Validate an independently persisted CSR before installing it into a
+    /// query service. Acceleration data may change representation only; bad
+    /// offsets or targets must be rejected rather than changing reachability.
+    pub(crate) fn is_valid_for(&self, expected_nodes: usize) -> bool {
+        self.n_nodes == expected_nodes
+            && self.offsets.len() == expected_nodes.saturating_add(1)
+            && self.offsets.first().copied() == Some(0)
+            && self.offsets.windows(2).all(|pair| pair[0] <= pair[1])
+            && self.offsets.last().copied().map(|last| last as usize) == Some(self.targets.len())
+            && self
+                .targets
+                .iter()
+                .all(|target| (*target as usize) < expected_nodes)
+    }
+
     /// Iterate the destinations for `from`. Empty if `from` is out
     /// of range or has no outgoing edges.
     pub fn neighbours(&self, from: NodeId) -> &[u32] {
@@ -315,6 +348,10 @@ impl EdgeCsr {
             return 0;
         }
         (self.offsets[i + 1] - self.offsets[i]) as usize
+    }
+
+    pub(crate) fn persisted_parts(&self) -> (&[u32], &[u32]) {
+        (&self.offsets, &self.targets)
     }
 }
 

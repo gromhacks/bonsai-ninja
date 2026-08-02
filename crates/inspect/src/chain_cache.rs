@@ -249,7 +249,7 @@ impl<'a> ChainCache<'a> {
     /// Per-entry interprocedural taint facts. Delegates to the
     /// workspace-level [`bonsai_workspace::dataflow::DataFlowCache`]
     /// (pre-warmed at `Workspace::open` time + persisted to
-    /// `.bonsai/dataflow.v2.bin`) so repeat queries — across
+    /// the external workspace cache) so repeat queries — across
     /// processes, even — pay the analysis cost once.
     ///
     /// The in-process `taint_facts_r` mirror is kept as a second-

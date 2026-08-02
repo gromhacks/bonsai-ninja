@@ -12,11 +12,45 @@ const SYNTAX_UNIT_TRANSIENT_BYTES: u64 = 768 * BYTES_PER_MIB;
 const SYNTAX_RESIDENT_RESERVE_BYTES: u64 = 512 * BYTES_PER_MIB;
 const COMPILER_UNIT_TRANSIENT_BYTES: u64 = BYTES_PER_GIB;
 const COMPILER_RESIDENT_RESERVE_BYTES: u64 = 2 * BYTES_PER_GIB;
+// Call resolution retains the same immutable symbol/path indexes regardless
+// of worker count. Each worker owns only one file's resolver caches, decoded
+// compiler object, and edge buffer. An exact 30,055-file Elasticsearch build
+// measured 2.58 GiB RSS with ten concurrent resolvers, leaving roughly
+// 430 MiB inside the 3 GiB production budget; the earlier 512 MiB estimate
+// serialized the same graph behind two workers and doubled cold latency.
+// Keep the measured per-worker allowance distinct from parser/lowering
+// arenas: this changes concurrency only, never files, edges, or resolution.
+const CALLGRAPH_RESOLVER_UNIT_TRANSIENT_BYTES: u64 = 96 * BYTES_PER_MIB;
+const CALLGRAPH_RESOLVER_RESIDENT_RESERVE_BYTES: u64 = 2 * BYTES_PER_GIB;
+// Retrieval retains its compact snapshot builder and the resolved graph while
+// workers decode one exact compiler object into file-local candidate terms.
+// Elasticsearch measured 2.17 GiB RSS with ten workers, leaving more than
+// 850 MiB in a 3 GiB budget. Keep a separate named profile so future changes
+// to either resolver or candidate representations cannot silently couple
+// their schedules.
+const CANDIDATE_INDEX_UNIT_TRANSIENT_BYTES: u64 = 96 * BYTES_PER_MIB;
+const CANDIDATE_INDEX_RESIDENT_RESERVE_BYTES: u64 = 2 * BYTES_PER_GIB;
+const SEMANTIC_QUERY_TRANSIENT_BYTES: u64 = 384 * BYTES_PER_MIB;
+// An entry-rooted query cannot escape into arbitrary callers and its sparse
+// worklists spill independently. Elasticsearch's exact 12,355-entry inspect
+// gate measures ~80 MiB of incremental RSS per concurrent rooted closure;
+// retain 128 MiB for allocator/page-cache variance. Generic rule-matched
+// sources keep the heavier profile above because they intentionally propagate
+// into every resolved caller.
+const ROOTED_SEMANTIC_QUERY_TRANSIENT_BYTES: u64 = 128 * BYTES_PER_MIB;
+const SEMANTIC_QUERY_MIN_RESERVE_BYTES: u64 = 768 * BYTES_PER_MIB;
 const WEIGHTED_COMPILER_UNIT_BASE_BYTES: u64 = 64 * BYTES_PER_MIB;
 const WEIGHTED_COMPILER_SOURCE_AMPLIFICATION: u64 = 40;
 const WEIGHTED_COMPILER_MIN_HEADROOM_BYTES: u64 = 128 * BYTES_PER_MIB;
-const WEIGHTED_COMPILER_HEADROOM_DIVISOR: u64 = 5;
+// Retain one quarter of the process budget for allocator variance, immutable
+// graph growth after the schedule is chosen, and platform runtime overhead.
+// Elasticsearch's 22.5M-edge IDG measured only 18 MiB below a 3 GiB budget
+// with the former one-fifth reserve; that margin was not portable across
+// allocators or kernels. This changes batch width only—never compiler work.
+const WEIGHTED_COMPILER_HEADROOM_DIVISOR: u64 = 4;
 const WEIGHTED_SYNTAX_HEADROOM_BYTES: u64 = 384 * BYTES_PER_MIB;
+const SOURCE_INGESTION_COPY_AMPLIFICATION: u64 = 2;
+const SOURCE_INGESTION_MIN_HEADROOM_BYTES: u64 = 128 * BYTES_PER_MIB;
 
 /// Return the effective memory limit available to the analyzer process.
 ///
@@ -62,6 +96,68 @@ pub fn compiler_worker_count(cpu_workers: usize) -> usize {
     compiler_worker_count_for_limit(cpu_workers, effective_memory_limit_bytes())
 }
 
+/// Bound exact call-resolution concurrency by its measured per-file working
+/// set rather than the heavier parser/lowering profile.
+///
+/// Resolver workers share immutable compiler headers and class indexes. The
+/// memory budget changes only the number of file-local caches in flight;
+/// every caller and edge is still resolved.
+#[must_use]
+pub fn callgraph_worker_count(cpu_workers: usize) -> usize {
+    callgraph_worker_count_for_limit(cpu_workers, effective_memory_limit_bytes())
+}
+
+/// Bound exact retrieval-candidate projection concurrency.
+///
+/// Candidate workers decode adapter-lowered compiler objects and emit only
+/// file-local terms. The compact workspace snapshot is retained by the
+/// coordinator, so this uses its own measured resource profile rather than a
+/// parser arena's deliberately heavier estimate.
+#[must_use]
+pub fn candidate_index_worker_count(cpu_workers: usize) -> usize {
+    candidate_index_worker_count_for_limit(cpu_workers, effective_memory_limit_bytes())
+}
+
+/// Bound independent exact semantic closures by the process's current
+/// resident graph plus a measured spill/worklist allowance per query.
+///
+/// Callers should invoke this after hydrating shared immutable query indexes.
+/// A constrained process runs the same entries serially; more memory changes
+/// only concurrency, never graph scope or fixed-point completion.
+#[must_use]
+pub fn semantic_query_worker_count(cpu_workers: usize) -> usize {
+    let resident = current_process_resident_bytes()
+        .unwrap_or(SEMANTIC_QUERY_MIN_RESERVE_BYTES)
+        .max(SEMANTIC_QUERY_MIN_RESERVE_BYTES);
+    memory_bounded_worker_count(cpu_workers, SEMANTIC_QUERY_TRANSIENT_BYTES, resident)
+}
+
+/// Bound independent entry-rooted semantic closures by live RSS.
+///
+/// This is a scheduling distinction, not a semantic shortcut: each worker
+/// still runs one complete context-matched fixed point, and constrained hosts
+/// execute the identical entry sequence serially.
+#[must_use]
+pub fn rooted_semantic_query_worker_count(cpu_workers: usize) -> usize {
+    let resident = current_process_resident_bytes()
+        .unwrap_or(SEMANTIC_QUERY_MIN_RESERVE_BYTES)
+        .max(SEMANTIC_QUERY_MIN_RESERVE_BYTES);
+    rooted_semantic_query_worker_count_for_limit(cpu_workers, effective_memory_limit_bytes(), resident)
+}
+
+fn rooted_semantic_query_worker_count_for_limit(
+    cpu_workers: usize,
+    limit: Option<u64>,
+    resident_bytes: u64,
+) -> usize {
+    worker_count_for_limit(
+        cpu_workers,
+        ROOTED_SEMANTIC_QUERY_TRANSIENT_BYTES,
+        resident_bytes.max(SEMANTIC_QUERY_MIN_RESERVE_BYTES),
+        limit,
+    )
+}
+
 /// Partition source units into deterministic, memory-weighted parallel
 /// batches.
 ///
@@ -94,6 +190,114 @@ pub fn syntax_weighted_batches(source_bytes: &[u64], cpu_workers: usize) -> Vec<
         effective_memory_limit_bytes(),
         current_process_resident_bytes(),
     )
+}
+
+/// Choose a continuous Tree-sitter worker width from the largest actual
+/// source units in a phase.
+///
+/// This is the non-barrier companion to [`syntax_weighted_batches`]. A caller
+/// that can stream results directly may submit its complete worklist to one
+/// pool: sizing against the largest `N` units proves that every possible set
+/// of concurrently scheduled files fits the same live-memory envelope. The
+/// returned width is always at least one, so memory changes scheduling only.
+#[must_use]
+pub fn syntax_worker_count_for_sources(source_bytes: &[u64], cpu_workers: usize) -> usize {
+    syntax_worker_count_for_sources_and_limit(
+        source_bytes,
+        cpu_workers,
+        effective_memory_limit_bytes(),
+        current_process_resident_bytes(),
+    )
+}
+
+/// Partition raw source reads into deterministic memory-bounded windows.
+///
+/// Workspace ingestion retains one source copy in the VFS and temporarily
+/// owns the concurrently read `String`s until that window is published in
+/// path order. Unlike a parser unit, a raw read has no fixed AST arena, so its
+/// schedule is governed by actual bytes rather than an arbitrary file count.
+/// Every file is still read exactly once; constrained machines use more
+/// windows and larger machines avoid thousands of tiny Rayon barriers.
+#[must_use]
+pub fn source_ingestion_batches(source_bytes: &[u64], cpu_workers: usize) -> Vec<Range<usize>> {
+    source_ingestion_batches_for_limit_and_resident(
+        source_bytes,
+        cpu_workers,
+        effective_memory_limit_bytes(),
+        current_process_resident_bytes(),
+    )
+}
+
+fn source_ingestion_batches_for_limit_and_resident(
+    source_bytes: &[u64],
+    cpu_workers: usize,
+    limit: Option<u64>,
+    resident_bytes: Option<u64>,
+) -> Vec<Range<usize>> {
+    let Some(limit) = limit else {
+        return weighted_batches_for_working_set(source_bytes, cpu_workers, None);
+    };
+    let headroom = (limit / WEIGHTED_COMPILER_HEADROOM_DIVISOR)
+        .max(SOURCE_INGESTION_MIN_HEADROOM_BYTES)
+        .min(limit.saturating_sub(1));
+    let resident = resident_bytes.unwrap_or(limit / 2);
+    let raw_window_bytes = limit
+        .saturating_sub(resident)
+        .saturating_sub(headroom)
+        .checked_div(SOURCE_INGESTION_COPY_AMPLIFICATION)
+        .unwrap_or(1)
+        .max(1);
+
+    let mut batches = Vec::new();
+    let mut start = 0usize;
+    while start < source_bytes.len() {
+        let mut end = start;
+        let mut batch_bytes = 0_u64;
+        while end < source_bytes.len()
+            && (end == start || batch_bytes.saturating_add(source_bytes[end]) <= raw_window_bytes)
+        {
+            batch_bytes = batch_bytes.saturating_add(source_bytes[end]);
+            end += 1;
+        }
+        batches.push(start..end);
+        start = end;
+    }
+    batches
+}
+
+fn syntax_worker_count_for_sources_and_limit(
+    source_bytes: &[u64],
+    cpu_workers: usize,
+    limit: Option<u64>,
+    resident_bytes: Option<u64>,
+) -> usize {
+    let cpu_workers = cpu_workers.max(1);
+    if source_bytes.is_empty() {
+        return 1;
+    }
+    let Some(limit) = limit else {
+        return cpu_workers.min(source_bytes.len()).max(1);
+    };
+    let headroom = WEIGHTED_SYNTAX_HEADROOM_BYTES.min(limit.saturating_sub(1));
+    let resident = resident_bytes.unwrap_or(SYNTAX_RESIDENT_RESERVE_BYTES);
+    let working_bytes = limit.saturating_sub(resident).saturating_sub(headroom).max(1);
+    let mut largest_units = source_bytes
+        .iter()
+        .copied()
+        .map(weighted_compiler_unit_bytes)
+        .collect::<Vec<_>>();
+    largest_units.sort_unstable_by(|left, right| right.cmp(left));
+
+    let mut admitted = 0usize;
+    let mut admitted_bytes = 0_u64;
+    for unit_bytes in largest_units.into_iter().take(cpu_workers) {
+        if admitted > 0 && admitted_bytes.saturating_add(unit_bytes) > working_bytes {
+            break;
+        }
+        admitted_bytes = admitted_bytes.saturating_add(unit_bytes);
+        admitted += 1;
+    }
+    admitted.max(1)
 }
 
 fn syntax_weighted_batches_for_limit_and_resident(
@@ -207,6 +411,24 @@ fn compiler_worker_count_for_limit(cpu_workers: usize, limit: Option<u64>) -> us
     )
 }
 
+fn callgraph_worker_count_for_limit(cpu_workers: usize, limit: Option<u64>) -> usize {
+    worker_count_for_limit(
+        cpu_workers,
+        CALLGRAPH_RESOLVER_UNIT_TRANSIENT_BYTES,
+        CALLGRAPH_RESOLVER_RESIDENT_RESERVE_BYTES,
+        limit,
+    )
+}
+
+fn candidate_index_worker_count_for_limit(cpu_workers: usize, limit: Option<u64>) -> usize {
+    worker_count_for_limit(
+        cpu_workers,
+        CANDIDATE_INDEX_UNIT_TRANSIENT_BYTES,
+        CANDIDATE_INDEX_RESIDENT_RESERVE_BYTES,
+        limit,
+    )
+}
+
 #[cfg(test)]
 fn syntax_worker_count_for_limit(cpu_workers: usize, limit: Option<u64>) -> usize {
     syntax_worker_count_for_limit_and_resident(cpu_workers, limit, None)
@@ -266,8 +488,14 @@ fn physical_memory_bytes() -> Option<u64> {
     kib.checked_mul(1024)
 }
 
+/// Return the current process resident set size when the host exposes it.
+///
+/// This is an observation helper for memory-aware scheduling and opt-in
+/// diagnostics. It must never be used to admit, skip, or cap semantic work.
+/// On macOS the kernel value is read through `ps`, so hot paths should cache
+/// the result or call it only behind a diagnostic gate.
 #[cfg(target_os = "linux")]
-fn current_process_resident_bytes() -> Option<u64> {
+pub fn current_process_resident_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let kib = status.lines().find_map(|line| {
         let value = line.strip_prefix("VmRSS:")?.trim();
@@ -276,8 +504,14 @@ fn current_process_resident_bytes() -> Option<u64> {
     kib.checked_mul(1024)
 }
 
+/// Return the current process resident set size when the host exposes it.
+///
+/// This is an observation helper for memory-aware scheduling and opt-in
+/// diagnostics. It must never be used to admit, skip, or cap semantic work.
+/// On macOS the kernel value is read through `ps`, so hot paths should cache
+/// the result or call it only behind a diagnostic gate.
 #[cfg(target_os = "macos")]
-fn current_process_resident_bytes() -> Option<u64> {
+pub fn current_process_resident_bytes() -> Option<u64> {
     let output = std::process::Command::new("/bin/ps")
         .args(["-o", "rss=", "-p", &std::process::id().to_string()])
         .output()
@@ -290,8 +524,14 @@ fn current_process_resident_bytes() -> Option<u64> {
         .checked_mul(1024)
 }
 
+/// Return the current process resident set size when the host exposes it.
+///
+/// This is an observation helper for memory-aware scheduling and opt-in
+/// diagnostics. It must never be used to admit, skip, or cap semantic work.
+/// On macOS the kernel value is read through `ps`, so hot paths should cache
+/// the result or call it only behind a diagnostic gate.
 #[cfg(target_os = "windows")]
-fn current_process_resident_bytes() -> Option<u64> {
+pub fn current_process_resident_bytes() -> Option<u64> {
     let query = format!("(Get-Process -Id {}).WorkingSet64", std::process::id());
     let output = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", &query])
@@ -304,8 +544,9 @@ fn current_process_resident_bytes() -> Option<u64> {
         .flatten()
 }
 
+/// Return the current process resident set size when the host exposes it.
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-const fn current_process_resident_bytes() -> Option<u64> {
+pub const fn current_process_resident_bytes() -> Option<u64> {
     None
 }
 
@@ -414,10 +655,12 @@ fn min_present(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
+        callgraph_worker_count_for_limit, candidate_index_worker_count_for_limit,
         compiler_weighted_batches_for_limit, compiler_weighted_batches_for_limit_and_resident,
-        compiler_worker_count_for_limit, min_present, syntax_weighted_batches_for_limit_and_resident,
-        syntax_worker_count_for_limit, syntax_worker_count_for_limit_and_resident, worker_count_for_limit,
-        BYTES_PER_GIB,
+        compiler_worker_count_for_limit, min_present, rooted_semantic_query_worker_count_for_limit,
+        source_ingestion_batches_for_limit_and_resident, syntax_weighted_batches_for_limit_and_resident,
+        syntax_worker_count_for_limit, syntax_worker_count_for_limit_and_resident,
+        syntax_worker_count_for_sources_and_limit, worker_count_for_limit, BYTES_PER_GIB,
     };
     use super::{linux_cgroup_limit_paths, read_numeric_limit};
 
@@ -444,10 +687,43 @@ mod tests {
     }
 
     #[test]
+    fn rooted_queries_use_the_measured_lighter_concurrency_profile() {
+        assert_eq!(
+            rooted_semantic_query_worker_count_for_limit(32, Some(3 * BYTES_PER_GIB), 5 * BYTES_PER_GIB / 2,),
+            4
+        );
+        assert_eq!(
+            rooted_semantic_query_worker_count_for_limit(32, Some(BYTES_PER_GIB), BYTES_PER_GIB),
+            1,
+            "a constrained host must execute the same closures serially"
+        );
+    }
+
+    #[test]
     fn three_gib_budget_serializes_exact_compiler_units() {
         assert_eq!(compiler_worker_count_for_limit(32, Some(3 * BYTES_PER_GIB)), 1);
         assert_eq!(compiler_worker_count_for_limit(32, Some(8 * BYTES_PER_GIB)), 6);
         assert_eq!(compiler_worker_count_for_limit(2, None), 2);
+    }
+
+    #[test]
+    fn three_gib_budget_keeps_ten_measured_call_resolvers_in_flight() {
+        assert_eq!(callgraph_worker_count_for_limit(32, Some(3 * BYTES_PER_GIB)), 10);
+        assert_eq!(callgraph_worker_count_for_limit(32, Some(2 * BYTES_PER_GIB)), 1);
+        assert_eq!(callgraph_worker_count_for_limit(3, None), 3);
+    }
+
+    #[test]
+    fn three_gib_budget_keeps_ten_measured_candidate_workers_in_flight() {
+        assert_eq!(
+            candidate_index_worker_count_for_limit(32, Some(3 * BYTES_PER_GIB)),
+            10
+        );
+        assert_eq!(
+            candidate_index_worker_count_for_limit(32, Some(2 * BYTES_PER_GIB)),
+            1
+        );
+        assert_eq!(candidate_index_worker_count_for_limit(3, None), 3);
     }
 
     #[test]
@@ -495,7 +771,7 @@ mod tests {
                 Some(3 * BYTES_PER_GIB),
                 Some(2 * BYTES_PER_GIB),
             ),
-            vec![0..6, 6..10]
+            vec![0..3, 3..6, 6..9, 9..10]
         );
     }
 
@@ -522,6 +798,52 @@ mod tests {
                 Some(2 * BYTES_PER_GIB),
             ),
             vec![0..8, 8..10]
+        );
+    }
+
+    #[test]
+    fn continuous_syntax_width_accounts_for_largest_possible_concurrent_units() {
+        let mib = 1024 * 1024;
+        assert_eq!(
+            syntax_worker_count_for_sources_and_limit(
+                &[mib, mib, 20 * mib, mib],
+                4,
+                Some(3 * BYTES_PER_GIB),
+                Some(BYTES_PER_GIB),
+            ),
+            4,
+        );
+        assert_eq!(
+            syntax_worker_count_for_sources_and_limit(
+                &[40 * mib, 40 * mib, mib, mib],
+                4,
+                Some(3 * BYTES_PER_GIB),
+                Some(BYTES_PER_GIB),
+            ),
+            1,
+            "the two largest compiler units cannot overlap inside the live budget",
+        );
+    }
+
+    #[test]
+    fn source_ingestion_windows_cover_all_bytes_without_a_file_count_cap() {
+        let mib = 1024 * 1024;
+        let source_bytes = vec![mib; 900];
+        let batches = source_ingestion_batches_for_limit_and_resident(
+            &source_bytes,
+            8,
+            Some(3 * BYTES_PER_GIB),
+            Some(512 * mib),
+        );
+        assert_eq!(batches, vec![0..896, 896..900]);
+        assert_eq!(batches.iter().map(std::ops::Range::len).sum::<usize>(), 900);
+    }
+
+    #[test]
+    fn source_ingestion_falls_back_to_cpu_windows_without_memory_detection() {
+        assert_eq!(
+            source_ingestion_batches_for_limit_and_resident(&[1; 5], 2, None, None),
+            vec![0..2, 2..4, 4..5]
         );
     }
 

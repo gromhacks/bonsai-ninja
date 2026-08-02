@@ -60,6 +60,12 @@ commands. Every assertion is evaluated after the command exits and
 `analysis_complete` is checked, so an SLO failure cannot interrupt, skip, or
 truncate semantic work.
 
+The inspect gate also protects phase residency and target planning: broad
+`inspect --taint-flow` must finish syntax discovery and release exact bodies
+before opening the IDG, batch-resolve matching AST spans, and reuse a sparse
+backward target-demand proof. Reintroducing one unrestricted closure per
+lexical hit is both a latency and peak-memory regression.
+
 Default warm ceilings are 15 seconds for semantic index reuse and 30 seconds
 for each query/analysis command. Dedicated slower performance hosts can
 calibrate `BONSAI_ES_WARM_INDEX_MAX_SECS`,
@@ -88,7 +94,7 @@ Record bytes, wall time, physical footprint/RSS, dirty resident memory when
 available, swaps, and SHA-256. Confirm `flow_chains_mode`,
 `taint_graph.chains_mode`, and `taint_graph.flow_id_labels_mode` are all
 `compressed_callgraph`, every truncation counter is zero, and a one-shot cache
-miss did not create `.bonsai/export.default.*`. Do not replace this gate with a
+miss did not create an `export.default.*` artifact in the workspace cache. Do not replace this gate with a
 timeout or reintroduce a materialized path-prefix option.
 
 ## GitHub Release Artifacts

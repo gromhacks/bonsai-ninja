@@ -393,10 +393,12 @@ impl SourceGroupExecutor<'_> {
                 sink_rule,
                 sink,
                 &current_call_taint_view,
-                endpoint_identity_proven,
-                self.factory_returns,
-                self.global,
-                self.receiver_base_map_cell,
+                &RuleConstraintTaintContext {
+                    endpoint_identity_proven,
+                    factory: self.factory_returns,
+                    global_headers: self.global,
+                    receiver_base_map_cell: self.receiver_base_map_cell,
+                },
             ) {
                 bonsai_diagnostics::debug_log!(
                     "security-taint",

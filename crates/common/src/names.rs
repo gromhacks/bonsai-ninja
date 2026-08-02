@@ -224,11 +224,15 @@ fn looks_like_callable_ident(value: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-/// Repository-local bonsai state directory.
+/// Per-workspace bonsai cache/state directory.
 ///
-/// Defaults to `<workspace>/.bonsai`. `BONSAI_WORKSPACE_DIR` may point
-/// at an alternate directory; relative values are resolved under the
-/// workspace root so each project can still keep isolated state.
+/// The default is an OS cache location namespaced by the canonical workspace
+/// path, for example
+/// `~/Library/Caches/bonsai-ninja/workspaces/project-0123abcd...` on macOS.
+/// Analysis must not dirty the repository it inspects. Set
+/// `BONSAI_WORKSPACE_DIR` to an exact directory when a workflow deliberately
+/// wants a different location; relative overrides remain workspace-relative
+/// for compatibility with earlier releases.
 #[must_use]
 pub fn workspace_bonsai_dir(workspace_root: &std::path::Path) -> std::path::PathBuf {
     match std::env::var_os("BONSAI_WORKSPACE_DIR") {
@@ -240,8 +244,51 @@ pub fn workspace_bonsai_dir(workspace_root: &std::path::Path) -> std::path::Path
                 workspace_root.join(path)
             }
         }
-        _ => workspace_root.join(".bonsai"),
+        _ => default_workspace_bonsai_dir(workspace_root, dirs::cache_dir().as_deref()),
     }
+}
+
+fn default_workspace_bonsai_dir(
+    workspace_root: &std::path::Path,
+    system_cache_root: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let identity = workspace_root.canonicalize().unwrap_or_else(|_| {
+        if workspace_root.is_absolute() {
+            workspace_root.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(workspace_root))
+                .unwrap_or_else(|_| workspace_root.to_path_buf())
+        }
+    });
+    let mut hasher = bonsai_hash::Hasher::new();
+    hasher.absorb(identity.to_string_lossy().as_bytes());
+    let digest = hasher.finish();
+    let slug = identity
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(workspace_cache_slug)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "workspace".to_string());
+    system_cache_root
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("bonsai-ninja")
+        .join("workspaces")
+        .join(format!("{slug}-{digest:016x}"))
+}
+
+fn workspace_cache_slug(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .take(48)
+        .collect()
 }
 
 #[cfg(test)]

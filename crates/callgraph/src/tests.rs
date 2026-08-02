@@ -240,6 +240,75 @@ fn build_graph_with_capabilities(
 }
 
 #[test]
+fn split_class_identity_survives_receiver_evidence_filtering() {
+    let implementation_file = FileId::new(70);
+    let caller_file = FileId::new(71);
+    let implementation = with_module_path(
+        decl_with(implementation_file, 1, "Base", DeclKind::Class, None, Vec::new()),
+        &["workspace", "Base"],
+    );
+    let helper = with_module_path(
+        decl_with(
+            implementation_file,
+            2,
+            "helper",
+            DeclKind::Method,
+            Some(1),
+            Vec::new(),
+        ),
+        &["workspace", "Base"],
+    );
+
+    let mut base_interface = with_module_path(
+        decl_with(caller_file, 1, "Base", DeclKind::Class, None, Vec::new()),
+        &["workspace", "Base"],
+    );
+    base_interface.body_span = None;
+    let mut child_interface = with_module_path(
+        decl_with(caller_file, 2, "Child", DeclKind::Class, None, Vec::new()),
+        &["workspace", "Child"],
+    );
+    child_interface.bases = vec!["Base".to_string()];
+    child_interface.body_span = None;
+    let mut child_implementation = with_module_path(
+        decl_with(caller_file, 3, "Child", DeclKind::Class, None, Vec::new()),
+        &["workspace", "Child"],
+    );
+    child_implementation.bases = vec!["Base".to_string()];
+    child_implementation.body_span = None;
+    let entry = with_module_path(
+        decl(
+            caller_file,
+            4,
+            "entry",
+            vec![method_call(caller_file, "obj.helper", "obj", &["Child", "Base"])],
+        ),
+        &["workspace", "Entry"],
+    );
+
+    let mut global = GlobalIndex::new();
+    insert_file(&mut global, implementation_file, vec![implementation, helper]);
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![base_interface, child_interface, child_implementation, entry],
+    );
+    global.finalize_semantic_facts();
+
+    let graph = build_graph_with_capabilities(
+        &global,
+        |_| Some("objc"),
+        |_| LanguageCapabilities::partial_baseline(),
+    );
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let helper = FuncId::new(global.find_by_name("helper")[0].raw());
+    assert!(
+        graph.callees_of(entry).any(|edge| edge.to == helper),
+        "a split class implementation must retain the method reached through its interface identity"
+    );
+}
+
+#[test]
 fn streamed_file_bodies_match_fully_resident_callgraph() {
     let target_file = FileId::new(90);
     let caller_file = FileId::new(91);
@@ -3625,6 +3694,50 @@ fn assign_source_call_does_not_duplicate_explicit_call_edge() {
     )
     .expect("resolved call span");
     assert_eq!(span, Span::new(file, 110, 113));
+}
+
+#[test]
+fn yield_result_binding_does_not_emit_a_second_call_edge() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(
+                file,
+                0,
+                "top",
+                vec![
+                    FlowEvent::Call {
+                        span: Span::new(file, 100, 110),
+                        name: "each_token".to_string(),
+                        receiver: None,
+                        receiver_types: Vec::new(),
+                        call_kind: CallKind::Function,
+                        args: Vec::new(),
+                    },
+                    FlowEvent::Assign {
+                        span: Span::new(file, 111, 130),
+                        target: "token".to_string(),
+                        source_name: None,
+                        source_call: Some("each_token".to_string()),
+                        source_call_args: Vec::new(),
+                        source_names: Vec::new(),
+                        declares_new_binding: true,
+                        value_kind: Some(bonsai_lang_api::AssignValueKind::YieldResult),
+                    },
+                ],
+            ),
+            decl(file, 1, "each_token", Vec::new()),
+        ],
+    );
+
+    let cg = build_graph(&global, |_| Some("ruby"));
+    let top = FuncId::new(global.find_by_name("top")[0].raw());
+    let edges = cg.callees_of(top).collect::<Vec<_>>();
+    assert_eq!(edges.len(), 1, "yield binding fabricated a call edge: {edges:#?}");
+    assert_eq!(edges[0].span, Span::new(file, 100, 110));
 }
 
 #[test]

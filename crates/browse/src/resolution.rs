@@ -106,23 +106,7 @@ struct ResolutionIndex {
 impl ResolutionIndex {
     fn new(ws: &Workspace) -> Self {
         let resolved = ws.cached_resolved_call_graph();
-
-        // `module_may_target_workspace` only compares the final normalized
-        // module segment. Precompute that exact relation once. The previous
-        // implementation walked every workspace file for every imported call
-        // site, which made coverage superlinear on large repositories.
-        let global = ws.compiler_linkage_index();
-        let workspace_module_tails = global
-            .all_files()
-            .filter_map(|file| ws.vfs().path(file).ok())
-            .filter_map(|path| {
-                normalize_file_key(&path.to_string_lossy())
-                    .rsplit('/')
-                    .next()
-                    .map(str::to_string)
-            })
-            .filter(|tail| !tail.is_empty())
-            .collect();
+        let workspace_module_tails = workspace_module_tails(ws);
 
         Self {
             resolved,
@@ -280,46 +264,61 @@ pub(crate) fn resolution_incomplete_reasons(ws: &Workspace) -> Vec<String> {
 /// come from adapter-lowered flow events, so the result remains a compiler
 /// fact rather than a cache approximation.
 fn persisted_resolution_incomplete_reasons(ws: &Workspace) -> Option<Vec<String>> {
-    let mut unresolved_sites = AHashSet::new();
-    match ws.visit_persisted_callgraph_partitions(|_file, _nodes, _outgoing, _incoming, unresolved| {
-        unresolved_sites.extend(
-            unresolved
-                .iter()
-                .map(|site| CallSiteKey::new(site.caller, site.span)),
-        );
-    }) {
+    let workspace_module_tails = workspace_module_tails(ws);
+    let mut unresolved_call_sites = 0usize;
+    let mut dynamic_call_sites = 0usize;
+    let mut macro_call_sites = 0usize;
+    let mut receiver_type_gaps = 0usize;
+    match ws.visit_persisted_callgraph_partitions(
+        |file, _nodes, outgoing, _incoming, _ambiguous_workspace_sites| {
+            // Reconstruct only this file's semantic call-site index. The
+            // persisted graph is partitioned by caller file, so this keeps
+            // memory bounded by one compiler object while producing the same
+            // classification as `resolution_coverage`.
+            let mut resolved_sites: AHashMap<CallSiteKey, EdgeCounts> = AHashMap::new();
+            for edge in outgoing.iter().filter(|edge| edge.precision.is_semantic()) {
+                let counts = resolved_sites
+                    .entry(CallSiteKey::new(edge.from, edge.span))
+                    .or_default();
+                match edge.kind {
+                    EdgeKind::Direct => counts.direct += 1,
+                    EdgeKind::Virtual => counts.virtual_edges += 1,
+                    EdgeKind::Indirect => counts.indirect += 1,
+                    EdgeKind::Unknown => {}
+                }
+            }
+
+            let Some(file_index) = ws.exact_decl_index_shared(file) else {
+                return;
+            };
+            let file_alias_targets: AHashMap<String, AliasTarget> =
+                bonsai_lang_api::alias_map_from_import_specs(&ws.db().imports_for(file))
+                    .into_iter()
+                    .collect();
+            for decl in &file_index.defs {
+                if !is_callable_decl(decl.kind) {
+                    continue;
+                }
+                let row = coverage_counts_for_decl_with_resolved_sites(
+                    decl,
+                    &resolved_sites,
+                    &file_alias_targets,
+                    &workspace_module_tails,
+                );
+                unresolved_call_sites += row.unresolved_call_sites;
+                dynamic_call_sites += row.dynamic_call_sites;
+                macro_call_sites += row.macro_call_sites;
+                receiver_type_gaps += row.receiver_type_gaps;
+            }
+        },
+    ) {
         Some(Ok(())) => {}
         Some(Err(_)) | None => return None,
     }
 
-    let headers = ws.compiler_header_index();
-    let mut seen_sites = AHashSet::new();
-    let mut dynamic_call_sites = 0usize;
-    let mut macro_call_sites = 0usize;
-    let mut receiver_type_gaps = 0usize;
-    for file in headers.all_files() {
-        let Some(file_index) = ws.exact_decl_index_shared(file) else {
-            continue;
-        };
-        for decl in &file_index.defs {
-            if !is_callable_decl(decl.kind) {
-                continue;
-            }
-            collect_persisted_incomplete_syntax(
-                FuncId::new(decl.symbol.raw()),
-                &decl.flow_events,
-                &unresolved_sites,
-                &mut seen_sites,
-                &mut dynamic_call_sites,
-                &mut macro_call_sites,
-                &mut receiver_type_gaps,
-            );
-        }
-    }
-
     let mut reasons = Vec::new();
-    if !unresolved_sites.is_empty() {
-        reasons.push(format!("unresolved-call-sites:{}", unresolved_sites.len()));
+    if unresolved_call_sites > 0 {
+        reasons.push(format!("unresolved-call-sites:{unresolved_call_sites}"));
     }
     if dynamic_call_sites > 0 {
         reasons.push(format!("dynamic-call-sites:{dynamic_call_sites}"));
@@ -331,117 +330,6 @@ fn persisted_resolution_incomplete_reasons(ws: &Workspace) -> Option<Vec<String>
         reasons.push(format!("receiver-type-gaps:{receiver_type_gaps}"));
     }
     Some(reasons)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_persisted_incomplete_syntax(
-    caller: FuncId,
-    events: &[FlowEvent],
-    unresolved_sites: &AHashSet<CallSiteKey>,
-    seen_sites: &mut AHashSet<CallSiteKey>,
-    dynamic_call_sites: &mut usize,
-    macro_call_sites: &mut usize,
-    receiver_type_gaps: &mut usize,
-) {
-    for event in events {
-        match event {
-            FlowEvent::Call {
-                span,
-                receiver,
-                receiver_types,
-                call_kind,
-                ..
-            } => {
-                let key = CallSiteKey::new(caller, *span);
-                if !seen_sites.insert(key) {
-                    continue;
-                }
-                if matches!(call_kind, CallKind::Indirect) {
-                    *dynamic_call_sites += 1;
-                }
-                if matches!(call_kind, CallKind::Macro) {
-                    *macro_call_sites += 1;
-                }
-                if unresolved_sites.contains(&key)
-                    && matches!(call_kind, CallKind::Method | CallKind::Constructor)
-                    && receiver.is_some()
-                    && receiver_types.is_empty()
-                {
-                    *receiver_type_gaps += 1;
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_persisted_incomplete_syntax(
-                    caller,
-                    then_events,
-                    unresolved_sites,
-                    seen_sites,
-                    dynamic_call_sites,
-                    macro_call_sites,
-                    receiver_type_gaps,
-                );
-                collect_persisted_incomplete_syntax(
-                    caller,
-                    else_events,
-                    unresolved_sites,
-                    seen_sites,
-                    dynamic_call_sites,
-                    macro_call_sites,
-                    receiver_type_gaps,
-                );
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_persisted_incomplete_syntax(
-                    caller,
-                    body,
-                    unresolved_sites,
-                    seen_sites,
-                    dynamic_call_sites,
-                    macro_call_sites,
-                    receiver_type_gaps,
-                )
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_persisted_incomplete_syntax(
-                    caller,
-                    body,
-                    unresolved_sites,
-                    seen_sites,
-                    dynamic_call_sites,
-                    macro_call_sites,
-                    receiver_type_gaps,
-                );
-                collect_persisted_incomplete_syntax(
-                    caller,
-                    catch_events,
-                    unresolved_sites,
-                    seen_sites,
-                    dynamic_call_sites,
-                    macro_call_sites,
-                    receiver_type_gaps,
-                );
-                collect_persisted_incomplete_syntax(
-                    caller,
-                    finally_events,
-                    unresolved_sites,
-                    seen_sites,
-                    dynamic_call_sites,
-                    macro_call_sites,
-                    receiver_type_gaps,
-                );
-            }
-            _ => {}
-        }
-    }
 }
 
 /// Aggregate resolution gaps only for the callable set that participated in
@@ -515,8 +403,22 @@ fn coverage_counts_for_decl(
     index: &ResolutionIndex,
     file_alias_targets: &AHashMap<String, AliasTarget>,
 ) -> ResolutionCoverageDeclRow {
-    let mut row = ResolutionCoverageDeclRow::default();
     let resolved_sites = index.resolved_sites_for_decl(decl);
+    coverage_counts_for_decl_with_resolved_sites(
+        decl,
+        &resolved_sites,
+        file_alias_targets,
+        &index.workspace_module_tails,
+    )
+}
+
+fn coverage_counts_for_decl_with_resolved_sites(
+    decl: &Decl,
+    resolved_sites: &AHashMap<CallSiteKey, EdgeCounts>,
+    file_alias_targets: &AHashMap<String, AliasTarget>,
+    workspace_module_tails: &AHashSet<String>,
+) -> ResolutionCoverageDeclRow {
+    let mut row = ResolutionCoverageDeclRow::default();
     let mut alias_targets = file_alias_targets.clone();
     bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_targets, &decl.flow_events);
     let mut seen_sites: AHashSet<CallSiteKey> = AHashSet::default();
@@ -524,15 +426,32 @@ fn coverage_counts_for_decl(
     collect_decl_call_sites(
         decl,
         &decl.flow_events,
-        &resolved_sites,
+        resolved_sites,
         &alias_targets,
-        &index.workspace_module_tails,
+        workspace_module_tails,
         &mut external_receivers,
         &mut seen_sites,
         &mut row,
     );
     finalize_decl_row(&mut row);
     row
+}
+
+fn workspace_module_tails(ws: &Workspace) -> AHashSet<String> {
+    // `module_may_target_workspace` compares the final normalized module
+    // segment. Precompute that exact relation once. Walking every workspace
+    // file for every imported call site would make coverage superlinear.
+    ws.compiler_linkage_index()
+        .all_files()
+        .filter_map(|file| ws.vfs().path(file).ok())
+        .filter_map(|path| {
+            normalize_file_key(&path.to_string_lossy())
+                .rsplit('/')
+                .next()
+                .map(str::to_string)
+        })
+        .filter(|tail| !tail.is_empty())
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)] // cohesive per-decl call-site scan state

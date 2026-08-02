@@ -55,7 +55,11 @@ published as one atomic generation. Callgraph, retrieval, linkage, IDG,
 security, inspect, and export stream that same typed generation. The persisted
 IDG path also lowers transfer facts once: it spools the compact typed stitch
 record and canonical node map, then replays them one file segment at a time
-without reparsing or a second transfer pass.
+without reparsing or a second transfer pass. `index --semantic` derives and
+publishes the default semantic contextual CSR plus compact function/node
+directories from that same immutable graph. Warm queries validate and install
+that query accelerator directly; it changes startup representation only, and
+removing it causes the exact fixed point to be recomputed.
 
 Large workspaces do not retain every function body beside the graph. The
 workspace linker keeps declaration, type, module, inheritance, and import
@@ -100,7 +104,10 @@ compatibility dataflow projection used by older SDK/query surfaces; it is
 not a second taint engine.
 
 Explicit semantic producers write binary factstores for speed and
-`.bonsai/manifest.json` for visibility. The manifest records sidecar
+`manifest.json` in the workspace's external OS cache for visibility. The
+default is a canonical-path-keyed directory under the platform cache root
+(`cache stats <workspace>` prints the exact path); `BONSAI_WORKSPACE_DIR`
+overrides it. Analysis caches never dirty the inspected repository. The manifest records sidecar
 coverage, producer fingerprints, paths, and missing reasons; commands still
 validate and read the binary sidecars before reusing analysis facts. Cache
 coverage includes the immutable compiler-object generation; an edit rebuilds
@@ -108,10 +115,10 @@ only mismatched objects while unchanged compressed payloads are copied into
 the next atomic generation. Compiler concurrency is weighted by actual source
 unit size, the process's current resident set, safety headroom, and the detected
 host/container memory budget. Linux detection follows the process's active
-nested cgroup v1/v2 path as well as root controller files. A 3 GiB budget
-serializes exact compiler units;
-resource scheduling can reduce parallelism but never files, graph closure, or
-facts. Revisited exact file bodies share a byte-weighted hot cache sized from
+nested cgroup v1/v2 path as well as root controller files. Under a 3 GiB
+budget, weighted batches still compile several small files concurrently while
+isolating a genuinely large unit. Resource scheduling can reduce parallelism
+but never files, graph closure, or facts. Revisited exact file bodies share a byte-weighted hot cache sized from
 that same budget. Eviction or an undersized body cache only causes exact
 Tree-sitter lowering to be replayed; an oversize body is still analyzed and is
 simply not retained. Cache stats validate sidecar payloads, not just path/size
@@ -131,7 +138,7 @@ displayed rows and chains are then hydrated through canonical APIs. Missing or
 stale sidecars fall back to exact syntax facts. Search may build retrieval on
 demand for a small complete workspace; inspect does not build it during normal
 query hydration, and a scoped workspace never publishes partial retrieval
-state under the complete workspace's `.bonsai/` directory.
+state under the complete workspace's external cache directory.
 
 Interactive commands render progress on stderr for each visible stage:
 workspace ingest/parse, sidecar/cache checks, optional sidecar prewarms,
@@ -143,6 +150,16 @@ automatically when stderr is not a TTY.
 Security analysis progress includes scope and cache notes: file/rule
 counts, source/sink match counts, taint-graph cache hit/miss state, and
 whether a sidecar write-through finished.
+
+Broad security planning is staged on cold workspaces. Raw anchors and exact
+file-local syntax targets run before global inheritance; the global receiver
+table is opened only for a typed call whose verdict can change through a base
+class. Compiler diagnostic coverage is remembered for every exact source
+snapshot, including clean files, so the final `analysis_complete` audit checks
+only files not already lowered during planning. The 2026-07-31 Elasticsearch
+fresh-cache production profile completed in 29.58 seconds at 708 MB peak RSS
+under `BONSAI_MEMORY_BUDGET_MB=3072`; the large-repository gate protects both
+fresh planning and warm semantic reuse without terminating or capping work.
 
 ## Human-First And LLM-First
 
@@ -296,11 +313,10 @@ source build path for that platform. See
 # Slice one symbol backwards from a source line
 ./target/release/bonsai-ninja slice ./my-app --symbol result --line 15 --file gateway.py
 
-# Inspect syntax hits and rulepack-free taint paths for a target
+# Inspect syntax facts for a target
 ./target/release/bonsai-ninja inspect ./my-app os.system
 
-# Output-scope controls: indexed hits only, or bounded raw taint paths
-./target/release/bonsai-ninja inspect ./my-app --query os.system --syntax-only
+# Add exact raw taint paths explicitly
 ./target/release/bonsai-ninja inspect ./my-app --query os.system --taint-flow
 
 # Request structural source-body evidence for a large inspect result set
@@ -341,29 +357,39 @@ Commands with `--format` also accept `--output-path <PATH>` to write the
 selected text, JSON, SARIF, DOT, or graph export payload directly to a
 file instead of stdout.
 
+Use global `--html-output <PATH>` for a standalone responsive report in the
+active bonsai color theme. This wraps the command's normal human-readable
+view without enabling extra analysis; it is mutually exclusive with
+`--output-path`.
+
 Accuracy is one mode: public analysis facts are emitted only when backed
 by exact or narrowed static evidence. When static analysis cannot prove a
 fact precisely enough, bonsai-ninja reports the limitation through
 coverage/provenance/incomplete metadata instead of downgrading to a
 guess.
 
-Text output names the evidence type directly: `inspect` renders generic
-`FLOW` call paths and rulepack-free `T:` taint paths for normal targeted
-queries, `security source-analysis` renders `SOURCE FLOW`, and
+Text output names the evidence type directly: `inspect --graph-flow` renders
+generic `FLOW` call paths, `inspect --taint-flow` renders rulepack-free `T:`
+taint paths, `security source-analysis` renders `SOURCE FLOW`, and
 `security taint-analysis` renders `TAINT FLOW` with source, argument
-propagation, and sink annotations. Use `inspect --syntax-only` when you
-deliberately want indexed facts without flow evidence,
-`inspect --taint-flow` to request bounded raw taint paths for large result
+propagation, and sink annotations. Plain `inspect` is the lightweight indexed
+syntax view. Use `inspect --taint-flow` to request raw taint paths for large result
 sets, and `inspect --graph-flow` to request structural source-body
 evidence for large result sets that would otherwise render syntax/index
 facts only. These flags change output scope, not analysis accuracy.
 
 `inspect` obtains raw taint rows through the workspace syntax-flow
-facade. That facade chooses a warmed IDG target cut when one already
-exists, otherwise it uses the canonical cached dataflow graph; the command
-does not build IDG in the hot path. `dump-taint` and the cached graph path
-share the same default entry seed helper so params, assignment targets, and
-bare call-argument carriers are interpreted consistently.
+facade. Candidate discovery is a separate Tree-sitter/compiler-object phase:
+it records exact matching spans, releases syntax-body and callgraph caches,
+and only then opens a fresh persisted IDG. Matching spans resolve to typed IDG
+nodes in one segment-streaming pass; spans without a carrier retain their
+owning function as an explicit conservative fallback. Broad entry batches
+share one sparse backward target-demand fixed point, while every admitted
+forward path still runs to exact closure. If no warmed IDG exists, the facade
+builds an exact query-scoped source/target IDG; the canonical dataflow cache is
+the final compatibility fallback. `dump-taint` and the cached graph path share
+the same default entry seed helper so params, assignment targets, and bare
+call-argument carriers are interpreted consistently.
 
 Most review commands page by default:
 
@@ -383,7 +409,7 @@ pages, and `--format json --no-color --no-progress` for scripts.
 - `BONSAI_MEMORY_BUDGET_MB` - lower the detected memory budget; this changes concurrency and cache retention, never analyzed facts
 - `BONSAI_NO_DATAFLOW=1` - skip explicit dataflow prewarm and trace eager hydration
 - `BONSAI_THEME` - terminal theme
-- `BONSAI_WORKSPACE_DIR` - per-workspace state directory
+- `BONSAI_WORKSPACE_DIR` - exact per-workspace cache-directory override
 - `BONSAI_CONTEXT` - default text and JSON paging budget
 - `BONSAI_NO_CACHE=1` - disable in-process caches for a command
 - `NO_COLOR` / `NO_PROGRESS` - disable ANSI styling or progress output

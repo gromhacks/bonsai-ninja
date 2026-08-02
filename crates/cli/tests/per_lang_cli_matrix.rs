@@ -627,11 +627,12 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
-        // The ts micro fixture models 5 source matches and 12 distinct
+        // The TS micro fixture models 5 source matches and 11 distinct
         // source-lineage chains after duplicate source rows collapse
-        // into `additional_sources`.
+        // into `additional_sources`. Imported namespace receivers are not
+        // runtime values and therefore do not fabricate a twelfth path.
         min_sources_micro: 5,
-        min_source_flows_micro: 12,
+        min_source_flows_micro: 11,
         min_deps_micro: 3,
         min_sanitizers_micro: 0,
     },
@@ -3356,7 +3357,7 @@ fn imports_whole_module_resolve_to_flows() {
         "php",
     ] {
         let w = ws(lang, "micro");
-        let Some((out, _, _)) = run(&["imports", &w]) else {
+        let Some((out, _, _)) = run(&["imports", &w, "--flows"]) else {
             return;
         };
         assert!(
@@ -3470,18 +3471,15 @@ fn inspect_compact_keeps_headers_drops_bodies() {
 #[test]
 fn inspect_grouped_view_emits_group_blocks() {
     let Some(_) = bin_path() else { return };
-    let w = ws("python", "complex");
+    let w = ws("python", "micro");
     let Some((out, _, code)) = run(&[
         "inspect",
         &w,
         "--query",
-        ".+",
-        "--regex",
+        "run_admin_command",
         "--graph-flow",
         "--view",
         "grouped",
-        "--max-flows",
-        "20",
     ]) else {
         return;
     };

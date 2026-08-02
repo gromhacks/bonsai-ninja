@@ -37,7 +37,7 @@ pub(crate) use browse::{
     apply_text_limit, cmd_args, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_entrypoints, cmd_imports,
     cmd_operations, cmd_refs, cmd_search, cmd_strings, cmd_vars, emit_json_paged_cached,
     emit_json_value_paged_cached, page_info_to_json, paged_json_incomplete_reasons, paging_from_cli,
-    paging_from_cli_output, short_file, truncate,
+    paging_from_cli_output, paging_with_row_limit, short_file, truncate,
 };
 pub(crate) use cache::cmd_cache;
 pub(crate) use diagnostics::{
@@ -108,30 +108,6 @@ pub(crate) fn open_project_path_query(root: &std::path::Path) -> Result<(Project
     open_project_with_options(root, options)
 }
 
-pub(crate) fn open_workspace_syntax_filtered_paths(
-    root: &std::path::Path,
-    include_filters: &[String],
-    exclude_filters: &[String],
-) -> Result<(Workspace, WorkspaceFooter)> {
-    let options = bonsai_sdk::OpenOptions::lazy_query();
-    let progress = workspace_open_progress();
-    let ws = Workspace::open_query_filtered_paths_with_options_and_events(
-        root,
-        bonsai_adapters::all_languages_registry(),
-        include_filters,
-        exclude_filters,
-        options,
-        &progress,
-    )
-    .map_err(|err| anyhow::anyhow!("opening workspace at {}: {err}", root.display()))?;
-    let footer = WorkspaceFooter::new();
-    Ok((ws, footer))
-}
-
-pub(crate) fn open_workspace_syntax_only(root: &std::path::Path) -> Result<(Workspace, WorkspaceFooter)> {
-    open_workspace_syntax_filtered_paths(root, &[], &[])
-}
-
 pub(crate) fn open_project_index_matching_literal(
     root: &std::path::Path,
     literal: &str,
@@ -183,24 +159,6 @@ pub(crate) fn open_project_index_retrieval_candidates(
     else {
         return Ok(None);
     };
-    crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
-    Ok(Some((project, WorkspaceFooter::new())))
-}
-
-pub(crate) fn open_project_index_retrieval_candidates_with_rulepack(
-    root: &std::path::Path,
-    query: &str,
-    filters: bonsai_sdk::SearchFilters<'_>,
-    rules_dir: Option<&std::path::Path>,
-) -> Result<Option<(Project, WorkspaceFooter)>> {
-    let progress = workspace_open_progress();
-    let bonsai = bonsai_with_rulepack(root, rules_dir)?;
-    let Some(project) =
-        bonsai.open_query_retrieval_candidates_with_progress(root, query, filters, progress)?
-    else {
-        return Ok(None);
-    };
-    let project = project.with_auto_refresh(false);
     crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
     Ok(Some((project, WorkspaceFooter::new())))
 }
@@ -278,11 +236,23 @@ fn build_project_with_bonsai_and_options(
     bonsai: bonsai_sdk::Bonsai,
     options: bonsai_sdk::OpenOptions,
 ) -> Result<Project> {
+    let open_started = std::time::Instant::now();
     let progress = workspace_open_progress();
     let project = bonsai
         .open_with_options_and_progress(root, options, progress)?
         .with_auto_refresh(false);
+    bonsai_diagnostics::debug_log!(
+        "workspace-open",
+        "workspace construction: {:.3}s",
+        open_started.elapsed().as_secs_f64()
+    );
+    let fingerprint_started = std::time::Instant::now();
     crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
+    bonsai_diagnostics::debug_log!(
+        "workspace-open",
+        "workspace fingerprint registration: {:.3}s",
+        fingerprint_started.elapsed().as_secs_f64()
+    );
     Ok(project)
 }
 
@@ -317,13 +287,29 @@ fn workspace_open_progress() -> impl Fn(WorkspaceOpenEvent) + Sync {
     let dataflow: Arc<Mutex<Option<indicatif::ProgressBar>>> = Arc::new(Mutex::new(None));
     let value_flow: Arc<Mutex<Option<indicatif::ProgressBar>>> = Arc::new(Mutex::new(None));
     let flow_ids: Arc<Mutex<Option<indicatif::ProgressBar>>> = Arc::new(Mutex::new(None));
+    let ingest_started = Arc::new(Mutex::new(None::<std::time::Instant>));
 
     move |event| match event {
         WorkspaceOpenEvent::IngestStarted => {
+            *ingest_started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
             replace_progress(&ingest, progress::spinner("ingesting workspace"));
         }
-        WorkspaceOpenEvent::IngestFinished { .. } => {
+        WorkspaceOpenEvent::IngestFinished { files } => {
             finish_progress(&ingest);
+            if let Some(started) = ingest_started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                bonsai_diagnostics::debug_log!(
+                    "workspace-open",
+                    "workspace ingest: {:.3}s · files {}",
+                    started.elapsed().as_secs_f64(),
+                    files
+                );
+            }
         }
         WorkspaceOpenEvent::ParseStarted { files } => {
             finish_progress(&ingest);

@@ -854,6 +854,13 @@ where
         factory_returns,
         on_progress,
     } = request;
+    if source_hits.is_empty() || sinks.is_empty() {
+        // With one endpoint set empty there is no possible taint path. Do not
+        // construct workspace linkage merely to rediscover that fact through
+        // an empty function map; the empty endpoint sets are already exact
+        // adapter/matcher results for this snapshot.
+        return finish_empty_chain_build(ws, pack, max_precision, on_progress);
+    }
     // ---- Phase 1: resolve rule matches to enclosing FuncIds ----
     let global = ws.compiler_linkage_index();
     // Run-scoped memo for the workspace-wide receiver→base-type map. Sink
@@ -889,18 +896,7 @@ where
         // No semantic IDG scope exists for this invocation. Still prepare and
         // immediately finish the empty namespace so SDK progress reports the
         // cache decision and no write-through temp file can dangle.
-        let taint_graph_fingerprint = taint_cache::config_fingerprint(pack, "taint-analysis", max_precision);
-        let cache_report =
-            taint_cache::prepare_workspace_cache(ws, "taint-analysis", taint_graph_fingerprint);
-        on_progress(AnalysisProgress::Note {
-            label: "taint-cache",
-            detail: cache_report.detail(),
-        });
-        // No source/sink work will run, but `prepare_workspace_cache`
-        // may have opened the sidecar write-through — close it so the
-        // temp file never dangles.
-        finish_taint_cache_write_through(ws, cache_report.persist_started, on_progress);
-        return ChainBuildResult::default();
+        return finish_empty_chain_build(ws, pack, max_precision, on_progress);
     }
     let SourceWorkPlan {
         items: source_work,
@@ -1137,6 +1133,28 @@ where
     on_progress(AnalysisProgress::PhaseFinished);
     finish_taint_cache_write_through(ws, cache_persist_started, on_progress);
     ChainBuildResult { findings, resolution }
+}
+
+fn finish_empty_chain_build<F>(
+    ws: &Workspace,
+    pack: &Rulepack,
+    max_precision: Option<Precision>,
+    on_progress: &mut F,
+) -> ChainBuildResult
+where
+    F: FnMut(AnalysisProgress),
+{
+    let taint_graph_fingerprint = taint_cache::config_fingerprint(pack, "taint-analysis", max_precision);
+    let cache_report = taint_cache::prepare_workspace_cache(ws, "taint-analysis", taint_graph_fingerprint);
+    on_progress(AnalysisProgress::Note {
+        label: "taint-cache",
+        detail: cache_report.detail(),
+    });
+    // No source/sink work will run, but `prepare_workspace_cache` may have
+    // opened the sidecar write-through. Close it so the temp file never
+    // dangles and repeated empty scans observe a clean namespace.
+    finish_taint_cache_write_through(ws, cache_report.persist_started, on_progress);
+    ChainBuildResult::default()
 }
 
 fn sorted_seed_key(seeds: &TokenSet) -> Vec<String> {

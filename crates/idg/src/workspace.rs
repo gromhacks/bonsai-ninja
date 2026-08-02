@@ -20,7 +20,9 @@
 use ahash::AHashMap;
 use bonsai_common::{wire, FuncId};
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Seek, SeekFrom};
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -43,6 +45,228 @@ pub struct SegmentId(pub u32);
 pub(crate) enum SegmentView<'a> {
     Resident(&'a IdgSegment),
     Paged(Arc<IdgSegment>),
+}
+
+/// Independently paged binary relations compiled for warm IDG queries.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub(crate) enum QueryAcceleratorBlobKind {
+    SymbolicFacts = 0,
+    SymbolicTransforms = 1,
+    FactSources = 2,
+    ReverseSymbolicTransforms = 3,
+    ReverseScalarTransforms = 4,
+    ContextualForwardTargets = 5,
+    ContextualBackwardTargets = 6,
+    ContextualHeapEdges = 7,
+    ContextualCallEdges = 8,
+    ContextualReturnEdges = 9,
+    ContextualReverseHeapNodes = 10,
+    ContextualReverseCallNodes = 11,
+    ContextualReverseReturnNodes = 12,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CompiledQueryAcceleratorBlob {
+    pub(crate) kind: QueryAcceleratorBlobKind,
+    pub(crate) file: Arc<File>,
+    pub(crate) bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CompiledQueryAcceleratorFrame {
+    pub(crate) file: Arc<File>,
+    pub(crate) bytes: u64,
+}
+
+/// Build-side query artifact. Large fixed-width relations stay in anonymous
+/// files and are streamed into fact-store chunks during atomic publication.
+#[derive(Clone, Debug)]
+pub struct CompiledQueryAccelerator {
+    pub(crate) core: CompiledQueryAcceleratorFrame,
+    pub(crate) contextual: CompiledQueryAcceleratorFrame,
+    pub(crate) symbolic_header: CompiledQueryAcceleratorFrame,
+    pub(crate) blobs: Arc<[CompiledQueryAcceleratorBlob]>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedQueryAcceleratorBlobLayout {
+    kind: QueryAcceleratorBlobKind,
+    bytes: u64,
+    chunks: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedQueryAcceleratorLayout {
+    version: u32,
+    core_bytes: u64,
+    core_chunks: u32,
+    contextual_bytes: u64,
+    contextual_chunks: u32,
+    symbolic_header_bytes: u64,
+    symbolic_header_chunks: u32,
+    blobs: Vec<PersistedQueryAcceleratorBlobLayout>,
+}
+
+/// Exact positioned view of one accelerator blob. The underlying fact-store
+/// reader and chunk directory are immutable and shared by all query pagers.
+#[derive(Clone)]
+pub(crate) struct QueryAcceleratorBlobReader {
+    reader: Arc<bonsai_factstore::FactStoreReader>,
+    first_key: u64,
+    bytes: u64,
+    chunks: u32,
+    cache: Arc<parking_lot::Mutex<QueryBlobPageCache>>,
+}
+
+// Relation probes are normally one fixed-width row. Use small cache units so
+// a sparse/random compiler walk does not read and zero 256 KiB for a 12-byte
+// lookup. Sixty-four pages retain a 1 MiB locality window per active blob
+// while remaining lazy; sequential frame decoding still bypasses it.
+const QUERY_BLOB_PAGE_BYTES: usize = 16 * 1024;
+const QUERY_BLOB_CACHE_PAGES: usize = 64;
+
+#[derive(Default)]
+struct QueryBlobPageCache {
+    pages: AHashMap<u64, Arc<[u8]>>,
+    order: VecDeque<u64>,
+}
+
+impl QueryBlobPageCache {
+    fn insert(&mut self, page: u64, bytes: Arc<[u8]>) -> Arc<[u8]> {
+        if let Some(existing) = self.pages.get(&page) {
+            return Arc::clone(existing);
+        }
+        while self.pages.len() >= QUERY_BLOB_CACHE_PAGES {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            self.pages.remove(&evicted);
+        }
+        self.order.push_back(page);
+        self.pages.insert(page, Arc::clone(&bytes));
+        bytes
+    }
+}
+
+impl QueryAcceleratorBlobReader {
+    pub(crate) fn len(&self) -> u64 {
+        self.bytes
+    }
+
+    pub(crate) fn read_exact_at(&self, mut offset: u64, mut output: &mut [u8]) -> crate::IdgResult<()> {
+        let requested = u64::try_from(output.len())
+            .map_err(|_| invalid_sidecar_payload("query accelerator read length exceeds u64"))?;
+        if offset.checked_add(requested).is_none_or(|end| end > self.bytes) {
+            return Err(invalid_sidecar_payload(
+                "query accelerator read exceeds blob bounds",
+            ));
+        }
+        // Sequential decodes already issue large reads. Keep them direct so
+        // this lazy cache is reserved for small adjacency/relation probes.
+        if output.len() >= QUERY_BLOB_PAGE_BYTES {
+            return self.read_exact_at_uncached(offset, output);
+        }
+        while !output.is_empty() {
+            let page = offset / QUERY_BLOB_PAGE_BYTES as u64;
+            let within = usize::try_from(offset % QUERY_BLOB_PAGE_BYTES as u64)
+                .expect("query blob page offset fits usize");
+            let cached = self.cache.lock().pages.get(&page).cloned();
+            let page_bytes = if let Some(cached) = cached {
+                cached
+            } else {
+                let page_offset = page.saturating_mul(QUERY_BLOB_PAGE_BYTES as u64);
+                let bytes = usize::try_from(
+                    self.bytes
+                        .saturating_sub(page_offset)
+                        .min(QUERY_BLOB_PAGE_BYTES as u64),
+                )
+                .expect("query blob page length fits usize");
+                let mut payload = vec![0_u8; bytes];
+                self.read_exact_at_uncached(page_offset, &mut payload)?;
+                self.cache
+                    .lock()
+                    .insert(page, Arc::from(payload.into_boxed_slice()))
+            };
+            let take = output.len().min(page_bytes.len().saturating_sub(within));
+            if take == 0 {
+                return Err(invalid_sidecar_payload(
+                    "query accelerator cache page is truncated",
+                ));
+            }
+            let (head, tail) = output.split_at_mut(take);
+            head.copy_from_slice(&page_bytes[within..within + take]);
+            output = tail;
+            offset = offset.saturating_add(take as u64);
+        }
+        Ok(())
+    }
+
+    fn read_exact_at_uncached(&self, mut offset: u64, mut output: &mut [u8]) -> crate::IdgResult<()> {
+        while !output.is_empty() {
+            let chunk = offset / IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES;
+            if chunk >= u64::from(self.chunks) {
+                return Err(invalid_sidecar_payload("query accelerator blob chunk is missing"));
+            }
+            let within = offset % IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES;
+            let available = IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES.saturating_sub(within);
+            let take = output.len().min(usize::try_from(available).unwrap_or(usize::MAX));
+            let (head, tail) = output.split_at_mut(take);
+            let found = self
+                .reader
+                .read_payload_range(self.first_key + chunk, within, head)?;
+            if !found {
+                return Err(missing_sidecar_entry(
+                    "query-accelerator-blob",
+                    u32::try_from(chunk).unwrap_or(u32::MAX),
+                ));
+            }
+            output = tail;
+            offset = offset.saturating_add(u64::try_from(take).expect("blob page length fits u64"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stream(&self) -> BufReader<QueryAcceleratorBlobStream> {
+        // MessagePack asks its reader for many scalar-sized values. Read
+        // ahead from the immutable factstore frame so adjacent scalars share
+        // one positioned I/O operation instead of issuing one `pread` each.
+        BufReader::with_capacity(
+            1024 * 1024,
+            QueryAcceleratorBlobStream {
+                blob: self.clone(),
+                offset: 0,
+            },
+        )
+    }
+}
+
+pub(crate) struct QueryAcceleratorBlobStream {
+    blob: QueryAcceleratorBlobReader,
+    offset: u64,
+}
+
+impl Read for QueryAcceleratorBlobStream {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.blob.bytes.saturating_sub(self.offset);
+        let take = output.len().min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        if take == 0 {
+            return Ok(0);
+        }
+        self.blob
+            .read_exact_at_uncached(self.offset, &mut output[..take])
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        self.offset = self.offset.saturating_add(take as u64);
+        Ok(take)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct PersistedQueryAcceleratorParts {
+    pub(crate) core: QueryAcceleratorBlobReader,
+    pub(crate) contextual: QueryAcceleratorBlobReader,
+    pub(crate) symbolic_header: QueryAcceleratorBlobReader,
+    pub(crate) blobs: AHashMap<QueryAcceleratorBlobKind, QueryAcceleratorBlobReader>,
 }
 
 impl Deref for SegmentView<'_> {
@@ -116,12 +340,16 @@ pub struct FieldFlowLink {
     pub precision: bonsai_common::Precision,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 struct SpoolEntry {
     offset: u64,
     encoded_len: u64,
     node_count: u32,
     edge_count: usize,
+    /// Stable function identities owned by this compilation unit. Keeping
+    /// this tiny header beside the spool entry lets persistence publish the
+    /// warm-query directory without decoding every completed segment again.
+    funcs: Arc<[u32]>,
 }
 
 /// Append-only compiler spill for canonical IDG segments.
@@ -388,25 +616,14 @@ impl SymbolicFieldCompilerStorage {
         self.graph.bases()
     }
 
-    pub(crate) fn string(&self, id: u32) -> Option<&str> {
-        self.graph.string(id)
-    }
-
-    pub(crate) fn visit_transforms<F>(&self, mut visit: F) -> crate::IdgResult<()>
-    where
-        F: FnMut(&[SymbolicFieldTransform]) -> crate::IdgResult<()>,
-    {
-        if let Some(spool) = &self.transform_spool {
-            spool.visit(visit)
-        } else {
-            visit(self.graph.transforms())
-        }
-    }
-
     pub(crate) fn check_spool(&self) -> crate::IdgResult<()> {
         self.transform_spool
             .as_ref()
             .map_or(Ok(()), WireChunkSpool::check_error)
+    }
+
+    pub(crate) fn release_indexes(&mut self) {
+        self.graph.release_indexes();
     }
 }
 
@@ -439,6 +656,7 @@ impl IdgSegmentSpool {
             encoded_len: u64::from(encoded_len),
             node_count: u32::try_from(segment.nodes.len()).expect("segment node count exceeds u32"),
             edge_count: segment.edges.len(),
+            funcs: Arc::from(segment.funcs.clone().into_boxed_slice()),
         });
         Ok(())
     }
@@ -449,8 +667,9 @@ impl IdgSegmentSpool {
             .generation
             .as_ref()
             .and_then(|generation| generation.entries.get(index))
-            .copied()
+            .cloned()
             .flatten();
+        let is_from_generation = from_generation.is_some();
         let entry = from_generation.map_or_else(|| self.entry(id), Ok)?;
         let len = usize::try_from(entry.encoded_len).map_err(|_| {
             crate::IdgError::Io(std::io::Error::new(
@@ -459,7 +678,45 @@ impl IdgSegmentSpool {
             ))
         })?;
         let mut payload = vec![0_u8; len];
-        let mut file = if from_generation.is_some() {
+        let mut file = if is_from_generation {
+            self.generation
+                .as_ref()
+                .expect("generation entry checked above")
+                .file
+                .try_clone_file()?
+        } else {
+            self.file.try_clone_file()?
+        };
+        file.seek(SeekFrom::Start(entry.offset))?;
+        file.read_exact(&mut payload)?;
+        let segment: IdgSegment = wire::decode(&payload)
+            .map_err(|err| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
+        if segment.version != IDG_SEGMENT_VERSION {
+            return Err(crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "spooled IDG segment version mismatch",
+            )));
+        }
+        Ok(segment)
+    }
+
+    fn read_segment_shared(&self, id: SegmentId) -> crate::IdgResult<IdgSegment> {
+        let from_generation = self
+            .generation
+            .as_ref()
+            .and_then(|generation| generation.entries.get(id.0 as usize))
+            .cloned()
+            .flatten();
+        let is_from_generation = from_generation.is_some();
+        let entry = from_generation.map_or_else(|| self.entry(id), Ok)?;
+        let len = usize::try_from(entry.encoded_len).map_err(|_| {
+            crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "spooled IDG segment exceeds addressable memory",
+            ))
+        })?;
+        let mut payload = vec![0_u8; len];
+        let mut file = if is_from_generation {
             self.generation
                 .as_ref()
                 .expect("generation entry checked above")
@@ -486,12 +743,12 @@ impl IdgSegmentSpool {
             .generation
             .as_ref()
             .and_then(|generation| generation.entries.get(id.0 as usize))
-            .copied()
+            .cloned()
             .flatten()
         {
             return Ok(entry);
         }
-        self.entries.get(id.0 as usize).copied().flatten().ok_or_else(|| {
+        self.entries.get(id.0 as usize).cloned().flatten().ok_or_else(|| {
             crate::IdgError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("missing spooled IDG segment {}", id.0),
@@ -776,7 +1033,7 @@ impl CrossFileEdges {
 /// Workspace-level IDG. Holds per-file segments, the cross-file
 /// edge index, and the `FuncId → SegmentId` lookup map.
 ///
-/// Persisted as a single versioned factstore payload under `.bonsai/`
+/// Persisted as a single versioned factstore payload in the workspace cache
 /// via [`Self::save_to_disk`]. The workspace open path tries
 /// [`Self::load_from_disk`] before triggering a full rebuild, so an
 /// already-indexed workspace skips the heavy
@@ -790,6 +1047,11 @@ pub struct IdgWorkspace {
     /// leave this unset and use the resident vectors above.
     #[serde(skip)]
     query_sidecar: Option<Arc<IdgQuerySidecar>>,
+    /// Query-ready compiler indexes installed by semantic prewarm. Resident
+    /// compiler/test workspaces may carry an encoded payload directly; warm
+    /// workspaces read the same independently validated factstore entry.
+    #[serde(skip)]
+    query_accelerator: Option<Arc<CompiledQueryAccelerator>>,
     /// Sidecar-only builds keep inactive segment payloads in an anonymous
     /// compiler spool. Query workspaces never enable this field.
     #[serde(skip)]
@@ -877,7 +1139,40 @@ impl IdgWorkspace {
         if let Some(sidecar) = &self.query_sidecar {
             return sidecar.segment(id).ok().flatten().map(SegmentView::Paged);
         }
+        if self.segment_spool.is_some()
+            && !self
+                .resident_segments
+                .get(id.0 as usize)
+                .copied()
+                .unwrap_or(false)
+        {
+            return self
+                .segment_spool
+                .as_ref()?
+                .read_segment_shared(id)
+                .ok()
+                .map(Arc::new)
+                .map(SegmentView::Paged);
+        }
         self.segment(id).map(SegmentView::Resident)
+    }
+
+    /// Install the exact query accelerator compiled from this same immutable
+    /// workspace generation before the canonical sidecar is published.
+    pub fn install_query_accelerator(&mut self, artifact: CompiledQueryAccelerator) {
+        self.query_accelerator = Some(Arc::new(artifact));
+    }
+
+    pub(crate) fn query_accelerator_parts(&self) -> crate::IdgResult<Option<PersistedQueryAcceleratorParts>> {
+        if let Some(artifact) = &self.query_accelerator {
+            let _ = artifact;
+            return Err(invalid_sidecar_payload(
+                "resident query accelerator cannot be reopened as persisted parts",
+            ));
+        }
+        self.query_sidecar
+            .as_ref()
+            .map_or(Ok(None), |sidecar| sidecar.query_accelerator_parts())
     }
 
     pub(crate) fn segment_views(&self) -> impl Iterator<Item = (SegmentId, SegmentView<'_>)> + '_ {
@@ -1198,8 +1493,20 @@ impl IdgWorkspace {
     }
 
     pub(crate) fn install_symbolic_compiler_storage(&mut self, storage: SymbolicFieldCompilerStorage) {
-        self.symbolic_field = storage.graph;
-        self.symbolic_transform_spool = storage.transform_spool;
+        let SymbolicFieldCompilerStorage {
+            mut graph,
+            transform_spool,
+        } = storage;
+        // The compiler drops hash-consing/query indexes before the eager
+        // compatibility phase so a large build does not retain them beside
+        // that phase's working set. A resident graph needs those indexes for
+        // exact base lookups; a spooled graph deliberately does not because
+        // the immutable query accelerator reconstructs its own paged indexes.
+        if transform_spool.is_none() {
+            graph.rebuild_indexes();
+        }
+        self.symbolic_field = graph;
+        self.symbolic_transform_spool = transform_spool;
     }
 
     #[cfg(test)]
@@ -1254,6 +1561,7 @@ impl IdgWorkspace {
             PersistCrossFileEdges::Resident(PersistSlice::Borrowed(&self.cross_file.edges)),
             PersistSlice::Borrowed(&self.field_flow),
             PersistSymbolic::Borrowed(&self.symbolic_field),
+            self.query_accelerator.clone(),
         )
     }
 
@@ -1270,6 +1578,7 @@ impl IdgWorkspace {
         let Self {
             mut segments,
             query_sidecar,
+            query_accelerator,
             segment_spool,
             resident_segments,
             cross_file_spool,
@@ -1309,6 +1618,7 @@ impl IdgWorkspace {
             persist_cross_file,
             PersistSlice::Owned(std::sync::Arc::new(field_flow)),
             persist_symbolic,
+            query_accelerator,
         );
         result
     }
@@ -1382,6 +1692,7 @@ impl IdgWorkspace {
         let mut ws = Self {
             segments: Vec::with_capacity(metadata.segment_count as usize),
             query_sidecar: None,
+            query_accelerator: None,
             segment_spool: None,
             resident_segments: Vec::new(),
             cross_file_spool: None,
@@ -1583,7 +1894,8 @@ impl IdgWorkspace {
             .saturating_add(u64::from(metadata.cross_file_chunk_count))
             .saturating_add(u64::from(metadata.field_flow_chunk_count))
             .saturating_add(1)
-            .saturating_add(u64::from(metadata.symbolic_transform_chunk_count));
+            .saturating_add(u64::from(metadata.symbolic_transform_chunk_count))
+            .saturating_add(query_accelerator_entry_count(metadata.query_accelerator.as_ref()));
         if reader.len() as u64 != expected_entries
             || (0..expected_entries).any(|key| !reader.contains_key(key))
         {
@@ -1607,21 +1919,21 @@ impl IdgWorkspace {
         }
         let symbolic_field = SymbolicFieldGraph::from_header_parts(strings, bases);
 
-        let mut sidecar = IdgQuerySidecar::open(path, pipeline_hash, metadata)?;
-        let mut by_func = AHashMap::new();
-        let mut intra_edge_count = 0_u64;
-        for index in 0..metadata.segment_count {
-            let id = SegmentId(index);
-            let Some(segment) = sidecar.segment(id)? else {
-                return Ok(None);
-            };
-            intra_edge_count = intra_edge_count.saturating_add(segment.edges.len() as u64);
-            for &func in &segment.funcs {
-                by_func.insert(func, id);
-            }
+        if metadata
+            .func_segments
+            .windows(2)
+            .any(|pair| pair[0].0 >= pair[1].0)
+            || metadata
+                .func_segments
+                .iter()
+                .any(|(_, segment)| *segment >= metadata.segment_count)
+        {
+            return Ok(None);
         }
-        sidecar.segment_cache.clear();
-        sidecar.intra_edge_count = intra_edge_count;
+        let mut by_func = AHashMap::with_capacity(metadata.func_segments.len());
+        for &(func, segment) in &metadata.func_segments {
+            by_func.insert(func, SegmentId(segment));
+        }
 
         let mut field_flow = Vec::with_capacity(metadata.field_flow_count.min(usize::MAX as u64) as usize);
         let field_base = first_field_flow_chunk_key(metadata.segment_count, metadata.cross_file_chunk_count);
@@ -1637,11 +1949,16 @@ impl IdgWorkspace {
             return Ok(None);
         }
 
+        let intra_edge_count = metadata.intra_edge_count;
+        let symbolic_transform_count = metadata.symbolic_transform_count;
+        let mut sidecar = IdgQuerySidecar::open(path, pipeline_hash, metadata)?;
+        sidecar.intra_edge_count = intra_edge_count;
         let mut cross_file = CrossFileEdges::new();
         cross_file.release_indexes();
         let workspace = Self {
             segments: Vec::new(),
             query_sidecar: Some(Arc::new(sidecar)),
+            query_accelerator: None,
             segment_spool: None,
             resident_segments: Vec::new(),
             cross_file_spool: None,
@@ -1659,7 +1976,7 @@ impl IdgWorkspace {
             workspace.func_count(),
             workspace.intra_edge_count(),
             workspace.cross_file_edge_count(),
-            metadata.symbolic_transform_count
+            symbolic_transform_count
         );
         Ok(Some(workspace))
     }
@@ -1711,9 +2028,9 @@ impl IdgWorkspace {
     /// without hydrating the complete graph. This checks the factstore header,
     /// section/index bounds, metadata schema, and the complete expected key
     /// layout. Query consumers open the sidecar through
-    /// [`crate::IdgQueryService::load_from_disk`], which scans each segment
-    /// once for the compact function directory and pages exact relation
-    /// payloads on demand.
+    /// [`crate::IdgQueryService::load_from_disk`], which opens the compact
+    /// function directory from metadata and pages exact relation payloads on
+    /// demand.
     pub fn validate_sidecar_layout_with_pipeline(
         path: &std::path::Path,
         pipeline_hash: u64,
@@ -1744,7 +2061,8 @@ impl IdgWorkspace {
             .saturating_add(u64::from(metadata.cross_file_chunk_count))
             .saturating_add(u64::from(metadata.field_flow_chunk_count))
             .saturating_add(1)
-            .saturating_add(u64::from(metadata.symbolic_transform_chunk_count));
+            .saturating_add(u64::from(metadata.symbolic_transform_chunk_count))
+            .saturating_add(query_accelerator_entry_count(metadata.query_accelerator.as_ref()));
         if reader.len() as u64 != expected_entries
             || (0..expected_entries).any(|key| !reader.contains_key(key))
         {
@@ -1754,6 +2072,29 @@ impl IdgWorkspace {
             )));
         }
         Ok(metadata.segment_count as usize)
+    }
+
+    /// Validate that semantic prewarm produced both the canonical graph and
+    /// its independently decodable query representation. A normal on-demand
+    /// build may intentionally persist only the graph; `index --semantic`
+    /// must not mistake that colder artifact for a completed prewarm.
+    pub fn validate_accelerated_sidecar_layout_with_pipeline(
+        path: &std::path::Path,
+        pipeline_hash: u64,
+    ) -> crate::IdgResult<usize> {
+        let segment_count = Self::validate_sidecar_layout_with_pipeline(path, pipeline_hash)?;
+        let reader = bonsai_factstore::FactStoreReader::open(path, IDG_WORKSPACE_TABLE_ID, pipeline_hash)?;
+        let metadata_hit = reader
+            .get(0)?
+            .ok_or_else(|| invalid_sidecar_payload("workspace IDG sidecar is missing metadata"))?;
+        let metadata: IdgWorkspaceMetadataOwned =
+            wire::decode(&metadata_hit.payload).map_err(invalid_sidecar_payload)?;
+        if metadata.query_accelerator.is_none() {
+            return Err(invalid_sidecar_payload(
+                "workspace IDG sidecar has no semantic query accelerator",
+            ));
+        }
+        Ok(segment_count)
     }
 }
 
@@ -1847,6 +2188,48 @@ impl PersistSegments<'_> {
             Self::Spool(spool) => spool.len(),
         }
     }
+
+    fn query_directory(&self) -> crate::IdgResult<(Vec<(u32, u32)>, u64)> {
+        let mut funcs = Vec::new();
+        let mut intra_edge_count = 0_u64;
+        match self {
+            Self::Borrowed(segments) => {
+                for (segment_index, segment) in segments.iter().enumerate() {
+                    let segment_index = u32::try_from(segment_index).expect("IDG segment count exceeds u32");
+                    funcs.extend(segment.funcs.iter().copied().map(|func| (func, segment_index)));
+                    intra_edge_count = intra_edge_count.saturating_add(segment.edges.len() as u64);
+                }
+            }
+            Self::Owned(segments) => {
+                for (segment_index, segment) in segments.iter().enumerate() {
+                    let segment_index = u32::try_from(segment_index).expect("IDG segment count exceeds u32");
+                    funcs.extend(segment.funcs.iter().copied().map(|func| (func, segment_index)));
+                    intra_edge_count = intra_edge_count.saturating_add(segment.edges.len() as u64);
+                }
+            }
+            Self::Spool(spool) => {
+                for (segment_index, entry) in spool.entries.iter().enumerate() {
+                    let entry = entry.as_ref().ok_or_else(|| {
+                        crate::IdgError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("missing spooled IDG segment {segment_index}"),
+                        ))
+                    })?;
+                    let segment_index = u32::try_from(segment_index).expect("IDG segment count exceeds u32");
+                    funcs.extend(entry.funcs.iter().copied().map(|func| (func, segment_index)));
+                    intra_edge_count = intra_edge_count.saturating_add(entry.edge_count as u64);
+                }
+            }
+        }
+        funcs.sort_unstable();
+        if funcs.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "IDG query directory contains a duplicate function identity",
+            )));
+        }
+        Ok((funcs, intra_edge_count))
+    }
 }
 
 fn encode_sidecar_value<T: serde::Serialize + ?Sized>(value: &T) -> crate::IdgResult<Vec<u8>> {
@@ -1901,12 +2284,14 @@ fn save_workspace_parts(
     cross_file_edges: PersistCrossFileEdges<'_>,
     field_flow: PersistSlice<'_, FieldFlowLink>,
     symbolic_field: PersistSymbolic<'_>,
+    query_accelerator: Option<Arc<CompiledQueryAccelerator>>,
 ) -> crate::IdgResult<()> {
     use bonsai_factstore::FactStoreWriter;
     use rayon::prelude::*;
 
     let persistence_started = std::time::Instant::now();
     let segment_count = segments.len();
+    let (func_segments, intra_edge_count) = segments.query_directory()?;
     let cross_file_edge_count = cross_file_edges.len();
     let cross_file_chunk_count = cross_file_edges.chunk_count();
     let field_flow_chunk_count = chunk_count(field_flow.as_slice().len(), IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN);
@@ -1930,9 +2315,32 @@ fn save_workspace_parts(
         "persist writer-ready: {:.3}s segments={segment_count}",
         persistence_started.elapsed().as_secs_f64()
     );
+    let query_accelerator_layout =
+        query_accelerator
+            .as_ref()
+            .map(|artifact| PersistedQueryAcceleratorLayout {
+                version: IDG_QUERY_ACCELERATOR_CONTAINER_VERSION,
+                core_bytes: artifact.core.bytes,
+                core_chunks: query_blob_chunk_count(artifact.core.bytes),
+                contextual_bytes: artifact.contextual.bytes,
+                contextual_chunks: query_blob_chunk_count(artifact.contextual.bytes),
+                symbolic_header_bytes: artifact.symbolic_header.bytes,
+                symbolic_header_chunks: query_blob_chunk_count(artifact.symbolic_header.bytes),
+                blobs: artifact
+                    .blobs
+                    .iter()
+                    .map(|blob| PersistedQueryAcceleratorBlobLayout {
+                        kind: blob.kind,
+                        bytes: blob.bytes,
+                        chunks: query_blob_chunk_count(blob.bytes),
+                    })
+                    .collect(),
+            });
     let metadata = IdgWorkspaceMetadata {
         version: IDG_WORKSPACE_VERSION,
         segment_count: segment_count as u32,
+        func_segments,
+        intra_edge_count,
         cross_file_edge_count: cross_file_edge_count as u64,
         cross_file_chunk_count: cross_file_chunk_count as u32,
         field_flow_count: field_flow.as_slice().len() as u64,
@@ -1941,6 +2349,7 @@ fn save_workspace_parts(
         symbolic_base_count: symbolic.bases().len() as u64,
         symbolic_transform_count: symbolic_transform_count as u64,
         symbolic_transform_chunk_count: symbolic_transform_chunk_count as u32,
+        query_accelerator: query_accelerator_layout,
     };
     writer.add_owned(0, IDG_WORKSPACE_VERSION as u64, encode_sidecar_value(&metadata)?)?;
 
@@ -2084,6 +2493,45 @@ fn save_workspace_parts(
             spool.write_chunks(&writer, transform_base)?;
         }
     }
+    if let Some(artifact) = query_accelerator {
+        let first = query_accelerator_key(
+            metadata.segment_count,
+            metadata.cross_file_chunk_count,
+            metadata.field_flow_chunk_count,
+            metadata.symbolic_transform_chunk_count,
+        );
+        let mut key = first;
+        for frame in [&artifact.core, &artifact.contextual, &artifact.symbolic_header] {
+            let chunks = query_blob_chunk_count(frame.bytes);
+            for chunk in 0..chunks {
+                let file = Arc::clone(&frame.file);
+                let offset = u64::from(chunk).saturating_mul(IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES);
+                let length = frame
+                    .bytes
+                    .saturating_sub(offset)
+                    .min(IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES);
+                writer.add_streamed(key, IDG_WORKSPACE_VERSION as u64, move |out| {
+                    stream_file_range(file.as_ref(), offset, length, out)
+                })?;
+                key = key.saturating_add(1);
+            }
+        }
+        for blob in artifact.blobs.iter() {
+            let chunks = query_blob_chunk_count(blob.bytes);
+            for chunk in 0..chunks {
+                let file = Arc::clone(&blob.file);
+                let offset = u64::from(chunk).saturating_mul(IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES);
+                let length = blob
+                    .bytes
+                    .saturating_sub(offset)
+                    .min(IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES);
+                writer.add_streamed(key, IDG_WORKSPACE_VERSION as u64, move |out| {
+                    stream_file_range(file.as_ref(), offset, length, out)
+                })?;
+                key = key.saturating_add(1);
+            }
+        }
+    }
     bonsai_diagnostics::debug_log!(
         "idg-build",
         "persist symbolic-transforms: {:.3}s transforms={symbolic_transform_count} chunks={symbolic_transform_chunk_count}",
@@ -2106,6 +2554,11 @@ fn save_workspace_parts(
 struct IdgWorkspaceMetadata {
     version: u32,
     segment_count: u32,
+    /// Independently decodable stable `FuncId -> SegmentId` linkage header.
+    /// Warm queries must not inflate every segment merely to rediscover this
+    /// compiler directory.
+    func_segments: Vec<(u32, u32)>,
+    intra_edge_count: u64,
     cross_file_edge_count: u64,
     cross_file_chunk_count: u32,
     field_flow_count: u64,
@@ -2114,13 +2567,16 @@ struct IdgWorkspaceMetadata {
     symbolic_base_count: u64,
     symbolic_transform_count: u64,
     symbolic_transform_chunk_count: u32,
+    query_accelerator: Option<PersistedQueryAcceleratorLayout>,
 }
 
 /// Owned mirror of [`IdgWorkspaceMetadata`] used by the load path.
-#[derive(Copy, Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 struct IdgWorkspaceMetadataOwned {
     version: u32,
     segment_count: u32,
+    func_segments: Vec<(u32, u32)>,
+    intra_edge_count: u64,
     cross_file_edge_count: u64,
     cross_file_chunk_count: u32,
     field_flow_count: u64,
@@ -2129,12 +2585,13 @@ struct IdgWorkspaceMetadataOwned {
     symbolic_base_count: u64,
     symbolic_transform_count: u64,
     symbolic_transform_chunk_count: u32,
+    query_accelerator: Option<PersistedQueryAcceleratorLayout>,
 }
 
 struct IdgQuerySidecar {
     metadata: IdgWorkspaceMetadataOwned,
     segment_cache: bonsai_factstore::FactCache<IdgSegment>,
-    relation_reader: bonsai_factstore::FactStoreReader,
+    relation_reader: Arc<bonsai_factstore::FactStoreReader>,
     intra_edge_count: u64,
 }
 
@@ -2169,7 +2626,7 @@ impl IdgQuerySidecar {
         Ok(Self {
             metadata,
             segment_cache: bonsai_factstore::FactCache::new(segment_reader, Self::segment_cache_capacity()),
-            relation_reader,
+            relation_reader: Arc::new(relation_reader),
             intra_edge_count: 0,
         })
     }
@@ -2194,6 +2651,10 @@ impl IdgQuerySidecar {
                 Ok(Some(segment))
             }
         }
+    }
+
+    fn query_accelerator_parts(&self) -> crate::IdgResult<Option<PersistedQueryAcceleratorParts>> {
+        read_query_accelerator_parts(Arc::clone(&self.relation_reader), &self.metadata)
     }
 
     fn visit_cross_file_edges<F>(&self, mut visit: F) -> crate::IdgResult<()>
@@ -2307,7 +2768,14 @@ const IDG_WORKSPACE_TABLE_ID: u32 = 101;
 /// [`IdgSegment`], renamed enum variant in [`crate::place::Place`]) or
 /// source-to-call edge semantic change that can leave old facts
 /// structurally decodable but security-significant.
-const IDG_WORKSPACE_VERSION: u32 = 13;
+// v21 keeps contextual CSR directories in a compact header while paging all
+// fixed-width adjacency rows. Reverse call, return, and heap relations remain
+// distinct so compiler demand preserves boundary direction; sparse call-return
+// spans stay body projections and unified node directories use bounded
+// counting partitions so the resident compiler core remains proportional.
+const IDG_WORKSPACE_VERSION: u32 = 22;
+const IDG_QUERY_ACCELERATOR_CONTAINER_VERSION: u32 = 1;
+const IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES: u64 = 256 * 1024 * 1024;
 
 #[cfg(not(test))]
 const IDG_WORKSPACE_EDGE_CHUNK_LEN: usize = 100_000;
@@ -2343,6 +2811,47 @@ fn chunk_count(len: usize, chunk_len: usize) -> usize {
     }
 }
 
+fn query_blob_chunk_count(bytes: u64) -> u32 {
+    if bytes == 0 {
+        0
+    } else {
+        u32::try_from(bytes.div_ceil(IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES))
+            .expect("query accelerator blob chunk count exceeds u32")
+    }
+}
+
+fn query_accelerator_entry_count(layout: Option<&PersistedQueryAcceleratorLayout>) -> u64 {
+    layout.map_or(0, |layout| {
+        u64::from(layout.core_chunks)
+            .saturating_add(u64::from(layout.contextual_chunks))
+            .saturating_add(u64::from(layout.symbolic_header_chunks))
+            .saturating_add(
+                layout
+                    .blobs
+                    .iter()
+                    .map(|blob| u64::from(blob.chunks))
+                    .sum::<u64>(),
+            )
+    })
+}
+
+fn stream_file_range(
+    file: &File,
+    mut offset: u64,
+    mut bytes: u64,
+    output: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    while bytes > 0 {
+        let take = usize::try_from(bytes.min(buffer.len() as u64)).expect("blob page fits usize");
+        crate::positioned_io::read_exact_at(file, offset, &mut buffer[..take])?;
+        output.write_all(&buffer[..take])?;
+        offset = offset.saturating_add(take as u64);
+        bytes -= take as u64;
+    }
+    Ok(())
+}
+
 fn first_cross_file_chunk_key(segment_count: u32) -> u64 {
     1 + u64::from(segment_count)
 }
@@ -2359,14 +2868,149 @@ fn symbolic_field_header_key(
     first_field_flow_chunk_key(segment_count, cross_file_chunk_count) + u64::from(field_flow_chunk_count)
 }
 
-/// Conventional sidecar path under `<workspace>/.bonsai/`.
+fn query_accelerator_key(
+    segment_count: u32,
+    cross_file_chunk_count: u32,
+    field_flow_chunk_count: u32,
+    symbolic_transform_chunk_count: u32,
+) -> u64 {
+    symbolic_field_header_key(segment_count, cross_file_chunk_count, field_flow_chunk_count)
+        + 1
+        + u64::from(symbolic_transform_chunk_count)
+}
+
+fn query_accelerator_key_from_metadata(metadata: &IdgWorkspaceMetadataOwned) -> u64 {
+    query_accelerator_key(
+        metadata.segment_count,
+        metadata.cross_file_chunk_count,
+        metadata.field_flow_chunk_count,
+        metadata.symbolic_transform_chunk_count,
+    )
+}
+
+fn read_query_accelerator_parts(
+    reader: Arc<bonsai_factstore::FactStoreReader>,
+    metadata: &IdgWorkspaceMetadataOwned,
+) -> crate::IdgResult<Option<PersistedQueryAcceleratorParts>> {
+    let Some(layout) = metadata.query_accelerator.as_ref() else {
+        return Ok(None);
+    };
+    if layout.version != IDG_QUERY_ACCELERATOR_CONTAINER_VERSION {
+        return Err(invalid_sidecar_payload(
+            "workspace IDG query accelerator container version mismatch",
+        ));
+    }
+    if query_blob_chunk_count(layout.core_bytes) != layout.core_chunks
+        || query_blob_chunk_count(layout.contextual_bytes) != layout.contextual_chunks
+        || query_blob_chunk_count(layout.symbolic_header_bytes) != layout.symbolic_header_chunks
+    {
+        return Err(invalid_sidecar_payload(
+            "workspace IDG query accelerator frame layout mismatch",
+        ));
+    }
+    let mut key = query_accelerator_key_from_metadata(metadata);
+    validate_query_blob_entries(
+        reader.as_ref(),
+        key,
+        layout.core_bytes,
+        layout.core_chunks,
+        "query-accelerator-core",
+    )?;
+    validate_query_blob_entries(
+        reader.as_ref(),
+        key.saturating_add(u64::from(layout.core_chunks)),
+        layout.contextual_bytes,
+        layout.contextual_chunks,
+        "query-accelerator-contextual",
+    )?;
+    validate_query_blob_entries(
+        reader.as_ref(),
+        key.saturating_add(u64::from(layout.core_chunks))
+            .saturating_add(u64::from(layout.contextual_chunks)),
+        layout.symbolic_header_bytes,
+        layout.symbolic_header_chunks,
+        "query-accelerator-symbolic-header",
+    )?;
+    let mut frame = |bytes: u64, chunks: u32| {
+        let out = QueryAcceleratorBlobReader {
+            reader: Arc::clone(&reader),
+            first_key: key,
+            bytes,
+            chunks,
+            cache: Arc::new(parking_lot::Mutex::new(QueryBlobPageCache::default())),
+        };
+        key = key.saturating_add(u64::from(chunks));
+        out
+    };
+    let core = frame(layout.core_bytes, layout.core_chunks);
+    let contextual = frame(layout.contextual_bytes, layout.contextual_chunks);
+    let symbolic_header = frame(layout.symbolic_header_bytes, layout.symbolic_header_chunks);
+    let mut blobs = AHashMap::with_capacity(layout.blobs.len());
+    for blob in &layout.blobs {
+        if query_blob_chunk_count(blob.bytes) != blob.chunks || blobs.contains_key(&blob.kind) {
+            return Err(invalid_sidecar_payload(
+                "workspace IDG query accelerator blob layout mismatch",
+            ));
+        }
+        validate_query_blob_entries(
+            reader.as_ref(),
+            key,
+            blob.bytes,
+            blob.chunks,
+            "query-accelerator-blob",
+        )?;
+        blobs.insert(
+            blob.kind,
+            QueryAcceleratorBlobReader {
+                reader: Arc::clone(&reader),
+                first_key: key,
+                bytes: blob.bytes,
+                chunks: blob.chunks,
+                cache: Arc::new(parking_lot::Mutex::new(QueryBlobPageCache::default())),
+            },
+        );
+        key = key.saturating_add(u64::from(blob.chunks));
+    }
+    Ok(Some(PersistedQueryAcceleratorParts {
+        core,
+        contextual,
+        symbolic_header,
+        blobs,
+    }))
+}
+
+fn validate_query_blob_entries(
+    reader: &bonsai_factstore::FactStoreReader,
+    first_key: u64,
+    bytes: u64,
+    chunks: u32,
+    kind: &'static str,
+) -> crate::IdgResult<()> {
+    for chunk in 0..chunks {
+        let offset = u64::from(chunk).saturating_mul(IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES);
+        let expected = bytes
+            .saturating_sub(offset)
+            .min(IDG_QUERY_ACCELERATOR_BLOB_CHUNK_BYTES);
+        let Some((body_hash, actual)) = reader.entry_metadata(first_key + u64::from(chunk))? else {
+            return Err(missing_sidecar_entry(kind, chunk));
+        };
+        if body_hash != IDG_WORKSPACE_VERSION as u64 || u64::from(actual) != expected {
+            return Err(invalid_sidecar_payload(format!(
+                "workspace IDG {kind} chunk mismatch: chunk={chunk} bytes={actual} expected={expected} body_hash={body_hash} expected_body_hash={IDG_WORKSPACE_VERSION}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Conventional sidecar path in the workspace's external OS cache.
 #[must_use]
 pub fn idg_sidecar_path(workspace_root: &std::path::Path) -> std::path::PathBuf {
     bonsai_common::workspace_bonsai_dir(workspace_root)
         .join(format!("idg.v{IDG_WORKSPACE_VERSION}.factstore"))
 }
 
-/// Rulepack-transfer-specific sidecar path under `<workspace>/.bonsai/`.
+/// Rulepack-transfer-specific sidecar path in the external workspace cache.
 ///
 /// Transfer options alter IDG edges, so security analysis cannot reuse
 /// the default source-structure sidecar. The caller supplies a stable

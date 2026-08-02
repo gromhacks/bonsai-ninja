@@ -50,7 +50,7 @@ use crate::segment::IdgSegment;
 use crate::symbolic::{SymbolicFieldTransform, SymbolicFieldTransformKind, NO_SYMBOLIC_STRING};
 use crate::transfer::{
     receiver_name_matches, receiver_tokens_equal, CallSiteRef, DescendantCopy, FlowControlFacts,
-    ReturnFieldProjection, TransferOutput,
+    ReturnFieldProjection, TransferOutput, YieldResultRef,
 };
 use crate::workspace::{
     CrossFileEdge, IdgWorkspace, SegmentId, SymbolicFieldCompilerStorage, WireChunkSpool,
@@ -77,6 +77,7 @@ struct CalleeEndpointInput {
     return_field_projections: Vec<ReturnFieldProjection>,
     return_passthrough_param_indices: Vec<usize>,
     return_node: Option<NodeId>,
+    yield_node: Option<NodeId>,
 }
 
 #[derive(Debug)]
@@ -94,6 +95,7 @@ struct CalleeEndpoints {
     return_field_projections_end: u32,
     return_passthrough_param_indices_end: u32,
     return_node: NodeId,
+    yield_node: NodeId,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -172,6 +174,10 @@ impl<'a> CalleeEndpointView<'a> {
 
     fn return_node(self) -> Option<NodeId> {
         (!self.row.return_node.is_sentinel()).then_some(self.row.return_node)
+    }
+
+    fn yield_node(self) -> Option<NodeId> {
+        (!self.row.yield_node.is_sentinel()).then_some(self.row.yield_node)
     }
 
     fn params(self) -> &'a [NodeId] {
@@ -349,6 +355,7 @@ impl CalleeEndpointIndex {
             return_field_projections,
             return_passthrough_param_indices,
             return_node,
+            yield_node,
         } = endpoints;
         let params_end = Self::append_end(&mut self.params, params);
         let param_names_end = Self::pack_strings(&mut self.strings, &mut self.param_names, param_names);
@@ -407,6 +414,7 @@ impl CalleeEndpointIndex {
             return_field_projections_end,
             return_passthrough_param_indices_end,
             return_node: return_node.unwrap_or(NodeId::SENTINEL),
+            yield_node: yield_node.unwrap_or(NodeId::SENTINEL),
         });
         self.row_by_func[func_index] = row;
     }
@@ -451,6 +459,7 @@ impl CalleeEndpointIndex {
 struct FunctionStitchData {
     params: Vec<String>,
     call_sites: Vec<CallSiteRef>,
+    yield_results: Vec<YieldResultRef>,
     param_count: usize,
     is_constructor: bool,
     has_return_event: bool,
@@ -477,6 +486,7 @@ fn take_function_stitch_data(out: TransferOutput) -> (FuncId, FunctionStitchData
         descendant_copies,
         flow_control,
         call_sites,
+        yield_results,
         is_constructor,
         has_return_event,
         ..
@@ -487,6 +497,7 @@ fn take_function_stitch_data(out: TransferOutput) -> (FuncId, FunctionStitchData
         FunctionStitchData {
             params,
             call_sites,
+            yield_results,
             param_count,
             is_constructor,
             has_return_event,
@@ -527,17 +538,43 @@ struct FieldArgStitch {
     allow_out_of_order_source: bool,
 }
 
-const STORAGE_SEGMENTS_CACHE_CAP: usize = 131_072;
+const MAX_STORAGE_NORMALIZATION_CACHE_ENTRIES: usize = 131_072;
+const MIN_STORAGE_NORMALIZATION_CACHE_ENTRIES: usize = 4_096;
+// One logical path owns a hash key plus either a normalized string or an Arc
+// slice whose elements own separate strings. Include allocator/hash control
+// overhead as well as the visible payload; treating this as a 512-byte scalar
+// record made the two recomputable memos retain ~180 MiB on Elasticsearch.
+const ESTIMATED_STORAGE_NORMALIZATION_ENTRY_BYTES: u64 = 2 * 1024;
 static STORAGE_SEGMENTS_CACHE: LazyLock<parking_lot::RwLock<AHashMap<String, Arc<[String]>>>> =
     LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
 static NORMALIZED_STORAGE_CACHE: LazyLock<parking_lot::RwLock<AHashMap<String, Arc<str>>>> =
     LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
 
+fn storage_normalization_cache_capacity() -> usize {
+    storage_normalization_cache_capacity_for_limit(bonsai_common::effective_memory_limit_bytes())
+}
+
+fn storage_normalization_cache_capacity_for_limit(limit: Option<u64>) -> usize {
+    // This is a recomputable build-phase memo. Give the two normalization
+    // caches a small fraction of detected memory so compiler dictionaries,
+    // edge spools, and query accelerators remain the dominant residents.
+    // Capacity affects cache hits only; every storage path is normalized with
+    // the same AST-derived algorithm after eviction.
+    let cache_bytes = limit.map(|limit| limit / 128).unwrap_or(
+        MAX_STORAGE_NORMALIZATION_CACHE_ENTRIES as u64 * ESTIMATED_STORAGE_NORMALIZATION_ENTRY_BYTES,
+    );
+    usize::try_from(cache_bytes / ESTIMATED_STORAGE_NORMALIZATION_ENTRY_BYTES)
+        .unwrap_or(MAX_STORAGE_NORMALIZATION_CACHE_ENTRIES)
+        .clamp(
+            MIN_STORAGE_NORMALIZATION_CACHE_ENTRIES,
+            MAX_STORAGE_NORMALIZATION_CACHE_ENTRIES,
+        )
+}
+
 #[derive(Default, Debug)]
 struct FieldArgSiteQueue {
-    sites: Vec<Arc<FieldArgStitch>>,
+    sites: Vec<FieldArgStitch>,
     deferred: Vec<Arc<FieldArgStitch>>,
-    seen: AHashSet<Arc<FieldArgStitch>>,
     current_caller: Option<FuncId>,
     accepted: usize,
 }
@@ -552,26 +589,27 @@ impl FieldArgSiteQueue {
         if normalize_storage_base_cached(&site.actual_arg).is_empty() {
             return;
         }
-        reset_site_dedup_for_caller(site.caller, &mut self.current_caller, &mut self.seen);
-        let site = Arc::new(site);
-        if self.seen.insert(Arc::clone(&site)) {
-            self.sites.push(site);
-            self.accepted = self.accepted.saturating_add(1);
-        }
+        begin_site_caller(
+            site.caller,
+            &mut self.current_caller,
+            &mut self.sites,
+            &mut self.deferred,
+            &mut self.accepted,
+        );
+        self.sites.push(site);
     }
 
-    fn take_current_sites(&mut self) -> Vec<Arc<FieldArgStitch>> {
-        self.seen.clear();
+    fn take_current_sites(&mut self) -> Vec<FieldArgStitch> {
         self.current_caller = None;
-        std::mem::take(&mut self.sites)
+        take_unique_site_batch(&mut self.sites, &mut self.accepted)
     }
 
-    fn defer(&mut self, site: Arc<FieldArgStitch>) {
-        self.deferred.push(site);
+    fn defer(&mut self, site: FieldArgStitch) {
+        self.deferred.push(Arc::new(site));
     }
 
     fn into_sites(mut self) -> Vec<Arc<FieldArgStitch>> {
-        self.deferred.append(&mut self.sites);
+        seal_site_batch(&mut self.sites, &mut self.deferred, &mut self.accepted);
         self.deferred
     }
 
@@ -582,18 +620,16 @@ impl FieldArgSiteQueue {
 
 #[derive(Default, Debug)]
 struct ReturnFieldSiteQueue {
-    sites: Vec<Arc<ReturnFieldStitch>>,
+    sites: Vec<ReturnFieldStitch>,
     deferred: Vec<Arc<ReturnFieldStitch>>,
-    seen: AHashSet<Arc<ReturnFieldStitch>>,
     current_caller: Option<FuncId>,
     accepted: usize,
 }
 
 #[derive(Default, Debug)]
 struct ScalarReturnSiteQueue {
-    sites: Vec<Arc<ScalarReturnStitch>>,
+    sites: Vec<ScalarReturnStitch>,
     deferred: Vec<Arc<ScalarReturnStitch>>,
-    seen: AHashSet<Arc<ScalarReturnStitch>>,
     current_caller: Option<FuncId>,
     accepted: usize,
 }
@@ -608,26 +644,27 @@ impl ScalarReturnSiteQueue {
         if normalize_storage_base_cached(&site.source_base).is_empty() {
             return;
         }
-        reset_site_dedup_for_caller(site.caller, &mut self.current_caller, &mut self.seen);
-        let site = Arc::new(site);
-        if self.seen.insert(Arc::clone(&site)) {
-            self.sites.push(site);
-            self.accepted = self.accepted.saturating_add(1);
-        }
+        begin_site_caller(
+            site.caller,
+            &mut self.current_caller,
+            &mut self.sites,
+            &mut self.deferred,
+            &mut self.accepted,
+        );
+        self.sites.push(site);
     }
 
-    fn take_current_sites(&mut self) -> Vec<Arc<ScalarReturnStitch>> {
-        self.seen.clear();
+    fn take_current_sites(&mut self) -> Vec<ScalarReturnStitch> {
         self.current_caller = None;
-        std::mem::take(&mut self.sites)
+        take_unique_site_batch(&mut self.sites, &mut self.accepted)
     }
 
-    fn defer(&mut self, site: Arc<ScalarReturnStitch>) {
-        self.deferred.push(site);
+    fn defer(&mut self, site: ScalarReturnStitch) {
+        self.deferred.push(Arc::new(site));
     }
 
     fn into_sites(mut self) -> Vec<Arc<ScalarReturnStitch>> {
-        self.deferred.append(&mut self.sites);
+        seal_site_batch(&mut self.sites, &mut self.deferred, &mut self.accepted);
         self.deferred
     }
 
@@ -644,26 +681,27 @@ impl ReturnFieldSiteQueue {
         if normalize_storage_base_cached(&site.source_base).is_empty() {
             return;
         }
-        reset_site_dedup_for_caller(site.caller, &mut self.current_caller, &mut self.seen);
-        let site = Arc::new(site);
-        if self.seen.insert(Arc::clone(&site)) {
-            self.sites.push(site);
-            self.accepted = self.accepted.saturating_add(1);
-        }
+        begin_site_caller(
+            site.caller,
+            &mut self.current_caller,
+            &mut self.sites,
+            &mut self.deferred,
+            &mut self.accepted,
+        );
+        self.sites.push(site);
     }
 
-    fn take_current_sites(&mut self) -> Vec<Arc<ReturnFieldStitch>> {
-        self.seen.clear();
+    fn take_current_sites(&mut self) -> Vec<ReturnFieldStitch> {
         self.current_caller = None;
-        std::mem::take(&mut self.sites)
+        take_unique_site_batch(&mut self.sites, &mut self.accepted)
     }
 
-    fn defer(&mut self, site: Arc<ReturnFieldStitch>) {
-        self.deferred.push(site);
+    fn defer(&mut self, site: ReturnFieldStitch) {
+        self.deferred.push(Arc::new(site));
     }
 
     fn into_sites(mut self) -> Vec<Arc<ReturnFieldStitch>> {
-        self.deferred.append(&mut self.sites);
+        seal_site_batch(&mut self.sites, &mut self.deferred, &mut self.accepted);
         self.deferred
     }
 
@@ -674,9 +712,8 @@ impl ReturnFieldSiteQueue {
 
 #[derive(Default, Debug)]
 struct ConstructorReturnSiteQueue {
-    sites: Vec<Arc<ConstructorReturnStitch>>,
+    sites: Vec<ConstructorReturnStitch>,
     deferred: Vec<Arc<ConstructorReturnStitch>>,
-    seen: AHashSet<Arc<ConstructorReturnStitch>>,
     current_caller: Option<FuncId>,
     accepted: usize,
 }
@@ -691,26 +728,27 @@ impl ConstructorReturnSiteQueue {
         if normalize_storage_base_cached(&site.receiver_param_name).is_empty() {
             return;
         }
-        reset_site_dedup_for_caller(site.caller, &mut self.current_caller, &mut self.seen);
-        let site = Arc::new(site);
-        if self.seen.insert(Arc::clone(&site)) {
-            self.sites.push(site);
-            self.accepted = self.accepted.saturating_add(1);
-        }
+        begin_site_caller(
+            site.caller,
+            &mut self.current_caller,
+            &mut self.sites,
+            &mut self.deferred,
+            &mut self.accepted,
+        );
+        self.sites.push(site);
     }
 
-    fn take_current_sites(&mut self) -> Vec<Arc<ConstructorReturnStitch>> {
-        self.seen.clear();
+    fn take_current_sites(&mut self) -> Vec<ConstructorReturnStitch> {
         self.current_caller = None;
-        std::mem::take(&mut self.sites)
+        take_unique_site_batch(&mut self.sites, &mut self.accepted)
     }
 
-    fn defer(&mut self, site: Arc<ConstructorReturnStitch>) {
-        self.deferred.push(site);
+    fn defer(&mut self, site: ConstructorReturnStitch) {
+        self.deferred.push(Arc::new(site));
     }
 
     fn into_sites(mut self) -> Vec<Arc<ConstructorReturnStitch>> {
-        self.deferred.append(&mut self.sites);
+        seal_site_batch(&mut self.sites, &mut self.deferred, &mut self.accepted);
         self.deferred
     }
 
@@ -719,10 +757,12 @@ impl ConstructorReturnSiteQueue {
     }
 }
 
-fn reset_site_dedup_for_caller<T>(
+fn begin_site_caller<T>(
     caller: FuncId,
     current_caller: &mut Option<FuncId>,
-    seen: &mut AHashSet<Arc<T>>,
+    sites: &mut Vec<T>,
+    retained: &mut Vec<Arc<T>>,
+    accepted: &mut usize,
 ) where
     T: Eq + std::hash::Hash,
 {
@@ -733,8 +773,59 @@ fn reset_site_dedup_for_caller<T>(
         current_caller.is_none_or(|previous| previous.raw() < caller.raw()),
         "field stitch sites must be emitted in caller order"
     );
-    seen.clear();
+    seal_site_batch(sites, retained, accepted);
     *current_caller = Some(caller);
+}
+
+fn take_unique_site_batch<T>(sites: &mut Vec<T>, accepted: &mut usize) -> Vec<T>
+where
+    T: Eq + std::hash::Hash,
+{
+    let sites = dedup_site_batch(std::mem::take(sites));
+    *accepted = accepted.saturating_add(sites.len());
+    sites
+}
+
+fn seal_site_batch<T>(sites: &mut Vec<T>, retained: &mut Vec<Arc<T>>, accepted: &mut usize)
+where
+    T: Eq + std::hash::Hash,
+{
+    retained.extend(take_unique_site_batch(sites, accepted).into_iter().map(Arc::new));
+}
+
+/// Deduplicate one caller's compiler facts without cloning their strings or
+/// allocating one reference-counted object per candidate. The numeric hash
+/// table resolves collisions against the canonical vector, preserving both
+/// exact equality and adapter emission order.
+fn dedup_site_batch<T>(sites: Vec<T>) -> Vec<T>
+where
+    T: Eq + std::hash::Hash,
+{
+    if sites.len() < 2 {
+        return sites;
+    }
+    let hash_builder = ahash::RandomState::new();
+    let mut seen = hashbrown::HashTable::<u32>::with_capacity(sites.len());
+    let mut unique = Vec::with_capacity(sites.len());
+    for site in sites {
+        let hash = hash_builder.hash_one(&site);
+        if seen
+            .find(hash, |index| unique.get(*index as usize) == Some(&site))
+            .is_some()
+        {
+            continue;
+        }
+        let index = u32::try_from(unique.len()).expect("field stitch site count exceeds u32");
+        unique.push(site);
+        seen.insert_unique(hash, index, |stored| {
+            hash_builder.hash_one(
+                unique
+                    .get(*stored as usize)
+                    .expect("field stitch dedup index belongs to its canonical batch"),
+            )
+        });
+    }
+    unique
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1121,12 +1212,9 @@ impl WorkspaceStitchState {
         )
     }
 
-    fn for_spooled_persistence(
-        function_count: usize,
-        spool_path: &std::path::Path,
-    ) -> crate::IdgResult<Self> {
+    fn for_spooled_persistence(spool_path: &std::path::Path) -> crate::IdgResult<Self> {
         Ok(Self::with_symbolic_storage(
-            function_count,
+            0,
             true,
             SymbolicFieldCompilerStorage::spooled(spool_path)?,
             Some(WireChunkSpool::new(
@@ -1138,7 +1226,7 @@ impl WorkspaceStitchState {
     }
 
     fn with_symbolic_storage(
-        function_count: usize,
+        field_context_capacity: usize,
         field_copy_sites_collected_by_segment: bool,
         symbolic_field_graph: SymbolicFieldCompilerStorage,
         symbolic_field_copy_spool: Option<WireChunkSpool<FieldCopySite>>,
@@ -1156,7 +1244,13 @@ impl WorkspaceStitchState {
             pending_field_copy_sites: Vec::new(),
             symbolic_field_copy_spool,
             passthrough_field_copy_sites: Vec::new(),
-            field_contexts: AHashMap::with_capacity(function_count),
+            // A spooled build consumes and removes contexts with each file
+            // segment, so reserving for every workspace function would leave
+            // a mostly empty workspace-sized table resident throughout typed
+            // replay. Resident builds pass their full function count because
+            // they intentionally defer the same exact facts to the final
+            // compatibility phase.
+            field_contexts: AHashMap::with_capacity(field_context_capacity),
             field_copy_sites_collected_by_segment,
         }
     }
@@ -1267,13 +1361,35 @@ impl WorkspaceStitchState {
                 precision: Precision::Exact,
                 call_kind: CallEdgeKind::Direct,
             }));
+        let mut yield_cursor = 0usize;
         for site in &data.call_sites {
+            let site_key = (site.site.0.file.raw(), site.site.0.start, site.site.0.end);
+            while data.yield_results.get(yield_cursor).is_some_and(|binding| {
+                (
+                    binding.site.0.file.raw(),
+                    binding.site.0.start,
+                    binding.site.0.end,
+                ) < site_key
+            }) {
+                yield_cursor = yield_cursor.saturating_add(1);
+            }
+            let yield_start = yield_cursor;
+            while data.yield_results.get(yield_cursor).is_some_and(|binding| {
+                (
+                    binding.site.0.file.raw(),
+                    binding.site.0.start,
+                    binding.site.0.end,
+                ) == site_key
+            }) {
+                yield_cursor = yield_cursor.saturating_add(1);
+            }
             stitch_call_site(
                 CallStitchRequest {
                     caller,
                     caller_seg,
                     caller_remap,
                     site,
+                    yield_results: &data.yield_results[yield_start..yield_cursor],
                     caller_params: &data.params,
                     caller_is_constructor: data.is_constructor,
                     caller_receiver_param_index: data.receiver_param_index,
@@ -1334,6 +1450,22 @@ impl WorkspaceStitchState {
             self.collect_resident_field_copy_sites(&ws, symbolic_field_forwarding, symbolic_funcs);
         }
         self.flush_symbolic_field_copy_spool()?;
+        // Every symbolic transform is interned incrementally while its caller
+        // (or field-copy spool chunk) is active. No later phase mutates the
+        // canonical dictionaries, so release their hash-consing tables before
+        // eager compatibility forwarding opens its own field indexes.
+        self.symbolic_field_graph.release_indexes();
+        // Spooled symbolic functions were removed segment by segment. Compact
+        // the remaining incomplete-adapter contexts before opening the eager
+        // field indexes; hash-table capacity is a storage choice, not part of
+        // the compiler relation.
+        self.field_contexts.shrink_to_fit();
+        // Symbolic call-site and copy lowering was the last consumer of the
+        // call-stitch normalization memo. Release its owned strings before
+        // sealing compatibility queues so this recomputable cache cannot
+        // overlap the completed cross-file graph. The field fixed point below
+        // lazily rebuilds only the exact paths it actually visits.
+        release_storage_normalization_caches();
         self.passthrough_field_copy_sites
             .append(&mut self.pending_field_copy_sites);
         dedup_receiver_mutation_sites(&mut self.receiver_mutation_sites);
@@ -1342,23 +1474,27 @@ impl WorkspaceStitchState {
         let scalar_return_site_count = self.scalar_return_sites.len();
         let constructor_return_site_count = self.constructor_return_sites.len();
         let receiver_mutation_site_count = self.receiver_mutation_sites.len();
+        let field_arg_sites = std::mem::take(&mut self.field_arg_sites).into_sites();
+        let return_field_sites = std::mem::take(&mut self.return_field_sites).into_sites();
+        let scalar_return_sites = std::mem::take(&mut self.scalar_return_sites).into_sites();
+        let constructor_return_sites = std::mem::take(&mut self.constructor_return_sites).into_sites();
         stitch_debug_log(format_args!(
-            "stitch call-sites-wired: {:.3}s field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={} symbolic_transforms={} symbolic_bases={} deferred_field_copies={} field_contexts={}",
+            "stitch call-sites-wired: {:.3}s field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} compatibility_field_args={} compatibility_return_fields={} compatibility_scalar_returns={} compatibility_constructor_returns={} receiver_mutation_sites={} symbolic_transforms={} symbolic_bases={} deferred_field_copies={} field_contexts={}",
             self.call_started.elapsed().as_secs_f64(),
             field_arg_site_count,
             return_field_site_count,
             scalar_return_site_count,
             constructor_return_site_count,
+            field_arg_sites.len(),
+            return_field_sites.len(),
+            scalar_return_sites.len(),
+            constructor_return_sites.len(),
             receiver_mutation_site_count,
             self.symbolic_field_graph.transform_count(),
             self.symbolic_field_graph.bases().len(),
             self.passthrough_field_copy_sites.len(),
             self.field_contexts.len(),
         ));
-        let field_arg_sites = self.field_arg_sites.into_sites();
-        let return_field_sites = self.return_field_sites.into_sites();
-        let scalar_return_sites = self.scalar_return_sites.into_sites();
-        let constructor_return_sites = self.constructor_return_sites.into_sites();
         if include_field_argument_forwarding {
             stitch_field_argument_forwarding(
                 FieldForwardingSites {
@@ -1703,7 +1839,7 @@ where
     ));
 
     let stitch_started = Instant::now();
-    let mut state = WorkspaceStitchState::for_spooled_persistence(function_count, spool_path)?;
+    let mut state = WorkspaceStitchState::for_spooled_persistence(spool_path)?;
     let mut stitched_function_count = 0usize;
     let mut previous_placeholder = None;
     ws.begin_spool_generation()?;
@@ -1891,6 +2027,7 @@ fn extend_callee_endpoints_for_segment(
                     .map(|data| data.return_passthrough_param_indices.clone())
                     .unwrap_or_default(),
                 return_node,
+                yield_node,
             },
         );
     }
@@ -2222,6 +2359,7 @@ struct CallStitchRequest<'a> {
     caller_seg: SegmentId,
     caller_remap: &'a NodeRemap,
     site: &'a CallSiteRef,
+    yield_results: &'a [YieldResultRef],
     caller_params: &'a [String],
     caller_is_constructor: bool,
     caller_receiver_param_index: Option<usize>,
@@ -2248,6 +2386,7 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
         caller_seg,
         caller_remap,
         site,
+        yield_results,
         caller_params,
         caller_is_constructor,
         caller_receiver_param_index,
@@ -2424,6 +2563,7 @@ fn stitch_call_site(request: CallStitchRequest<'_>, outputs: CallStitchOutputs<'
                 caller_seg,
                 caller_remap,
                 site,
+                yield_results,
                 caller_params,
                 caller_is_constructor,
                 caller_receiver_param_index,
@@ -2473,6 +2613,7 @@ struct ResolvedCandidateStitch<'a> {
     caller_seg: SegmentId,
     caller_remap: &'a NodeRemap,
     site: &'a CallSiteRef,
+    yield_results: &'a [YieldResultRef],
     caller_params: &'a [String],
     caller_is_constructor: bool,
     caller_receiver_param_index: Option<usize>,
@@ -2857,10 +2998,32 @@ fn stitch_candidate_return_outputs(
         caller_seg,
         caller_remap,
         site,
+        yield_results,
         candidate: cand,
         endpoints,
         ..
     } = request;
+    // A call may expose both a normal return and yielded values (Ruby block
+    // calls are the canonical example). Keep the endpoints independent:
+    // only the callee's AST-lowered Yield place can populate block/generator
+    // bindings recorded at this call site.
+    if let Some(callee_yield) = endpoints.yield_node() {
+        for binding in yield_results {
+            let target = caller_remap.get(binding.target_node);
+            if target.is_sentinel() {
+                continue;
+            }
+            place_inter_edge(
+                endpoints.segment,
+                caller_seg,
+                IdgEdge::inter_yield(callee_yield, target, site.site.0, cand.precision, cand.edge_kind),
+                ws,
+            );
+            if let Some(stats) = stats.as_deref_mut() {
+                stats.inter_edges = stats.inter_edges.saturating_add(1);
+            }
+        }
+    }
     // Emit `callee.Return → caller.CallRet(site)`.
     let caller_call_ret = caller_remap.get(site.call_ret_node);
     if let Some(callee_return) = endpoints.return_node() {
@@ -4012,7 +4175,7 @@ fn stitch_field_argument_forwarding(
     ws: &mut IdgWorkspace,
     symbolic: bool,
     symbolic_funcs: Option<&AHashSet<FuncId>>,
-    mut symbolic_field_graph: SymbolicFieldCompilerStorage,
+    symbolic_field_graph: SymbolicFieldCompilerStorage,
 ) -> crate::IdgResult<()> {
     let FieldForwardingSites {
         field_args: sites,
@@ -4074,7 +4237,10 @@ fn stitch_field_argument_forwarding(
         // path.  This partition is capability-derived per function: a
         // single complete adapter must never disable field forwarding for a
         // peer adapter that cannot consume symbolic facts precisely.
-        extend_symbolic_field_graph(&mut symbolic_field_graph, &transforms, symbolic_funcs);
+        // Symbolic entries were already compiled per caller before the
+        // dictionary indexes were released at the phase boundary. The rows
+        // retained here are exactly the deferred mixed/incomplete-adapter
+        // compatibility partition and must stay on the eager path.
         transforms.retain(|source, entries| {
             entries.retain(|transform| !field_transform_is_symbolic(source, transform, symbolic_funcs));
             !entries.is_empty()
@@ -4090,15 +4256,14 @@ fn stitch_field_argument_forwarding(
         .filter(|site| !symbolic || !symbolic_pair_supported(site.func, site.func, symbolic_funcs))
         .cloned()
         .collect::<Vec<_>>();
-    let eager_requested_field_places =
-        field_place_keys_for_propagation(&transforms, sites, None, &eager_copy_sites)?;
-    let mut requested_field_places = eager_requested_field_places.clone();
-    requested_field_places.extend(field_place_keys_for_propagation(
-        &AHashMap::new(),
-        &[],
-        symbolic.then_some(&symbolic_field_graph),
-        &copy_sites,
-    )?);
+    // Complete adapters already express every argument/copy fallback in the
+    // symbolic relation consumed by the query fixed point. Re-indexing those
+    // same millions of transforms as concrete field places duplicates one
+    // exact compiler product beside another and was the cold-build memory
+    // high-water mark on large workspaces. The eager index is therefore only
+    // the mixed/incomplete-adapter compatibility partition plus the finite
+    // copy sites that this concrete worklist can actually visit.
+    let requested_field_places = field_place_keys_for_propagation(&transforms, sites, &eager_copy_sites);
     let mut requested_segments = requested_field_places
         .iter()
         .map(|key| key.seg_id)
@@ -4141,13 +4306,6 @@ fn stitch_field_argument_forwarding(
     } else {
         stitch_field_argument_fallbacks(sites, &mut state)
     };
-    if symbolic {
-        fallback_edges += if spooled {
-            stitch_symbolic_field_fallbacks_spooled(&symbolic_field_graph, &inputs, &mut state)?
-        } else {
-            stitch_symbolic_field_fallbacks(&symbolic_field_graph, &inputs, &mut state)?
-        };
-    }
     fallback_edges += if spooled {
         stitch_field_copy_fallbacks_spooled(&copy_sites, &inputs, &mut state)?
     } else {
@@ -4155,7 +4313,7 @@ fn stitch_field_argument_forwarding(
     };
     if spooled {
         state.ws.spill_resident_segments()?;
-        let mut eager_segments = eager_requested_field_places
+        let mut eager_segments = requested_field_places
             .iter()
             .map(|key| key.seg_id)
             .collect::<Vec<_>>();
@@ -4245,9 +4403,8 @@ fn stitch_field_argument_forwarding(
 fn field_place_keys_for_propagation(
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
     fallback_argument_sites: &[Arc<FieldArgStitch>],
-    symbolic: Option<&SymbolicFieldCompilerStorage>,
     copy_sites: &[FieldCopySite],
-) -> crate::IdgResult<AHashSet<FieldPlaceKey>> {
+) -> AHashSet<FieldPlaceKey> {
     let mut keys = AHashSet::default();
     for (source, entries) in transforms {
         keys.insert(source.clone());
@@ -4271,36 +4428,11 @@ fn field_place_keys_for_propagation(
         insert_field_place_key(&mut keys, site.caller_seg, site.caller, &site.actual_arg, true);
         insert_field_place_key(&mut keys, site.callee_seg, site.callee, &site.param_name, false);
     }
-    if let Some(symbolic) = symbolic {
-        symbolic.visit_transforms(|transforms| {
-            for transform in transforms.iter().filter(|transform| {
-                matches!(
-                    transform.kind,
-                    SymbolicFieldTransformKind::Argument | SymbolicFieldTransformKind::Copy
-                )
-            }) {
-                let Some(source) = symbolic.bases().get(transform.source as usize) else {
-                    continue;
-                };
-                let Some(target) = symbolic.bases().get(transform.target as usize) else {
-                    continue;
-                };
-                let (Some(source_base), Some(target_base)) =
-                    (symbolic.string(source.storage), symbolic.string(target.storage))
-                else {
-                    continue;
-                };
-                insert_field_place_key(&mut keys, source.segment, source.func, source_base, true);
-                insert_field_place_key(&mut keys, target.segment, target.func, target_base, false);
-            }
-            Ok(())
-        })?;
-    }
     for site in copy_sites {
         insert_field_place_key(&mut keys, site.seg_id, site.func, &site.source_base, true);
         insert_field_place_key(&mut keys, site.seg_id, site.func, &site.target_base, false);
     }
-    Ok(keys)
+    keys
 }
 
 fn insert_field_place_key(
@@ -4387,124 +4519,6 @@ fn build_field_write_transforms(
         push_field_write_transform(&mut out, key, FieldWriteTransform::Copy(site.clone()));
     }
     out
-}
-
-fn extend_symbolic_field_graph(
-    graph: &mut SymbolicFieldCompilerStorage,
-    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    symbolic_funcs: Option<&AHashSet<FuncId>>,
-) {
-    let mut source_keys: Vec<FieldPlaceKey> = transforms.keys().cloned().collect();
-    sort_field_keys(&mut source_keys);
-    for source_key in source_keys {
-        let source = graph.intern_base(source_key.seg_id, source_key.func, &source_key.base);
-        let Some(entries) = transforms.get(&source_key) else {
-            continue;
-        };
-        for transform in entries {
-            if !field_transform_is_symbolic(&source_key, transform, symbolic_funcs) {
-                continue;
-            }
-            let (
-                target,
-                exact_field,
-                call_span,
-                write_span,
-                precision,
-                call_kind,
-                kind,
-                arg_idx,
-                param_idx,
-                allow,
-            ) = match transform {
-                FieldWriteTransform::Argument(site) => (
-                    graph.intern_base(site.callee_seg, site.callee, &site.param_name),
-                    NO_SYMBOLIC_STRING,
-                    site.call_span,
-                    site.call_span,
-                    site.precision,
-                    site.call_kind,
-                    SymbolicFieldTransformKind::Argument,
-                    site.arg_idx,
-                    site.param_idx,
-                    site.allow_out_of_order_source,
-                ),
-                FieldWriteTransform::Return(site) => (
-                    graph.intern_base(site.caller_seg, site.caller, &site.target_base),
-                    NO_SYMBOLIC_STRING,
-                    site.call_span,
-                    site.write_span,
-                    site.precision,
-                    site.call_kind,
-                    SymbolicFieldTransformKind::Return,
-                    u32::MAX,
-                    u32::MAX,
-                    true,
-                ),
-                FieldWriteTransform::ScalarReturn(site) => (
-                    graph.intern_base(site.caller_seg, site.caller, &site.target_base),
-                    graph.intern_string(&site.source_field),
-                    site.call_span,
-                    site.write_span,
-                    site.precision,
-                    site.call_kind,
-                    SymbolicFieldTransformKind::ScalarReturn,
-                    u32::MAX,
-                    u32::MAX,
-                    true,
-                ),
-                FieldWriteTransform::ConstructorReturn(site) => (
-                    graph.intern_base(site.caller_seg, site.caller, &site.target_base),
-                    NO_SYMBOLIC_STRING,
-                    site.call_span,
-                    site.write_span,
-                    site.precision,
-                    site.call_kind,
-                    SymbolicFieldTransformKind::ConstructorReturn,
-                    u32::MAX,
-                    u32::MAX,
-                    true,
-                ),
-                FieldWriteTransform::ReceiverMutation(site) => (
-                    graph.intern_base(site.caller_seg, site.caller, &site.target_base),
-                    NO_SYMBOLIC_STRING,
-                    site.call_span,
-                    site.call_span,
-                    site.precision,
-                    site.call_kind,
-                    SymbolicFieldTransformKind::ReceiverMutation,
-                    u32::MAX,
-                    u32::MAX,
-                    true,
-                ),
-                FieldWriteTransform::Copy(site) => (
-                    graph.intern_base(site.seg_id, site.func, &site.target_base),
-                    NO_SYMBOLIC_STRING,
-                    site.via_span,
-                    site.write_span,
-                    site.precision,
-                    site.call_kind,
-                    SymbolicFieldTransformKind::Copy,
-                    u32::MAX,
-                    u32::MAX,
-                    false,
-                ),
-            };
-            graph.push_transform(SymbolicFieldTransform {
-                source,
-                target,
-                exact_field,
-                call_span,
-                write_span,
-                precision,
-                call_kind,
-                kind,
-                arg_idx,
-                param_idx,
-                allow_out_of_order_source: allow,
-            });
-        }
-    }
 }
 
 fn push_symbolic_field_copy(graph: &mut SymbolicFieldCompilerStorage, site: &FieldCopySite) {
@@ -5122,123 +5136,6 @@ fn stitch_field_argument_fallbacks_spooled(
     Ok(added)
 }
 
-fn stitch_symbolic_field_fallbacks(
-    graph: &SymbolicFieldCompilerStorage,
-    inputs: &FieldPropagationInputs<'_>,
-    state: &mut FieldPropagationState<'_>,
-) -> crate::IdgResult<usize> {
-    let mut added = 0_usize;
-    graph.visit_transforms(|transforms| {
-        for transform in transforms {
-            let Some(source) = graph.bases().get(transform.source as usize) else {
-                continue;
-            };
-            let Some(target) = graph.bases().get(transform.target as usize) else {
-                continue;
-            };
-            let (Some(actual_arg), Some(param_name)) =
-                (graph.string(source.storage), graph.string(target.storage))
-            else {
-                continue;
-            };
-            match transform.kind {
-                SymbolicFieldTransformKind::Argument => {
-                    added += stitch_one_field_argument_fallback(
-                        source.func,
-                        source.segment,
-                        target.func,
-                        target.segment,
-                        actual_arg,
-                        param_name,
-                        transform.call_span,
-                        transform.precision,
-                        transform.call_kind,
-                        state,
-                    );
-                }
-                SymbolicFieldTransformKind::Copy => {
-                    let site = symbolic_field_copy_site(source, target, actual_arg, param_name, transform);
-                    added = added.saturating_add(stitch_one_field_copy_fallback(&site, inputs, state));
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    })?;
-    Ok(added)
-}
-
-fn stitch_symbolic_field_fallbacks_spooled(
-    graph: &SymbolicFieldCompilerStorage,
-    inputs: &FieldPropagationInputs<'_>,
-    state: &mut FieldPropagationState<'_>,
-) -> crate::IdgResult<usize> {
-    let mut added = 0_usize;
-    let mut active_segment = None;
-    graph.visit_transforms(|transforms| {
-        for transform in transforms {
-            let Some(source) = graph.bases().get(transform.source as usize) else {
-                continue;
-            };
-            let Some(target) = graph.bases().get(transform.target as usize) else {
-                continue;
-            };
-            let (Some(actual_arg), Some(param_name)) =
-                (graph.string(source.storage), graph.string(target.storage))
-            else {
-                continue;
-            };
-            match transform.kind {
-                SymbolicFieldTransformKind::Argument => {
-                    activate_fallback_segment(state.ws, &mut active_segment, source.segment)?;
-                    added += stitch_one_field_argument_fallback(
-                        source.func,
-                        source.segment,
-                        target.func,
-                        target.segment,
-                        actual_arg,
-                        param_name,
-                        transform.call_span,
-                        transform.precision,
-                        transform.call_kind,
-                        state,
-                    );
-                }
-                SymbolicFieldTransformKind::Copy => {
-                    activate_fallback_segment(state.ws, &mut active_segment, source.segment)?;
-                    let site = symbolic_field_copy_site(source, target, actual_arg, param_name, transform);
-                    added = added.saturating_add(stitch_one_field_copy_fallback(&site, inputs, state));
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    })?;
-    state.ws.spill_resident_segments()?;
-    Ok(added)
-}
-
-fn symbolic_field_copy_site(
-    source: &crate::symbolic::SymbolicFieldBase,
-    target: &crate::symbolic::SymbolicFieldBase,
-    source_base: &str,
-    target_base: &str,
-    transform: &SymbolicFieldTransform,
-) -> FieldCopySite {
-    debug_assert_eq!(source.segment, target.segment);
-    debug_assert_eq!(source.func, target.func);
-    FieldCopySite {
-        seg_id: source.segment,
-        func: source.func,
-        source_base: source_base.to_string(),
-        target_base: target_base.to_string(),
-        write_span: transform.write_span,
-        via_span: transform.call_span,
-        precision: transform.precision,
-        call_kind: transform.call_kind,
-    }
-}
-
 fn activate_fallback_segment(
     ws: &mut IdgWorkspace,
     active_segment: &mut Option<SegmentId>,
@@ -5576,7 +5473,7 @@ fn storage_segments_cached(text: &str) -> Arc<[String]> {
     push_storage_segments(text, &mut parts);
     let parts: Arc<[String]> = Arc::from(parts.into_boxed_slice());
     let mut write = STORAGE_SEGMENTS_CACHE.write();
-    if write.len() >= STORAGE_SEGMENTS_CACHE_CAP {
+    if write.len() >= storage_normalization_cache_capacity() {
         write.clear();
     }
     write.entry(text.to_string()).or_insert_with(|| parts.clone());
@@ -6064,7 +5961,7 @@ fn normalize_storage_base_cached(base: &str) -> Arc<str> {
     let parts = storage_segments_cached(base);
     let normalized: Arc<str> = Arc::from(join_storage_parts(parts.as_ref()));
     let mut write = NORMALIZED_STORAGE_CACHE.write();
-    if write.len() >= STORAGE_SEGMENTS_CACHE_CAP {
+    if write.len() >= storage_normalization_cache_capacity() {
         write.clear();
     }
     write
@@ -6079,8 +5976,22 @@ fn normalize_storage_base_cached(base: &str) -> Arc<str> {
 /// high-water mark. Clearing is semantics-neutral; a concurrent or later build
 /// simply recomputes the same AST-derived normalization.
 fn release_storage_normalization_caches() {
-    *STORAGE_SEGMENTS_CACHE.write() = AHashMap::new();
-    *NORMALIZED_STORAGE_CACHE.write() = AHashMap::new();
+    let (segment_entries, segment_capacity) = {
+        let mut cache = STORAGE_SEGMENTS_CACHE.write();
+        let stats = (cache.len(), cache.capacity());
+        *cache = AHashMap::new();
+        stats
+    };
+    let (normalized_entries, normalized_capacity) = {
+        let mut cache = NORMALIZED_STORAGE_CACHE.write();
+        let stats = (cache.len(), cache.capacity());
+        *cache = AHashMap::new();
+        stats
+    };
+    stitch_debug_log(format_args!(
+        "stitch normalization-cache-release: segment_entries={} segment_capacity={} normalized_entries={} normalized_capacity={}",
+        segment_entries, segment_capacity, normalized_entries, normalized_capacity
+    ));
 }
 
 fn join_storage_parts(parts: &[String]) -> String {

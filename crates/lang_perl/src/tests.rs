@@ -503,6 +503,13 @@ sub entry {
         .flat_map(|file| global.decls_in(file))
         .find(|decl| decl.name == "orchestrate")
         .expect("target decl");
+    let package = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "Pipeline")
+        .expect("package declaration");
+    assert_eq!(package.kind, DeclKind::Module);
+    assert_eq!(target.kind, DeclKind::Function);
     let call_graph = ws.resolved_call_graph();
     assert!(
         call_graph
@@ -510,5 +517,68 @@ sub entry {
             .any(|edge| edge.to == bonsai_common::FuncId::new(target.symbol.raw())),
         "the static package call must resolve to the declared Perl subroutine; target={target:#?}; events={:#?}",
         entry.flow_events
+    );
+}
+
+#[test]
+fn oo_package_and_isa_drive_typed_arrow_dispatch() {
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[
+            (
+                "Base.pm",
+                "package Base;\nsub helper { my ($self, $p) = @_; sink($p); }\n1;\n",
+            ),
+            (
+                "entry.pl",
+                "use Base;\npackage Child;\nour @ISA = ('Base');\npackage main;\n\
+                 sub entry { my ($args) = @_; my $obj = bless {}, 'Child'; $obj->helper($args); }\n",
+            ),
+        ],
+    );
+    let global = ws.db().global_index();
+    let base = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "Base" && decl.kind == DeclKind::Class)
+        .expect("method-bearing package should be a class");
+    let helper = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "helper")
+        .expect("base helper");
+    assert_eq!(helper.parent, Some(base.symbol));
+
+    let child = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "Child" && decl.kind == DeclKind::Class)
+        .expect("@ISA package should be a class");
+    assert_eq!(child.bases, ["Base"]);
+    let entry = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .expect("entry declaration");
+    let call = entry
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call {
+                name, receiver_types, ..
+            } if name == "obj->helper" => Some(receiver_types),
+            _ => None,
+        })
+        .expect("arrow call");
+    assert_eq!(call, &["Child", "Base"]);
+
+    let call_graph = ws.resolved_call_graph();
+    assert!(
+        call_graph
+            .callees_of(bonsai_common::FuncId::new(entry.symbol.raw()))
+            .any(|edge| edge.to == bonsai_common::FuncId::new(helper.symbol.raw())),
+        "typed Perl inheritance should resolve the base method"
     );
 }

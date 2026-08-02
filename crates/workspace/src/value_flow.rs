@@ -583,7 +583,7 @@ impl ValueFlowCache {
         inner.disk = None;
     }
 
-    /// Conventional sidecar path under `workspace_root/.bonsai/`.
+    /// Conventional sidecar path in the external workspace cache.
     /// v3 uses the `.factstore` extension to make the format change
     /// obvious in directory listings; pre-v3 `.bin` files are not
     /// recognised by the new reader and are ignored on load.

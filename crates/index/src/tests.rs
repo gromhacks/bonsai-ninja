@@ -522,4 +522,59 @@ fn receiver_ancestry_projection_enriches_file_local_compiler_bodies() {
         panic!("expected call");
     };
     assert_eq!(receiver_types, &["Child".to_string(), "Base".to_string()]);
+
+    let frontend_body = DeclIndex {
+        file: body_file,
+        defs: vec![local.defs[0].clone()],
+        ..DeclIndex::default()
+    };
+    let frontend = global.remap_file_to_existing_symbols_frontend_only(frontend_body);
+    let FlowEvent::Call { receiver_types, .. } = &frontend.defs[0].flow_events[0] else {
+        panic!("expected frontend call");
+    };
+    assert_eq!(
+        receiver_types,
+        &["Child".to_string(), "Base".to_string()],
+        "frontend-only remap preserves facts already present in its input"
+    );
+}
+
+#[test]
+fn frontend_only_remap_does_not_invent_cross_file_receiver_ancestry() {
+    let class_file = FileId::new(42);
+    let body_file = FileId::new(43);
+    let mut child = decl(class_file, 0, "Child");
+    child.kind = DeclKind::Class;
+    child.bases.push("Base".to_string());
+    let mut body = decl(body_file, 0, "run");
+    body.flow_events.push(FlowEvent::Call {
+        span: Span::new(body_file, 10, 20),
+        name: "child.execute".to_string(),
+        receiver: Some("child".to_string()),
+        receiver_types: vec!["Child".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: Vec::new(),
+    });
+    let local = DeclIndex {
+        file: body_file,
+        defs: vec![body],
+        ..DeclIndex::default()
+    };
+    let mut global = GlobalIndex::new();
+    global.insert_header_preprocessed(DeclIndex {
+        file: class_file,
+        defs: vec![child],
+        ..DeclIndex::default()
+    });
+    global.insert_header_preprocessed(local.clone());
+    global.finalize_semantic_facts();
+
+    let frontend = global.remap_file_to_existing_symbols_frontend_only(local.clone());
+    let semantic = global.remap_file_to_existing_symbols(local);
+    let receiver_types = |index: &DeclIndex| match &index.defs[0].flow_events[0] {
+        FlowEvent::Call { receiver_types, .. } => receiver_types.clone(),
+        _ => panic!("expected call"),
+    };
+    assert_eq!(receiver_types(&frontend), ["Child"]);
+    assert_eq!(receiver_types(&semantic), ["Child", "Base"]);
 }

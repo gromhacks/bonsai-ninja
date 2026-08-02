@@ -66,13 +66,21 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
 }
 
 fn copy_dir_including_bonsai(src: &std::path::Path, dst: &std::path::Path) {
+    copy_dir_tree_including_bonsai(src, dst);
+    let source_cache = bonsai_common::workspace_bonsai_dir(src);
+    if source_cache.is_dir() {
+        copy_dir_tree_including_bonsai(&source_cache, &bonsai_common::workspace_bonsai_dir(dst));
+    }
+}
+
+fn copy_dir_tree_including_bonsai(src: &std::path::Path, dst: &std::path::Path) {
     std::fs::create_dir_all(dst).expect("create copied workspace dir");
     for entry in std::fs::read_dir(src).expect("read workspace dir") {
         let entry = entry.expect("dir entry");
         let path = entry.path();
         let target = dst.join(entry.file_name());
         if path.is_dir() {
-            copy_dir_including_bonsai(&path, &target);
+            copy_dir_tree_including_bonsai(&path, &target);
         } else {
             std::fs::copy(&path, &target).unwrap_or_else(|err| {
                 panic!(
@@ -394,10 +402,9 @@ fn facade_index_semantic_writes_structural_sidecars_and_query_stays_lazy() {
         .expect("semantic path after index");
     assert!(
         !path.idg_available
-            && path
-                .backends
-                .iter()
-                .any(|backend| backend == "resolved-callgraph"),
+            && path.backends.iter().any(|backend| {
+                backend == "resolved-callgraph" || backend.starts_with("partitioned-resolved-callgraph-")
+            }),
         "a structural path query should use the exact callgraph without loading IDG pages: {path:#?}"
     );
     assert!(
@@ -501,10 +508,10 @@ fn cache_stats_reuses_independently_versioned_sidecars_when_only_manifest_build_
         "fixture must be warm: {fresh:#?}"
     );
 
-    let mut manifest: serde_json::Value =
+    let mut manifest: bonsai_sdk::CacheManifest =
         serde_json::from_slice(&std::fs::read(&fresh.manifest).expect("read semantic manifest"))
             .expect("parse semantic manifest");
-    manifest["build_fingerprint"] = serde_json::Value::String("older-release-build".to_string());
+    manifest.build_fingerprint = "older-release-build".to_string();
     std::fs::write(
         &fresh.manifest,
         serde_json::to_vec_pretty(&manifest).expect("serialize edited manifest"),
@@ -599,8 +606,8 @@ fn cache_stats_validation_rejects_retrieval_sidecar_from_moved_workspace() {
         .expect("stats for moved workspace cache");
     assert_eq!(
         moved_stats.validation.manifest_status,
-        bonsai_sdk::CacheFreshnessStatus::Fresh,
-        "moving a workspace preserves relative source fingerprints, so retrieval payload validation must prove the stale sidecar: {moved_stats:#?}"
+        bonsai_sdk::CacheFreshnessStatus::Stale,
+        "a manifest is bound to its canonical workspace root: {moved_stats:#?}"
     );
     assert!(
         !moved_stats.validation.structural_ready && !moved_stats.validation.semantic_ready,
@@ -670,8 +677,8 @@ fn cache_stats_validation_rejects_moved_full_prewarm_factstores() {
         .expect("stats for moved full-prewarm cache");
     assert_eq!(
         moved_stats.validation.manifest_status,
-        bonsai_sdk::CacheFreshnessStatus::Fresh,
-        "moving preserves relative manifest fingerprints; sidecar payload validation must prove stale paths: {moved_stats:#?}"
+        bonsai_sdk::CacheFreshnessStatus::Stale,
+        "a full-prewarm manifest is bound to its canonical workspace root: {moved_stats:#?}"
     );
     for name in ["callgraph", "dataflow_factstore", "flow_ids"] {
         assert!(
@@ -713,7 +720,7 @@ fn sdk_retrieval_candidate_filters_are_relative_and_fact_backed() {
     )
     .expect("write service");
     let bonsai = bonsai_sdk::Bonsai::new();
-    bonsai.index_semantic(&root).expect("semantic index");
+    let indexed = bonsai.index_semantic(&root).expect("semantic index");
 
     let filters = bonsai
         .retrieval_candidate_file_filters(&root, "sdk_unique_symbol", bonsai_sdk::SearchFilters::default())
@@ -733,6 +740,22 @@ fn sdk_retrieval_candidate_filters_are_relative_and_fact_backed() {
     assert_eq!(
         legacy_filters, filters,
         "search-named compatibility helper should delegate to the neutral retrieval helper"
+    );
+
+    let scoped = bonsai
+        .open_query_retrieval_candidates_with_progress(
+            &root,
+            "sdk_unique_symbol",
+            bonsai_sdk::SearchFilters::default(),
+            |_| {},
+        )
+        .expect("open retrieval candidates")
+        .expect("fresh retrieval project");
+    assert_eq!(scoped.stats().files, 1, "query body hydration should stay scoped");
+    assert_eq!(
+        scoped.source_content_fingerprint(),
+        indexed.source_content_fingerprint(),
+        "a scoped query must retain the complete workspace generation identity"
     );
     let _ = std::fs::remove_dir_all(root);
 }

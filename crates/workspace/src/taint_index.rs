@@ -479,7 +479,7 @@ impl TaintGraphIndex {
         }
     }
 
-    /// Conventional sidecar path under `<workspace>/.bonsai/`.
+    /// Conventional sidecar path in the external workspace cache.
     #[must_use]
     pub fn sidecar_path(workspace_root: &Path) -> PathBuf {
         workspace_bonsai_dir(workspace_root)

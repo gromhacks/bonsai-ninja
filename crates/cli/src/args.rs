@@ -6,8 +6,7 @@
 //! variant's handler (`cmd_*`) dispatches from `main.rs` into one of
 //! the `commands/*` modules.
 //!
-//! The default-value constants [`BROWSE_TEXT_LIMIT_DEFAULT`] and
-//! [`DUMP_AST_FILE_LIMIT_DEFAULT`] live here because clap's
+//! The default-value constant [`BROWSE_TEXT_LIMIT_DEFAULT`] lives here because clap's
 //! `#[arg(default_value_t = ...)]` must be able to resolve them at
 //! attribute-expansion time.
 
@@ -33,21 +32,10 @@ pub(crate) enum SemanticWorkerPhase {
     Manifest,
 }
 
-/// Default row cap for every browse command's text renderer. Chosen
-/// so the footer's `~estimated tokens` stays under the 10K-token
-/// shoulder of typical LLM context windows even on monster repos
-/// (`calls` on Redis produces ~300K rows / ~11M tokens uncapped).
-/// Users who want everything either pass `--limit 0` for legacy
-/// text caps or `--all` / `--context uncapped` for token-budget
-/// paging.
-pub(crate) const BROWSE_TEXT_LIMIT_DEFAULT: usize = 200;
-
-/// Dump-AST-specific file cap. Much smaller than the general
-/// browse default because a single real-world source file emits
-/// tens of thousands of AST nodes — even 10 files is tens of
-/// thousands of lines of output. Users who really want the full
-/// workspace AST pass `--limit 0`.
-pub(crate) const DUMP_AST_FILE_LIMIT_DEFAULT: usize = 10;
+/// Browse collection is exhaustive by default. Token-budget pagination is
+/// the output bound; an explicit nonzero `--limit` is the user's requested
+/// presentation cap, never a hidden semantic default.
+pub(crate) const BROWSE_TEXT_LIMIT_DEFAULT: usize = 0;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum OutputFormat {
@@ -122,8 +110,7 @@ pub(crate) enum InspectView {
     Trace,
     /// Cluster flows by longest-shared-suffix into GROUP blocks.
     Grouped,
-    /// `trace` when ≤ [`GROUPED_VIEW_AUTO_THRESHOLD`] total flows,
-    /// `grouped` otherwise.
+    /// `trace` for 10 or fewer total flows, `grouped` otherwise.
     Auto,
 }
 
@@ -229,6 +216,12 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) no_progress: bool,
 
+    /// Write the command's human-readable output as a standalone themed HTML
+    /// report. This is a presentation sink: it does not enable security,
+    /// semantic, or indexing work the selected command did not request.
+    #[arg(long = "html-output", global = true, value_name = "PATH")]
+    pub(crate) html_output: Option<PathBuf>,
+
     /// Secondary output filter: keep only result rows whose text
     /// contains this substring (case-insensitive). Repeatable — a row
     /// must contain ALL given substrings. Works across the browse,
@@ -264,17 +257,9 @@ pub(crate) struct Cli {
     )]
     pub(crate) memory_budget_mb: Option<u64>,
 
-    /// Enable categorised debug logging on stderr. Pass a
-    /// comma-separated list of category names, or `*` for all.
-    /// Available categories include `idg-closure` (per-source seed /
-    /// closure / xcall counts), `idg-resolve` (callgraph callee
-    /// resolution), `recv-state` (receiver-state propagation
-    /// fixpoint), `find-group` (finding combination /
-    /// primary-vs-additional decisions), `taint-graph` (cross-call
-    /// edge ordering), `xcall` (cross-file edge index per closure).
-    /// Equivalent to `BONSAI_DEBUG=<categories>` for the analyzer
-    /// process — useful for tracking down non-determinism, missing
-    /// findings, or unexpected over-approximation.
+    /// Enable comma-separated debug categories on stderr, or `*` for all.
+    /// Equivalent to `BONSAI_DEBUG`; common categories are `idg-closure`,
+    /// `idg-resolve`, `recv-state`, `find-group`, `taint-graph`, and `xcall`.
     #[arg(long = "debug", global = true, value_name = "CATEGORIES")]
     pub(crate) debug: Option<String>,
 
@@ -301,7 +286,7 @@ pub(crate) enum Cmd {
                       Pass `--semantic` when you intentionally want a full \
                       semantic prewarm: resolved callgraph, the streamed \
                       workspace IDG, and \
-                      `.bonsai/manifest.json`. This \
+                      the external workspace-cache manifest. This \
                       can be expensive on large or dense workspaces and should \
                       be used only when front-loading that cost is desired.\n\
                       \n\
@@ -418,11 +403,11 @@ pub(crate) enum Cmd {
     Trace {
         /// Workspace root to analyze.
         workspace: PathBuf,
-        /// Positional symbol to trace (alternative to `--function`).
-        symbol: Option<String>,
-        /// Function name to trace. Takes precedence over the positional
-        /// symbol when both are set.
-        #[arg(long)]
+        /// Positional symbol to trace (alternative to `--symbol`).
+        target: Option<String>,
+        /// Function/symbol name to trace. Takes precedence over the
+        /// positional target. `--function` remains a compatibility alias.
+        #[arg(long = "symbol", visible_alias = "function")]
         function: Option<String>,
         /// Restrict to flows that start at (or pass through) a name
         /// containing this substring. Pairs with `--to` to bracket a
@@ -446,18 +431,6 @@ pub(crate) enum Cmd {
         /// Emit the full trace with no context cap.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Optional cross-module call-depth cutoff. `0` analyzes to a graph fixed point.
-        #[arg(long, default_value_t = 0)]
-        max_depth: u16,
-        /// Optional semantic-step cutoff. `0` analyzes the complete reachable graph.
-        #[arg(long, default_value_t = 0)]
-        max_steps: u32,
-        /// Optional per-split alternative cutoff. `0` expands every semantic target/arm.
-        #[arg(long, default_value_t = 0)]
-        max_branch_fanout: u16,
-        /// Optional loop binding-state cutoff. `0` iterates each loop to a fixed point.
-        #[arg(long, default_value_t = 0)]
-        max_loop_iters: u16,
         /// Output shape — `text` for the rendered trace, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
@@ -471,18 +444,15 @@ pub(crate) enum Cmd {
         long_about = themed_subcommand_long_about("Find ranked shortest call paths from one callable to another \
                       using only syntax-derived, resolver-backed semantic callgraph \
                       edges. The command does not search raw text or invent missing \
-                      edges. If unresolved call sites or traversal caps mean absence \
-                      cannot be proven, the output marks analysis incomplete and says \
+                      edges. If unresolved call sites mean absence cannot be proven, \
+                      the output marks analysis incomplete and says \
                       why."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Shortest semantic paths from entry to sink\n  \
                       $ bonsai-ninja path ./src --from handle_request --to os.system\n  \
                       \n  \
                       # Machine-readable output for tooling\n  \
-                      $ bonsai-ninja path ./src --from handle_request --to run_admin_command --format json\n  \
-                      \n  \
-                      # Wider bounded search\n  \
-                      $ bonsai-ninja path ./src --from controller --to execute --max-paths 25 --max-depth 16")
+                      $ bonsai-ninja path ./src --from handle_request --to run_admin_command --format json")
     )]
     Path {
         /// Workspace root to analyze.
@@ -496,15 +466,6 @@ pub(crate) enum Cmd {
         /// Interpret `--from` and `--to` as regexes instead of substring matches.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Optional maximum paths to emit after ranking. `0` is uncapped.
-        #[arg(long, default_value_t = 0)]
-        max_paths: usize,
-        /// Optional maximum semantic call edges in one path. `0` is uncapped.
-        #[arg(long, default_value_t = 0)]
-        max_depth: usize,
-        /// Optional graph-state probe ceiling. `0` is uncapped.
-        #[arg(long, default_value_t = 0)]
-        max_probes: usize,
         /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
         #[arg(long)]
         context: Option<String>,
@@ -524,7 +485,7 @@ pub(crate) enum Cmd {
     /// Backward slice for a symbol at a source line.
     #[command(
         display_order = 4,
-        long_about = themed_subcommand_long_about("Build a bounded backwards slice for one normalized symbol \
+        long_about = themed_subcommand_long_about("Build an exact backwards slice for one normalized symbol \
                       at one source line using adapter-emitted syntax-flow facts. \
                       The command follows local assignments, call arguments, returns, \
                       and lifecycle/use-site facts. It does not search raw text or \
@@ -553,9 +514,6 @@ pub(crate) enum Cmd {
         /// Explicit absolute paths are also accepted.
         #[arg(long)]
         file: Option<String>,
-        /// Maximum slice steps to emit. Use 0 for uncapped.
-        #[arg(long, default_value_t = 64)]
-        max_steps: usize,
         /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
         #[arg(long)]
         context: Option<String>,
@@ -791,9 +749,8 @@ pub(crate) enum Cmd {
     DumpCallgraph {
         /// Workspace root to analyze.
         workspace: PathBuf,
-        /// Max rows in the text rendering (`0` = uncapped). JSON
-        /// uses token-budget paging unless `--all` is set.
-        /// Legacy cap — prefer `--context` for token-budget paging.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
@@ -868,8 +825,8 @@ pub(crate) enum Cmd {
         edge: Option<String>,
         /// Max edges in the text rendering (`0` = uncapped). JSON
         /// uses token-budget paging unless `--all` is set. Redis emits ~300 k edges
-        /// without a cap — keep the common interactive run
-        /// readable. Legacy cap — prefer `--context`.
+        /// without a cap. This combines with `--context` and never
+        /// drops later rows; continue with `--page` for full coverage.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
@@ -924,8 +881,8 @@ pub(crate) enum Cmd {
         /// Include only files with at least one unresolved call site.
         #[arg(long, default_value_t = false)]
         unresolved_only: bool,
-        /// Max rows in the text rendering (`0` = uncapped). JSON
-        /// uses token-budget paging unless `--all` is set.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
@@ -1004,15 +961,6 @@ pub(crate) enum Cmd {
         /// (`N:` + 8 hex). Prints that node and its subtree.
         #[arg(long)]
         node: Option<String>,
-        /// Max files in the text rendering (`0` = uncapped). A
-        /// single real-world source file can emit tens of
-        /// thousands of AST nodes, so the default cap is
-        /// deliberately small — dump-ast is a targeted debug tool
-        /// (scope with `--file` / `--function` / `--node`), not a
-        /// bulk listing. Use `--all` for exhaustive JSON. Legacy
-        /// cap — prefer `--context`.
-        #[arg(long, default_value_t = DUMP_AST_FILE_LIMIT_DEFAULT)]
-        limit: usize,
         /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
         #[arg(long)]
         context: Option<String>,
@@ -1237,8 +1185,8 @@ pub(crate) enum Cmd {
         /// Interpret `--name` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Include structural flow IDs. This explicitly hydrates semantic
@@ -1309,8 +1257,8 @@ pub(crate) enum Cmd {
         /// Interpret `--name` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
@@ -1370,15 +1318,14 @@ pub(crate) enum Cmd {
         /// Interpret `--callee` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set. Legacy cap —
-        /// prefer `--context` for token-budget-aware paging.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Token-budget ceiling for rendered output. Accepts integers
         /// (`32768`) or shorthand (`4k / 8k / 16k / 32k / 64k /
-        /// 128k / 256k / 1m`). Overrides `--limit` when both are
-        /// set. `0` / `all` / `uncapped` disable the cap. Defaults
+        /// 128k / 256k / 1m`). Combines with `--limit`; the tighter
+        /// per-page bound wins. `0` / `all` / `uncapped` disable the token cap. Defaults
         /// to `BONSAI_CONTEXT` env or `32k` for text and JSON.
         #[arg(long)]
         context: Option<String>,
@@ -1466,8 +1413,8 @@ pub(crate) enum Cmd {
         /// Interpret `--module` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Include structural flow IDs. This explicitly hydrates semantic
@@ -1536,8 +1483,8 @@ pub(crate) enum Cmd {
         /// Interpret `--name` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Include structural flow IDs. This explicitly hydrates semantic
@@ -1599,8 +1546,8 @@ pub(crate) enum Cmd {
         /// Interpret `--contains` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Include structural flow IDs. This explicitly hydrates semantic
@@ -1676,8 +1623,8 @@ pub(crate) enum Cmd {
         /// Interpret `--contains` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Token-budget ceiling for rendered output. Shorthand: `4k`
@@ -1746,8 +1693,8 @@ pub(crate) enum Cmd {
         /// Interpret `--callee` / `--value` as regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Include structural flow IDs. This explicitly hydrates semantic
@@ -1812,8 +1759,8 @@ pub(crate) enum Cmd {
         /// Interpret `--kind` / `--name` as regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Include structural flow IDs. This explicitly hydrates semantic
@@ -1880,8 +1827,8 @@ pub(crate) enum Cmd {
         /// Interpret `--name` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Include structural flow IDs. This explicitly hydrates semantic
@@ -1954,8 +1901,8 @@ pub(crate) enum Cmd {
         /// Interpret the symbol as a regex instead of an exact/substring match.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set.
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Include structural flow IDs. This explicitly hydrates semantic
@@ -2028,7 +1975,7 @@ pub(crate) enum Cmd {
         /// Interpret the query as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 0)]
         limit: usize,
         /// Include structural flow IDs. This explicitly hydrates semantic
         /// graph facts and is off by default.
@@ -2057,9 +2004,8 @@ pub(crate) enum Cmd {
                       (functions, methods, classes, structs), calls, imports, \
                       vars (assignments), strings, args, refs, decorators.\n\
                       \n\
-                      By default inspect surfaces matching declarations / \
-                      occurrences, indexed rulepack-free taint paths, and \
-                      syntax/index facts and source excerpts by default. It \
+                      By default inspect surfaces matching declarations, \
+                      occurrences, syntax/index facts, and source excerpts. It \
                       does not load source / sink / sanitizer YAML or hydrate \
                       a whole-workspace semantic graph. Pass `--graph-flow` \
                       when you intentionally need structural callgraph source \
@@ -2079,8 +2025,8 @@ pub(crate) enum Cmd {
                       `inspect` is the pattern-less query layer over the \
                       indexed taint graph `export` ships; `security taint-analysis` \
                       applies rulepack source / sink / sanitizer matches with \
-                      exact source seeds. `--taint-flow` requests the bounded \
-                      raw taint preview explicitly."),
+                      exact source seeds. `--taint-flow` requests exact raw \
+                      taint paths explicitly."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Syntax hits and code evidence\n  \
                       $ bonsai-ninja inspect ./src --query os.system\n  \
@@ -2159,29 +2105,8 @@ pub(crate) enum Cmd {
         /// this substring. (`update_user` / `verify_token` / …)
         #[arg(long = "in-fn")]
         in_fn: Option<String>,
-        /// Max number of flows to show per decl hit. Defaults are
-        /// tuned to surface most chains while keeping queries fast on
-        /// huge workspaces. When a cap kicks in the output explicitly
-        /// reports `[truncated by max-flows cap]` — silent data loss
-        /// is impossible. Use `--all` for guaranteed exhaustive
-        /// enumeration.
-        #[arg(long, default_value_t = 50)]
-        max_flows: usize,
-        /// DFS probe budget for chain enumeration. Default lets
-        /// realistic call graphs (Redis, lodash, kotlinx.coroutines)
-        /// finish; the truncation warning fires when it doesn't.
-        #[arg(long, default_value_t = 500)]
-        max_entry_probes: usize,
-        /// Max number of non-decl hits (calls / strings / args /
-        /// imports / refs) to list. Defaults to 200 — high enough to
-        /// avoid silent miss for most queries, with the truncation
-        /// banner surfacing the rest.
-        #[arg(long, default_value_t = 200)]
-        max_hits: usize,
-        /// Show every syntax hit unconditionally; when paired with
-        /// `--graph-flow`, also lifts graph-flow caps. Equivalent to
-        /// `--max-flows usize::MAX --max-entry-probes usize::MAX
-        /// --max-hits usize::MAX`.
+        /// Render every result in one artifact instead of paging it.
+        /// Analysis is already exact and uncapped by default.
         #[arg(long, default_value_t = false)]
         all: bool,
         /// Render explicit graph flows without inlined source bodies. The chain
@@ -2215,9 +2140,8 @@ pub(crate) enum Cmd {
         #[arg(long)]
         group: Option<String>,
         /// Request structural call-graph flows with source bodies for
-        /// inspect hits. Bounded default inspect already renders code;
-        /// this flag renders graph-flow evidence for large result sets
-        /// that would otherwise show syntax/index facts only. It does
+        /// inspect hits. This flag adds graph-flow evidence to the default
+        /// syntax/index view. It does
         /// not lower the resolver's exact/narrowed evidence contract.
         #[arg(long = "graph-flow", default_value_t = false)]
         graph_flow: bool,
@@ -2226,8 +2150,9 @@ pub(crate) enum Cmd {
         /// dataflow analysis.
         #[arg(long = "taint-flow", default_value_t = false)]
         taint_flow: bool,
-        /// Token-budget ceiling for rendered output. Paging unit is
-        /// one FLOW block (never mid-flow). Shorthand `4k`, `32k`,
+        /// Token-budget ceiling for rendered output. Taint rows, syntax hits,
+        /// declarations, and structural FLOW blocks are lossless page units;
+        /// a structural flow is never split mid-flow. Shorthand `4k`, `32k`,
         /// `128k`, `1m`; `0` / `all` / `uncapped` disables.
         /// Default 32k for text and JSON.
         #[arg(long)]
@@ -2259,21 +2184,21 @@ pub(crate) enum Cmd {
                       reachability facts kinded by (decl / call / read / \
                       write / arg / string / import / class), per-parameter \
                       assign-chain expansion, per-parameter CFG dataflow, \
-                      inferred entry-points, optional interprocedural \
+                      inferred entry-points, compiler-form interprocedural \
                       propagation records, resolved FuncId chains per target, and \
                       stable `F:` / `G:` flow-id labels or the exact compressed \
                       semantic callgraph needed to derive them. The export also emits \
                       top-level `analysis_scope`, `analysis_complete`, and \
                       `analysis_incomplete_reasons` fields so downstream tools \
-                      never need to infer whether a document is complete. Chain and label \
-                      Chain and flow-label evidence is always represented as \
+                      never need to infer whether a document is complete. Chain and \
+                      flow-label evidence is always represented as \
                       an exact `compressed_callgraph`: even a small call graph \
                       can have exponentially many paths, so materializing a \
                       capped prefix would be both less accurate and less scalable. \
-                      Propagation records are \
-                      omitted by default with explicit completeness metadata; \
-                      pass `--full-propagations` when downstream tooling needs \
-                      every interprocedural propagation edge. When \
+                      The complete propagation relation is exported in compact \
+                      `compiled_idg` form by default; pass `--full-propagations` \
+                      only when downstream tooling needs every concrete \
+                      per-entry propagation row. When \
                       `analysis_complete=true`, downstream tooling can \
                       reconstruct every exported finding without re-running the \
                       analyzer.\n\
@@ -2292,9 +2217,6 @@ pub(crate) enum Cmd {
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Native semantic export to a file\n  \
                       $ bonsai-ninja export ./src --output-path index.json\n  \
-                      \n  \
-                      # Expanded semantic audit export scope\n  \
-                      $ bonsai-ninja export ./src --all --output-path audit.json\n  \
                       \n  \
                       # NetworkX node-link graph\n  \
                       $ bonsai-ninja export ./src --format networkx --output-path graph.node_link.json\n  \
@@ -2318,16 +2240,10 @@ pub(crate) enum Cmd {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// Materialize exhaustive interprocedural propagation records.
-        /// Omitted by default with explicit completeness metadata
-        /// because records can be much larger than the structural graph.
+        /// The default keeps the same exact relation in compiled IDG form
+        /// because concrete rows can be much larger than the structural graph.
         #[arg(long)]
         full_propagations: bool,
-        /// Request the complete compiler graph. Potentially quadratic derived
-        /// paths and per-entry propagation rows stay in exact compressed form;
-        /// combine with `--full-propagations` only when concrete row expansion
-        /// is intentionally required.
-        #[arg(long)]
-        all: bool,
         /// Output shape. `json` is the full native export; `networkx`,
         /// `graphml`, and `cypher` project the same taint graph into
         /// graph-database-friendly node/edge formats.
@@ -2347,7 +2263,7 @@ pub(crate) enum Cmd {
                       callees, enclosing) — built fresh each run, dropped on \
                       exit. Use `--no-cache` / `BONSAI_NO_CACHE=1` on any \
                       command to bypass them for a single invocation.\n\
-                      \n  - On-disk artifacts under `<workspace>/.bonsai/` — \
+                      \n  - On-disk artifacts in the workspace's OS cache directory — \
                       used for persisted sidecars, currently including the \
                       dataflow taint graph at `dataflow.v3.factstore` \
                       (plus backward-compatible `dataflow.v2.bin` reads), \
@@ -2456,7 +2372,7 @@ pub(crate) enum Cmd {
         #[arg(long = "exclude-file")]
         exclude_file: Vec<String>,
         /// Children-per-dir cap (`0` = uncapped).
-        #[arg(long, default_value_t = 200)]
+        #[arg(long, default_value_t = 0)]
         limit: usize,
         /// Token-budget ceiling for rendered output (e.g. `4k`, `32k`,
         /// `128k`, `1m`). Defaults to `BONSAI_CONTEXT` or `32k`.
@@ -2486,28 +2402,28 @@ pub(crate) enum Cmd {
              opens and indexes only the resolved file, so it is \
              suitable for large workspaces after `search`, `defs`, \
              or syntax `inspect` finds an anchor. Semantic overlays are explicit: \
-             `--rules-dir`, `--from`, `--to`, `--max-inlined-bodies`, \
-             or `--all` use the workspace-analysis path for finding \
+             `--rules-dir`, `--from`, `--to`, or `--max-inlined-bodies` \
+             use the workspace-analysis path for finding \
              marks, flow entry/exit pairs, and cross-file caller / \
-             callee bodies.\n\
+             callee bodies. `--all` only disables output pagination; it \
+             never turns on semantic work.\n\
              \n\
              Compact mode is a step list of marks (one line per \
              marked location, with finding id, rule, severity, and \
              tainted source name). The default view shows the \
              primary file source with marks beside the relevant \
-             lines, then pulls in cross-file callers and callees \
-             with full bodies. `--lines A:B` slices the primary \
+             lines; explicitly requested semantic overlays can then add \
+             cross-file callers and callees with full bodies. `--lines A:B` slices the primary \
              file; `--from <needle>` / `--to <needle>` filter the \
              rendered marks to flows that connect them.\n\
              \n\
-             Findings populate when a rulepack is present (auto-\
-             discovered at `./security-patterns/` or via \
-             `--rules-dir`); without one, only structural facts \
-             (decls, cross-file edges) render."
+             Finding annotations are explicit: pass `--rules-dir` to \
+             request them. Without it, only structural facts (declarations \
+             and requested cross-file edges) render."
         ),
         after_help = themed_subcommand_after_help(
             "EXAMPLES\n\n  \
-             # Sink-marked view of a known-bad file\n  \
+             # Lightweight source view of one file\n  \
              $ bonsai-ninja read-file ./src auth/verify_token.py\n  \
              \n  \
              # Unique basename/suffix after search or defs finds an anchor\n  \
@@ -2516,8 +2432,8 @@ pub(crate) enum Cmd {
              # Jump from a symbol to its defining file\n  \
              $ bonsai-ninja read-file ./src --symbol verify_token\n  \
              \n  \
-             # Compact mark list when you intentionally want less code\n  \
-             $ bonsai-ninja read-file ./src auth/verify_token.py --compact\n  \
+             # Compact finding list when rule annotations are requested\n  \
+             $ bonsai-ninja read-file ./src auth/verify_token.py --rules-dir ./security-patterns --compact\n  \
              \n  \
              # Slice + filter to flows on a chain from `request.args` to `os.system`\n  \
              $ bonsai-ninja read-file ./src auth/verify_token.py --lines 1:50 --from request.args --to os.system\n  \
@@ -2544,7 +2460,9 @@ pub(crate) enum Cmd {
         /// Filter to flows the needle participates in (sink side).
         #[arg(long)]
         to: Option<String>,
-        /// Hard cap on inlined caller / callee bodies (default 8).
+        /// Optional explicit cap on inlined caller / callee bodies.
+        /// Omitted (or 0) includes every connected body; output pagination
+        /// remains independent.
         #[arg(long)]
         max_inlined_bodies: Option<usize>,
         /// Drop the inlined-body section; emit a step-list of marks.
@@ -2557,7 +2475,8 @@ pub(crate) enum Cmd {
         /// Page to render — 1-based number, `next`, or `P:` cursor.
         #[arg(long)]
         page: Option<String>,
-        /// Lift every cap; render the full file with all bodies.
+        /// Disable output paging. This does not request semantic overlays or
+        /// change the inlined-body scope.
         #[arg(long, default_value_t = false)]
         all: bool,
         /// Output shape — `text` or `json`.
@@ -2650,10 +2569,9 @@ pub(crate) enum SecurityAction {
         /// are also accepted.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
-        /// Cap on rendered rows (mirrors `search --limit`). `0` =
-        /// uncapped. JSON uses token-budget paging unless `--all`
-        /// is set.
-        #[arg(long, default_value_t = 50)]
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
+        #[arg(long, default_value_t = 0)]
         limit: usize,
         /// Token-budget ceiling for rendered output (`4k`, `32k`, `128k`,
         /// `1m`; `0`/`all`/`uncapped` disables).
@@ -2758,8 +2676,8 @@ pub(crate) enum SecurityAction {
         /// paths; explicit absolute paths are also accepted.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
-        /// Cap on rendered rows (`0` = uncapped).
-        #[arg(long, default_value_t = 50)]
+        /// Maximum rows per output page (`0` = token-budget only).
+        #[arg(long, default_value_t = 0)]
         limit: usize,
         /// Token-budget ceiling for rendered output (`4k`, `32k`, `128k`,
         /// `1m`; `0`/`all`/`uncapped` disables).
@@ -2839,8 +2757,8 @@ pub(crate) enum SecurityAction {
         /// paths; explicit absolute paths are also accepted.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
-        /// Cap on rendered rows (`0` = uncapped).
-        #[arg(long, default_value_t = 50)]
+        /// Maximum rows per output page (`0` = token-budget only).
+        #[arg(long, default_value_t = 0)]
         limit: usize,
         /// Token-budget ceiling for rendered output.
         #[arg(long)]
@@ -2909,8 +2827,8 @@ pub(crate) enum SecurityAction {
         /// paths; explicit absolute paths are also accepted.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
-        /// Cap on rendered rows (`0` = uncapped).
-        #[arg(long, default_value_t = 50)]
+        /// Maximum rows per output page (`0` = token-budget only).
+        #[arg(long, default_value_t = 0)]
         limit: usize,
         /// Token-budget ceiling for rendered output.
         #[arg(long)]
@@ -3337,9 +3255,9 @@ pub(crate) enum SecurityAction {
         /// Emit every row, no paging or context cap.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Cap on rendered rows (`0` = uncapped). JSON uses
-        /// token-budget paging unless `--all` is set.
-        #[arg(long, default_value_t = 200)]
+        /// Maximum rows per output page (`0` = token-budget only).
+        /// This combines with `--context`; it never drops later rows.
+        #[arg(long, default_value_t = 0)]
         limit: usize,
         /// Output shape — `text` for the rule listing / audit matrix, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
@@ -3383,13 +3301,13 @@ pub(crate) enum CacheAction {
         #[command(flatten)]
         output: OutputPathArg,
     },
-    /// Remove on-disk cache artifacts under `<workspace>/.bonsai/`.
+    /// Remove on-disk artifacts from the workspace's external OS cache.
     /// Specifically deletes the persisted analysis sidecars written
     /// by the engine. In-process caches don't need clearing — they
     /// drop at process exit; use `--no-cache` to bypass them within
     /// a single command.
     #[command(
-        long_about = themed_subcommand_long_about("Remove on-disk cache artifacts under `<workspace>/.bonsai/`. \
+        long_about = themed_subcommand_long_about("Remove on-disk artifacts from the workspace's external OS cache. \
                       Specifically deletes persisted analysis sidecars, \
                       including `dataflow.v3.factstore`, value-flow, flow-id, \
                       callgraph, IDG, export, and compatibility files written \
@@ -3399,19 +3317,19 @@ pub(crate) enum CacheAction {
                       process exit; use `--no-cache` / `BONSAI_NO_CACHE=1` to \
                       bypass them within a single command."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Wipe every sidecar under .bonsai/\n  \
+                      # Wipe every persisted sidecar for this workspace\n  \
                       $ bonsai-ninja cache clear ./src\n  \
                       \n  \
                       # Keep other sidecars, only drop the dataflow cache\n  \
                       $ bonsai-ninja cache clear ./src --dataflow-only")
     )]
     Clear {
-        /// Workspace root whose `.bonsai/` cache dir should be removed.
+        /// Workspace root whose external cache directory should be removed.
         /// Defaults to the current directory.
         workspace: Option<PathBuf>,
         /// Only clear dataflow sidecars (`dataflow.v3.factstore`
-        /// and compatibility `dataflow.v2.bin`), leaving other
-        /// `.bonsai/` contents intact. Useful when you want to force
+        /// and compatibility `dataflow.v2.bin`), leaving the other
+        /// external workspace sidecars intact. Useful when you want to force
         /// a dataflow recompute without touching unrelated sidecars.
         #[arg(long)]
         dataflow_only: bool,

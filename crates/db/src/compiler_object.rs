@@ -14,7 +14,10 @@ use bonsai_factstore::{
     FactStoreError, FactStoreReader, FactStoreWriter, PreparedFactStoreEntry, PreparedFactStorePayload,
 };
 use bonsai_hash::fnv1a_bytes64;
-use bonsai_lang_api::{CompilerSyntaxHeader, DeclIndex, ImportIndex};
+use bonsai_lang_api::{
+    CompilerAttribution, CompilerBrowseHeader, CompilerFunctionAttribution, CompilerSyntaxHeader, DeclIndex,
+    ImportIndex,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
@@ -24,8 +27,19 @@ use std::sync::Arc;
 /// Current per-file compiler-object wire and semantic ABI.
 ///
 /// Bump this whenever adapter lowering, [`DeclIndex`], [`ImportIndex`],
-/// [`CompilerSyntaxHeader`], or the object validation contract changes in a
-/// way that can alter compiler facts.
+/// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
+/// or the object validation contract changes in a way that can alter compiler
+/// facts.
+// v20: imported namespace/type qualifiers are classified in receiver facts,
+// preventing call resolution syntax from becoming a runtime data receiver.
+// v19: exact browse/search candidate terms became an independently decodable
+// projection. Candidate-index construction no longer inflates declaration and
+// flow bodies for every file.
+// v17: compiler attribution is stored as independently compressed function
+// frames behind a small span index. A function-scoped query never decodes the
+// attribution for every sibling method in a large source file.
+// v16: exact call/write attribution became an independently decodable per-file
+// projection beside the full declaration/flow body.
 // v15: standalone lambdas and named local callables retain their nearest
 // Tree-sitter lexical callable parent; Perl package modules own their
 // declarations and `Package::sub(...)` lowers as a static function call.
@@ -37,12 +51,14 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 15;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 20;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;
 const METADATA_KEY: u64 = 0;
 const COMPILER_OBJECT_COMPRESSION_LEVEL: i32 = 1;
+const ATTRIBUTION_PAYLOAD_MAGIC: [u8; 8] = *b"BNSATTR1";
+const ATTRIBUTION_PAYLOAD_PREFIX_BYTES: usize = 8 + 4 + 32;
 
 /// Exact typed compiler output for one source file.
 ///
@@ -86,6 +102,12 @@ struct PreparedCompilerObject {
     header_compressed: Vec<u8>,
     header_payload_digest: [u8; 32],
     header_payload_len: u32,
+    attribution_compressed: Vec<u8>,
+    attribution_payload_digest: [u8; 32],
+    attribution_payload_len: u32,
+    browse_compressed: Vec<u8>,
+    browse_payload_digest: [u8; 32],
+    browse_payload_len: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,6 +116,40 @@ struct CompilerObjectHeader {
     imports_digest: [u8; 32],
     syntax: Option<CompilerSyntaxHeader>,
     syntax_digest: [u8; 32],
+}
+
+/// Independently decoded directory for the function frames in one compiler
+/// attribution payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CompilerAttributionIndex {
+    pub file: FileId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    frames: Vec<CompilerAttributionFrame>,
+    /// Absolute offset of the frame blob relative to the fact-store payload.
+    /// This is container metadata reconstructed from the fixed prefix and is
+    /// intentionally not serialized inside the semantic index.
+    #[serde(skip)]
+    frames_payload_offset: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct CompilerAttributionFrame {
+    declaration_span: Span,
+    relative_offset: u64,
+    compressed_len: u32,
+    compressed_digest: [u8; 32],
+}
+
+impl CompilerAttributionIndex {
+    fn frame_at_span(&self, span: Span) -> Option<&CompilerAttributionFrame> {
+        let key = |value: Span| (value.file.raw(), value.start, value.end);
+        let wanted = key(span);
+        let index = self
+            .frames
+            .binary_search_by_key(&wanted, |frame| key(frame.declaration_span))
+            .ok()?;
+        self.frames.get(index)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -119,6 +175,16 @@ struct CompilerObjectFileMetadata {
     /// facts).
     header_payload_digest: [u8; 32],
     header_payload_len: u32,
+    /// Digest/length of exact adapter-lowered call/write attribution. This
+    /// payload is separate from both the broad syntax header and full body so
+    /// a path query decodes only the facts it consumes.
+    attribution_payload_digest: [u8; 32],
+    attribution_payload_len: u32,
+    /// Digest/length of exact file-local browse candidate terms. Kept apart
+    /// from syntax targets and bodies so either consumer decodes only its own
+    /// compiler projection.
+    browse_payload_digest: [u8; 32],
+    browse_payload_len: u32,
 }
 
 /// v11 stored every per-file import/syntax projection inside one monolithic
@@ -213,10 +279,11 @@ impl CompilerObjectStore {
     }
 
     fn load(&self, descriptor: &SourceDescriptor) -> std::io::Result<Option<CompiledFileObject>> {
-        let Some(prepared) = self.compressed_payload(descriptor)? else {
+        let Some(metadata) = self.metadata_for(descriptor) else {
             return Ok(None);
         };
-        let decoded = zstd::stream::decode_all(Cursor::new(prepared.compressed))?;
+        let compressed = self.compressed_object_payload(descriptor, metadata)?;
+        let decoded = zstd::stream::decode_all(Cursor::new(compressed))?;
         let object: CompiledFileObject = wire::decode(&decoded).map_err(invalid_wire)?;
         validate_object(&object, descriptor)?;
         Ok(Some(object))
@@ -229,6 +296,28 @@ impl CompilerObjectStore {
         let Some(metadata) = self.metadata_for(descriptor) else {
             return Ok(None);
         };
+        let compressed = self.compressed_object_payload(descriptor, metadata)?;
+        Ok(Some(PreparedCompilerObject {
+            compressed,
+            payload_digest: metadata.payload_digest,
+            payload_len: metadata.payload_len,
+            header_compressed: self.compressed_header_payload(metadata)?,
+            header_payload_digest: metadata.header_payload_digest,
+            header_payload_len: metadata.header_payload_len,
+            attribution_compressed: self.compressed_attribution_payload(metadata)?,
+            attribution_payload_digest: metadata.attribution_payload_digest,
+            attribution_payload_len: metadata.attribution_payload_len,
+            browse_compressed: self.compressed_browse_payload(metadata)?,
+            browse_payload_digest: metadata.browse_payload_digest,
+            browse_payload_len: metadata.browse_payload_len,
+        }))
+    }
+
+    fn compressed_object_payload(
+        &self,
+        descriptor: &SourceDescriptor,
+        metadata: &CompilerObjectFileMetadata,
+    ) -> std::io::Result<Vec<u8>> {
         let hit = self
             .reader
             .get(object_key(descriptor.file))
@@ -242,14 +331,7 @@ impl CompilerObjectStore {
         {
             return Err(invalid_data("compiler-object payload digest mismatch"));
         }
-        Ok(Some(PreparedCompilerObject {
-            compressed: hit.payload,
-            payload_digest: metadata.payload_digest,
-            payload_len: metadata.payload_len,
-            header_compressed: self.compressed_header_payload(metadata)?,
-            header_payload_digest: metadata.header_payload_digest,
-            header_payload_len: metadata.header_payload_len,
-        }))
+        Ok(hit.payload)
     }
 
     fn compressed_header_payload(&self, metadata: &CompilerObjectFileMetadata) -> std::io::Result<Vec<u8>> {
@@ -265,6 +347,47 @@ impl CompilerObjectStore {
             || u32::try_from(hit.payload.len()).ok() != Some(metadata.header_payload_len)
         {
             return Err(invalid_data("compiler-object header payload digest mismatch"));
+        }
+        Ok(hit.payload)
+    }
+
+    fn compressed_attribution_payload(
+        &self,
+        metadata: &CompilerObjectFileMetadata,
+    ) -> std::io::Result<Vec<u8>> {
+        let hit = self
+            .reader
+            .get(attribution_key(FileId::new(metadata.file)))
+            .map_err(factstore_io)?
+            .ok_or_else(|| invalid_data("compiler-object attribution payload is missing"))?;
+        if hit.body_hash != attribution_body_hash_from_digest(metadata.source_digest) {
+            return Err(invalid_data(
+                "compiler-object attribution body fingerprint mismatch",
+            ));
+        }
+        if digest_bytes(&hit.payload) != metadata.attribution_payload_digest
+            || u32::try_from(hit.payload.len()).ok() != Some(metadata.attribution_payload_len)
+        {
+            return Err(invalid_data(
+                "compiler-object attribution payload digest mismatch",
+            ));
+        }
+        Ok(hit.payload)
+    }
+
+    fn compressed_browse_payload(&self, metadata: &CompilerObjectFileMetadata) -> std::io::Result<Vec<u8>> {
+        let hit = self
+            .reader
+            .get(browse_key(FileId::new(metadata.file)))
+            .map_err(factstore_io)?
+            .ok_or_else(|| invalid_data("compiler-object browse payload is missing"))?;
+        if hit.body_hash != browse_body_hash_from_digest(metadata.source_digest) {
+            return Err(invalid_data("compiler-object browse body fingerprint mismatch"));
+        }
+        if digest_bytes(&hit.payload) != metadata.browse_payload_digest
+            || u32::try_from(hit.payload.len()).ok() != Some(metadata.browse_payload_len)
+        {
+            return Err(invalid_data("compiler-object browse payload digest mismatch"));
         }
         Ok(hit.payload)
     }
@@ -292,6 +415,135 @@ impl CompilerObjectStore {
         Ok(self.load_header(descriptor)?.and_then(|header| header.syntax))
     }
 
+    fn load_browse(&self, descriptor: &SourceDescriptor) -> std::io::Result<Option<CompilerBrowseHeader>> {
+        let Some(metadata) = self.metadata_for(descriptor) else {
+            return Ok(None);
+        };
+        let compressed = self.compressed_browse_payload(metadata)?;
+        let decoded = zstd::stream::decode_all(Cursor::new(compressed))?;
+        let browse: CompilerBrowseHeader = wire::decode(&decoded).map_err(invalid_wire)?;
+        Ok(Some(browse))
+    }
+
+    fn attribution_payload_range(
+        &self,
+        metadata: &CompilerObjectFileMetadata,
+        relative_offset: u64,
+        length: u64,
+    ) -> std::io::Result<Vec<u8>> {
+        let mut reader = self
+            .reader
+            .payload_range_reader(
+                attribution_key(FileId::new(metadata.file)),
+                relative_offset,
+                length,
+            )
+            .map_err(factstore_io)?
+            .ok_or_else(|| invalid_data("compiler-object attribution payload is missing"))?;
+        if reader.body_hash != attribution_body_hash_from_digest(metadata.source_digest) {
+            return Err(invalid_data(
+                "compiler-object attribution body fingerprint mismatch",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+        reader.read_to_end(&mut bytes)?;
+        if u64::try_from(bytes.len()).ok() != Some(length) {
+            return Err(invalid_data("compiler-object attribution range is truncated"));
+        }
+        Ok(bytes)
+    }
+
+    fn load_attribution_index(
+        &self,
+        descriptor: &SourceDescriptor,
+    ) -> std::io::Result<Option<CompilerAttributionIndex>> {
+        let Some(metadata) = self.metadata_for(descriptor) else {
+            return Ok(None);
+        };
+        if metadata.attribution_payload_len < ATTRIBUTION_PAYLOAD_PREFIX_BYTES as u32 {
+            return Err(invalid_data("compiler-object attribution payload is truncated"));
+        }
+        let prefix = self.attribution_payload_range(metadata, 0, ATTRIBUTION_PAYLOAD_PREFIX_BYTES as u64)?;
+        if prefix[..8] != ATTRIBUTION_PAYLOAD_MAGIC {
+            return Err(invalid_data("compiler-object attribution payload magic mismatch"));
+        }
+        let index_len = u32::from_le_bytes(prefix[8..12].try_into().expect("fixed attribution index length"));
+        let frames_payload_offset = u64::try_from(ATTRIBUTION_PAYLOAD_PREFIX_BYTES)
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::from(index_len));
+        if frames_payload_offset > u64::from(metadata.attribution_payload_len) {
+            return Err(invalid_data("compiler-object attribution index exceeds payload"));
+        }
+        let index_bytes = self.attribution_payload_range(
+            metadata,
+            ATTRIBUTION_PAYLOAD_PREFIX_BYTES as u64,
+            u64::from(index_len),
+        )?;
+        if digest_bytes(&index_bytes) != prefix[12..44] {
+            return Err(invalid_data("compiler-object attribution index digest mismatch"));
+        }
+        let mut index: CompilerAttributionIndex = wire::decode(&index_bytes).map_err(invalid_wire)?;
+        index.frames_payload_offset = frames_payload_offset;
+        validate_compiler_attribution_index(&index, metadata)?;
+        Ok(Some(index))
+    }
+
+    fn load_function_attribution(
+        &self,
+        descriptor: &SourceDescriptor,
+        index: &CompilerAttributionIndex,
+        declaration_span: Span,
+    ) -> std::io::Result<Option<CompilerFunctionAttribution>> {
+        let Some(metadata) = self.metadata_for(descriptor) else {
+            return Ok(None);
+        };
+        if index.file != descriptor.file {
+            return Err(invalid_data(
+                "compiler-object attribution index identity mismatch",
+            ));
+        }
+        let Some(frame) = index.frame_at_span(declaration_span) else {
+            return Ok(None);
+        };
+        let relative_offset = index
+            .frames_payload_offset
+            .checked_add(frame.relative_offset)
+            .ok_or_else(|| invalid_data("compiler-object attribution frame offset overflow"))?;
+        let compressed =
+            self.attribution_payload_range(metadata, relative_offset, u64::from(frame.compressed_len))?;
+        if digest_bytes(&compressed) != frame.compressed_digest {
+            return Err(invalid_data("compiler-object attribution frame digest mismatch"));
+        }
+        let decoded = zstd::stream::decode_all(Cursor::new(compressed))?;
+        let attribution: CompilerFunctionAttribution = wire::decode(&decoded).map_err(invalid_wire)?;
+        if attribution.declaration_span != declaration_span {
+            return Err(invalid_data(
+                "compiler-object attribution frame identity mismatch",
+            ));
+        }
+        Ok(Some(attribution))
+    }
+
+    fn load_attribution(
+        &self,
+        descriptor: &SourceDescriptor,
+    ) -> std::io::Result<Option<CompilerAttribution>> {
+        let Some(index) = self.load_attribution_index(descriptor)? else {
+            return Ok(None);
+        };
+        let mut functions = Vec::with_capacity(index.frames.len());
+        for frame in &index.frames {
+            functions.push(
+                self.load_function_attribution(descriptor, &index, frame.declaration_span)?
+                    .ok_or_else(|| invalid_data("compiler-object attribution frame is missing"))?,
+            );
+        }
+        Ok(Some(CompilerAttribution {
+            file: descriptor.file,
+            functions,
+        }))
+    }
+
     fn validate_payload(&self, metadata: &CompilerObjectFileMetadata) -> std::io::Result<()> {
         validate_streamed_payload(
             &self.reader,
@@ -308,6 +560,22 @@ impl CompilerObjectStore {
             metadata.header_payload_len,
             metadata.header_payload_digest,
             "compiler-object header",
+        )?;
+        validate_streamed_payload(
+            &self.reader,
+            attribution_key(FileId::new(metadata.file)),
+            attribution_body_hash_from_digest(metadata.source_digest),
+            metadata.attribution_payload_len,
+            metadata.attribution_payload_digest,
+            "compiler-object attribution",
+        )?;
+        validate_streamed_payload(
+            &self.reader,
+            browse_key(FileId::new(metadata.file)),
+            browse_body_hash_from_digest(metadata.source_digest),
+            metadata.browse_payload_len,
+            metadata.browse_payload_digest,
+            "compiler-object browse projection",
         )?;
         Ok(())
     }
@@ -371,6 +639,24 @@ impl AnalyzerDb {
         Some(object)
     }
 
+    /// Return whether this exact source snapshot has already completed the
+    /// canonical compiler-object diagnostic pass in the current process.
+    ///
+    /// The marker includes successful files with zero diagnostics. Broad
+    /// completion audits use it to avoid recompiling syntax headers that an
+    /// earlier command phase already lowered. File invalidation removes the
+    /// marker together with that file's published diagnostics.
+    #[must_use]
+    pub fn compiler_diagnostics_are_current(&self, file: FileId) -> bool {
+        let Some(descriptor) = source_descriptor(self, file) else {
+            return false;
+        };
+        self.inner
+            .compiler_diagnostics_published
+            .read()
+            .contains(&(file, descriptor.source_digest))
+    }
+
     /// Load the independently decodable import header for one exact source
     /// snapshot. A valid compiler-object generation answers without
     /// decompressing declaration bodies or flow events; a cache miss falls
@@ -395,7 +681,12 @@ impl AnalyzerDb {
                 }
             }
         }
-        self.compiler_file_object_uncached(file)?.imports
+        // Import-only callers do not require declarations or flow bodies.
+        // On a sidecar miss, run the owning adapter's exact import pass over
+        // the canonical Tree-sitter tree instead of compiling a complete
+        // object. This preserves the language frontend contract and keeps
+        // package-gated planning lightweight on a cold workspace.
+        self.build_import_index_with_diagnostics(file, &self.inner.diagnostics)
     }
 
     /// Load the independently decodable syntax-target header for one exact
@@ -426,6 +717,125 @@ impl AnalyzerDb {
             .declarations
             .as_ref()
             .map(CompilerSyntaxHeader::from_decl_index)
+    }
+
+    /// Load exact normalized browse candidates without decompressing the
+    /// declaration/flow body or unrelated syntax-target header.
+    ///
+    /// A missing or damaged persisted projection falls back to the canonical
+    /// Tree-sitter object and derives the identical terms. This changes only
+    /// storage and scheduling; it cannot admit a candidate that the owning
+    /// adapter did not lower.
+    #[must_use]
+    pub fn compiler_browse_header_uncached(&self, file: FileId) -> Option<CompilerBrowseHeader> {
+        let descriptor = source_descriptor(self, file)?;
+        if let Some(store) = self.inner.compiler_object_store.read().as_ref().cloned() {
+            match store.load_browse(&descriptor) {
+                Ok(Some(browse)) => return Some(browse),
+                Ok(None) => {}
+                Err(error) => {
+                    self.inner
+                        .compiler_object_store_requires_repair
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-object",
+                        "compiler browse projection miss for {}: {}",
+                        descriptor.path,
+                        error
+                    );
+                }
+            }
+        }
+        let object = self.compiler_file_object_uncached(file)?;
+        Some(CompilerBrowseHeader::from_indexes(
+            object.declarations.as_ref(),
+            object.imports.as_ref(),
+        ))
+    }
+
+    /// Load exact adapter-lowered call/write attribution for one source file
+    /// without decompressing its declaration and flow body.
+    ///
+    /// The content-addressed payload is a projection of the same compiler IR,
+    /// not a heuristic index. A missing or invalid sidecar falls back to one
+    /// canonical Tree-sitter lowering and derives the identical projection.
+    #[must_use]
+    pub fn compiler_attribution_uncached(&self, file: FileId) -> Option<CompilerAttribution> {
+        let descriptor = source_descriptor(self, file)?;
+        if let Some(store) = self.inner.compiler_object_store.read().as_ref().cloned() {
+            match store.load_attribution(&descriptor) {
+                Ok(Some(attribution)) => return Some(attribution),
+                Ok(None) => {}
+                Err(error) => {
+                    self.inner
+                        .compiler_object_store_requires_repair
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-object",
+                        "compiler attribution miss for {}: {}",
+                        descriptor.path,
+                        error
+                    );
+                }
+            }
+        }
+        self.compiler_file_object_uncached(file)?
+            .declarations
+            .as_ref()
+            .map(CompilerAttribution::from_decl_index)
+    }
+
+    /// Load one exact function's adapter attribution frame.
+    ///
+    /// The persisted path reads a small span directory and one independently
+    /// compressed function frame. It never decodes sibling functions or the
+    /// full compiler body. Cache damage falls back to the canonical
+    /// Tree-sitter object and therefore affects speed only.
+    #[must_use]
+    pub fn compiler_function_attribution_uncached(
+        &self,
+        file: FileId,
+        declaration_span: Span,
+    ) -> Option<CompilerFunctionAttribution> {
+        let descriptor = source_descriptor(self, file)?;
+        if let Some(store) = self.inner.compiler_object_store.read().as_ref().cloned() {
+            match store.load_attribution_index(&descriptor) {
+                Ok(Some(index)) => {
+                    match store.load_function_attribution(&descriptor, &index, declaration_span) {
+                        Ok(attribution) => return attribution,
+                        Err(error) => {
+                            self.inner
+                                .compiler_object_store_requires_repair
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            bonsai_diagnostics::debug_log!(
+                                "compiler-object",
+                                "compiler function attribution miss for {}: {}",
+                                descriptor.path,
+                                error
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.inner
+                        .compiler_object_store_requires_repair
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    bonsai_diagnostics::debug_log!(
+                        "compiler-object",
+                        "compiler function attribution miss for {}: {}",
+                        descriptor.path,
+                        error
+                    );
+                }
+            }
+        }
+        self.compiler_file_object_uncached(file)?
+            .declarations
+            .as_ref()
+            .map(CompilerAttribution::from_decl_index)?
+            .function_at_span(declaration_span)
+            .cloned()
     }
 
     /// Visit exact compiler objects for a deterministic file sequence using
@@ -520,6 +930,27 @@ impl AnalyzerDb {
             return Ok(0);
         }
 
+        // Scoped query workspaces intentionally do not open the complete
+        // compiler-object metadata during their lightweight syntax phase.
+        // Once a semantic consumer requests exact bodies, try that immutable
+        // generation before compiling a temporary session. `covers` binds
+        // every selected stable FileId to its adapter, path, and strong source
+        // digest, so a dense/local scoped id or changed file cannot become a
+        // false cache hit. This keeps path-filtered security scans on the
+        // already-published Tree-sitter IR without making syntax-only commands
+        // pay to hydrate unrelated compiler metadata.
+        if let Some(root) = self.workspace_root() {
+            if let Ok(store) = CompilerObjectStore::open_reusable(&root) {
+                if store.covers(&descriptors) {
+                    *self.inner.compiler_object_store.write() = Some(Arc::new(store));
+                    self.inner
+                        .compiler_object_store_requires_repair
+                        .store(false, std::sync::atomic::Ordering::Release);
+                    return Ok(0);
+                }
+            }
+        }
+
         // Preserve every still-exact object from a previous scoped session.
         // This makes successive rule-language batches monotonic without
         // widening the first pass to files that no active rule can consume.
@@ -555,7 +986,7 @@ impl AnalyzerDb {
         descriptors.dedup_by_key(|descriptor| descriptor.file.raw());
         let generation_digest = generation_digest(&descriptors);
         let mut prepared = PreparedFactStorePayload::create_near(path).map_err(factstore_io)?;
-        let mut prepared_entries = Vec::with_capacity(descriptors.len());
+        let mut prepared_entries = Vec::with_capacity(descriptors.len().saturating_mul(4));
         let mut files = Vec::with_capacity(descriptors.len());
         let cpu_workers = compiler_object_cpu_workers();
         let source_bytes = descriptors
@@ -606,6 +1037,26 @@ impl AnalyzerDb {
                     payload_offset: header_payload_offset,
                     payload_len: encoded.header_payload_len,
                 });
+                let (attribution_payload_offset, attribution_persisted_len) = prepared
+                    .append(&encoded.attribution_compressed)
+                    .map_err(factstore_io)?;
+                debug_assert_eq!(encoded.attribution_payload_len, attribution_persisted_len);
+                prepared_entries.push(PreparedFactStoreEntry {
+                    key: attribution_key(descriptor.file),
+                    body_hash: attribution_body_hash(descriptor),
+                    payload_offset: attribution_payload_offset,
+                    payload_len: encoded.attribution_payload_len,
+                });
+                let (browse_payload_offset, browse_persisted_len) = prepared
+                    .append(&encoded.browse_compressed)
+                    .map_err(factstore_io)?;
+                debug_assert_eq!(encoded.browse_payload_len, browse_persisted_len);
+                prepared_entries.push(PreparedFactStoreEntry {
+                    key: browse_key(descriptor.file),
+                    body_hash: browse_body_hash(descriptor),
+                    payload_offset: browse_payload_offset,
+                    payload_len: encoded.browse_payload_len,
+                });
                 files.push(CompilerObjectFileMetadata {
                     file: descriptor.file.raw(),
                     path: descriptor.path.clone(),
@@ -616,6 +1067,10 @@ impl AnalyzerDb {
                     payload_len: encoded.payload_len,
                     header_payload_digest: encoded.header_payload_digest,
                     header_payload_len: encoded.header_payload_len,
+                    attribution_payload_digest: encoded.attribution_payload_digest,
+                    attribution_payload_len: encoded.attribution_payload_len,
+                    browse_payload_digest: encoded.browse_payload_digest,
+                    browse_payload_len: encoded.browse_payload_len,
                 });
             }
         }
@@ -739,8 +1194,11 @@ impl AnalyzerDb {
             .with_code("parse-failed")],
         };
         let diagnostics = parking_lot::RwLock::new(DiagnosticSink::new());
-        let declarations = self.build_decl_index_with_diagnostics(descriptor.file, &diagnostics);
+        let mut declarations = self.build_decl_index_with_diagnostics(descriptor.file, &diagnostics);
         let imports = self.build_import_index_with_diagnostics(descriptor.file, &diagnostics);
+        if let (Some(declarations), Some(imports)) = (&mut declarations, &imports) {
+            bonsai_lang_api::mark_namespace_call_receivers(declarations, imports);
+        }
         self.release_syntax(descriptor.file);
         parser_diagnostics.extend(diagnostics.read().snapshot());
         CompiledFileObject {
@@ -756,21 +1214,20 @@ impl AnalyzerDb {
 
     fn publish_compiler_diagnostics(&self, object: &CompiledFileObject) {
         let key = (object.file, object.source_digest);
-        if object.diagnostics.is_empty() {
-            return;
-        }
         let _gate = self.inner.compiler_diagnostics_gate.lock();
         if !self.inner.compiler_diagnostics_published.write().insert(key) {
             return;
         }
-        self.inner
-            .diagnostics
-            .write()
-            .extend(object.diagnostics.iter().cloned());
+        if !object.diagnostics.is_empty() {
+            self.inner
+                .diagnostics
+                .write()
+                .extend(object.diagnostics.iter().cloned());
+        }
     }
 }
 
-/// Conventional compiler-object generation path under `<workspace>/.bonsai`.
+/// Conventional compiler-object generation path in the external workspace cache.
 #[must_use]
 pub fn compiler_object_sidecar_path(workspace_root: &Path) -> PathBuf {
     workspace_bonsai_dir(workspace_root).join(format!(
@@ -851,7 +1308,7 @@ where
     let legacy_generation_digest = legacy.generation_digest;
     let file_count = legacy.files.len();
     let mut prepared = PreparedFactStorePayload::create_near(&destination).map_err(factstore_io)?;
-    let mut prepared_entries = Vec::with_capacity(file_count.saturating_mul(2));
+    let mut prepared_entries = Vec::with_capacity(file_count.saturating_mul(4));
     let mut files = Vec::with_capacity(file_count);
     let mut previous_file = None;
     let mut descriptors = Vec::with_capacity(file_count);
@@ -874,6 +1331,23 @@ where
         {
             return Err(invalid_data("legacy compiler-object payload mismatch"));
         }
+        let legacy_decoded = zstd::stream::decode_all(Cursor::new(&legacy_payload.payload))?;
+        let legacy_object: CompiledFileObject = wire::decode(&legacy_decoded).map_err(invalid_wire)?;
+        if legacy_object.file != file || legacy_object.source_digest != legacy_file.source_digest {
+            return Err(invalid_data("legacy compiler-object identity mismatch"));
+        }
+        let attribution = legacy_object
+            .declarations
+            .as_ref()
+            .map(CompilerAttribution::from_decl_index)
+            .unwrap_or_else(|| CompilerAttribution {
+                file,
+                functions: Vec::new(),
+            });
+        let browse = CompilerBrowseHeader::from_indexes(
+            legacy_object.declarations.as_ref(),
+            legacy_object.imports.as_ref(),
+        );
         let (payload_offset, payload_len) = prepared.append(&legacy_payload.payload).map_err(factstore_io)?;
         prepared_entries.push(PreparedFactStoreEntry {
             key: object_key(file),
@@ -903,6 +1377,34 @@ where
             payload_offset: header_payload_offset,
             payload_len: header_payload_len,
         });
+        let attribution_compressed = encode_compiler_attribution_payload(&attribution)?;
+        let attribution_payload_digest = digest_bytes(&attribution_compressed);
+        let attribution_payload_len = u32::try_from(attribution_compressed.len())
+            .map_err(|_| invalid_data("compiler-object attribution payload exceeds 4 GiB"))?;
+        let (attribution_payload_offset, persisted_attribution_len) =
+            prepared.append(&attribution_compressed).map_err(factstore_io)?;
+        debug_assert_eq!(attribution_payload_len, persisted_attribution_len);
+        prepared_entries.push(PreparedFactStoreEntry {
+            key: attribution_key(file),
+            body_hash: attribution_body_hash_from_digest(legacy_file.source_digest),
+            payload_offset: attribution_payload_offset,
+            payload_len: attribution_payload_len,
+        });
+        let browse_encoded = wire::encode_struct_map(&browse).map_err(invalid_wire)?;
+        let browse_compressed =
+            zstd::stream::encode_all(Cursor::new(browse_encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)?;
+        let browse_payload_digest = digest_bytes(&browse_compressed);
+        let browse_payload_len = u32::try_from(browse_compressed.len())
+            .map_err(|_| invalid_data("compiler-object browse payload exceeds 4 GiB"))?;
+        let (browse_payload_offset, persisted_browse_len) =
+            prepared.append(&browse_compressed).map_err(factstore_io)?;
+        debug_assert_eq!(browse_payload_len, persisted_browse_len);
+        prepared_entries.push(PreparedFactStoreEntry {
+            key: browse_key(file),
+            body_hash: browse_body_hash_from_digest(legacy_file.source_digest),
+            payload_offset: browse_payload_offset,
+            payload_len: browse_payload_len,
+        });
         descriptors.push(SourceDescriptor {
             file,
             path: legacy_file.path.clone(),
@@ -922,6 +1424,10 @@ where
             payload_len: legacy_file.payload_len,
             header_payload_digest,
             header_payload_len,
+            attribution_payload_digest,
+            attribution_payload_len,
+            browse_payload_digest,
+            browse_payload_len,
         });
     }
     if legacy_generation_digest_v11(&descriptors) != legacy_generation_digest {
@@ -1145,6 +1651,15 @@ fn prepare_compiler_object(
         .declarations
         .as_ref()
         .map(CompilerSyntaxHeader::from_decl_index);
+    let attribution = object
+        .declarations
+        .as_ref()
+        .map(CompilerAttribution::from_decl_index)
+        .unwrap_or_else(|| CompilerAttribution {
+            file: descriptor.file,
+            functions: Vec::new(),
+        });
+    let browse = CompilerBrowseHeader::from_indexes(object.declarations.as_ref(), object.imports.as_ref());
     let syntax_digest = compiler_syntax_header_digest(syntax.as_ref());
     let header = CompilerObjectHeader {
         imports,
@@ -1163,6 +1678,16 @@ fn prepare_compiler_object(
     let header_payload_digest = digest_bytes(&header_compressed);
     let header_payload_len = u32::try_from(header_compressed.len())
         .map_err(|_| invalid_data("compiler-object header payload exceeds 4 GiB"))?;
+    let attribution_compressed = encode_compiler_attribution_payload(&attribution)?;
+    let attribution_payload_digest = digest_bytes(&attribution_compressed);
+    let attribution_payload_len = u32::try_from(attribution_compressed.len())
+        .map_err(|_| invalid_data("compiler-object attribution payload exceeds 4 GiB"))?;
+    let browse_encoded = wire::encode_struct_map(&browse).map_err(invalid_wire)?;
+    let browse_compressed =
+        zstd::stream::encode_all(Cursor::new(browse_encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)?;
+    let browse_payload_digest = digest_bytes(&browse_compressed);
+    let browse_payload_len = u32::try_from(browse_compressed.len())
+        .map_err(|_| invalid_data("compiler-object browse payload exceeds 4 GiB"))?;
     Ok(PreparedCompilerObject {
         compressed,
         payload_digest,
@@ -1170,6 +1695,12 @@ fn prepare_compiler_object(
         header_compressed,
         header_payload_digest,
         header_payload_len,
+        attribution_compressed,
+        attribution_payload_digest,
+        attribution_payload_len,
+        browse_compressed,
+        browse_payload_digest,
+        browse_payload_len,
     })
 }
 
@@ -1275,6 +1806,85 @@ fn compiler_syntax_header_digest(syntax: Option<&CompilerSyntaxHeader>) -> [u8; 
     digest_bytes(&encoded)
 }
 
+fn encode_compiler_attribution_payload(attribution: &CompilerAttribution) -> std::io::Result<Vec<u8>> {
+    let mut frames = Vec::with_capacity(attribution.functions.len());
+    let mut frame_bytes = Vec::new();
+    for function in &attribution.functions {
+        let encoded = wire::encode_struct_map(function).map_err(invalid_wire)?;
+        let compressed = zstd::stream::encode_all(Cursor::new(encoded), COMPILER_OBJECT_COMPRESSION_LEVEL)?;
+        let compressed_len = u32::try_from(compressed.len())
+            .map_err(|_| invalid_data("compiler-object attribution frame exceeds 4 GiB"))?;
+        frames.push(CompilerAttributionFrame {
+            declaration_span: function.declaration_span,
+            relative_offset: u64::try_from(frame_bytes.len()).unwrap_or(u64::MAX),
+            compressed_len,
+            compressed_digest: digest_bytes(&compressed),
+        });
+        frame_bytes.extend_from_slice(&compressed);
+    }
+    let index = CompilerAttributionIndex {
+        file: attribution.file,
+        frames,
+        frames_payload_offset: 0,
+    };
+    let index_bytes = wire::encode_struct_map(&index).map_err(invalid_wire)?;
+    let index_len = u32::try_from(index_bytes.len())
+        .map_err(|_| invalid_data("compiler-object attribution index exceeds 4 GiB"))?;
+    let total_len = ATTRIBUTION_PAYLOAD_PREFIX_BYTES
+        .checked_add(index_bytes.len())
+        .and_then(|len| len.checked_add(frame_bytes.len()))
+        .ok_or_else(|| invalid_data("compiler-object attribution payload length overflow"))?;
+    let mut payload = Vec::with_capacity(total_len);
+    payload.extend_from_slice(&ATTRIBUTION_PAYLOAD_MAGIC);
+    payload.extend_from_slice(&index_len.to_le_bytes());
+    payload.extend_from_slice(&digest_bytes(&index_bytes));
+    payload.extend_from_slice(&index_bytes);
+    payload.extend_from_slice(&frame_bytes);
+    Ok(payload)
+}
+
+fn validate_compiler_attribution_index(
+    index: &CompilerAttributionIndex,
+    metadata: &CompilerObjectFileMetadata,
+) -> std::io::Result<()> {
+    if index.file.raw() != metadata.file {
+        return Err(invalid_data(
+            "compiler-object attribution index identity mismatch",
+        ));
+    }
+    let frames_bytes = u64::from(metadata.attribution_payload_len)
+        .checked_sub(index.frames_payload_offset)
+        .ok_or_else(|| invalid_data("compiler-object attribution frame directory exceeds payload"))?;
+    let mut previous_span = None;
+    let mut expected_offset = 0_u64;
+    for frame in &index.frames {
+        let span_key = (
+            frame.declaration_span.file.raw(),
+            frame.declaration_span.start,
+            frame.declaration_span.end,
+        );
+        if frame.declaration_span.file != index.file
+            || previous_span.is_some_and(|previous| previous >= span_key)
+            || frame.relative_offset != expected_offset
+        {
+            return Err(invalid_data("compiler-object attribution index is not canonical"));
+        }
+        expected_offset = expected_offset
+            .checked_add(u64::from(frame.compressed_len))
+            .ok_or_else(|| invalid_data("compiler-object attribution frame range overflow"))?;
+        if expected_offset > frames_bytes {
+            return Err(invalid_data("compiler-object attribution frame exceeds payload"));
+        }
+        previous_span = Some(span_key);
+    }
+    if expected_offset != frames_bytes {
+        return Err(invalid_data(
+            "compiler-object attribution payload has unindexed bytes",
+        ));
+    }
+    Ok(())
+}
+
 fn compiler_frontend_semantic_fingerprint() -> u64 {
     let policy = MATCHER_POLICY_FINGERPRINT;
     (policy as u64)
@@ -1310,7 +1920,7 @@ fn legacy_metadata_pipeline_hash_v11(metadata: &LegacyCompilerObjectMetadataV11)
 }
 
 fn object_key(file: FileId) -> u64 {
-    u64::from(file.raw()).saturating_mul(2).saturating_add(1)
+    u64::from(file.raw()).saturating_mul(4).saturating_add(1)
 }
 
 fn legacy_object_key_v11(file: FileId) -> u64 {
@@ -1318,11 +1928,19 @@ fn legacy_object_key_v11(file: FileId) -> u64 {
 }
 
 fn header_key(file: FileId) -> u64 {
-    u64::from(file.raw()).saturating_mul(2).saturating_add(2)
+    u64::from(file.raw()).saturating_mul(4).saturating_add(2)
+}
+
+fn attribution_key(file: FileId) -> u64 {
+    u64::from(file.raw()).saturating_mul(4).saturating_add(3)
+}
+
+fn browse_key(file: FileId) -> u64 {
+    u64::from(file.raw()).saturating_mul(4).saturating_add(4)
 }
 
 fn compiler_object_entry_count(files: usize) -> usize {
-    files.saturating_mul(2).saturating_add(1)
+    files.saturating_mul(4).saturating_add(1)
 }
 
 fn object_body_hash(descriptor: &SourceDescriptor) -> u64 {
@@ -1345,6 +1963,22 @@ fn header_body_hash(descriptor: &SourceDescriptor) -> u64 {
 
 fn header_body_hash_from_digest(source_digest: [u8; 32]) -> u64 {
     object_body_hash_from_digest(source_digest) ^ 0x4845_4144_4552_5f31
+}
+
+fn attribution_body_hash(descriptor: &SourceDescriptor) -> u64 {
+    attribution_body_hash_from_digest(descriptor.source_digest)
+}
+
+fn attribution_body_hash_from_digest(source_digest: [u8; 32]) -> u64 {
+    object_body_hash_from_digest(source_digest) ^ 0x4154_5452_4942_5f31
+}
+
+fn browse_body_hash(descriptor: &SourceDescriptor) -> u64 {
+    browse_body_hash_from_digest(descriptor.source_digest)
+}
+
+fn browse_body_hash_from_digest(source_digest: [u8; 32]) -> u64 {
+    object_body_hash_from_digest(source_digest) ^ 0x4252_4f57_5345_5f31
 }
 
 fn validate_streamed_payload(
@@ -1560,6 +2194,163 @@ mod tests {
     }
 
     #[test]
+    fn compiler_attribution_decodes_without_opening_corrupt_full_body() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("src/input.py");
+        let vfs = Arc::new(Vfs::new());
+        let file = vfs.write(
+            source.to_string_lossy().into_owned(),
+            Arc::<str>::from("def route(payload):\n    repo.send(payload)\n    return payload\n"),
+        );
+        let registry = Arc::new(LanguageRegistry::new());
+        registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+        let db = AnalyzerDb::new(Arc::clone(&vfs), registry);
+        db.set_workspace_root(root.path().to_path_buf());
+        let descriptor = source_descriptor(&db, file).expect("source descriptor");
+        let object = db.compile_fresh_file_object(descriptor.clone());
+        let expected = object
+            .declarations
+            .as_ref()
+            .map(CompilerAttribution::from_decl_index)
+            .expect("python attribution");
+        assert_eq!(expected.functions.len(), 1);
+        db.save_compiler_object_sidecar(root.path())
+            .expect("save objects");
+
+        let path = compiler_object_sidecar_path(root.path());
+        let mut sidecar = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open compiler-object sidecar");
+        let mut header_bytes = [0_u8; HEADER_SIZE];
+        sidecar.read_exact(&mut header_bytes).expect("read header");
+        let header = Header::from_bytes(&header_bytes).expect("valid factstore header");
+        sidecar
+            .seek(SeekFrom::Start(header.index_offset))
+            .expect("seek index");
+        let mut body_entry = None;
+        for _ in 0..header.index_count {
+            let mut entry_bytes = [0_u8; INDEX_ENTRY_SIZE];
+            sidecar.read_exact(&mut entry_bytes).expect("read index entry");
+            let entry = IndexEntry::from_bytes(&entry_bytes).expect("valid index entry");
+            if entry.key == object_key(file) {
+                body_entry = Some(entry);
+                break;
+            }
+        }
+        let body_entry = body_entry.expect("compiler body entry");
+        sidecar
+            .seek(SeekFrom::Start(body_entry.payload_offset))
+            .expect("seek body payload");
+        let mut byte = [0_u8; 1];
+        sidecar.read_exact(&mut byte).expect("read body payload");
+        byte[0] ^= 0xff;
+        sidecar
+            .seek(SeekFrom::Start(body_entry.payload_offset))
+            .expect("rewind body payload");
+        sidecar.write_all(&byte).expect("corrupt body payload");
+        sidecar.sync_all().expect("flush corruption");
+
+        let store = CompilerObjectStore::open_reusable(root.path()).expect("open generation metadata");
+        assert_eq!(
+            store
+                .load_attribution(&descriptor)
+                .expect("independent attribution payload"),
+            Some(expected),
+            "attribution lookup must not touch the unrelated full-body payload"
+        );
+        assert!(
+            store.load(&descriptor).is_err(),
+            "test must corrupt only the full body"
+        );
+    }
+
+    #[test]
+    fn function_attribution_range_does_not_decode_corrupt_sibling_frame() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("src/input.py");
+        let vfs = Arc::new(Vfs::new());
+        let file = vfs.write(
+            source.to_string_lossy().into_owned(),
+            Arc::<str>::from(
+                "def first(payload):\n    sink(payload)\n\ndef second(other):\n    sink(other)\n",
+            ),
+        );
+        let registry = Arc::new(LanguageRegistry::new());
+        registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+        let db = AnalyzerDb::new(Arc::clone(&vfs), registry);
+        db.set_workspace_root(root.path().to_path_buf());
+        db.save_compiler_object_sidecar(root.path())
+            .expect("save objects");
+        let descriptor = source_descriptor(&db, file).expect("source descriptor");
+        let original = CompilerObjectStore::open_reusable(root.path()).expect("open store");
+        let index = original
+            .load_attribution_index(&descriptor)
+            .expect("load frame index")
+            .expect("frame index");
+        assert_eq!(index.frames.len(), 2);
+        let first_span = index.frames[0].declaration_span;
+        let second_span = index.frames[1].declaration_span;
+
+        let path = compiler_object_sidecar_path(root.path());
+        let mut sidecar = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open sidecar");
+        let mut header_bytes = [0_u8; HEADER_SIZE];
+        sidecar.read_exact(&mut header_bytes).expect("read header");
+        let header = Header::from_bytes(&header_bytes).expect("valid header");
+        sidecar
+            .seek(SeekFrom::Start(header.index_offset))
+            .expect("seek index");
+        let mut attribution_entry = None;
+        for _ in 0..header.index_count {
+            let mut entry_bytes = [0_u8; INDEX_ENTRY_SIZE];
+            sidecar.read_exact(&mut entry_bytes).expect("read index entry");
+            let entry = IndexEntry::from_bytes(&entry_bytes).expect("valid index entry");
+            if entry.key == attribution_key(file) {
+                attribution_entry = Some(entry);
+                break;
+            }
+        }
+        let attribution_entry = attribution_entry.expect("attribution entry");
+        let corrupt_offset = attribution_entry
+            .payload_offset
+            .saturating_add(index.frames_payload_offset)
+            .saturating_add(index.frames[1].relative_offset);
+        sidecar
+            .seek(SeekFrom::Start(corrupt_offset))
+            .expect("seek second frame");
+        let mut byte = [0_u8; 1];
+        sidecar.read_exact(&mut byte).expect("read second frame");
+        byte[0] ^= 0xff;
+        sidecar
+            .seek(SeekFrom::Start(corrupt_offset))
+            .expect("rewind second frame");
+        sidecar.write_all(&byte).expect("corrupt second frame");
+        sidecar.sync_all().expect("flush corruption");
+
+        let store = CompilerObjectStore::open_reusable(root.path()).expect("reopen store");
+        let index = store
+            .load_attribution_index(&descriptor)
+            .expect("uncorrupted index")
+            .expect("index");
+        assert!(store
+            .load_function_attribution(&descriptor, &index, first_span)
+            .expect("first frame remains independently readable")
+            .is_some());
+        assert!(
+            store
+                .load_function_attribution(&descriptor, &index, second_span)
+                .is_err(),
+            "the selected corrupt sibling must still fail integrity validation"
+        );
+        assert!(validate_compiler_object_sidecar_layout(root.path()).is_err());
+    }
+
+    #[test]
     fn legacy_v11_generation_migrates_without_reparsing() {
         let root = tempfile::tempdir().expect("tempdir");
         let source = root.path().join("src/input.fixture");
@@ -1645,7 +2436,7 @@ mod tests {
             1
         );
         let migrated = CompilerObjectStore::open_reusable(root.path()).expect("open migrated store");
-        assert_eq!(migrated.reader.len(), 3);
+        assert_eq!(migrated.reader.len(), 5);
         let replayed = migrated
             .load(&descriptor)
             .expect("load migrated object")
@@ -1658,6 +2449,30 @@ mod tests {
         assert_eq!(
             migrated.load_syntax(&descriptor).expect("load migrated syntax"),
             syntax
+        );
+        assert_eq!(
+            migrated
+                .load_browse(&descriptor)
+                .expect("load migrated browse projection"),
+            Some(CompilerBrowseHeader::from_indexes(
+                object.declarations.as_ref(),
+                object.imports.as_ref(),
+            ))
+        );
+        assert_eq!(
+            migrated
+                .load_attribution(&descriptor)
+                .expect("load migrated attribution"),
+            Some(
+                object
+                    .declarations
+                    .as_ref()
+                    .map(CompilerAttribution::from_decl_index)
+                    .unwrap_or_else(|| CompilerAttribution {
+                        file,
+                        functions: Vec::new(),
+                    })
+            )
         );
     }
 }

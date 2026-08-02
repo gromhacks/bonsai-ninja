@@ -664,6 +664,30 @@ pub struct CompilerSyntaxHeader {
     pub type_aliases: Vec<TypeAliasBinding>,
 }
 
+/// Independently decodable browse/search terms projected from one compiler
+/// object.
+///
+/// This is an exact projection of adapter-lowered declarations, references,
+/// imports, literals, comments, and flow events. It is persisted separately
+/// from both syntax-target headers and full bodies so broad candidate-index
+/// construction never has to inflate dataflow IR. Terms are normalized once
+/// while the canonical compiler object is resident; consumers may narrow
+/// candidate files with them, but must hydrate rendered facts through the
+/// canonical APIs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerBrowseHeader {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<CompilerBrowseTermGroup>,
+}
+
+/// Sorted normalized terms for one browse fact kind.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerBrowseTermGroup {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<String>,
+}
+
 /// Compact call target retained in [`CompilerSyntaxHeader`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompilerCallHeader {
@@ -691,6 +715,283 @@ pub struct CompilerFactoryCallAssignment {
     pub call_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_receiver: Option<String>,
+}
+
+/// Independently decodable call/write attribution projected from one exact
+/// compiler object.
+///
+/// This is not a second lowering path. Every field comes directly from the
+/// owning adapter's [`DeclIndex`] / [`FlowEvent`] IR and is persisted beside
+/// the full body so path rendering can open only the facts it consumes. The
+/// declaration span is the relocatable identity: workspace linking remaps
+/// symbols, while source spans remain stable inside the content-addressed
+/// object.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerAttribution {
+    pub file: FileId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub functions: Vec<CompilerFunctionAttribution>,
+}
+
+/// Compact attribution for one function-shaped declaration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerFunctionAttribution {
+    pub declaration_span: Span,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<CompilerCallAttribution>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub return_spans: Vec<Span>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writes: Vec<CompilerWriteAttribution>,
+}
+
+/// One adapter-lowered call site needed to reconstruct exact taint evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerCallAttribution {
+    pub span: Span,
+    pub name: String,
+    pub call_kind: CallKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<CompilerCallArgumentAttribution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver: Option<String>,
+    /// Value carriers from the adapter's structured receiver expression.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receiver_source_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receiver_types: Vec<String>,
+}
+
+/// The rendering and AST-derived carrier facts for one call argument.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerCallArgumentAttribution {
+    pub span: Span,
+    pub value_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_names: Vec<String>,
+}
+
+/// One exact assignment-shaped write and its adapter-proven RHS carriers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerWriteAttribution {
+    pub span: Span,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_names: Vec<String>,
+}
+
+impl CompilerAttribution {
+    /// Project call, return, and write evidence from canonical adapter IR.
+    #[must_use]
+    pub fn from_decl_index(index: &DeclIndex) -> Self {
+        fn is_bare_identifier(text: &str) -> bool {
+            let mut chars = text.chars();
+            let Some(first) = chars.next() else {
+                return false;
+            };
+            (first.is_ascii_alphabetic() || first == '_')
+                && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+        }
+
+        fn collect_expression_carriers(flow: &ExpressionFlow, out: &mut ahash::AHashSet<String>) {
+            if let Some(place) = flow.place.as_deref() {
+                let place = place.trim();
+                if !place.is_empty() {
+                    out.insert(place.to_string());
+                }
+            }
+            for source in &flow.source_names {
+                let source = source.trim();
+                if !source.is_empty() {
+                    out.insert(source.to_string());
+                }
+            }
+            for field in &flow.aggregate_fields {
+                collect_expression_carriers(&field.value, out);
+            }
+            for item in &flow.tuple_items {
+                collect_expression_carriers(item, out);
+            }
+            for spread in &flow.spreads {
+                collect_expression_carriers(spread, out);
+            }
+        }
+
+        fn walk(
+            events: &[FlowEvent],
+            receiver_facts: &[CallReceiverFact],
+            calls: &mut ahash::AHashMap<Span, CompilerCallAttribution>,
+            return_spans: &mut Vec<Span>,
+            writes: &mut Vec<CompilerWriteAttribution>,
+        ) {
+            for event in events {
+                match event {
+                    FlowEvent::Call {
+                        span,
+                        name,
+                        receiver,
+                        receiver_types,
+                        call_kind,
+                        args,
+                    } => {
+                        let mut receiver_source_names = ahash::AHashSet::default();
+                        if let Some(fact) = call_receiver_fact_for_span(receiver_facts, *span) {
+                            collect_expression_carriers(&fact.value_flow, &mut receiver_source_names);
+                        }
+                        let mut receiver_source_names = receiver_source_names.into_iter().collect::<Vec<_>>();
+                        receiver_source_names.sort();
+                        calls.insert(
+                            *span,
+                            CompilerCallAttribution {
+                                span: *span,
+                                name: name.clone(),
+                                call_kind: *call_kind,
+                                args: args
+                                    .iter()
+                                    .map(|arg| CompilerCallArgumentAttribution {
+                                        span: arg.span,
+                                        value_text: arg.value_text.clone(),
+                                        place: arg.place.clone(),
+                                        source_names: arg.source_names.clone(),
+                                    })
+                                    .collect(),
+                                receiver: receiver.clone(),
+                                receiver_source_names,
+                                receiver_types: receiver_types.clone(),
+                            },
+                        );
+                    }
+                    FlowEvent::Assign {
+                        span,
+                        target,
+                        source_name,
+                        source_names,
+                        source_call,
+                        source_call_args,
+                        ..
+                    } => {
+                        let mut write_sources = source_name.iter().cloned().collect::<Vec<_>>();
+                        write_sources.extend(source_names.iter().cloned());
+                        writes.push(CompilerWriteAttribution {
+                            span: *span,
+                            target: target.clone(),
+                            source_names: write_sources,
+                        });
+                        if let Some(name) = source_call {
+                            calls.entry(*span).or_insert_with(|| CompilerCallAttribution {
+                                span: *span,
+                                name: name.clone(),
+                                call_kind: CallKind::Function,
+                                args: source_call_args
+                                    .iter()
+                                    .map(|argument| {
+                                        let argument = argument.trim();
+                                        let carrier =
+                                            is_bare_identifier(argument).then(|| argument.to_string());
+                                        CompilerCallArgumentAttribution {
+                                            span: *span,
+                                            value_text: argument.to_string(),
+                                            place: carrier.clone(),
+                                            source_names: carrier.into_iter().collect(),
+                                        }
+                                    })
+                                    .collect(),
+                                receiver: None,
+                                receiver_source_names: Vec::new(),
+                                receiver_types: Vec::new(),
+                            });
+                        }
+                    }
+                    FlowEvent::Return { span, .. } => return_spans.push(*span),
+                    FlowEvent::Branch {
+                        then_events,
+                        else_events,
+                        ..
+                    } => {
+                        walk(then_events, receiver_facts, calls, return_spans, writes);
+                        walk(else_events, receiver_facts, calls, return_spans, writes);
+                    }
+                    FlowEvent::Loop { body, .. }
+                    | FlowEvent::Defer { body, .. }
+                    | FlowEvent::Using { body, .. } => {
+                        walk(body, receiver_facts, calls, return_spans, writes);
+                    }
+                    FlowEvent::Try {
+                        body,
+                        catch_events,
+                        finally_events,
+                        ..
+                    } => {
+                        walk(body, receiver_facts, calls, return_spans, writes);
+                        walk(catch_events, receiver_facts, calls, return_spans, writes);
+                        walk(finally_events, receiver_facts, calls, return_spans, writes);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut functions = Vec::new();
+        for decl in &index.defs {
+            if !matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) {
+                continue;
+            }
+            let mut calls = ahash::AHashMap::default();
+            let mut return_spans = Vec::new();
+            let mut writes = Vec::new();
+            walk(
+                &decl.flow_events,
+                &index.call_receivers,
+                &mut calls,
+                &mut return_spans,
+                &mut writes,
+            );
+            let mut calls = calls.into_values().collect::<Vec<_>>();
+            calls.sort_by_key(|call| {
+                (
+                    call.span.file.raw(),
+                    call.span.start,
+                    std::cmp::Reverse(call.span.end),
+                )
+            });
+            return_spans.sort_by_key(|span| (span.file.raw(), span.start, span.end));
+            return_spans.dedup();
+            functions.push(CompilerFunctionAttribution {
+                declaration_span: decl.span,
+                calls,
+                return_spans,
+                writes,
+            });
+        }
+        functions.sort_by_key(|function| {
+            (
+                function.declaration_span.file.raw(),
+                function.declaration_span.start,
+                function.declaration_span.end,
+            )
+        });
+        Self {
+            file: index.file,
+            functions,
+        }
+    }
+
+    /// Find one exact declaration projection without decoding sibling bodies.
+    #[must_use]
+    pub fn function_at_span(&self, span: Span) -> Option<&CompilerFunctionAttribution> {
+        let key = |value: Span| (value.file.raw(), value.start, value.end);
+        let wanted = key(span);
+        let index = self
+            .functions
+            .binary_search_by_key(&wanted, |function| key(function.declaration_span))
+            .ok()?;
+        self.functions.get(index)
+    }
 }
 
 impl CompilerSyntaxHeader {
@@ -2064,9 +2365,32 @@ pub struct CallReceiverFact {
     pub call_span: Span,
     pub receiver_span: Span,
     pub value_flow: ExpressionFlow,
+    /// Compiler-resolved role of the receiver expression. Namespace/type
+    /// qualifiers participate in call resolution but do not carry runtime
+    /// data into the call as an implicit receiver value.
+    #[serde(default, skip_serializing_if = "CallReceiverRole::is_value")]
+    pub role: CallReceiverRole,
     /// Exact scalar receiver decoded by the owning language frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_value: Option<StaticScalarValue>,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallReceiverRole {
+    /// Ordinary runtime value receiver (`client.send(...)`).
+    #[default]
+    Value,
+    /// Imported module/type namespace used only to qualify a callable
+    /// (`pickle.loads(...)`, `fmt.Println(...)`).
+    Namespace,
+}
+
+impl CallReceiverRole {
+    #[must_use]
+    pub const fn is_value(&self) -> bool {
+        matches!(self, Self::Value)
+    }
 }
 
 /// Compiler-owned value shape for one call argument.
@@ -2560,11 +2884,366 @@ pub struct ImportIndex {
     pub imports: Vec<ImportSpec>,
 }
 
+impl CompilerBrowseHeader {
+    /// Project exact file-local browse candidates from canonical adapter IR.
+    #[must_use]
+    pub fn from_indexes(declarations: Option<&DeclIndex>, imports: Option<&ImportIndex>) -> Self {
+        fn add(groups: &mut ahash::AHashMap<String, ahash::AHashSet<String>>, kind: &str, value: &str) {
+            let group = groups.entry(kind.to_string()).or_default();
+            let raw = value.trim().to_lowercase();
+            if !raw.is_empty() {
+                group.insert(raw);
+            }
+            group.extend(
+                value
+                    .split(|character: char| {
+                        !(character.is_ascii_alphanumeric()
+                            || matches!(character, '_' | '$' | '@' | ':' | '.'))
+                    })
+                    .filter(|part| !part.is_empty())
+                    .map(str::to_lowercase),
+            );
+        }
+
+        fn collect_flow(
+            groups: &mut ahash::AHashMap<String, ahash::AHashSet<String>>,
+            events: &[FlowEvent],
+            enclosing: &str,
+        ) {
+            for event in events {
+                match event {
+                    FlowEvent::Call { name, args, .. } => {
+                        add(groups, "call", name);
+                        add(groups, "call", enclosing);
+                        for argument in args {
+                            add(groups, "arg", &argument.value_text);
+                            add(groups, "arg", enclosing);
+                            if let Some(name) = argument.name.as_deref() {
+                                add(groups, "arg", name);
+                                add(groups, "arg", &format!("{name}={}", argument.value_text));
+                            }
+                            if let Some(place) = argument.place.as_deref() {
+                                add(groups, "arg", place);
+                            }
+                            for source in &argument.source_names {
+                                add(groups, "arg", source);
+                            }
+                        }
+                    }
+                    FlowEvent::Assign {
+                        target,
+                        source_name,
+                        source_call,
+                        source_call_args,
+                        source_names,
+                        ..
+                    } => {
+                        add(groups, "var", target);
+                        add(groups, "var", enclosing);
+                        let display_source = source_name
+                            .as_deref()
+                            .or(source_call.as_deref())
+                            .or_else(|| source_names.first().map(String::as_str));
+                        if let Some(source) = display_source {
+                            add(groups, "var", source);
+                            add(groups, "var", &format!("{target} = {source}"));
+                        }
+                        if let Some(call) = source_call {
+                            add(groups, "call", call);
+                            add(groups, "call", enclosing);
+                            for argument in source_call_args {
+                                add(groups, "arg", argument);
+                            }
+                        }
+                        for source in source_names {
+                            add(groups, "ref-read", source);
+                            add(groups, "ref-read", enclosing);
+                        }
+                    }
+                    FlowEvent::Branch {
+                        then_events,
+                        else_events,
+                        ..
+                    } => {
+                        collect_flow(groups, then_events, enclosing);
+                        collect_flow(groups, else_events, enclosing);
+                    }
+                    FlowEvent::Loop { body, .. }
+                    | FlowEvent::Defer { body, .. }
+                    | FlowEvent::Using { body, .. } => collect_flow(groups, body, enclosing),
+                    FlowEvent::Try {
+                        body,
+                        catch_events,
+                        finally_events,
+                        ..
+                    } => {
+                        collect_flow(groups, body, enclosing);
+                        collect_flow(groups, catch_events, enclosing);
+                        collect_flow(groups, finally_events, enclosing);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn enclosing_function(index: &DeclIndex, span: Span) -> Option<&str> {
+            index
+                .defs
+                .iter()
+                .filter(|declaration| {
+                    matches!(
+                        declaration.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    ) && declaration.span.start <= span.start
+                        && span.end <= declaration.span.end
+                })
+                .min_by_key(|declaration| declaration.span.end.saturating_sub(declaration.span.start))
+                .map(|declaration| declaration.name.as_str())
+        }
+
+        let mut groups = ahash::AHashMap::<String, ahash::AHashSet<String>>::default();
+        if let Some(index) = declarations {
+            for declaration in &index.defs {
+                let kind = format!("{:?}", declaration.kind).to_lowercase();
+                add(&mut groups, &kind, &declaration.name);
+                if let Some(qualified) = declaration.qualified_name.as_deref() {
+                    add(&mut groups, &kind, qualified);
+                }
+                for parameter in &declaration.params {
+                    add(&mut groups, &kind, parameter);
+                }
+                for operation in operations_from_flow_events(&declaration.flow_events) {
+                    add(&mut groups, "operation", operation.kind.as_str());
+                    add(&mut groups, "operation", &declaration.name);
+                    if let Some(target) = operation.target.as_deref() {
+                        add(&mut groups, "operation", target);
+                    }
+                    if let Some(detail) = operation.detail.as_deref() {
+                        add(&mut groups, "operation", detail);
+                    }
+                    for operand in operation.operands {
+                        add(&mut groups, "operation", &operand.name);
+                        add(&mut groups, "operation", operand.role.as_str());
+                        add(
+                            &mut groups,
+                            "operation",
+                            &format!("{}:{}", operand.role.as_str(), operand.name),
+                        );
+                    }
+                }
+                collect_flow(&mut groups, &declaration.flow_events, &declaration.name);
+            }
+            for reference in &index.refs {
+                let kind = match reference.kind {
+                    RefKind::Read => "ref-read",
+                    RefKind::Write => "ref-write",
+                    RefKind::Call => "ref-call",
+                    RefKind::Decorator => "ref-decorator",
+                    _ => "ref",
+                };
+                add(&mut groups, kind, &reference.name);
+            }
+            for string in &index.strings {
+                add(&mut groups, "string", &string.text);
+                add(
+                    &mut groups,
+                    "string",
+                    &format!("{:?}", string.category).to_lowercase(),
+                );
+                if let Some(function) = enclosing_function(index, string.span) {
+                    add(&mut groups, "string", function);
+                }
+            }
+            for comment in &index.comments {
+                add(&mut groups, "comment", &comment.text);
+                add(
+                    &mut groups,
+                    "comment",
+                    &format!("{:?}", comment.kind).to_lowercase(),
+                );
+                if let Some(function) = enclosing_function(index, comment.span) {
+                    add(&mut groups, "comment", function);
+                }
+            }
+        }
+        if let Some(index) = imports {
+            for import in &index.imports {
+                let kind = if import.alias.is_some() {
+                    "import-alias"
+                } else {
+                    "import"
+                };
+                add(&mut groups, kind, &import.module);
+                if let Some(alias) = import.alias.as_deref() {
+                    add(&mut groups, kind, alias);
+                }
+                if let Some(original) = import.original_name.as_deref() {
+                    add(&mut groups, kind, original);
+                }
+            }
+        }
+
+        let mut groups = groups
+            .into_iter()
+            .map(|(kind, terms)| {
+                let mut terms = terms.into_iter().collect::<Vec<_>>();
+                terms.sort_unstable();
+                CompilerBrowseTermGroup { kind, terms }
+            })
+            .collect::<Vec<_>>();
+        groups.sort_unstable_by(|left, right| left.kind.cmp(&right.kind));
+        Self { groups }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnsupportedConstruct {
     pub span: Span,
     pub note: String,
     pub precision: Precision,
+}
+
+#[cfg(test)]
+mod compiler_attribution_tests {
+    use super::*;
+
+    fn span(start: u64, end: u64) -> Span {
+        Span::new(FileId::new(4), start, end)
+    }
+
+    fn decl(kind: DeclKind, declaration_span: Span, flow_events: Vec<FlowEvent>) -> Decl {
+        Decl {
+            symbol: SymbolId::new(u32::try_from(declaration_span.start).expect("test symbol")),
+            kind,
+            name: "fixture".to_string(),
+            qualified_name: None,
+            module_path: ModulePath::default(),
+            span: declaration_span,
+            name_span: declaration_span,
+            visibility: Visibility::Private,
+            parent: None,
+            body_span: Some(declaration_span),
+            flow_events,
+            has_implicit_returns: false,
+            params: Vec::new(),
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: Vec::new(),
+            receiver_state_sources: Vec::new(),
+            return_type: None,
+            is_variadic: false,
+        }
+    }
+
+    #[test]
+    fn compiler_attribution_projects_nested_adapter_ir_without_text_tokenization() {
+        let direct_call = span(10, 18);
+        let assignment_call = span(30, 42);
+        let function_span = span(1, 80);
+        let index = DeclIndex {
+            file: FileId::new(4),
+            defs: vec![
+                decl(
+                    DeclKind::Function,
+                    function_span,
+                    vec![
+                        FlowEvent::Call {
+                            span: direct_call,
+                            name: "send".to_string(),
+                            receiver: Some("repo.client".to_string()),
+                            receiver_types: vec!["Repository".to_string()],
+                            call_kind: CallKind::Method,
+                            args: vec![CallArg {
+                                span: span(15, 17),
+                                passing_mode: ArgumentPassingMode::Value,
+                                name: None,
+                                value_text: "payload".to_string(),
+                                place: Some("payload".to_string()),
+                                source_names: vec!["payload".to_string()],
+                            }],
+                        },
+                        FlowEvent::Branch {
+                            span: span(19, 29),
+                            condition: None,
+                            then_events: vec![FlowEvent::Return {
+                                span: span(21, 27),
+                                value_text: Some("payload".to_string()),
+                                value_name: Some("payload".to_string()),
+                                value_flow: ExpressionFlow::from_place("payload"),
+                            }],
+                            else_events: Vec::new(),
+                        },
+                        FlowEvent::Assign {
+                            span: assignment_call,
+                            target: "saved".to_string(),
+                            source_name: Some("payload".to_string()),
+                            source_call: Some("transform".to_string()),
+                            source_call_args: vec!["payload".to_string(), "x + y".to_string()],
+                            source_names: vec!["fallback".to_string()],
+                            declares_new_binding: true,
+                            value_kind: Some(AssignValueKind::CallResult),
+                        },
+                    ],
+                ),
+                // Non-callable declarations must not manufacture function
+                // attribution even if a malformed fixture gives them events.
+                decl(
+                    DeclKind::Class,
+                    span(90, 120),
+                    vec![FlowEvent::Call {
+                        span: span(100, 110),
+                        name: "ignored".to_string(),
+                        receiver: None,
+                        receiver_types: Vec::new(),
+                        call_kind: CallKind::Function,
+                        args: Vec::new(),
+                    }],
+                ),
+            ],
+            call_receivers: vec![CallReceiverFact {
+                call_span: direct_call,
+                receiver_span: span(10, 14),
+                value_flow: ExpressionFlow {
+                    place: Some("repo.client".to_string()),
+                    source_names: vec!["repo".to_string()],
+                    aggregate_fields: vec![ExpressionField {
+                        name: "nested".to_string(),
+                        value: ExpressionFlow::from_place("nested.value"),
+                    }],
+                    ..ExpressionFlow::default()
+                },
+                role: CallReceiverRole::Value,
+                static_value: None,
+            }],
+            ..DeclIndex::default()
+        };
+
+        let projected = CompilerAttribution::from_decl_index(&index);
+        assert_eq!(projected.file, FileId::new(4));
+        assert_eq!(projected.functions.len(), 1);
+        let function = projected
+            .function_at_span(function_span)
+            .expect("function projection");
+        assert_eq!(function.calls.len(), 2);
+        assert_eq!(function.calls[0].name, "send");
+        assert_eq!(
+            function.calls[0].receiver_source_names,
+            ["nested.value", "repo", "repo.client"]
+        );
+        assert_eq!(function.return_spans, [span(21, 27)]);
+        assert_eq!(function.writes.len(), 1);
+        assert_eq!(function.writes[0].source_names, ["payload", "fallback"]);
+        assert_eq!(function.calls[1].name, "transform");
+        assert_eq!(function.calls[1].args[0].place.as_deref(), Some("payload"));
+        assert!(
+            function.calls[1].args[1].source_names.is_empty(),
+            "rendered compound text must not be split into invented carriers"
+        );
+        assert!(projected.function_at_span(span(90, 120)).is_none());
+    }
 }
 
 #[cfg(test)]

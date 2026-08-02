@@ -274,6 +274,10 @@ fn save_load_round_trip_preserves_segments_and_indexes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("idg.factstore");
     w.save_to_disk(&path, 0xDEAD_BEEF).expect("save succeeds");
+    assert!(
+        IdgWorkspace::validate_accelerated_sidecar_layout_with_pipeline(&path, 0xDEAD_BEEF,).is_err(),
+        "a canonical graph without a query accelerator is not a completed semantic prewarm"
+    );
     let restored = IdgWorkspace::load_from_disk(&path, 0xDEAD_BEEF)
         .expect("load Ok")
         .expect("Some workspace");

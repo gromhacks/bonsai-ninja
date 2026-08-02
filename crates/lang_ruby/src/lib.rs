@@ -1409,6 +1409,46 @@ fn ruby_span_text(src: &[u8], span: Span) -> Option<&str> {
 }
 
 fn apply_ruby_class_semantic_identity(idx: &mut DeclIndex) {
+    // Ruby modules are lexical namespace owners, not just display wrappers.
+    // The generic declaration pass records that ownership in `Decl.parent`;
+    // materialize it into `module_path` so a constant-qualified call such as
+    // `Tokenizer.each_token` resolves against the exact AST-declared module.
+    // Without this step every module method retained only the file module
+    // (`pipeline`) even though its qualified name correctly included the
+    // lexical owner (`pipeline::Tokenizer::each_token`).
+    let owners = idx
+        .defs
+        .iter()
+        .map(|decl| (decl.symbol, (decl.parent, decl.kind, decl.name.clone())))
+        .collect::<std::collections::HashMap<_, _>>();
+    for decl in &mut idx.defs {
+        let mut owner = if decl.kind == DeclKind::Module {
+            Some(decl.symbol)
+        } else {
+            decl.parent
+        };
+        let mut module_names = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(symbol) = owner {
+            if !seen.insert(symbol) {
+                break;
+            }
+            let Some((parent, kind, name)) = owners.get(&symbol) else {
+                break;
+            };
+            if *kind == DeclKind::Module {
+                module_names.push(name.clone());
+            }
+            owner = *parent;
+        }
+        module_names.reverse();
+        for module_name in module_names {
+            if decl.module_path.segments.last() != Some(&module_name) {
+                decl.module_path.segments.push(module_name);
+            }
+        }
+    }
+
     let mut classes: Vec<(Span, String, bonsai_common::SymbolId)> = idx
         .defs
         .iter()

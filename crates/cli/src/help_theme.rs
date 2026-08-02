@@ -49,7 +49,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("trace", "Expand one entry point's call tree"),
             ("path", "Ranked call paths"),
             ("slice", "Backward symbol slice"),
-            ("show", "Open an F:/T:/E:/S: id"),
+            ("show", "Open an F:/G:/T:/E:/N:/S:/R: id"),
         ],
     ),
     (
@@ -64,7 +64,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Cache",
         &[
             ("cache stats", "Show cache config and sidecar size"),
-            ("cache clear", "Delete `.bonsai/` sidecars"),
+            ("cache clear", "Delete external workspace sidecars"),
             ("cache rebuild", "Rebuild semantic structural sidecars"),
         ],
     ),
@@ -88,7 +88,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
     (
         "Navigation",
         &[
-            ("tree", "Annotated workspace tree"),
+            ("tree", "Direct filesystem tree"),
             ("read-file", "Annotated source view"),
         ],
     ),
@@ -124,8 +124,8 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
 /// fragments so the builder can paint commands / flags separately.
 pub(crate) const HELP_EXAMPLES: &[(&str, &[&str])] = &[
     (
-        "Inspect a sink and its flows:",
-        &["bonsai-ninja inspect ./src --query os.system"],
+        "Inspect a sink and its raw taint flows:",
+        &["bonsai-ninja inspect ./src --query os.system --taint-flow"],
     ),
     (
         "Trace behavior from an entry point:",

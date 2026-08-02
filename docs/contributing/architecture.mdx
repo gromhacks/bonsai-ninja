@@ -78,6 +78,15 @@ Under pressure the OS can reclaim those clean pages while Bonsai serializes,
 spills, or exactly recomputes compiler bodies. Resource accounting changes
 throughput and representation only.
 
+Raw workspace ingestion has a lighter schedule than parsing. Independent
+source reads run concurrently in byte-weighted windows derived from the live
+memory budget; each completed window is published to the VFS in canonical path
+order. Consequently I/O concurrency cannot renumber `FileId`s, change the
+snapshot, or create a second whole-workspace source copy on constrained hosts.
+Matcher body scans use one continuous work-stealing pool sized against the
+largest actual source units that could overlap. They do not place a barrier
+after every CPU-sized group of files.
+
 **`crates/hash`** provides FNV-1a digests for every persisted ID. Sole API:
 `fnv1a_str_slice64`, `fnv1a_names64`, `fnv1a_bytes64`, `fnv1a_low32`. RFC
 vector verified.
@@ -108,14 +117,22 @@ boundary. For each source snapshot it persists a relocatable
 events, syntax facts, and parser/adapter diagnostics. It never persists a raw
 Tree-sitter tree or parser handle.
 
-The object generation exposes two separately integrity-checked header
-projections: imports, plus compact syntax targets containing adapter-lowered
-calls, assignment aliases, factory assignments, and receiver/type evidence.
-Rule planning first tests raw source anchors, then exact import/package
-headers, then exact syntax targets. Only surviving files decompress
-declarations and flow events. The full body remains the canonical source when
-a surviving file needs matching, transfer, or rendered evidence; this is one
-compiler IR with staged decoding, not a second parser.
+The object generation exposes independently integrity-checked projections for
+imports, compact syntax targets, function attribution, and normalized browse
+facts. Syntax targets contain adapter-lowered calls, assignment aliases,
+factory assignments, and receiver/type evidence. Rule planning first tests raw
+source anchors, then exact import/package headers, then exact syntax targets.
+Only surviving files decompress declarations and flow events. The full body
+remains the canonical source when a surviving file needs matching, transfer,
+or rendered evidence; this is one compiler IR with staged decoding, not a
+second parser.
+
+Compiler diagnostics also carry per-source-snapshot coverage. A successful
+file with zero diagnostics is recorded just as deliberately as a file with an
+ERROR/MISSING node. A later completeness audit compiles only unchecked source
+snapshots, while an edit invalidates both the marker and that file's diagnostic
+rows. This prevents a broad command from repeating the same Tree-sitter and
+adapter pass merely to prove that an already-lowered file was clean.
 
 Object identity is the workspace-relative path/module context, selected
 adapter, explicit frontend ABI, and SHA-256 of the complete source. A
@@ -141,11 +158,17 @@ flowchart LR
   G --> X[One-pass transfer lowering]
   X --> P[Typed stitch spool]
   P --> I[Exact IDG closure substrate]
+  I --> A[Validated query accelerator]
   I --> Q[Inspect, security, taint, export]
+  A --> Q
 ```
 
 `index --semantic` runs compiler objects, callgraph, retrieval, linkage, and
-IDG as ordered worker processes. The process boundary returns Tree-sitter and
+IDG as ordered worker processes. The IDG worker also compiles the default
+semantic contextual fixed point and compact node/function directories into an
+independently decodable query accelerator beside the canonical graph. The
+accelerator is representation-only: deleting it causes exact recomputation,
+not different edges or results. The process boundary returns Tree-sitter and
 allocator arenas to the OS. Later workers open the same object generation, so
 the boundary does not imply another syntax interpretation. The parent then
 validates every sidecar against the same current workspace snapshot; if a file
@@ -173,6 +196,20 @@ workspace-package prewarm has no languages, so a static import cannot be lost
 at that phase boundary. When a selected function needs global flow evidence,
 its exact compiler object is streamed and rebound to the persisted symbol
 table.
+
+On a cold command, receiver ancestry is demand-driven. The file-local syntax
+pass requests the workspace ancestry projection only when a typed call has the
+right method target and a base class could change its match, or when an
+explicit receiver-type constraint could change. Missing method names, regex
+targets, and untyped receivers cannot trigger a whole-workspace declaration
+pass. If ancestry is needed, the candidate plan is rerun with the exact base
+map before any body is admitted; this changes phase scheduling, never rule
+semantics.
+
+Files deferred for ancestry retain their independently decoded syntax and
+import headers. Once the receiver projection is available, planning enriches
+and rechecks those same exact headers rather than reopening every deferred
+compiler object. Non-deferred plans remain admitted and are never recomputed.
 
 The global index is a linker header, not a second copy of every body. It keeps
 declarations, aggregate layouts, types, modules, imports, inheritance, and
@@ -276,6 +313,15 @@ record and local-to-segment node map. Stitching hydrates one segment and moves
 that record into the linker; it does not reparse or re-lower the AST. Every
 scheduled function and fixed-point relation is still consumed.
 
+Before `index --semantic` publishes the immutable IDG generation, it derives
+the query-ready `FuncId -> SegmentId` directory, unified numeric node
+identities, and default `Exact/Narrowed` contextual CSR from that same spooled
+graph. Warm open validates array lengths, ownership, CSR offsets/targets, and
+call-boundary identities before installing the accelerator. A normal cold
+query may persist only the canonical graph; semantic prewarm distinguishes
+that valid-but-cold artifact and completes the accelerator rather than
+silently treating it as warm.
+
 Workspace IDG generations are single-flight in process and own a
 target-specific advisory lock across processes. A waiter validates and reuses
 the immutable sidecar published by the current owner before doing compiler
@@ -364,7 +410,7 @@ publishes the reusable default artifact, so a cache miss never creates a
 multi-gigabyte temporary copy beside the requested output.
 
 **`crates/retrieval`** is a fact-backed candidate index, not an evidence
-engine. It persists `FactDoc` records under `.bonsai/` with stable fact ids,
+engine. It persists `FactDoc` records in the external workspace cache with stable fact ids,
 source spans, language/file/symbol metadata, provenance, precision,
 static-limit/incomplete metadata, normalized search text, content
 fingerprints, and pipeline fingerprints. Source files are first-class
@@ -419,8 +465,9 @@ name-only fan-out.
 
 `path` builds a shared semantic path graph from the cached resolved
 callgraph plus warmed IDG cross-call edges when an IDG sidecar has been
-hydrated. It then uses `enumerate_paths_resolved`: a bounded, ranked
-source-to-target walk over exact/narrowed edges only. It carries edge
+hydrated. It then uses `enumerate_paths_resolved`: a cycle-safe, ranked
+source-to-target walk over exact/narrowed edges only. The default walk is
+uncapped; explicit diagnostic cutoffs report incompleteness. It carries edge
 precision through each path and reports truncation, missing IDG facts, or
 resolution gaps as incompleteness rather than widening missing calls into
 guessed evidence. When the target pattern matches an indexed call site but
@@ -458,6 +505,10 @@ known external/library call sites, unresolved call sites, dynamic calls, macro
 calls, and receiver-type fact gaps. The output is syntax-derived and
 completeness-oriented; it never widens a missing edge into guessed evidence,
 and it does not treat import-proven external API calls as receiver-type gaps.
+When a fresh partitioned callgraph is available, aggregate export completeness
+streams one caller-file partition and one exact compiler body at a time, then
+replays this same classification. Cached and uncached reports therefore count
+the same call sites without retaining the whole graph beside all bodies.
 
 **`crates/abstract_interp`** is the shared abstract-interpretation
 runtime. Its value lattice now carries constants, bounded integer ranges,
@@ -474,11 +525,16 @@ construction. All interprocedural taint surfaces are IDG-backed: source seeds ar
 resolved to concrete IDG nodes, configured transfer summaries are applied to
 fixpoint, and the resulting closure is cut to a semantic target/lineage
 corridor before call records or findings are rendered.
-On first query, forward and backward numeric CSR adjacency is counted and
-filled together in two passes over canonical IDG edges. It does not stage a
-second workspace-sized endpoint vector, perform name search, or change the
-edge set. Precision-specific adjacency remains lazy so unused query modes do
-not duplicate the graph in memory or on disk.
+After `index --semantic`, the first query decodes and validates the persisted
+default semantic CSR and compact identity directories without reopening every
+IDG segment. A valid canonical graph without that optional accelerator builds
+the same forward/backward adjacency in two streaming passes on demand. Neither
+path stages a second workspace-sized endpoint vector, performs name search, or
+changes the edge set. Non-default precision adjacency remains lazy so unused
+diagnostic modes do not duplicate the graph in memory or on disk. A dense
+function corridor may reuse an already-prewarmed global representation while
+the closure still enforces the exact admitted function set at every
+transition; cold and genuinely narrow corridors retain sparse projections.
 `interprocedural_taint_with_caches` is a compatibility façade over that same
 closure, not a second scheduler. `reachable.rs` also owns the
 shared default entry seed helpers used by cached dataflow, inspect, and
@@ -521,7 +577,7 @@ interactive output does not accumulate duplicate wheels.
 
 The reuse path is binary factstores, not JSON re-parsing. Explicit cache
 producers such as `index --semantic`, SDK `Bonsai::index_semantic`, and
-`cache rebuild` also write `.bonsai/manifest.json`: a descriptive JSON
+`cache rebuild` also write `manifest.json` in the external workspace cache: a descriptive JSON
 inventory of sidecar coverage, producer fingerprints, missing reasons, and a
 versioned source ledger. The ledger stores each path's size, modification
 stamp, and exact SHA-256 digest. A warm validation reuses the digest only when
@@ -549,21 +605,26 @@ candidate indexes before they can narrow a query.
   persisted sidecar is present, computed on demand for exact queries, and
   fully rebuilt by explicit full-prewarm SDK opens or by the compatibility
   dataflow-only path, `index --prewarm-dataflow`; persisted to
-  `.bonsai/dataflow.v3.factstore` (the older `dataflow.v2.bin` is still
+  external-cache `dataflow.v3.factstore` (the older `dataflow.v2.bin` is still
   readable for warm reopens).
 - `SyntaxFlowQuery` (`flow_query.rs`) — the command-facing facade for
-  rulepack-free entry taint graphs. It uses a warmed IDG target cut when
-  one is already seeded, otherwise it returns the canonical
-  `DataFlowCache` graph. Each result carries a `SyntaxFlowPlan` with the
-  selected backend, cache hit/miss status, target-cut scope, IDG
-  availability, and fallback/incompleteness reasons. Interactive commands
-  use this instead of open-coding IDG/dataflow selection or hiding planner
-  decisions in render-only logic.
+  rulepack-free entry taint graphs. Inspect first records exact Tree-sitter
+  match spans and releases syntax-body/callgraph ownership before opening a
+  persisted IDG. The facade batch-resolves those spans to typed IDG target
+  nodes, keeps function fallbacks only for unrepresented spans, and reuses one
+  sparse backward target-relevance proof across exact per-entry closures. A
+  warmed IDG answers the target cut; a cache miss builds one exact
+  query-scoped source/target IDG, with `DataFlowCache` retained only as the
+  compatibility fallback. Each result carries a `SyntaxFlowPlan` with the
+  selected backend, cache hit/miss status, target-cut scope, IDG availability,
+  and fallback/incompleteness reasons. Interactive commands use this instead
+  of open-coding IDG/dataflow selection or hiding planner decisions in
+  render-only logic.
 - `ValueFlowCache` (`value_flow.rs`) — per-`FuncId` seed-free
   `ValueFlowGraph` plus a `returning_seed_names` set
   for compatibility navigation/SDK clients. Loaded when present and projected
   from the canonical IDG only for the requested scope; explicit callers may
-  persist it to `.bonsai/value_flow.v*.factstore`. Security and native export
+  persist it to external-cache `value_flow.v*.factstore`. Security and native export
   query the IDG directly.
 - `FlowIdCache` (`flow_ids.rs`) — per-`FuncId` flow labels for
   browse-row F-IDs. Computed for the rendered browse scope; shares the
@@ -573,7 +634,7 @@ candidate indexes before they can narrow a query.
   `(source_func, sorted_seed_key) → Arc<EntryTaintGraph>`. Lifted
   out of the per-invocation map so a second `taint-analysis` /
   `source-analysis` run reuses the cached graph. Persisted to
-  `.bonsai/taint_graph.v*.<mode>.<config>.factstore` with version + fingerprint
+  external-cache `taint_graph.v*.<mode>.<config>.factstore` with version + fingerprint
   guard, so different analysis configurations do not evict each other.
   Write-through persistence is default-on and can be disabled with
   `BONSAI_TAINT_GRAPH_PERSIST=0` when cache I/O is undesirable.
@@ -695,7 +756,9 @@ full-prewarm paths can additionally materialize stages 8–10:
 2. `parser` parses each file (with cache).
 3. The right `lang_*` adapter walks the tree and emits `Decl` / `Ref` /
    `ImportSpec`.
-4. The DB/index path enriches call receiver types from adapter-emitted
+4. The DB/index path links adapter-emitted import and receiver facts, marks
+   module/type qualifiers as non-value receivers unless local binding facts
+   prove shadowing, and enriches runtime receiver types from adapter-emitted
    type aliases and AST-derived parent links.
 5. `resolve` turns refs into resolved symbols.
 6. `callgraph` builds the call graph (cached on the workspace via
@@ -708,7 +771,7 @@ full-prewarm paths can additionally materialize stages 8–10:
    workspace-wide `InterTaintCaches` singleton for resolver memo, alias maps,
    function summaries, and local bindings across source groups.
 9. `DataFlowCache::prewarm_all` fans out across rayon and persists to
-   `.bonsai/dataflow.v3.factstore`; compatibility value-flow entries persist
+   external-cache `dataflow.v3.factstore`; compatibility value-flow entries persist
    only after explicit/on-demand projection.
 10. `FlowIdCache::prewarm_all` materialises browse-row flow labels
     using the same shared call graph.

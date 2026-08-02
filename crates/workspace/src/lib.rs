@@ -103,7 +103,7 @@ impl std::ops::Deref for ExactDecl {
     }
 }
 
-/// Conventional workspace IDG sidecar path under `<workspace>/.bonsai/`.
+/// Conventional IDG sidecar path in the workspace's external OS cache.
 #[must_use]
 pub fn idg_sidecar_path(workspace_root: &Path) -> std::path::PathBuf {
     bonsai_idg::workspace::idg_sidecar_path(workspace_root)
@@ -487,6 +487,12 @@ pub enum WorkspaceError {
         count: usize,
         candidates: Vec<String>,
     },
+    #[error("source path filter is ambiguous: {query} ({count} candidates: {candidates})")]
+    AmbiguousSourcePath {
+        query: String,
+        count: usize,
+        candidates: String,
+    },
 }
 
 #[derive(Clone)]
@@ -544,7 +550,7 @@ struct Inner {
     /// stream every source hash from disk without retaining unrelated source
     /// text. Callgraph and linkage readers share the resulting compact table
     /// so a command never fingerprints the workspace twice.
-    sidecar_source_inputs: Mutex<Option<Arc<Vec<(u32, String, u64)>>>>,
+    sidecar_source_inputs: Mutex<Option<SidecarSourceInputs>>,
     /// Compact declaration/type/linkage table for the current source snapshot.
     /// This is the compiler's workspace symbol layer: exact file bodies are
     /// lowered beside it and discarded after each consumer finishes. The IDG
@@ -604,7 +610,7 @@ struct Inner {
     reparse_counter: Mutex<u64>,
     root_label: Mutex<String>,
     /// Workspace root recorded at open time so the on-demand IDG-build
-    /// path can persist its versioned sidecar under `<root>/.bonsai/`
+    /// path can persist its versioned sidecar in the external workspace cache
     /// without re-threading the path through every call site.
     /// `None` for tests / synthetic workspaces that open without a
     /// real on-disk root; persistence is skipped silently in that case.
@@ -613,9 +619,11 @@ struct Inner {
     /// supported source set under `workspace_root`. Literal-, path-,
     /// and filter-scoped query workspaces are exact for their scoped
     /// command, but must not publish reusable whole-workspace sidecars
-    /// under the shared `.bonsai/` directory.
+    /// under the shared complete-workspace cache directory.
     complete_workspace_index: Mutex<bool>,
 }
+
+type SidecarSourceInputs = Arc<Vec<(u32, String, u64)>>;
 
 #[derive(Copy, Clone, Debug, Default, Serialize)]
 pub struct WorkspaceStats {
@@ -1103,6 +1111,30 @@ impl Workspace {
         self.inner.db.save_compiler_object_sidecar(root)
     }
 
+    /// Ensure a complete semantic phase consumes one immutable generation of
+    /// adapter-lowered compiler objects.
+    ///
+    /// Query workspaces normally open an existing generation in
+    /// [`AnalyzerDb::set_workspace_root`]. On a cold or invalidated cache, the
+    /// first whole-workspace semantic consumer publishes the exact current
+    /// generation before building linkage or callgraph facts. Those later
+    /// phases then stream the same Tree-sitter lowering instead of reparsing
+    /// every source independently. Failure to publish is a performance/cache
+    /// failure only: callers retain the canonical syntax fallback.
+    fn ensure_complete_compiler_object_generation(&self, root: &Path) {
+        if self.compiler_object_generation_matches_current_snapshot() {
+            return;
+        }
+        if let Err(error) = self.save_compiler_object_sidecar(root) {
+            bonsai_diagnostics::debug_log!(
+                "compiler-cache",
+                "compiler-object generation publication failed at {}: {}",
+                compiler_object_sidecar_path(root).display(),
+                error
+            );
+        }
+    }
+
     pub fn vfs(&self) -> &Vfs {
         &self.inner.vfs
     }
@@ -1240,6 +1272,13 @@ impl Workspace {
     /// AST call-linkage row beside the IDG.
     #[must_use]
     pub fn compiler_linkage_index(&self) -> Arc<GlobalIndex> {
+        // Once the canonical IDG is open, it already owns the exact compact
+        // linkage generation used to build or validate that graph. Reuse it
+        // rather than decoding/building a second workspace symbol table
+        // beside the graph.
+        if let Some(idg) = self.inner.db.idg_service() {
+            return idg.global_linkage_index();
+        }
         if let Some(linkage) = self.inner.compiler_linkage.read().clone() {
             return linkage;
         }
@@ -1254,9 +1293,23 @@ impl Workspace {
                 *slot = Some(linkage.clone());
                 return linkage;
             }
+            self.ensure_complete_compiler_object_generation(&root);
         }
         let linkage = self.inner.db.build_global_linkage_index();
         *slot = Some(linkage.clone());
+        drop(slot);
+        if let Some(root) = self.root_path().filter(|_| self.is_complete_workspace_index()) {
+            let path = linkage_sidecar::linkage_sidecar_path(&root);
+            if let Err(error) = linkage_sidecar::save_linkage_sidecar(&path, &self.inner.db, linkage.clone())
+            {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "compiler-linkage publication failed at {}: {}",
+                    path.display(),
+                    error
+                );
+            }
+        }
         linkage
     }
 
@@ -1268,6 +1321,13 @@ impl Workspace {
     /// proven necessary by its compiler worklist.
     #[must_use]
     pub fn compiler_header_index(&self) -> Arc<GlobalIndex> {
+        // A warmed IDG already owns the immutable declaration/type identity
+        // generation used to validate the graph. It is a strict superset of
+        // this syntax projection, so reusing it avoids decoding and retaining
+        // a second workspace-wide symbol table beside the IDG.
+        if let Some(idg) = self.inner.db.idg_service() {
+            return idg.global_linkage_index();
+        }
         if let Some(headers) = self.inner.compiler_headers.read().clone() {
             return headers;
         }
@@ -1571,6 +1631,23 @@ impl Workspace {
         self.exact_decl_with_headers(symbol, headers)
     }
 
+    /// Return one exact adapter-lowered declaration for frontend debugging.
+    /// Unlike [`Self::exact_decl`], this preserves file-local HIR and does not
+    /// add workspace-global receiver ancestry. It still remaps declaration
+    /// symbols against stable headers, so full and scoped opens agree.
+    #[must_use]
+    pub fn exact_frontend_decl(&self, symbol: SymbolId) -> Option<ExactDecl> {
+        let headers = self.compiler_index_for_exact_bodies();
+        let file = headers.declaring_file(symbol)?;
+        let index = self.inner.db.decl_index_uncached(file)?;
+        let index = headers.remap_file_to_existing_symbols_frontend_only(index);
+        let position = index.defs.iter().position(|decl| decl.symbol == symbol)?;
+        Some(ExactDecl {
+            file_index: Arc::new(index),
+            position,
+        })
+    }
+
     /// Reuse an already-materialized compiler identity table before building
     /// another one solely to replay an exact body.
     ///
@@ -1582,6 +1659,9 @@ impl Workspace {
     /// header builder stole another exact-body job and recursively requested
     /// its own write-locked cache.
     fn compiler_index_for_exact_bodies(&self) -> Arc<GlobalIndex> {
+        if let Some(idg) = self.inner.db.idg_service() {
+            return idg.global_linkage_index();
+        }
         if let Some(linkage) = self.inner.compiler_linkage.read().clone() {
             return linkage;
         }
@@ -1694,6 +1774,7 @@ impl Workspace {
                 self.seed_resolved_call_graph(graph.clone());
                 return graph;
             }
+            self.ensure_complete_compiler_object_generation(root);
         }
         let built = self.build_resolved_call_graph();
         let arc = Arc::new(built);
@@ -1715,6 +1796,18 @@ impl Workspace {
         self.inner.flow_ids.seed_call_graph(arc.clone());
         *slot = Some(arc.clone());
         drop(slot);
+        if let Some(root) = complete_root.as_deref() {
+            let path = callgraph_sidecar::callgraph_sidecar_path(root);
+            if let Err(error) = callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, arc.clone())
+            {
+                bonsai_diagnostics::debug_log!(
+                    "compiler-cache",
+                    "resolved-callgraph publication failed at {}: {}",
+                    path.display(),
+                    error
+                );
+            }
+        }
         arc
     }
 
@@ -1904,7 +1997,8 @@ impl Workspace {
     }
 
     fn build_resolved_call_graph(&self) -> bonsai_callgraph::ResolvedCallGraph {
-        build_resolved_call_graph_snapshot(&self.inner.db)
+        let headers = self.compiler_header_index();
+        bonsai_taint::build_resolved_call_graph_snapshot_with_headers(&self.inner.db, headers.as_ref())
     }
 
     pub fn source_reachable_resolved_call_graph(
@@ -2613,10 +2707,12 @@ impl Workspace {
         let pipeline_hash = self.cached_idg_workspace_pipeline_hash(Some(&root));
         let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
         let _sidecar_guard = IdgSidecarWriteGuard::acquire(&sidecar)?;
-        if let Ok(segment_count) = bonsai_idg::workspace::IdgWorkspace::validate_sidecar_layout_with_pipeline(
-            &sidecar,
-            pipeline_hash,
-        ) {
+        if let Ok(segment_count) =
+            bonsai_idg::workspace::IdgWorkspace::validate_accelerated_sidecar_layout_with_pipeline(
+                &sidecar,
+                pipeline_hash,
+            )
+        {
             return Ok(Some(segment_count));
         }
         let call_graph_path = callgraph_sidecar::callgraph_sidecar_path(&root);
@@ -2660,6 +2756,33 @@ impl Workspace {
                 },
             )?;
         let segment_count = workspace.segment_count();
+        // IDG stitching has consumed every resolver call-linkage row. Retain
+        // only stable declaration/type headers while compiling the query
+        // accelerator; keeping the resolver payload beside contextual and
+        // symbolic fixed-point relations made cold prewarm peak needlessly
+        // additive on large workspaces.
+        drop(resident_call_graph);
+        drop(partitioned_call_graph);
+        self.release_compiler_linkage_cache();
+        self.release_exact_body_cache();
+        self.release_decl_name_index_cache();
+        self.inner.db.release_global_index();
+        let global = Arc::try_unwrap(global)
+            .unwrap_or_else(|shared| (*shared).clone())
+            .into_header_index();
+        let global = Arc::new(global);
+        // Compile the default query representation from the exact graph while
+        // its compiler spool is still available, then release every runtime
+        // owner before persistence. Warm commands can install this immutable
+        // derived fixed point directly instead of decoding every body and
+        // rebuilding the same workspace-wide CSR on first use.
+        let workspace = Arc::new(workspace);
+        let service = bonsai_idg::IdgQueryService::new(Arc::clone(&workspace), global);
+        let accelerator = service.compile_default_query_accelerator()?;
+        let Ok(mut workspace) = Arc::try_unwrap(workspace) else {
+            unreachable!("query-accelerator compiler retained an IDG workspace owner")
+        };
+        workspace.install_query_accelerator(accelerator);
         workspace.save_into_disk(&sidecar, pipeline_hash)?;
         Ok(Some(segment_count))
     }
@@ -3144,11 +3267,30 @@ impl Workspace {
         Ok(inputs)
     }
 
+    /// Content hashes for the complete source generation represented by this
+    /// workspace.
+    ///
+    /// Exact query workspaces contain only the bodies selected for one
+    /// compiler worklist, but retain the validated full-workspace source table
+    /// used by persisted sidecars. Cache freshness and page replay must use
+    /// that complete identity rather than mistaking the scoped body set for a
+    /// new 10-file workspace.
+    pub fn complete_source_content_hashes(&self) -> std::io::Result<Vec<(std::path::PathBuf, u64)>> {
+        Ok(self
+            .sidecar_source_inputs()?
+            .iter()
+            .map(|(_, path, hash)| (std::path::PathBuf::from(path), *hash))
+            .collect())
+    }
+
     /// Record the workspace root so [`Self::build_and_seed_idg_service`]
-    /// can persist the IDG sidecar next to the other `.bonsai/` files.
+    /// can persist the IDG sidecar next to the other external cache files.
     /// Called by the `open*` family once the root path is known.
-    fn set_idg_sidecar_root(&self, root: &std::path::Path) {
-        *self.inner.idg_sidecar_root.lock() = Some(root.to_path_buf());
+    fn set_idg_sidecar_root(&self, root: &std::path::Path) -> std::io::Result<()> {
+        let canonical_root = canonical_workspace_root(root);
+        cache_fingerprint::register_workspace_cache_root(&canonical_root)?;
+        *self.inner.idg_sidecar_root.lock() = Some(canonical_root);
+        Ok(())
     }
 
     /// Whether this workspace contains the complete supported source
@@ -3339,7 +3481,7 @@ impl Workspace {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let ws = Self::new_with_open_options(registry, options);
-        ws.set_idg_sidecar_root(root);
+        ws.set_idg_sidecar_root(root)?;
         ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
@@ -3391,7 +3533,7 @@ impl Workspace {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let ws = Self::new_with_open_options(registry, options);
-        ws.set_idg_sidecar_root(root);
+        ws.set_idg_sidecar_root(root)?;
         ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
@@ -3475,7 +3617,7 @@ impl Workspace {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let ws = Self::new_with_open_options(registry, options);
-        ws.set_idg_sidecar_root(root);
+        ws.set_idg_sidecar_root(root)?;
         ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
@@ -3535,7 +3677,7 @@ impl Workspace {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let ws = Self::new_with_open_options(registry, options);
-        ws.set_idg_sidecar_root(root);
+        ws.set_idg_sidecar_root(root)?;
         ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
@@ -3657,7 +3799,7 @@ impl Workspace {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let ws = Self::new_with_open_options(registry, options);
-        ws.set_idg_sidecar_root(root);
+        ws.set_idg_sidecar_root(root)?;
         ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
@@ -3704,7 +3846,7 @@ impl Workspace {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let ws = Self::new_with_open_options(registry, options);
-        ws.set_idg_sidecar_root(root);
+        ws.set_idg_sidecar_root(root)?;
         on_event(WorkspaceOpenEvent::IngestStarted);
         ws.ingest_dir(root)?;
         let files = ws.vfs().all_files();
@@ -3793,7 +3935,13 @@ impl Workspace {
                         entries: 0,
                     });
                 }
-                Err(_) => {
+                Err(error) => {
+                    bonsai_diagnostics::debug_log!(
+                        "idg-build",
+                        "workspace IDG sidecar load failed: path={} error={}",
+                        bonsai_idg::workspace::idg_sidecar_path(root).display(),
+                        error
+                    );
                     on_event(WorkspaceOpenEvent::CacheChecked {
                         cache: "IDG factstore",
                         status: WorkspaceCacheStatus::Error,
@@ -4013,6 +4161,7 @@ impl Workspace {
         *self.inner.root_label.lock() = root.display().to_string();
         self.set_complete_workspace_index(true);
         let canonical_root = canonical_workspace_root(root);
+        cache_fingerprint::register_workspace_cache_root(&canonical_root)?;
         self.inner.db.set_workspace_root(canonical_root.clone());
         let mut ingested = Vec::new();
         stream_supported_source_files(&canonical_root, &self.inner.registry, |source| {
@@ -4226,9 +4375,14 @@ impl Workspace {
             }
         };
 
+        let unchecked_files = files
+            .iter()
+            .copied()
+            .filter(|file| !self.inner.db.compiler_diagnostics_are_current(*file))
+            .collect::<Vec<_>>();
         self.inner
             .db
-            .visit_compiler_file_objects_uncached(files, |file, object| match object {
+            .visit_compiler_file_objects_uncached(&unchecked_files, |file, object| match object {
                 Some(object) => {
                     for diagnostic in &object.diagnostics {
                         record_diagnostic(diagnostic);
@@ -4365,6 +4519,9 @@ impl Workspace {
     ) -> Option<Vec<FuncId>> {
         let lookup = split_symbol_lookup_spec(qualified);
         let global = self.persisted_compiler_header_index_for_files(candidate_files)?;
+        // CONTEXTLESS_LOOKUP_JUSTIFICATION: integrity-checked partition
+        // inventory, constrained below by the complete lookup spec; all
+        // overloads survive and no semantic dispatch is guessed by name.
         let mut hits = global
             .find_by_name(lookup.name)
             .iter()
@@ -5186,7 +5343,7 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // adapter-declared implicit class receivers resolve inherited
     // constructors. Rebuild linkage, callgraph, IDG, and taint facts whose
     // identities or attribution depend on those compiler semantics.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 54;
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 55;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
@@ -5531,28 +5688,45 @@ where
     // Inclusion is structural: explicit ignore rules plus the adapter's
     // supported extension. File names and source text are compiler input,
     // never heuristics for dropping otherwise supported programs.
-    let entries = walk_workspace_entries(canonical_root)?;
+    let entries = walk_workspace_entries(canonical_root)?
+        .into_iter()
+        .filter(|entry| {
+            entry.file_type().is_some_and(|file_type| file_type.is_file())
+                && entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| registry.adapter_for_extension(extension).is_some())
+        })
+        .collect::<Vec<_>>();
+    let source_bytes = entries
+        .iter()
+        .map(|entry| entry.metadata().map_or(0, |metadata| metadata.len()))
+        .collect::<Vec<_>>();
+    let workers = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
 
-    for entry in entries {
-        if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
-            continue;
+    // Read independent compiler inputs concurrently, but publish each bounded
+    // batch to the VFS in sorted path order. This preserves deterministic
+    // FileIds and the exact source snapshot while removing a serialized I/O
+    // pass from every cold CLI process. The shared syntax scheduler accounts
+    // for current RSS and file size, so constrained machines execute smaller
+    // batches instead of retaining a second whole-workspace source copy.
+    for range in bonsai_common::source_ingestion_batches(&source_bytes, workers) {
+        use rayon::prelude::*;
+        let batch = entries[range]
+            .par_iter()
+            .map(|entry| {
+                let path = entry.path();
+                std::fs::read_to_string(path).map(|text| SourceFileContent {
+                    path: path.to_path_buf(),
+                    text,
+                    full_workspace_file: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        for source in batch {
+            on_file(source.map_err(WorkspaceError::Io)?)?;
         }
-        let path = entry.path();
-        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if registry.adapter_for_extension(ext).is_none() {
-            continue;
-        }
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) => return Err(WorkspaceError::Io(error)),
-        };
-        on_file(SourceFileContent {
-            path: path.to_path_buf(),
-            text,
-            full_workspace_file: None,
-        })?;
     }
 
     Ok(())
@@ -5601,10 +5775,15 @@ fn read_supported_source_file_at_path(
     registry: &LanguageRegistry,
     requested_path: &Path,
 ) -> Result<SourceFileContent, WorkspaceError> {
-    let path = if requested_path.is_absolute() {
+    let direct_path = if requested_path.is_absolute() {
         requested_path.to_path_buf()
     } else {
         canonical_root.join(requested_path)
+    };
+    let path = if direct_path.is_file() || requested_path.is_absolute() {
+        direct_path
+    } else {
+        resolve_unique_supported_source_path(canonical_root, registry, requested_path)?
     };
     let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
         return Err(WorkspaceError::NoAdapter(path.display().to_string()));
@@ -5622,6 +5801,57 @@ fn read_supported_source_file_at_path(
         text,
         full_workspace_file: None,
     })
+}
+
+/// Resolve a user-facing file filter to one supported workspace source.
+///
+/// CLI file options are documented as workspace-relative path filters, so a
+/// unique basename such as `executor.rs` must find `src/executor.rs`. Exact
+/// paths stay O(1) in [`read_supported_source_file_at_path`]; this metadata
+/// walk is only the fallback for a non-exact filter. Ambiguity fails closed
+/// with candidate paths instead of silently selecting whichever directory the
+/// filesystem happened to enumerate first.
+fn resolve_unique_supported_source_path(
+    canonical_root: &Path,
+    registry: &LanguageRegistry,
+    requested_path: &Path,
+) -> Result<PathBuf, WorkspaceError> {
+    let query = requested_path.to_string_lossy().replace('\\', "/");
+    let query = query.trim_start_matches("./");
+    let mut candidates = walk_workspace_entries(canonical_root)?
+        .into_iter()
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            let path = entry.into_path();
+            let ext = path.extension()?.to_str()?;
+            registry.adapter_for_extension(ext)?;
+            let relative = path.strip_prefix(canonical_root).ok()?;
+            let normalized = relative.to_string_lossy().replace('\\', "/");
+            normalized.contains(query).then_some((normalized, path))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    match candidates.as_slice() {
+        [(_, path)] => Ok(path.clone()),
+        [] => Err(WorkspaceError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "no supported source path matching `{}` under {}",
+                requested_path.display(),
+                canonical_root.display()
+            ),
+        ))),
+        _ => Err(WorkspaceError::AmbiguousSourcePath {
+            query: requested_path.display().to_string(),
+            count: candidates.len(),
+            candidates: candidates
+                .iter()
+                .take(8)
+                .map(|(relative, _)| relative.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        }),
+    }
 }
 
 fn read_supported_source_files_impl(

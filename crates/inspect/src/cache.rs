@@ -6,11 +6,11 @@
 //! is preserved on update-in-place so an entry doesn't get evicted
 //! just because a writer touched it again.
 //!
-//! Bounding each cache puts a hard ceiling on `inspect` / `export`
-//! memory: Redis's worst-case `--from main --to system` query was
-//! holding ~250 MB in the `reachable` map alone before this cap.
-//! At cap=8192 the same workload runs in the same wall time and
-//! caps reachable-cache memory at roughly 40 MB.
+//! Bounding retained memo entries limits `inspect` / `export` memory:
+//! Redis's worst-case `--from main --to system` query held ~250 MB in
+//! the `reachable` map alone before eviction was introduced. Eviction
+//! changes reuse only; a miss recomputes the same exact facts and never
+//! narrows semantic work or returned results.
 
 pub struct BoundedCache<K, V> {
     map: ahash::AHashMap<K, V>,
@@ -97,8 +97,8 @@ impl<K: std::hash::Hash + Eq + Clone, V> BoundedCache<K, V> {
 // ---------------------------------------------------------------------------
 // Per-cache size caps
 //
-// Each cap is generous enough that a typical run never evicts; they
-// exist as a hard ceiling for worst-case memory, not as a tuning knob.
+// Each capacity is generous enough that a typical run never evicts; it
+// bounds retained memo state, not analysis work or result cardinality.
 // The current caps are intentionally higher than the original Redis-
 // scale baseline because flow filtering now composes several token
 // caches and benefits from keeping hot FuncId/FileId facts resident.

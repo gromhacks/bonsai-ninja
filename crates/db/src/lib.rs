@@ -95,9 +95,10 @@ struct DbInner {
     /// lowering inside one generation remains memory-aware and parallel; only
     /// publication of the immutable generation is single-flight.
     compiler_object_generation_build: Mutex<()>,
-    /// Snapshots whose persisted diagnostics have already been published into
-    /// the process sink. Broad phases may read one compiler object repeatedly;
-    /// diagnostics remain complete without multiplying identical messages.
+    /// Snapshots whose exact compiler diagnostics have already been checked
+    /// and, when non-empty, published into the process sink. Successful files
+    /// with zero diagnostics remain in this coverage set so a completion audit
+    /// does not recompile work already performed by a syntax-header phase.
     compiler_diagnostics_published: RwLock<AHashSet<(FileId, [u8; 32])>>,
     /// Serializes the published-version set with replacement of its diagnostic
     /// rows. Without this gate, an edit racing a warm object load could remove
@@ -613,8 +614,12 @@ impl AnalyzerDb {
         if let Some(v) = cached {
             return Some(v);
         }
-        let adapter = self.adapter_for(file)?;
-        let value = Arc::new(self.adapter_context_with(|ctx| adapter.extract_imports(file, ctx)));
+        // The compiler-object import header is the adapter's exact
+        // Tree-sitter-lowered `ImportIndex`, stored independently from the
+        // declaration/flow body. Reuse it here as well as in streaming
+        // passes; reparsing source for the cached interactive facade made a
+        // warm large-repository query pay a second frontend pass per file.
+        let value = Arc::new(self.compiler_import_index_uncached(file)?);
         let mut cache = self.inner.cache.write();
         let stored = cache
             .import_index
@@ -771,25 +776,36 @@ impl AnalyzerDb {
     fn build_streaming_global_index(&self, insert: fn(&mut GlobalIndex, DeclIndex)) -> Arc<GlobalIndex> {
         let files = self.inner.vfs.all_files();
         let mut global = GlobalIndex::new();
-        let workers = global_index_worker_count();
-        if workers <= 1 || files.len() <= 1 {
+        let source_bytes = files
+            .iter()
+            .map(|file| {
+                self.inner
+                    .vfs
+                    .snapshot(*file)
+                    .ok()
+                    .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
+                    .unwrap_or(0)
+            })
+            .collect::<Vec<_>>();
+        let batches = bonsai_common::compiler_weighted_batches(&source_bytes, global_index_cpu_workers());
+        let parallel_width = batches.iter().map(std::ops::Range::len).max().unwrap_or(1);
+        if parallel_width <= 1 || files.len() <= 1 {
             for file in files {
                 if let Some(index) = self.decl_index_uncached(file) {
                     insert(&mut global, index);
                 }
             }
         } else {
-            let chunk_size = (workers * 8).max(16);
             match rayon::ThreadPoolBuilder::new()
-                .num_threads(workers)
+                .num_threads(parallel_width)
                 .stack_size(global_index_worker_stack_bytes())
                 .build()
             {
                 Ok(pool) => {
-                    for chunk in files.chunks(chunk_size) {
+                    for range in batches {
                         let indexes = pool.install(|| {
                             use rayon::prelude::*;
-                            chunk
+                            files[range]
                                 .par_iter()
                                 .map(|&file| self.decl_index_uncached(file))
                                 .collect::<Vec<_>>()
@@ -1103,11 +1119,15 @@ fn should_consume_decl_index_cache_for_global() -> bool {
 }
 
 fn global_index_worker_count() -> usize {
+    bonsai_common::compiler_worker_count(global_index_cpu_workers())
+}
+
+fn global_index_cpu_workers() -> usize {
     let available = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
         .max(1);
-    let requested = std::env::var("BONSAI_GLOBAL_INDEX_JOBS")
+    std::env::var("BONSAI_GLOBAL_INDEX_JOBS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .or_else(|| {
@@ -1117,10 +1137,7 @@ fn global_index_worker_count() -> usize {
         })
         .unwrap_or(available)
         .max(1)
-        .min(available);
-    // A constrained machine lowers the identical file set serially; memory
-    // affects scheduling, never syntax coverage.
-    bonsai_common::compiler_worker_count(requested)
+        .min(available)
 }
 
 fn global_index_worker_stack_bytes() -> usize {

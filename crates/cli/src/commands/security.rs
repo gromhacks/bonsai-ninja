@@ -18,7 +18,7 @@ use crate::args::{BrowseFormat, SecurityAction, SecurityFormat};
 use crate::commands::{
     emit_json_paged_cached, emit_json_value_paged_cached, open_project_index_filtered_paths,
     open_project_index_matching_literal, open_project_index_only, page_info_to_json,
-    paged_json_incomplete_reasons, paging_from_cli, short_file,
+    paged_json_incomplete_reasons, paging_from_cli, paging_with_row_limit, short_file,
 };
 use crate::footer::{render_paging_footer, render_truncation_notice};
 use crate::page_cache;
@@ -247,6 +247,7 @@ fn open_security_project_filtered_paths(
 /// rulepack once, merges any project-local overrides, then forwards
 /// to the per-action handler.
 pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<()> {
+    let command_started = std::time::Instant::now();
     // Extract --rules-dir from whichever action variant carries it.
     // Same shape on every variant; clap-derive forces a per-variant
     // field (`global = true` would route the flag but wouldn't show
@@ -272,6 +273,11 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
         project_local_overrides = pack.merge_overriding(local);
     }
     stage.finish();
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "security rulepack/setup: {:.3}s",
+        command_started.elapsed().as_secs_f64()
+    );
     if !project_local_overrides.is_empty() {
         let u = ui();
         for id in project_local_overrides {
@@ -761,6 +767,7 @@ fn cmd_sources(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let literal_anchor = source_inventory_exact_rule_literal(
         pack,
         rule.as_deref(),
@@ -910,11 +917,18 @@ fn cmd_sinks(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    let command_started = std::time::Instant::now();
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
         open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
     } else {
         open_security_project(workspace, pack, rules_dir)?
     };
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "sink inventory workspace open: {:.3}s",
+        command_started.elapsed().as_secs_f64()
+    );
     let sev_floor = parse_severity_flag(severity.as_deref())?;
     let mut analysis_progress = SecurityAnalysisProgress::new();
     let matches = project.security().sinks_with_progress(
@@ -930,7 +944,13 @@ fn cmd_sinks(
         },
         |event| analysis_progress.handle(event),
     )?;
-    render_match_table(
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "sink inventory analysis complete: {:.3}s matches={}",
+        command_started.elapsed().as_secs_f64(),
+        matches.len()
+    );
+    let result = render_match_table(
         workspace,
         "sinks",
         &matches,
@@ -948,7 +968,13 @@ fn cmd_sinks(
             ("tag", tag.as_deref().unwrap_or("")),
             ("category", category.as_deref().unwrap_or("")),
         ]),
-    )
+    );
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "sink inventory command complete: {:.3}s",
+        command_started.elapsed().as_secs_f64()
+    );
+    result
 }
 
 // ---- sanitizers ----
@@ -968,6 +994,7 @@ fn cmd_sanitizers(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
         open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
     } else {
@@ -1023,6 +1050,7 @@ fn cmd_deps(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
         open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
     } else {
@@ -4206,6 +4234,7 @@ fn cmd_pack(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    let paging_cfg = paging_with_row_limit(paging_cfg, limit);
     let kind_filter = match kind.as_deref() {
         Some("source") => Some(RuleKind::Source),
         Some("sink") => Some(RuleKind::Sink),

@@ -6,10 +6,12 @@
 //! remains part of the relation.
 
 use crate::positioned_io::read_exact_at;
+use crate::workspace::QueryAcceleratorBlobReader;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::sync::Arc;
 
 const READ_ROWS: usize = 2_048;
 const INDEX_STRIDE: u64 = 256;
@@ -105,7 +107,7 @@ impl<R: ExternalRecord> ExternalSorter<R> {
         file.seek(SeekFrom::Start(0))
             .expect("rewind sorted exact compiler relation");
         SortedExternalRelation {
-            file,
+            storage: ExternalRelationStorage::File(file),
             len: count,
             checkpoints: checkpoints.into_boxed_slice(),
         }
@@ -141,9 +143,20 @@ impl<R: ExternalRecord> ExternalSorter<R> {
 }
 
 pub(crate) struct SortedExternalRelation<R> {
-    file: File,
+    storage: ExternalRelationStorage,
     len: u64,
     checkpoints: Box<[R]>,
+}
+
+enum ExternalRelationStorage {
+    File(File),
+    Persisted(QueryAcceleratorBlobReader),
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersistedExternalRelation {
+    len: u64,
+    checkpoints: Box<[u8]>,
 }
 
 impl<R: ExternalRecord> SortedExternalRelation<R> {
@@ -153,6 +166,67 @@ impl<R: ExternalRecord> SortedExternalRelation<R> {
 
     pub(crate) fn len(&self) -> u64 {
         self.len
+    }
+
+    pub(crate) fn persisted_metadata(&self) -> PersistedExternalRelation {
+        let mut checkpoints = Vec::with_capacity(self.checkpoints.len().saturating_mul(R::BYTES));
+        for checkpoint in self.checkpoints.iter().copied() {
+            checkpoint.encode(&mut checkpoints);
+        }
+        PersistedExternalRelation {
+            len: self.len,
+            checkpoints: checkpoints.into_boxed_slice(),
+        }
+    }
+
+    pub(crate) fn snapshot_file(&self) -> std::io::Result<Arc<File>> {
+        let mut file = tempfile::tempfile()?;
+        let mut offset = 0_u64;
+        let total = self.len.saturating_mul(R::BYTES as u64);
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        while offset < total {
+            let take =
+                usize::try_from((total - offset).min(buffer.len() as u64)).expect("relation page fits usize");
+            self.read_exact_at(offset, &mut buffer[..take])?;
+            file.write_all(&buffer[..take])?;
+            offset = offset.saturating_add(take as u64);
+        }
+        file.seek(SeekFrom::Start(0))?;
+        Ok(Arc::new(file))
+    }
+
+    pub(crate) fn from_persisted(
+        metadata: PersistedExternalRelation,
+        storage: QueryAcceleratorBlobReader,
+    ) -> Result<Self, &'static str> {
+        let expected_checkpoints = metadata.len.div_ceil(INDEX_STRIDE) as usize;
+        if metadata.checkpoints.len() != expected_checkpoints.saturating_mul(R::BYTES)
+            || storage.len() != metadata.len.saturating_mul(R::BYTES as u64)
+        {
+            return Err("external relation layout");
+        }
+        let checkpoints: Vec<R> = metadata
+            .checkpoints
+            .chunks_exact(R::BYTES)
+            .map(R::decode)
+            .collect();
+        if checkpoints.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("external relation checkpoint ordering");
+        }
+        Ok(Self {
+            storage: ExternalRelationStorage::Persisted(storage),
+            len: metadata.len,
+            checkpoints: checkpoints.into_boxed_slice(),
+        })
+    }
+
+    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> std::io::Result<()> {
+        match &self.storage {
+            ExternalRelationStorage::File(file) => read_exact_at(file, offset, output),
+            ExternalRelationStorage::Persisted(blob) => blob
+                .read_exact_at(offset, output)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        }
     }
 
     pub(crate) fn lower_bound(&self, row: R) -> u64 {
@@ -171,12 +245,8 @@ impl<R: ExternalRecord> SortedExternalRelation<R> {
         let byte_count = rows.saturating_mul(R::BYTES);
         let mut block = vec![0_u8; byte_count];
         if byte_count > 0 {
-            read_exact_at(
-                &self.file,
-                block_start.saturating_mul(R::BYTES as u64),
-                &mut block,
-            )
-            .expect("read sorted exact compiler relation block");
+            self.read_exact_at(block_start.saturating_mul(R::BYTES as u64), &mut block)
+                .expect("read sorted exact compiler relation block");
         }
         let mut low = 0usize;
         let mut high = rows;
@@ -197,12 +267,8 @@ impl<R: ExternalRecord> SortedExternalRelation<R> {
             let rows =
                 usize::try_from((end - start).min(READ_ROWS as u64)).expect("relation page exceeds usize");
             let bytes = rows.saturating_mul(R::BYTES);
-            read_exact_at(
-                &self.file,
-                start.saturating_mul(R::BYTES as u64),
-                &mut payload[..bytes],
-            )
-            .expect("read sorted exact compiler relation range");
+            self.read_exact_at(start.saturating_mul(R::BYTES as u64), &mut payload[..bytes])
+                .expect("read sorted exact compiler relation range");
             for record in payload[..bytes].chunks_exact(R::BYTES) {
                 visit(R::decode(record));
             }
@@ -216,12 +282,8 @@ impl<R: ExternalRecord> SortedExternalRelation<R> {
             let rows = usize::try_from((self.len - start).min(READ_ROWS as u64))
                 .expect("relation page exceeds usize");
             let bytes = rows.saturating_mul(R::BYTES);
-            read_exact_at(
-                &self.file,
-                start.saturating_mul(R::BYTES as u64),
-                &mut payload[..bytes],
-            )
-            .expect("read sorted exact compiler relation range");
+            self.read_exact_at(start.saturating_mul(R::BYTES as u64), &mut payload[..bytes])
+                .expect("read sorted exact compiler relation range");
             for record in payload[..bytes].chunks_exact(R::BYTES) {
                 if !visit(R::decode(record)) {
                     return;

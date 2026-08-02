@@ -53,14 +53,22 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
     // semantically-qualified reference as only its lexical call token.
     let regex = f.regex.then(|| regex::Regex::new(symbol)).transpose()?;
     let query_is_qualified = short_qualified_tail(symbol) != symbol;
+    let qualified_global = query_is_qualified.then(|| ws.compiler_header_index());
+    let mut qualified_target_scopes = Vec::new();
     let qualified_targets: ahash::AHashSet<bonsai_common::SymbolId> = if query_is_qualified {
-        let global = ws.compiler_header_index();
-        global
+        let global = qualified_global
+            .as_ref()
+            .expect("qualified query initialized compiler headers");
+        let mut targets = ahash::AHashSet::default();
+        for decl in global
             .all_files()
             .flat_map(|file| global.decls_in(file))
             .filter(|decl| declaration_matches_symbol_query(decl, symbol))
-            .map(|decl| decl.symbol)
-            .collect()
+        {
+            targets.insert(decl.symbol);
+            qualified_target_scopes.push((decl.module_path.clone(), decl.parent));
+        }
+        targets
     } else {
         ahash::AHashSet::default()
     };
@@ -94,7 +102,27 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
             let qualified_call_spans = if query_is_qualified && regex.is_none() {
                 let mut spans = ahash::AHashSet::default();
                 for decl in &index.defs {
-                    collect_matching_qualified_call_spans(&decl.flow_events, symbol, &mut spans);
+                    let bare_call_in_target_scope =
+                        qualified_target_scopes
+                            .iter()
+                            .any(|(target_module, target_parent)| {
+                                decl.module_path.matches(target_module)
+                                    && target_parent.is_none_or(|owner| {
+                                        declaration_is_within_owner(
+                                            qualified_global
+                                                .as_deref()
+                                                .expect("qualified query initialized compiler headers"),
+                                            decl,
+                                            owner,
+                                        )
+                                    })
+                            });
+                    collect_matching_qualified_call_spans(
+                        &decl.flow_events,
+                        symbol,
+                        bare_call_in_target_scope,
+                        &mut spans,
+                    );
                 }
                 spans
             } else {
@@ -254,6 +282,7 @@ fn symbol_query_matches(query: &str, candidate: &str, allow_bare_qualified_tail:
 fn collect_matching_qualified_call_spans(
     events: &[FlowEvent],
     query: &str,
+    bare_call_in_target_scope: bool,
     spans: &mut ahash::AHashSet<(u64, u64)>,
 ) {
     for event in events {
@@ -265,7 +294,13 @@ fn collect_matching_qualified_call_spans(
                 receiver_types,
                 ..
             } => {
-                if qualified_call_matches_query(query, name, receiver.as_deref(), receiver_types) {
+                if qualified_call_matches_query(
+                    query,
+                    name,
+                    receiver.as_deref(),
+                    receiver_types,
+                    bare_call_in_target_scope,
+                ) {
                     spans.insert((span.start, span.end));
                 }
             }
@@ -274,11 +309,11 @@ fn collect_matching_qualified_call_spans(
                 else_events,
                 ..
             } => {
-                collect_matching_qualified_call_spans(then_events, query, spans);
-                collect_matching_qualified_call_spans(else_events, query, spans);
+                collect_matching_qualified_call_spans(then_events, query, bare_call_in_target_scope, spans);
+                collect_matching_qualified_call_spans(else_events, query, bare_call_in_target_scope, spans);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_matching_qualified_call_spans(body, query, spans);
+                collect_matching_qualified_call_spans(body, query, bare_call_in_target_scope, spans);
             }
             FlowEvent::Try {
                 body,
@@ -286,9 +321,14 @@ fn collect_matching_qualified_call_spans(
                 finally_events,
                 ..
             } => {
-                collect_matching_qualified_call_spans(body, query, spans);
-                collect_matching_qualified_call_spans(catch_events, query, spans);
-                collect_matching_qualified_call_spans(finally_events, query, spans);
+                collect_matching_qualified_call_spans(body, query, bare_call_in_target_scope, spans);
+                collect_matching_qualified_call_spans(catch_events, query, bare_call_in_target_scope, spans);
+                collect_matching_qualified_call_spans(
+                    finally_events,
+                    query,
+                    bare_call_in_target_scope,
+                    spans,
+                );
             }
             FlowEvent::Assign { .. }
             | FlowEvent::AggregateAssign { .. }
@@ -308,6 +348,7 @@ fn qualified_call_matches_query(
     call_name: &str,
     receiver: Option<&str>,
     receiver_types: &[String],
+    bare_call_in_target_scope: bool,
 ) -> bool {
     let Some(query_owner) = qualified_owner(query) else {
         return false;
@@ -315,10 +356,32 @@ fn qualified_call_matches_query(
     if short_qualified_tail(query) != short_qualified_tail(call_name) {
         return false;
     }
+    if receiver.is_none() && bare_call_in_target_scope && short_qualified_tail(call_name) == call_name {
+        return true;
+    }
     receiver
         .into_iter()
         .chain(receiver_types.iter().map(String::as_str))
         .any(|candidate| qualified_owner_matches(query_owner, candidate))
+}
+
+fn declaration_is_within_owner(
+    global: &bonsai_index::GlobalIndex,
+    decl: &bonsai_lang_api::Decl,
+    owner: bonsai_common::SymbolId,
+) -> bool {
+    let mut current = Some(decl.symbol);
+    let mut seen = ahash::AHashSet::default();
+    while let Some(symbol) = current {
+        if symbol == owner {
+            return true;
+        }
+        if !seen.insert(symbol) {
+            return false;
+        }
+        current = global.decl_of(symbol).and_then(|decl| decl.parent);
+    }
+    false
 }
 
 fn qualified_owner(name: &str) -> Option<&str> {

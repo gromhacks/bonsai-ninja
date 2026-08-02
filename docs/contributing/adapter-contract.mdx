@@ -247,11 +247,19 @@ existing `Decl` / `FlowEvent` contracts.
   doesn't pattern-match `new `, `return `, `def `, `__construct`,
   `Self(`, `static(`, or any other syntactic keyword out of raw
   expression text. Adapters classify constructors structurally
-  (`CallKind::Construct`), emit return values via `FlowEvent::Return`,
+  (`CallKind::Constructor`), emit return values via `FlowEvent::Return`,
   and produce `value_text` that already has the keyword removed.
   Cross-language tokens that *do* live in the engine (variable sigils,
   pointer sigils, implicit-receiver prefixes, super tokens) are named
   constants in `bonsai_common::names`; see design-patterns.mdx §12a.
+
+Imported namespace and type qualifiers are call-resolution syntax, not
+runtime receiver values. Adapters emit their exact `ImportSpec` and
+`CallReceiverFact` records; compiler-object linking marks matching whole-module
+bindings as `CallReceiverRole::Namespace`. A parameter or non-import assignment
+with the same name is exact shadowing evidence and keeps the receiver role
+`Value`. IDG transfer must not create an implicit receiver edge for a
+`Namespace` fact.
 
 ## Testing contract
 

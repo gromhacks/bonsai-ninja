@@ -17,7 +17,6 @@ use bonsai_lang_api::FlowEvent;
 
 use crate::{text::normalise_qualified_text, IntraTaintResult, TokenSet};
 
-pub(crate) use summary::function_summary_from_idg;
 #[allow(unreachable_pub)]
 pub use summary::{
     function_summary, FunctionSummary, ParamSideEffect, ReturnAccessPath, ReturnElementTaint,
@@ -146,7 +145,7 @@ pub struct FunctionSeed {
     pub seed: Vec<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CallPropagation {
     #[serde(default)]
     pub trace_id: u64,
@@ -160,20 +159,20 @@ pub struct CallPropagation {
     pub edge_precision: Precision,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaintedArg {
     pub index: usize,
     pub value_text: String,
     pub param_name: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaintedArgAtCall {
     pub index: usize,
     pub value_text: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaintedCall {
     #[serde(default)]
     pub parent_trace_id: Option<u64>,

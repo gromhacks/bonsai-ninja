@@ -1,7 +1,7 @@
 use super::{
     cache_is_fresh, content_tree_fingerprint, dependency_metadata_fingerprint, eager_window,
-    read_json_cache_file, rulepack_dir_skipped, serialize_json_bounded, workspace_fingerprint, PageCacheFile,
-    MAX_PAYLOAD_BYTES, RENDER_CACHE_VERSION,
+    read_json_cache_file, remember_structural_id_hints, rulepack_dir_skipped, serialize_json_bounded,
+    structural_id_hint, workspace_fingerprint, PageCacheFile, MAX_PAYLOAD_BYTES, RENDER_CACHE_VERSION,
 };
 use std::path::PathBuf;
 
@@ -263,5 +263,29 @@ fn cache_freshness_rejects_dependency_metadata_content_change() {
         !cache_is_fresh(&root, &cache).expect("fresh after"),
         "page cache must not replay when dependency metadata changes"
     );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn structural_id_hint_round_trips_and_invalidates_with_source() {
+    let root = tempdir("structural-id-hint");
+    std::fs::write(root.join("app.py"), "def target():\n    return 1\n").expect("write source");
+    let cache_root = bonsai_common::workspace_bonsai_dir(&root);
+    let id = "F:0123456789abcdef";
+
+    remember_structural_id_hints(&root, [id], "pkg.Target.target", false);
+    let hint = structural_id_hint(&root, id)
+        .expect("read hint")
+        .expect("stored hint");
+    assert_eq!(hint.query, "pkg.Target.target");
+    assert!(!hint.regex);
+
+    std::fs::write(root.join("app.py"), "def target():\n    return 2\n").expect("change source");
+    assert!(
+        structural_id_hint(&root, id).expect("read stale hint").is_none(),
+        "a structural breadcrumb must never survive workspace source changes"
+    );
+
+    std::fs::remove_dir_all(&cache_root).ok();
     std::fs::remove_dir_all(&root).ok();
 }

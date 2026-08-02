@@ -396,21 +396,35 @@ fn read_file_with_taint_options(
     let local_decls = ws
         .exact_decl_index_shared(file_id)
         .ok_or_else(|| anyhow::anyhow!("compiler declarations unavailable for {path}"))?;
-    let line_decl_index: Vec<LineDeclSpan> = local_decls
+    let span_map = bonsai_common::cached_span_map_arc(file_id, snapshot.version, &snapshot.text);
+    let mut line_decl_index: Vec<LineDeclSpan> = local_decls
         .defs
         .iter()
-        .map(|d| {
-            let loc = Locator::from_span(d.span, ws);
-            let span_map = bonsai_common::cached_span_map_arc(file_id, snapshot.version, &snapshot.text);
+        .filter_map(|d| {
             let start = span_map.line_col(d.span.start).line;
             let end = span_map.line_col(d.span.end).line;
-            LineDeclSpan {
+            // A line-ranged read is a projection of that range, not a hidden
+            // full-file declaration inventory. Keep declarations that
+            // intersect the requested source window and preserve their true
+            // source extent for clients that need nesting context.
+            (end >= line_lo && start <= actual_hi).then(|| LineDeclSpan {
                 line_start: start,
                 line_end: end,
-                locator: loc,
-            }
+                locator: Locator::from_span(d.name_span, ws),
+            })
         })
         .collect();
+    line_decl_index.sort_by(|left, right| {
+        left.line_start
+            .cmp(&right.line_start)
+            .then_with(|| left.line_end.cmp(&right.line_end))
+            .then_with(|| left.locator.decl.cmp(&right.locator.decl))
+    });
+    line_decl_index.dedup_by(|left, right| {
+        left.line_start == right.line_start
+            && left.line_end == right.line_end
+            && left.locator == right.locator
+    });
     drop(local_decls);
 
     let primary_locator = Locator {
@@ -460,7 +474,7 @@ fn effective_max_inlined_bodies(max_inlined_bodies: Option<usize>) -> usize {
     match max_inlined_bodies {
         Some(0) => usize::MAX,
         Some(limit) => limit,
-        None => 8,
+        None => usize::MAX,
     }
 }
 

@@ -264,6 +264,30 @@ fn build_resolved_call_graph_snapshot_scoped(
     included_files: Option<&[bonsai_common::FileId]>,
 ) -> bonsai_callgraph::ResolvedCallGraph {
     let global = db.build_global_header_index();
+    build_resolved_call_graph_snapshot_with_headers_scoped(db, global.as_ref(), included_files)
+}
+
+/// Build the canonical resolved call graph against an already-validated
+/// workspace declaration header table.
+///
+/// Semantic prewarm persists those headers in the linkage artifact before
+/// starting the isolated callgraph worker. Reusing them here avoids decoding
+/// every compiler body once to reconstruct declarations and then a second
+/// time to resolve calls. Resolver semantics are unchanged: exact file bodies
+/// are still streamed from the adapter-lowered compiler objects below.
+#[must_use]
+pub fn build_resolved_call_graph_snapshot_with_headers(
+    db: &AnalyzerDb,
+    global: &bonsai_index::GlobalIndex,
+) -> bonsai_callgraph::ResolvedCallGraph {
+    build_resolved_call_graph_snapshot_with_headers_scoped(db, global, None)
+}
+
+fn build_resolved_call_graph_snapshot_with_headers_scoped(
+    db: &AnalyzerDb,
+    global: &bonsai_index::GlobalIndex,
+    included_files: Option<&[bonsai_common::FileId]>,
+) -> bonsai_callgraph::ResolvedCallGraph {
     let semantics = bonsai_callgraph::CallGraphFileSemantics::new(
         |file| bonsai_resolve::alias_map_for_file(&db.imports_for_uncached(file)),
         |file| {
@@ -287,7 +311,7 @@ fn build_resolved_call_graph_snapshot_scoped(
     match included_files {
         Some(files) => {
             let context = bonsai_callgraph::ResolvedCallGraph::build_context(
-                global.as_ref(),
+                global,
                 |file| {
                     db.vfs()
                         .path(file)
@@ -302,7 +326,7 @@ fn build_resolved_call_graph_snapshot_scoped(
                 },
             );
             bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_for_files_streaming_with_context(
-                global.as_ref(),
+                global,
                 |file| bonsai_resolve::alias_map_for_file(&db.imports_for_uncached(file)),
                 |file| {
                     bonsai_lang_api::alias_map_from_import_specs(&db.imports_for_uncached(file))
@@ -311,13 +335,13 @@ fn build_resolved_call_graph_snapshot_scoped(
                 },
                 files,
                 &context,
-                |file| db.decl_index_remapped_to_headers(global.as_ref(), file),
+                |file| db.decl_index_remapped_to_headers(global, file),
             )
         }
         None => bonsai_callgraph::ResolvedCallGraph::build_with_file_semantics_streaming(
-            global.as_ref(),
+            global,
             semantics,
-            |file| db.decl_index_remapped_to_headers(global.as_ref(), file),
+            |file| db.decl_index_remapped_to_headers(global, file),
         ),
     }
 }

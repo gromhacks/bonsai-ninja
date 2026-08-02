@@ -56,6 +56,30 @@ fn payload_reader_streams_one_bounded_entry() {
 }
 
 #[test]
+fn payload_range_reader_is_exact_and_rejects_out_of_bounds_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v.bin");
+    write_test_store(&path, 2, 0xDEAD, &[(20, 200, b"0123456789")]);
+    let reader = FactStoreReader::open(&path, 2, 0xDEAD).expect("open");
+    let mut payload = reader
+        .payload_range_reader(20, 3, 4)
+        .expect("valid range")
+        .expect("hit");
+    assert_eq!(payload.body_hash, 200);
+    let mut decoded = String::new();
+    payload.read_to_string(&mut decoded).expect("stream range");
+    assert_eq!(decoded, "3456");
+    assert!(matches!(
+        reader.payload_range_reader(20, 8, 3),
+        Err(FactStoreError::BadPayloadRange { .. })
+    ));
+    assert!(reader
+        .payload_range_reader(99, 0, 1)
+        .expect("missing lookup")
+        .is_none());
+}
+
+#[test]
 fn get_returns_none_for_missing_key() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v.bin");

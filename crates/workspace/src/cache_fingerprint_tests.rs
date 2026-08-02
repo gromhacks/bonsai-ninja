@@ -1,4 +1,7 @@
-use super::{dependency_metadata_fingerprint, dependency_metadata_fingerprint_for_sidecar};
+use super::{
+    dependency_metadata_fingerprint, dependency_metadata_fingerprint_for_sidecar,
+    register_workspace_cache_root,
+};
 use std::path::PathBuf;
 
 fn tempdir(name: &str) -> PathBuf {
@@ -120,4 +123,30 @@ fn sidecar_fingerprint_resolves_workspace_root() {
         dependency_metadata_fingerprint(&root)
     );
     std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn external_sidecar_fingerprint_resolves_registered_workspace_root() {
+    let root = tempdir("external-sidecar-root");
+    std::fs::write(root.join("package-lock.json"), "{}\n").expect("write lockfile");
+    let cache = register_workspace_cache_root(&root).expect("bind external cache");
+    let sidecar = cache.join("dataflow.v3.factstore");
+    assert_eq!(
+        dependency_metadata_fingerprint_for_sidecar(&sidecar),
+        dependency_metadata_fingerprint(&root)
+    );
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(&cache).ok();
+}
+
+#[test]
+fn unbound_external_sidecar_never_uses_legacy_zero_fingerprint() {
+    let cache = tempdir("unbound-external-sidecar");
+    let sidecar = cache.join("callgraph.v25.factstore");
+    assert_eq!(
+        dependency_metadata_fingerprint_for_sidecar(&sidecar),
+        super::UNBOUND_WORKSPACE_DEPENDENCY_FINGERPRINT
+    );
+    assert_ne!(dependency_metadata_fingerprint_for_sidecar(&sidecar), 0);
+    std::fs::remove_dir_all(cache).ok();
 }

@@ -698,25 +698,26 @@ pub(crate) fn match_rule_against_facts_with_taint_view(
     )
 }
 
-/// Re-evaluate `rule` against the workspace with taint context, and
-/// return whether the specific `expected` hit (rule_id + span) still
-/// passes. Used by chain-aware finding assembly to recheck sink
-/// constraints once the source's taint graph is known.
+/// Shared compiler state for one source-specific endpoint recheck.
+///
+/// The receiver ancestry memo is run-scoped because rebuilding it for each
+/// sink candidate would turn endpoint checks into a candidates×workspace
+/// scan. It remains lazy and is initialized only when a rule needs ancestry.
+pub(crate) struct RuleConstraintTaintContext<'a> {
+    pub endpoint_identity_proven: bool,
+    pub factory: &'a FactoryReturns,
+    pub global_headers: &'a Arc<GlobalIndex>,
+    pub receiver_base_map_cell: &'a OnceLock<AHashMap<String, Vec<String>>>,
+}
+
+/// Re-evaluate `rule` against the workspace with taint context, and return
+/// whether the specific `expected` hit (rule id + span) still passes.
 pub(crate) fn rule_match_passes_constraints_with_taint_view(
     ws: &Workspace,
     rule: &Rule,
     expected: &RuleMatch,
     taint_view: &InterTaintView<'_>,
-    endpoint_identity_proven: bool,
-    factory: &FactoryReturns,
-    global_headers: &Arc<GlobalIndex>,
-    // Run-scoped memo for the workspace-wide receiver→base-type map. This
-    // function is called once per sink candidate; `workspace_receiver_base_map`
-    // scans every decl in the workspace, so rebuilding it per candidate is a
-    // candidates×workspace blowup. The caller owns a `OnceLock` shared across
-    // all candidates (and parallel source groups) so the scan happens at most
-    // once per analysis run — and only if some rule actually needs it.
-    receiver_base_map_cell: &OnceLock<AHashMap<String, Vec<String>>>,
+    context: &RuleConstraintTaintContext<'_>,
 ) -> bool {
     if rule.language != expected.language || rule.id != expected.rule_id {
         return false;
@@ -727,9 +728,12 @@ pub(crate) fn rule_match_passes_constraints_with_taint_view(
     // the source-specific taint predicates here. Positional predicates on an
     // identity-proven call are fully represented by `TaintedCall`; keyword or
     // ambiguous overlapping-span cases fall through to the exact AST path.
-    if let Some(verdict) =
-        endpoint_taint_constraints_pass_without_syntax(rule, expected, taint_view, endpoint_identity_proven)
-    {
+    if let Some(verdict) = endpoint_taint_constraints_pass_without_syntax(
+        rule,
+        expected,
+        taint_view,
+        context.endpoint_identity_proven,
+    ) {
         return verdict;
     }
     if bonsai_diagnostics::debug::is_enabled("security-phase")
@@ -744,7 +748,7 @@ pub(crate) fn rule_match_passes_constraints_with_taint_view(
             expected.span,
             call.map(|call| call.name.as_str()).unwrap_or(""),
             call.map(|call| call.call_span),
-            endpoint_identity_proven,
+            context.endpoint_identity_proven,
             taint_view.calls.len()
         );
     }
@@ -756,13 +760,13 @@ pub(crate) fn rule_match_passes_constraints_with_taint_view(
         &prepared,
         expected,
         taint_view,
-        factory,
-        global_headers,
-        receiver_base_map_cell,
+        context.factory,
+        context.global_headers,
+        context.receiver_base_map_cell,
     ) {
         return verdict;
     }
-    match_rule_against_facts_with_taint_view(ws, rule, taint_view, global_headers)
+    match_rule_against_facts_with_taint_view(ws, rule, taint_view, context.global_headers)
         .into_iter()
         .any(|hit| hit.rule_id == expected.rule_id && hit.span == expected.span)
 }
@@ -1249,22 +1253,39 @@ where
         crate::deps::workspace_dependency_package_context_for_scan(root, db.vfs().instance_id())
     });
     let prepared_by_language = build_prepared_rule_batches(&prepared, factory);
-    let compiler_session_started = debug_security_phase.then(Instant::now);
-    prepare_compiler_object_session_for_header_prewarm(ws, &files, &prepared_by_language, retention);
-    if let Some(started) = compiler_session_started {
-        bonsai_diagnostics::debug_log!(
-            "security-phase",
-            "matcher compiler-object session: {:.3}s",
-            started.elapsed().as_secs_f64()
-        );
-    }
-    // Package/context gates and receiver-base matching both consume
-    // workspace-global syntax facts. Build them once before the file-level
-    // Rayon scan so workers borrow the canonical compiler IR instead of
-    // racing to construct it or rebuilding per-file declarations afterward.
+    // Follow the compiler planning order: reject impossible source files from
+    // cheap raw anchors before opening import/syntax headers or lowering any
+    // body. This is candidate planning only; every surviving rule still goes
+    // through exact adapter IR and matcher constraints below.
+    let raw_scan_files = files
+        .iter()
+        .copied()
+        .filter(|file| {
+            let Some(adapter) = ws.db().adapter_for(*file) else {
+                return false;
+            };
+            let Some(file_rules) = prepared_by_language.get(adapter.language_id().as_str()) else {
+                return false;
+            };
+            let Ok(snapshot) = ws.db().vfs().snapshot(*file) else {
+                return false;
+            };
+            file_rules.syntax_target_possible_in_text(
+                snapshot.text.as_ref(),
+                mode,
+                adapter.capabilities().call_text_prefilter,
+            )
+        })
+        .collect::<Vec<_>>();
+    // Package/context gates consume exact file-local import facts. Receiver
+    // inheritance is the only ordinary endpoint constraint that needs the
+    // workspace declaration table; source rules and untyped API rules keep
+    // their stable file/span identity until semantic attribution. Building
+    // global headers unconditionally made a cold no-finding scan lower every
+    // function body before syntax-target planning.
     let imports_started = debug_security_phase.then(Instant::now);
     let prewarmed_import_contexts =
-        prewarm_language_import_package_contexts(ws, &files, &prepared_by_language, retention);
+        prewarm_language_import_package_contexts(ws, &raw_scan_files, &prepared_by_language, retention);
     if let Some(started) = imports_started {
         bonsai_diagnostics::debug_log!(
             "security-phase",
@@ -1274,15 +1295,13 @@ where
         );
     }
     let headers_started = debug_security_phase.then(Instant::now);
-    // Inventory matching is deliberately file-local: it lists syntax sites
-    // and does not perform receiver-ancestry or cross-file missing-call
-    // traversal. Local compiler symbols are already internally consistent, so
-    // loading/remapping the workspace symbol table here would be pure cost.
-    let global_file_indexes = global_headers.cloned().or_else(|| {
-        (!matches!(mode, ConstraintMode::Inventory)).then(|| matcher_global_headers(ws, retention))
-    });
-    let inventory_receiver_ancestry =
-        matches!(mode, ConstraintMode::Inventory).then(|| ws.compiler_receiver_ancestry());
+    // Caller-supplied semantic headers are already resident and authoritative.
+    // Ordinary endpoint/inventory scans defer any new workspace ancestry table
+    // until exact call headers contain a receiver/method pair whose verdict can
+    // actually change through a base type.
+    let needs_receiver_ancestry = prepared.iter().any(prepared_rule_needs_receiver_base_map);
+    let mut global_file_indexes = global_headers.cloned();
+    let mut inventory_receiver_ancestry: Option<Arc<bonsai_index::ReceiverAncestry>> = None;
     if let Some(started) = headers_started {
         bonsai_diagnostics::debug_log!(
             "security-phase",
@@ -1294,7 +1313,7 @@ where
                 .map_or(0, |ancestry| ancestry.len())
         );
     }
-    let receiver_base_map = global_file_indexes
+    let mut receiver_base_map = global_file_indexes
         .as_ref()
         .map_or_else(AHashMap::new, |headers| {
             workspace_receiver_base_map_if_needed(&prepared, mode, headers.as_ref())
@@ -1333,35 +1352,17 @@ where
             constructor_names.len()
         );
     }
-    // Apply cheap raw targets first, then exact import/package constraints in
-    // parallel from the prewarmed compiler headers. Retain only rule
-    // references for survivors; full declarations and flow events are decoded
-    // in the body phase below. This is the compiler's header/body boundary:
-    // scheduling changes, but every rule and file keeps the same semantics.
-    let raw_scan_files = files
-        .iter()
-        .copied()
-        .filter(|file| {
-            let Some(adapter) = ws.db().adapter_for(*file) else {
-                return false;
-            };
-            let Some(file_rules) = prepared_by_language.get(adapter.language_id().as_str()) else {
-                return false;
-            };
-            let Ok(snapshot) = ws.db().vfs().snapshot(*file) else {
-                return false;
-            };
-            file_rules.syntax_target_possible_in_text(
-                snapshot.text.as_ref(),
-                mode,
-                adapter.capabilities().call_text_prefilter,
-            )
-        })
-        .collect::<Vec<_>>();
+    // Apply exact import/package and syntax-header constraints to raw-anchor
+    // survivors. Retain only rule references for the body phase below. This
+    // is the compiler's header/body boundary: scheduling changes, but every
+    // rule and file keeps the same semantics.
     let package_filter_started = debug_security_phase.then(Instant::now);
-    let scan_plan = {
+    let build_scan_plan = |candidate_files: &[FileId],
+                           receiver_base_map: &AHashMap<String, Vec<String>>,
+                           inventory_receiver_ancestry: Option<&Arc<bonsai_index::ReceiverAncestry>>,
+                           receiver_ancestry_complete: bool| {
         use rayon::prelude::*;
-        raw_scan_files
+        candidate_files
             .par_iter()
             .map(|&file| {
                 let adapter = ws.db().adapter_for(file)?;
@@ -1386,33 +1387,104 @@ where
                     prewarmed_import_contexts: import_contexts,
                     compiler_imports,
                 });
-                let mut syntax = ws.db().compiler_syntax_header_uncached(file);
-                if let (Some(ancestry), Some(syntax)) =
-                    (inventory_receiver_ancestry.as_ref(), syntax.as_mut())
-                {
-                    ancestry.apply_to_syntax_header(syntax);
+                let Some(mut syntax) = ws.db().compiler_syntax_header_uncached(file) else {
+                    return Some((file, rules, None));
+                };
+                if let Some(ancestry) = inventory_receiver_ancestry.as_ref() {
+                    ancestry.apply_to_syntax_header(&mut syntax);
                 }
                 if inventory_receiver_ancestry.is_none() {
-                    if let Some(syntax) = syntax.as_mut() {
-                        enrich_compiler_syntax_header_receiver_types(syntax, &receiver_base_map);
-                    }
+                    enrich_compiler_syntax_header_receiver_types(&mut syntax, receiver_base_map);
                 }
-                let rules = syntax.as_ref().map_or(rules.clone(), |syntax| {
-                    file_rules.filtered_rule_refs_for_syntax_header(
+                let (filtered_rules, deferred) = file_rules.filtered_rule_refs_for_syntax_header(
+                    rules.clone(),
+                    &syntax,
+                    compiler_imports,
+                    &constructor_names,
+                    language.as_str(),
+                    receiver_ancestry_complete,
+                );
+                let deferred_plan = deferred.then(|| {
+                    (
                         rules,
                         syntax,
-                        compiler_imports,
-                        &constructor_names,
-                        language.as_str(),
+                        compiler_imports.cloned(),
+                        language.as_str().to_string(),
                     )
                 });
-                (!rules.is_empty()).then_some((file, rules))
+                Some((file, filtered_rules, deferred_plan))
             })
             .collect::<Vec<_>>()
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
     };
+    let ancestry_already_complete =
+        !needs_receiver_ancestry || global_file_indexes.is_some() || inventory_receiver_ancestry.is_some();
+    let initial_plan = build_scan_plan(
+        &raw_scan_files,
+        &receiver_base_map,
+        inventory_receiver_ancestry.as_ref(),
+        ancestry_already_complete,
+    );
+    let mut deferred_plans = Vec::new();
+    let mut scan_plan = Vec::new();
+    for (file, rules, deferred) in initial_plan {
+        if let Some(deferred) = deferred {
+            deferred_plans.push((file, deferred));
+        } else if !rules.is_empty() {
+            scan_plan.push((file, rules));
+        }
+    }
+    if !deferred_plans.is_empty() {
+        let ancestry_started = debug_security_phase.then(Instant::now);
+        if matches!(mode, ConstraintMode::Inventory) {
+            inventory_receiver_ancestry = Some(ws.compiler_receiver_ancestry());
+        } else if global_file_indexes.is_none() {
+            global_file_indexes = Some(matcher_global_headers(ws, retention));
+            receiver_base_map = global_file_indexes
+                .as_ref()
+                .map_or_else(AHashMap::new, |headers| {
+                    workspace_receiver_base_map_if_needed(&prepared, mode, headers.as_ref())
+                });
+        }
+        let deferred_file_count = deferred_plans.len();
+        use rayon::prelude::*;
+        let completed_deferred = deferred_plans
+            .into_par_iter()
+            .filter_map(|(file, (rules, mut syntax, compiler_imports, language))| {
+                if let Some(ancestry) = inventory_receiver_ancestry.as_ref() {
+                    ancestry.apply_to_syntax_header(&mut syntax);
+                } else {
+                    enrich_compiler_syntax_header_receiver_types(&mut syntax, &receiver_base_map);
+                }
+                let file_rules = prepared_by_language.get(&language)?;
+                let (rules, _) = file_rules.filtered_rule_refs_for_syntax_header(
+                    rules,
+                    &syntax,
+                    compiler_imports.as_ref(),
+                    &constructor_names,
+                    &language,
+                    true,
+                );
+                (!rules.is_empty()).then_some((file, rules))
+            })
+            .collect::<Vec<_>>();
+        scan_plan.extend(completed_deferred);
+        scan_plan.sort_unstable_by_key(|(file, _)| file.raw());
+        if let Some(started) = ancestry_started {
+            bonsai_diagnostics::debug_log!(
+                "security-phase",
+                "matcher deferred receiver ancestry: {:.3}s files={} declarations={} receiver_types={}",
+                started.elapsed().as_secs_f64(),
+                deferred_file_count,
+                global_file_indexes.as_ref().map_or(0, |headers| headers.len()),
+                inventory_receiver_ancestry
+                    .as_ref()
+                    .map_or(0, |ancestry| ancestry.len())
+            );
+        }
+    }
     if let Some(started) = package_filter_started {
         bonsai_diagnostics::debug_log!(
             "security-phase",
@@ -1422,15 +1494,26 @@ where
             scan_plan.len()
         );
     }
+    let compiler_session_started = debug_security_phase.then(Instant::now);
+    let body_files = scan_plan.iter().map(|(file, _)| *file).collect::<Vec<_>>();
+    prepare_compiler_object_session_for_body_scan(ws, &body_files, &prepared_by_language, retention);
+    if let Some(started) = compiler_session_started {
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "matcher body compiler-object session: {:.3}s files={}",
+            started.elapsed().as_secs_f64(),
+            body_files.len()
+        );
+    }
     let target_prefilter_skipped = total.saturating_sub(scan_plan.len());
     for _ in 0..target_prefilter_skipped {
         on_file_done();
     }
-    // Each `scan_file_rules` writes only to its own per-file Vec. Schedule
-    // exact source-size-weighted batches so several small Tree-sitter units
-    // can run together while an unusually large source runs alone. Batch
-    // boundaries affect locality only; they cover every file exactly once.
-    // Match collection order is non-deterministic across runs, but downstream
+    // Each `scan_file_rules` writes only to its own per-file Vec. Size one
+    // continuous work-stealing pool against the largest actual compiler units
+    // that could overlap. This retains the weighted memory proof without
+    // serial batch barriers that strand workers behind one large file. Match
+    // collection order is non-deterministic across runs, but downstream
     // callers sort before emission to keep finding ids stable.
     let workers = matcher_worker_count();
     let source_bytes = scan_plan
@@ -1442,61 +1525,61 @@ where
                 .map_or(0, |snapshot| snapshot.text.len() as u64)
         })
         .collect::<Vec<_>>();
-    let batches = bonsai_common::syntax_weighted_batches(&source_bytes, workers);
-    let parallel_width = batches.iter().map(std::ops::Range::len).max().unwrap_or(1);
+    let parallel_width = bonsai_common::syntax_worker_count_for_sources(&source_bytes, workers);
     if debug_security_phase {
         bonsai_diagnostics::debug_log!(
             "security-phase",
-            "matcher schedule: files={} candidates={} batches={} max_parallel={}",
+            "matcher schedule: files={} candidates={} max_parallel={}",
             files.len(),
             scan_plan.len(),
-            batches.len(),
             parallel_width
         );
     }
+    let scan_planned_file = |file: FileId, rule_refs: &[&PreparedRule<'_>]| {
+        let _syntax_release = TransientSyntaxRelease::new(ws, file, retention);
+        let mut file_out: Vec<RuleMatch> = Vec::new();
+        let Some(adapter) = ws.db().adapter_for(file) else {
+            return (file_out, false);
+        };
+        let language = adapter.language_id();
+        let file_rules = PreparedRuleBatch::new(rule_refs, factory.clone());
+        let Some(compiler_object) = ws.db().compiler_file_object_uncached(file) else {
+            return (file_out, false);
+        };
+        let file_imports = compiler_object.imports;
+        let Some(file_index) = compiler_object.declarations else {
+            return (file_out, true);
+        };
+        let mut file_index = match global_file_indexes.as_ref() {
+            Some(headers) => ws.db().remap_decl_index_to_headers(headers.as_ref(), file_index),
+            None => file_index,
+        };
+        if let Some(ancestry) = inventory_receiver_ancestry.as_ref() {
+            ancestry.apply_to_decl_index(&mut file_index);
+        }
+        let ctx = FileScanContext {
+            ws,
+            file,
+            file_index: &file_index,
+            file_imports: file_imports.as_ref(),
+            import_package_contexts: prewarmed_import_contexts.get(language.as_str()),
+            constructor_names: &constructor_names,
+            mode,
+            taint_view,
+            retention,
+            receiver_base_map: &receiver_base_map,
+        };
+        scan_file_rules(&ctx, &file_rules, &mut file_out);
+        if dedup_file_matches {
+            dedup_inventory_matches_in_place(&mut file_out);
+        }
+        (file_out, true)
+    };
     if parallel_width <= 1 || scan_plan.len() <= 1 {
         return scan_plan
             .iter()
             .flat_map(|(file, rule_refs)| {
-                let file = *file;
-                let _syntax_release = TransientSyntaxRelease::new(ws, file, retention);
-                let mut file_out: Vec<RuleMatch> = Vec::new();
-                if let Some(adapter) = ws.db().adapter_for(file) {
-                    let language = adapter.language_id();
-                    let file_rules = PreparedRuleBatch::new(rule_refs, factory.clone());
-                    let Some(compiler_object) = ws.db().compiler_file_object_uncached(file) else {
-                        on_file_done();
-                        return file_out;
-                    };
-                    let file_imports = compiler_object.imports;
-                    let Some(file_index) = compiler_object.declarations else {
-                        on_file_done();
-                        return file_out;
-                    };
-                    let mut file_index = match global_file_indexes.as_ref() {
-                        Some(headers) => ws.db().remap_decl_index_to_headers(headers.as_ref(), file_index),
-                        None => file_index,
-                    };
-                    if let Some(ancestry) = inventory_receiver_ancestry.as_ref() {
-                        ancestry.apply_to_decl_index(&mut file_index);
-                    }
-                    let ctx = FileScanContext {
-                        ws,
-                        file,
-                        file_index: &file_index,
-                        file_imports: file_imports.as_ref(),
-                        import_package_contexts: prewarmed_import_contexts.get(language.as_str()),
-                        constructor_names: &constructor_names,
-                        mode,
-                        taint_view,
-                        retention,
-                        receiver_base_map: &receiver_base_map,
-                    };
-                    scan_file_rules(&ctx, &file_rules, &mut file_out);
-                    if dedup_file_matches {
-                        dedup_inventory_matches_in_place(&mut file_out);
-                    }
-                }
+                let (file_out, _) = scan_planned_file(*file, rule_refs);
                 on_file_done();
                 file_out
             })
@@ -1512,65 +1595,17 @@ where
             let worker = scope.spawn(move || {
                 let scan = || {
                     use rayon::prelude::*;
-                    let mut out = Vec::new();
-                    for range in &batches {
-                        let mut batch_out = scan_plan[range.clone()]
-                            .par_iter()
-                            .flat_map_iter(|(file, rule_refs)| {
-                                let file = *file;
-                                let _syntax_release = TransientSyntaxRelease::new(ws, file, retention);
-                                let mut file_out: Vec<RuleMatch> = Vec::new();
-                                if let Some(adapter) = ws.db().adapter_for(file) {
-                                    let language = adapter.language_id();
-                                    let file_rules = PreparedRuleBatch::new(rule_refs, factory.clone());
-                                    let Some(compiler_object) = ws.db().compiler_file_object_uncached(file)
-                                    else {
-                                        let _ = tick_tx.send(());
-                                        return file_out;
-                                    };
-                                    let file_imports = compiler_object.imports;
-                                    parsed_files_worker.fetch_add(1, Ordering::Relaxed);
-                                    let Some(file_index) = compiler_object.declarations else {
-                                        let _ = tick_tx.send(());
-                                        return file_out;
-                                    };
-                                    let mut file_index = match global_file_indexes.as_ref() {
-                                        Some(headers) => {
-                                            ws.db().remap_decl_index_to_headers(headers.as_ref(), file_index)
-                                        }
-                                        None => file_index,
-                                    };
-                                    if let Some(ancestry) = inventory_receiver_ancestry.as_ref() {
-                                        ancestry.apply_to_decl_index(&mut file_index);
-                                    }
-                                    let ctx = FileScanContext {
-                                        ws,
-                                        file,
-                                        file_index: &file_index,
-                                        file_imports: file_imports.as_ref(),
-                                        import_package_contexts: prewarmed_import_contexts
-                                            .get(language.as_str()),
-                                        constructor_names: &constructor_names,
-                                        mode,
-                                        taint_view,
-                                        retention,
-                                        receiver_base_map: &receiver_base_map,
-                                    };
-                                    scan_file_rules(&ctx, &file_rules, &mut file_out);
-                                    if dedup_file_matches {
-                                        dedup_inventory_matches_in_place(&mut file_out);
-                                    }
-                                } else {
-                                    let _ = tick_tx.send(());
-                                    return file_out;
-                                }
-                                let _ = tick_tx.send(());
-                                file_out
-                            })
-                            .collect::<Vec<_>>();
-                        out.append(&mut batch_out);
-                    }
-                    out
+                    scan_plan
+                        .par_iter()
+                        .flat_map_iter(|(file, rule_refs)| {
+                            let (file_out, parsed) = scan_planned_file(*file, rule_refs);
+                            if parsed {
+                                parsed_files_worker.fetch_add(1, Ordering::Relaxed);
+                            }
+                            let _ = tick_tx.send(());
+                            file_out
+                        })
+                        .collect::<Vec<_>>()
                 };
                 match pool {
                     Some(pool) => pool.install(scan),
@@ -1835,6 +1870,42 @@ fn prepared_rule_needs_receiver_base_map(rule: &PreparedRule<'_>) -> bool {
                 ConstraintKind::ReceiverTypeIn { .. } | ConstraintKind::ReceiverTypeNotIn { .. }
             )
         })
+}
+
+/// Return whether adding compiler-proven base types could change the verdict
+/// for this concrete call/rule pair.
+///
+/// Receiver ancestry cannot repair a missing method name, a regex target, or
+/// an untyped receiver. Deferring the workspace declaration table until this
+/// predicate succeeds keeps the header pass exact while avoiding a complete
+/// project lowering for files whose syntax already proves every rule absent.
+fn receiver_ancestry_can_change_call_match(
+    rule: &PreparedRule<'_>,
+    call: &bonsai_lang_api::CompilerCallHeader,
+    direct_match: bool,
+) -> bool {
+    if call.receiver_types.is_empty() {
+        return false;
+    }
+    let has_receiver_type_constraint = rule.rule.constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            ConstraintKind::ReceiverTypeIn { .. } | ConstraintKind::ReceiverTypeNotIn { .. }
+        )
+    });
+    if direct_match && has_receiver_type_constraint {
+        return true;
+    }
+    if direct_match || rule.regex.is_some() {
+        return false;
+    }
+    let Some(attribute) = rule.attribute.filter(|attribute| attribute.len() >= 2) else {
+        return false;
+    };
+    let Some(method) = attribute.last() else {
+        return false;
+    };
+    callee_tail_matches(&normalize_callee_for_matching(&call.name), method)
 }
 
 fn receiver_base_keys(name: &str, qualified_name: Option<&str>) -> Vec<String> {
@@ -2991,12 +3062,13 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
         compiler_imports: Option<&bonsai_lang_api::ImportIndex>,
         constructor_names: &AHashSet<String>,
         language: &str,
-    ) -> Vec<&'p PreparedRule<'rule>> {
+        receiver_ancestry_complete: bool,
+    ) -> (Vec<&'p PreparedRule<'rule>>, bool) {
         if rules
             .iter()
             .all(|rule| !matches!(rule.rule.match_spec.kind, MatchKind::Call | MatchKind::New))
         {
-            return rules;
+            return (rules, false);
         }
         let mut alias_map = compiler_imports
             .map(bonsai_lang_api::alias_map_from_imports)
@@ -3029,32 +3101,41 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             }
             extend_alias_map_with_declared_types(&mut alias_map, &factory_aliases);
         }
-        rules
-            .into_iter()
-            .filter(|prepared| {
-                if !matches!(prepared.rule.match_spec.kind, MatchKind::Call | MatchKind::New) {
-                    return true;
-                }
-                syntax.calls.iter().any(|call| {
-                    if let Some(matched_callee) = callee_or_alias_matches(
-                        &call.name,
-                        &call.receiver_types,
-                        prepared.name,
-                        prepared.attribute,
-                        prepared.regex.as_ref(),
-                        &alias_map,
-                    ) {
-                        if !prepared.base_name_allows(&matched_callee) {
-                            return false;
-                        }
-                        return prepared.rule.match_spec.kind != MatchKind::New
+        let mut retained = Vec::new();
+        let mut receiver_ancestry_deferred = false;
+        for prepared in rules {
+            if !matches!(prepared.rule.match_spec.kind, MatchKind::Call | MatchKind::New) {
+                retained.push(prepared);
+                continue;
+            }
+            let mut rule_matches = false;
+            for call in &syntax.calls {
+                let matched_callee = callee_or_alias_matches(
+                    &call.name,
+                    &call.receiver_types,
+                    prepared.name,
+                    prepared.attribute,
+                    prepared.regex.as_ref(),
+                    &alias_map,
+                );
+                let direct_match = matched_callee.as_ref().is_some_and(|matched_callee| {
+                    prepared.base_name_allows(matched_callee)
+                        && (prepared.rule.match_spec.kind != MatchKind::New
                             || call.call_kind == CallKind::Constructor
-                            || constructor_name_matches(&call.name, constructor_names);
-                    }
-                    false
-                })
-            })
-            .collect()
+                            || constructor_name_matches(&call.name, constructor_names))
+                });
+                if !receiver_ancestry_complete
+                    && receiver_ancestry_can_change_call_match(prepared, call, direct_match)
+                {
+                    receiver_ancestry_deferred = true;
+                }
+                rule_matches |= direct_match;
+            }
+            if rule_matches {
+                retained.push(prepared);
+            }
+        }
+        (retained, receiver_ancestry_deferred)
     }
 
     /// Return whether any rule in this language batch can match the raw file
@@ -3164,16 +3245,16 @@ fn build_prepared_rule_batches<'p, 'rule>(
         .collect()
 }
 
-/// Materialize one scoped compiler-object generation when this matcher pass
-/// needs independently decodable import and syntax-target projections.
+/// Materialize one scoped compiler-object generation for files that survived
+/// raw, import/package, and exact syntax-target planning.
 ///
-/// The coordinator would otherwise lower complete declarations during the
-/// import prewarm and then lower them again during file matching. The scoped
-/// session is content-addressed, disk-backed, and never published under the
-/// analyzed workspace; later phases stream the exact same adapter IR. Failure
-/// is an optimization miss only: every consumer falls back to canonical
-/// Tree-sitter lowering and preserves semantic coverage.
-fn prepare_compiler_object_session_for_header_prewarm<'p, 'rule>(
+/// Cold header planning deliberately streams and releases compiler IR: most
+/// raw candidates never reach a sink body. The scoped session is therefore
+/// created only for body survivors, is content-addressed and disk-backed, and
+/// is never published under the analyzed workspace. Failure is an
+/// optimization miss only; the body scan falls back to canonical Tree-sitter
+/// lowering with identical coverage.
+fn prepare_compiler_object_session_for_body_scan<'p, 'rule>(
     ws: &Workspace,
     files: &[FileId],
     prepared_by_language: &AHashMap<String, PreparedRuleBatch<'p, 'rule>>,

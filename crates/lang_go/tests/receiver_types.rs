@@ -42,11 +42,11 @@ func Persist() int {
     for file in global.all_files() {
         for decl in global.decls_in(file) {
             match (decl.name.as_str(), decl.kind) {
-                ("AuditedRepository", DeclKind::Class) => {
+                ("AuditedRepository", DeclKind::Struct) => {
                     audited_symbol = Some(decl.symbol);
                     assert_eq!(decl.bases, vec!["Repository"]);
                 }
-                ("Repository", DeclKind::Class) => repository_symbol = Some(decl.symbol),
+                ("Repository", DeclKind::Struct) => repository_symbol = Some(decl.symbol),
                 ("Run", DeclKind::Method) if decl.params.first().is_some_and(|p| p == "a") => {
                     audited_run_parent = decl.parent;
                 }
@@ -56,7 +56,7 @@ func Persist() int {
         }
     }
     assert_eq!(audited_run_parent, audited_symbol);
-    assert!(repository_symbol.is_some(), "Repository class should be indexed");
+    assert!(repository_symbol.is_some(), "Repository struct should be indexed");
     assert!(
         persist_calls.iter().any(|(name, receiver_types)| {
             name == "repo.Run"

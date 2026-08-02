@@ -58,6 +58,144 @@ fn structural_boundary_index_groups_exact_callees_without_hash_buckets() {
 }
 
 #[test]
+fn contextual_boundary_demand_remaps_only_synthetic_same_site_endpoints() {
+    let caller = FuncId::new(10);
+    let callee = FuncId::new(11);
+    let compatibility_owner = FuncId::new(12);
+    let site = span(0, 20, 30);
+    let mut segment = crate::segment::IdgSegment::new();
+    let argument_place = segment.intern_place(Place::CallArg {
+        site: crate::place::CallSiteId(site),
+        idx: 0,
+    });
+    let parameter_place = segment.intern_place(Place::Param { idx: 0 });
+    let synthetic_place = segment.intern_place(Place::Yield);
+    let argument = segment.intern_node(caller, argument_place);
+    let parameter = segment.intern_node(callee, parameter_place);
+    let synthetic = segment.intern_node(compatibility_owner, synthetic_place);
+    segment.add_edge(IdgEdge::inter_call_arg(
+        argument,
+        parameter,
+        site,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+    segment.add_edge(IdgEdge::inter_call_arg(
+        argument,
+        synthetic,
+        site,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+    segment.record_func(caller);
+    segment.record_func(callee);
+    segment.record_func(compatibility_owner);
+
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+    let runtime = service.build_contextual_summary_runtime(&[], Some(Precision::Narrowed), None);
+    let mut rows = Vec::new();
+    runtime
+        .calls_by_from
+        .visit(NodeId(argument.0), |edge| rows.push(edge));
+
+    assert!(rows
+        .iter()
+        .any(|edge| edge.key.callee == callee && edge.target == parameter));
+    assert!(rows
+        .iter()
+        .any(|edge| edge.key.callee == callee && edge.target == synthetic));
+    assert!(
+        rows.iter().all(|edge| edge.key.callee != compatibility_owner),
+        "synthetic compatibility ownership must be attributed to the exact structural callee: {rows:?}"
+    );
+}
+
+#[test]
+fn contextual_boundary_spool_merges_runs_without_losing_or_duplicating_facts() {
+    let row_count = CONTEXTUAL_BOUNDARY_RUN_ROWS + 17;
+    let mut spool = ContextBoundarySpool::new();
+    for source in (0..row_count).rev() {
+        let source = u32::try_from(source).expect("test source fits u32");
+        spool.push(
+            NodeId(source),
+            ContextBoundaryEdge {
+                key: ContextBoundaryKey {
+                    caller: FuncId::new(1),
+                    callee: FuncId::new(2),
+                    span: span(0, 20, 30),
+                },
+                target: NodeId(source + 1),
+                cross_call: None,
+            },
+        );
+    }
+    spool.push(
+        NodeId(7),
+        ContextBoundaryEdge {
+            key: ContextBoundaryKey {
+                caller: FuncId::new(1),
+                callee: FuncId::new(2),
+                span: span(0, 20, 30),
+            },
+            target: NodeId(8),
+            cross_call: None,
+        },
+    );
+
+    let (rows, reverse) = spool.finish(true);
+    assert_eq!(rows.edges.len(), row_count);
+    assert_eq!(rows.sources.len(), row_count);
+    assert_eq!(rows.offsets.len(), row_count + 1);
+    assert_eq!(rows.sources.first(), Some(&NodeId(0)));
+    assert_eq!(rows.sources.last(), Some(&NodeId(row_count as u32 - 1)));
+    assert_eq!(reverse.len(), row_count);
+    assert_eq!(reverse.first(), Some(&(NodeId(1), WsNodeId(0))));
+}
+
+#[test]
+fn contextual_fixed_width_rows_round_trip_every_boundary_field() {
+    let cross_call = CrossCallEdge {
+        caller: FuncId::new(11),
+        callee: FuncId::new(12),
+        call_span: span(3, 101, 149),
+        arg_idx: 7,
+        param_idx: 9,
+        precision: Precision::OverApproximate,
+        call_kind: CallEdgeKind::Indirect,
+        relation: CrossCallRelation::Capture,
+    };
+    let heap = HeapBoundaryEdge {
+        target: WsNodeId(37),
+        cross_call: Some(cross_call),
+    };
+    let mut heap_row = Vec::new();
+    encode_heap_boundary_edge(&mut heap_row, &heap);
+    assert_eq!(heap_row.len(), CONTEXTUAL_HEAP_EDGE_BYTES);
+    let decoded_heap = decode_heap_boundary_edge(&heap_row);
+    assert_eq!(decoded_heap.target, heap.target);
+    assert_eq!(decoded_heap.cross_call, heap.cross_call);
+
+    let boundary = ContextBoundaryEdge {
+        key: ContextBoundaryKey {
+            caller: FuncId::new(21),
+            callee: FuncId::new(22),
+            span: span(4, 211, 233),
+        },
+        target: NodeId(41),
+        cross_call: Some(cross_call),
+    };
+    let mut boundary_row = Vec::new();
+    encode_context_boundary_edge(&mut boundary_row, &boundary);
+    assert_eq!(boundary_row.len(), CONTEXTUAL_BOUNDARY_EDGE_BYTES);
+    let decoded_boundary = decode_context_boundary_edge(&boundary_row);
+    assert_eq!(decoded_boundary.key, boundary.key);
+    assert_eq!(decoded_boundary.target, boundary.target);
+    assert_eq!(decoded_boundary.cross_call, boundary.cross_call);
+}
+
+#[test]
 fn packed_symbolic_strings_preserve_exact_sorted_utf8_identity() {
     let values = vec![
         "0.deep.field".to_string(),
@@ -518,6 +656,270 @@ fn compact_function_node_lookup_is_exact_for_non_monotonic_node_insertion() {
 }
 
 #[test]
+fn persisted_query_accelerator_restores_exact_narrowed_runtime() {
+    let func = FuncId::new(7);
+    let mut segment = crate::segment::IdgSegment::new();
+    let param_place = segment.intern_place(Place::Param { idx: 0 });
+    let return_place = segment.intern_place(Place::Return);
+    let param = segment.intern_node(func, param_place);
+    let returned = segment.intern_node(func, return_place);
+    segment.add_edge(IdgEdge::intra_assign(param, returned, span(0, 1, 2)));
+    segment.record_func(func);
+
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let workspace = Arc::new(workspace);
+    let compiler = IdgQueryService::new(Arc::clone(&workspace), Arc::new(GlobalIndex::new()));
+    let payload = compiler
+        .compile_default_query_accelerator()
+        .expect("compile query accelerator");
+    let mut workspace = Arc::try_unwrap(workspace).expect("compiler released workspace");
+    workspace.install_query_accelerator(payload);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sidecar = dir.path().join("accelerated-idg.factstore");
+    workspace
+        .save_to_disk(&sidecar, 0xA11C_E1A7)
+        .expect("save accelerated sidecar");
+    assert_eq!(
+        IdgWorkspace::validate_accelerated_sidecar_layout_with_pipeline(&sidecar, 0xA11C_E1A7,)
+            .expect("accelerated layout"),
+        1
+    );
+    let loaded = IdgQueryService::load_from_disk(&sidecar, 0xA11C_E1A7, Arc::new(GlobalIndex::new()))
+        .expect("load accelerated sidecar")
+        .expect("current accelerated sidecar");
+
+    assert!(
+        loaded.unified.read().is_some(),
+        "a warm service must install the validated compiler index during open"
+    );
+    assert!(
+        loaded
+            .unified
+            .read()
+            .as_ref()
+            .and_then(|unified| unified.symbolic_runtime.get())
+            .is_none(),
+        "opening a semantic generation must keep the independently decodable symbolic runtime lazy"
+    );
+    let params = loaded.param_nodes_of(func);
+    let return_node = loaded.return_node_of(func).expect("return node");
+    assert_eq!(params, vec![WsNodeId(param.0)]);
+    assert!(loaded.forward_closure(&params).contains(&return_node));
+    {
+        let unified = loaded.unified.read();
+        let contextual = unified
+            .as_ref()
+            .expect("warm unified address space")
+            .contextual_summaries
+            .read();
+        assert!(matches!(
+            contextual
+                .get(&Some(Precision::Narrowed))
+                .map(|runtime| &runtime.reach),
+            Some(ContextualReach::Paged { .. })
+        ));
+    }
+    assert!(
+        loaded
+            .unified
+            .read()
+            .as_ref()
+            .and_then(|unified| unified.symbolic_runtime.get())
+            .is_some(),
+        "the first unscoped closure must hydrate the exact persisted symbolic runtime"
+    );
+    let allowed = AHashSet::from([func]);
+    assert!(loaded
+        .forward_closure_within_funcs_with_max_precision(&params, &allowed, Some(Precision::Narrowed),)
+        .contains(&return_node));
+    let relevance =
+        loaded.target_relevance_with_max_precision(&[return_node], None, Some(Precision::Narrowed));
+    assert!(relevance.admits_any(&params));
+    assert!(
+        loaded.scoped_contextual_summary.lock().is_none(),
+        "a dense warm scope should reuse the validated global representation"
+    );
+    assert!(
+        loaded.scoped_symbolic_runtime.lock().is_none(),
+        "a warm scope must page the validated global symbolic representation"
+    );
+}
+
+#[test]
+fn persisted_query_accelerator_accepts_source_oriented_return_evidence() {
+    let caller = FuncId::new(7);
+    let callee = FuncId::new(8);
+    let unrelated_caller = FuncId::new(9);
+    let call_span = span(0, 20, 30);
+    let unrelated_span = span(0, 31, 39);
+    let mut segment = crate::segment::IdgSegment::new();
+    let caller_arg_place = segment.intern_place(Place::CallArg {
+        site: crate::place::CallSiteId(call_span),
+        idx: 0,
+    });
+    let caller_ret_place = segment.intern_place(Place::CallRet {
+        site: crate::place::CallSiteId(call_span),
+    });
+    let callee_param_place = segment.intern_place(Place::Param { idx: 0 });
+    let callee_return_place = segment.intern_place(Place::Return);
+    let unrelated_arg_place = segment.intern_place(Place::CallArg {
+        site: crate::place::CallSiteId(unrelated_span),
+        idx: 0,
+    });
+    let caller_arg = segment.intern_node(caller, caller_arg_place);
+    let caller_ret = segment.intern_node(caller, caller_ret_place);
+    let callee_param = segment.intern_node(callee, callee_param_place);
+    let callee_return = segment.intern_node(callee, callee_return_place);
+    let unrelated_arg = segment.intern_node(unrelated_caller, unrelated_arg_place);
+    segment.add_edge(IdgEdge::intra_assign(
+        callee_param,
+        callee_return,
+        span(0, 40, 50),
+    ));
+    segment.add_edge(IdgEdge::inter_call_arg(
+        caller_arg,
+        callee_param,
+        call_span,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+    segment.add_edge(IdgEdge::inter_return(
+        callee_return,
+        caller_ret,
+        call_span,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+    segment.add_edge(IdgEdge::inter_call_arg(
+        unrelated_arg,
+        callee_param,
+        unrelated_span,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+    segment.record_func(caller);
+    segment.record_func(callee);
+    segment.record_func(unrelated_caller);
+
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let workspace = Arc::new(workspace);
+    let compiler = IdgQueryService::new(Arc::clone(&workspace), Arc::new(GlobalIndex::new()));
+    let payload = compiler
+        .compile_default_query_accelerator()
+        .expect("compile query accelerator");
+    let mut workspace = Arc::try_unwrap(workspace).expect("compiler released workspace");
+    workspace.install_query_accelerator(payload);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sidecar = dir.path().join("call-return-accelerated-idg.factstore");
+    workspace
+        .save_to_disk(&sidecar, 0xCA11_AB1E)
+        .expect("save accelerated sidecar");
+    let loaded = IdgQueryService::load_from_disk(&sidecar, 0xCA11_AB1E, Arc::new(GlobalIndex::new()))
+        .expect("load accelerated sidecar")
+        .expect("current accelerated sidecar");
+    let evidence = loaded.semantic_cross_call_edges_with_max_precision(Some(Precision::Narrowed));
+    assert!(evidence.iter().any(|edge| {
+        edge.relation == CrossCallRelation::Return
+            && edge.caller == callee
+            && edge.callee == caller
+            && edge.call_span == call_span
+    }));
+    let allowed: AHashSet<_> = [caller, callee, unrelated_caller].into_iter().collect();
+    let relevance = loaded.target_relevance_from_source_within_funcs_with_max_precision(
+        caller,
+        &[WsNodeId(caller_ret.0)],
+        None,
+        &allowed,
+        Some(Precision::Narrowed),
+    );
+    assert!(
+        relevance.admits_any(&[WsNodeId(caller_arg.0)]),
+        "source-rooted reverse return must activate the exact callee and return through its matching argument"
+    );
+    assert!(
+        !relevance.admits_any(&[WsNodeId(unrelated_arg.0)]),
+        "a shared callee must not pull an unrelated caller into a source-rooted target proof"
+    );
+
+    let unrooted = loaded.forward_closure_evidence_within_funcs_with_max_precision(
+        &[WsNodeId(callee_param.0)],
+        &allowed,
+        Some(Precision::Narrowed),
+    );
+    assert!(
+        unrooted.nodes.contains(&WsNodeId(caller_ret.0)),
+        "a rule-matched source in a helper may flow into each resolved caller"
+    );
+    let rooted = loaded
+        .forward_closure_evidence_rooted_at_func_within_funcs_and_relevance_with_max_precision(
+            &[WsNodeId(callee_param.0)],
+            callee,
+            &allowed,
+            None,
+            Some(Precision::Narrowed),
+        );
+    assert!(rooted.nodes.contains(&WsNodeId(callee_return.0)));
+    assert!(
+        !rooted.nodes.contains(&WsNodeId(caller_ret.0)),
+        "an entry-rooted query must not escape into an unrelated caller"
+    );
+    assert_eq!(
+        loaded.rooted_scalar_target_precheck_with_max_precision(
+            &[WsNodeId(caller_arg.0)],
+            caller,
+            &[WsNodeId(caller_ret.0)],
+            Some(Precision::Narrowed),
+        ),
+        Some(true),
+        "contextual scalar summaries must preserve exact callee-return reachability"
+    );
+    assert_eq!(
+        loaded.rooted_scalar_target_precheck_with_max_precision(
+            &[WsNodeId(caller_ret.0)],
+            caller,
+            &[WsNodeId(caller_arg.0)],
+            Some(Precision::Narrowed),
+        ),
+        Some(false),
+        "the scalar summary precheck must provide an exact negative proof"
+    );
+}
+
+#[test]
+fn malformed_query_accelerator_is_rejected() {
+    let mut workspace = IdgWorkspace::new();
+    let mut segment = crate::segment::IdgSegment::new();
+    segment.record_func(FuncId::new(1));
+    workspace.register_segment(segment);
+    let frame = |payload: &[u8]| {
+        let mut file = tempfile::tempfile().expect("accelerator frame");
+        file.write_all(payload).expect("write accelerator frame");
+        file.seek(SeekFrom::Start(0)).expect("rewind accelerator frame");
+        crate::workspace::CompiledQueryAcceleratorFrame {
+            file: Arc::new(file),
+            bytes: payload.len() as u64,
+        }
+    };
+    workspace.install_query_accelerator(crate::workspace::CompiledQueryAccelerator {
+        core: frame(&[0xC1, 0x00]),
+        contextual: frame(&[]),
+        symbolic_header: frame(&[]),
+        blobs: Arc::from(Vec::new().into_boxed_slice()),
+    });
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sidecar = dir.path().join("bad-accelerator.factstore");
+    workspace
+        .save_to_disk(&sidecar, 0xBAD0_0A81)
+        .expect("save malformed accelerator fixture");
+    assert!(IdgQueryService::load_from_disk(&sidecar, 0xBAD0_0A81, Arc::new(GlobalIndex::new()),).is_err());
+}
+
+#[test]
 fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges() {
     let caller = FuncId::new(1);
     let middle = FuncId::new(2);
@@ -619,7 +1021,7 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
     );
     assert_eq!(
         evidence
-            .symbolic_cross_calls
+            .cross_calls
             .iter()
             .map(|edge| (edge.caller, edge.callee, edge.relation))
             .collect::<Vec<_>>(),
@@ -642,7 +1044,7 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
     );
     assert_eq!(
         scoped
-            .symbolic_cross_calls
+            .cross_calls
             .iter()
             .map(|edge| (edge.caller, edge.callee))
             .collect::<Vec<_>>(),
@@ -672,6 +1074,14 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
         !relevance.admits_any(&[params[1]]),
         "backward relevance must reject an unrelated sibling-field seed"
     );
+    assert_eq!(
+        service.funcs_admitted_by_target_relevance(
+            &[FuncId::new(u32::MAX), caller, middle, callee],
+            &relevance,
+        ),
+        vec![caller, callee],
+        "source prefiltering must preserve input order and every function that owns a relevant seed node"
+    );
     let relevant = service.forward_closure_evidence_within_funcs_and_relevance_with_max_precision(
         &[params[0]],
         &all_funcs,
@@ -681,12 +1091,12 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
     assert!(relevant.nodes.contains(&callee_return));
     assert_eq!(
         relevant
-            .symbolic_cross_calls
+            .cross_calls
             .iter()
             .map(|edge| (edge.caller, edge.callee, edge.relation))
             .collect::<Vec<_>>(),
         evidence
-            .symbolic_cross_calls
+            .cross_calls
             .iter()
             .map(|edge| (edge.caller, edge.callee, edge.relation))
             .collect::<Vec<_>>(),
@@ -866,11 +1276,8 @@ fn target_relevance_reverses_exact_scalar_field_returns() {
         Some(Precision::Narrowed),
     );
     assert!(evidence.nodes.contains(&target));
-    assert_eq!(evidence.symbolic_cross_calls.len(), 1);
-    assert_eq!(
-        evidence.symbolic_cross_calls[0].relation,
-        CrossCallRelation::Return
-    );
+    assert_eq!(evidence.cross_calls.len(), 1);
+    assert_eq!(evidence.cross_calls[0].relation, CrossCallRelation::Return);
 }
 
 #[test]
@@ -1062,6 +1469,28 @@ fn target_node_cut_accepts_exact_unresolved_aggregate_argument_evidence() {
         vec![(func, call_span, 0)],
         "call-argument identity must come from the unified compiler index"
     );
+    let allowed_funcs: AHashSet<FuncId> = [func].into_iter().collect();
+    let scoped_relevance = service.target_relevance_within_funcs_with_max_precision(
+        &target_nodes,
+        None,
+        &allowed_funcs,
+        Some(Precision::Narrowed),
+    );
+    let scoped = service.forward_closure_within_funcs_and_relevance_with_max_precision(
+        &seeds,
+        &allowed_funcs,
+        &scoped_relevance,
+        Some(Precision::Narrowed),
+    );
+    assert_eq!(
+        service.tainted_call_args_in_reachable_nodes_for_funcs(&scoped, Some(&allowed_funcs)),
+        vec![(func, call_span, 0)],
+        "scoped aggregate evidence must render without reopening a global runtime"
+    );
+    assert!(
+        service.ensure_unified().symbolic_runtime.get().is_none(),
+        "a target-scoped call projection must reuse its scoped compiler runtime"
+    );
     let scalar = service.forward_closure(&seeds);
     assert!(
         target_nodes.iter().all(|target| !scalar.contains(target)),
@@ -1077,7 +1506,6 @@ fn target_node_cut_accepts_exact_unresolved_aggregate_argument_evidence() {
         service.tainted_call_args_in_reachable_nodes(&cut),
         vec![(func, call_span, 0)]
     );
-    let allowed_funcs: AHashSet<FuncId> = [func].into_iter().collect();
     let relevance =
         service.target_relevance_with_max_precision(&target_nodes, None, Some(Precision::Narrowed));
     assert!(
@@ -1095,6 +1523,49 @@ fn target_node_cut_accepts_exact_unresolved_aggregate_argument_evidence() {
         service.tainted_call_args_in_reachable_nodes(&relevant),
         vec![(func, call_span, 0)]
     );
+}
+
+#[test]
+fn batched_span_targets_match_scalar_lookup_and_report_unresolved_fallbacks() {
+    let func = FuncId::new(8);
+    let call_span = span(0, 40, 55);
+    let missing_span = span(0, 90, 95);
+    let mut segment = crate::segment::IdgSegment::new();
+    let call_arg_place = segment.intern_place(Place::CallArg {
+        site: crate::place::CallSiteId(call_span),
+        idx: 0,
+    });
+    segment.intern_node(func, call_arg_place);
+    segment.record_func(func);
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+
+    let scalar = service.nodes_at_span(func, call_span);
+    let (batched, unresolved) = service.nodes_and_unresolved_funcs_at_spans(&[
+        (func, call_span),
+        (func, call_span),
+        (func, missing_span),
+    ]);
+
+    assert_eq!(
+        batched, scalar,
+        "batch lookup must preserve exact AST endpoint identity"
+    );
+    assert_eq!(
+        unresolved,
+        [func].into_iter().collect(),
+        "one unrepresented target span keeps its owning function as a conservative fallback"
+    );
+}
+
+#[test]
+fn target_relevance_starts_sparse_until_relation_density_requires_promotion() {
+    let worklist = TargetRelevanceWorklist::new(10_000_000);
+    assert!(matches!(
+        worklist.relevance.nodes,
+        RootClosureVisited::Sparse { ref reached, node_count: 10_000_000 } if reached.is_empty()
+    ));
 }
 
 #[test]
@@ -1140,12 +1611,45 @@ fn within_function_closure_excludes_reachable_callee_nodes() {
     let seed = svc.param_nodes_of(caller);
 
     let global = svc.forward_closure_with_max_precision(&seed, Some(Precision::Narrowed));
-    let local = svc.forward_closure_within_func_with_max_precision(&seed, caller, Some(Precision::Narrowed));
+    let allowed_funcs: AHashSet<FuncId> = [caller].into_iter().collect();
+    let local =
+        svc.forward_closure_within_funcs_with_max_precision(&seed, &allowed_funcs, Some(Precision::Narrowed));
     assert_eq!(global.len(), 3);
     assert_eq!(local.len(), 2);
     assert!(local
         .iter()
         .all(|node| svc.resolve_point(*node).is_some_and(|point| point.func == caller)));
+    assert!(
+        svc.scoped_contextual_summary.lock().is_none(),
+        "an already-compiled global contextual relation is filtered by the exact function scope instead of duplicated"
+    );
+    assert!(
+        svc.scoped_symbolic_runtime.lock().is_none(),
+        "an already-compiled global symbolic relation is filtered by the exact function scope instead of duplicated"
+    );
+
+    let all_funcs: AHashSet<FuncId> = [caller, callee].into_iter().collect();
+    assert_eq!(
+        svc.cross_call_edges_in_reachable_nodes_filtered_with_max_precision(
+            &global,
+            Some(Precision::Narrowed),
+            Some(&all_funcs),
+        ),
+        svc.cross_call_edges_in_reachable_nodes_with_max_precision(&global, Some(Precision::Narrowed),),
+        "demand-decoded scoped cross-call evidence must equal the canonical global evidence"
+    );
+    let scoped_calls = svc.scoped_cross_calls.lock();
+    let scoped_calls = scoped_calls
+        .as_ref()
+        .expect("function-scoped evidence caches its exact cross-call index");
+    assert_eq!(scoped_calls.funcs.as_ref(), &[caller, callee]);
+
+    let targets: AHashSet<FuncId> = [callee].into_iter().collect();
+    assert_eq!(
+        svc.semantic_function_corridor_with_max_precision(&[caller], &targets, Some(Precision::Narrowed),),
+        [caller, callee].into_iter().collect(),
+        "the numeric semantic corridor must retain the complete caller-to-callee path"
+    );
 }
 
 #[test]
@@ -1293,6 +1797,49 @@ fn compiler_return_summaries_compose_calls_and_mutual_recursion() {
     let mut workspace = IdgWorkspace::new();
     workspace.register_segment(segment);
     let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+    let only_f = AHashSet::from_iter([f]);
+    let narrow = service.return_taint_param_indices_for_funcs_within_funcs_with_max_precision(
+        &[f],
+        &only_f,
+        Some(Precision::Narrowed),
+    );
+    assert_eq!(
+        narrow.get(&f),
+        Some(&Vec::new()),
+        "excluding the recursive callee changes only this explicit compiler scope"
+    );
+    assert!(
+        service.return_summaries.lock().is_empty(),
+        "a scoped negative must never populate the canonical global cache"
+    );
+    let full_scope = AHashSet::from_iter([f, g]);
+    let unified = service.ensure_unified();
+    let contextual =
+        service.ensure_contextual_summary_runtime(&unified, Some(Precision::Narrowed), Some(&full_scope));
+    let compiled_batch = Arc::clone(
+        &service
+            .scoped_contextual_summary
+            .lock()
+            .as_ref()
+            .expect("full scoped compiler batch")
+            .batch,
+    );
+    let scoped = service.return_taint_param_indices_for_funcs_within_funcs_with_max_precision(
+        &[f, g],
+        &full_scope,
+        Some(Precision::Narrowed),
+    );
+    assert_eq!(scoped.get(&f), Some(&vec![0]));
+    assert_eq!(scoped.get(&g), Some(&vec![0]));
+    let contextual_after =
+        service.ensure_contextual_summary_runtime(&unified, Some(Precision::Narrowed), Some(&full_scope));
+    let cached_after = service.scoped_contextual_summary.lock();
+    let cached_after = cached_after.as_ref().expect("reused scoped compiler batch");
+    assert!(Arc::ptr_eq(&contextual, &contextual_after));
+    assert!(
+        Arc::ptr_eq(&compiled_batch, &cached_after.batch),
+        "return attribution must reuse the target-cut compiler batch"
+    );
     let summaries =
         service.return_taint_param_indices_for_funcs_with_max_precision(&[f, g], Some(Precision::Narrowed));
 
@@ -1692,6 +2239,16 @@ fn reachable_name_lookup_preserves_exact_projected_writes() {
     assert!(
         !names.contains("response.headers.Location"),
         "exact projected lookup must not taint sibling header fields"
+    );
+
+    let inventory = service.read_or_write_names_of_func(func);
+    assert!(inventory.contains("cd"));
+    assert!(inventory.contains("user_input"));
+    assert!(inventory.contains("response.headers.Content-Disposition"));
+    assert!(inventory.contains("response.headers.Location"));
+    assert!(
+        !inventory.contains("response"),
+        "projected IDG places must remain exact instead of inventing a bare container: {inventory:?}"
     );
 }
 

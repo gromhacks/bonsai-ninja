@@ -82,7 +82,6 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
             args.compact,
             None,
             Some(id),
-            0,
             paging_cfg,
             args.format,
         ),
@@ -115,6 +114,8 @@ impl ShowArgs<'_> {
 fn show_structural_flow(
     workspace: &Path,
     id: &str,
+    query: Option<&str>,
+    is_regex: bool,
     compact: bool,
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
@@ -122,13 +123,10 @@ fn show_structural_flow(
     cmd_inspect(
         workspace,
         InspectCommandOptions {
-            pattern: None,
-            is_regex: false,
+            pattern: query,
+            is_regex,
             kind_filter: &[],
             filters: InspectFilters::default(),
-            max_flows: usize::MAX,
-            max_entry_probes: usize::MAX,
-            max_hits: usize::MAX,
             render: InspectRenderOptions {
                 compact,
                 flow_id_filter: Some(id.to_string()),
@@ -138,7 +136,6 @@ fn show_structural_flow(
             },
             graph_flow: true,
             taint_flow: false,
-            taint_flow_explicit: false,
             paging_cfg,
             format,
         },
@@ -150,6 +147,34 @@ fn show_security_or_structural_flow(
     id: &str,
     paging_cfg: paging::PagingConfig,
 ) -> Result<()> {
+    // An explicit query, or a fresh breadcrumb recorded when inspect emitted
+    // this id, identifies it as structural and restores the exact narrow
+    // compiler scope. Never speculatively open the security taint engine for
+    // a structural id merely because both historical APIs use `F:`.
+    if let Some(query) = args.query {
+        return show_structural_flow(
+            args.workspace,
+            id,
+            Some(query),
+            false,
+            args.compact,
+            paging_cfg,
+            args.format,
+        );
+    }
+    if args.rules_dir.is_none() {
+        if let Some(hint) = crate::page_cache::structural_id_hint(args.workspace, id)? {
+            return show_structural_flow(
+                args.workspace,
+                id,
+                Some(&hint.query),
+                hint.regex,
+                args.compact,
+                paging_cfg,
+                args.format,
+            );
+        }
+    }
     // Security and structural flows historically share the F: namespace.
     // Probe the exact flow-filtered security facade first: production output
     // is the most common source of pasted F: ids, and the sparse IDG query is
@@ -159,7 +184,15 @@ fn show_security_or_structural_flow(
     match show_security_flow(args, id) {
         Ok(()) => Ok(()),
         Err(security_err) => {
-            match show_structural_flow(args.workspace, id, args.compact, paging_cfg.clone(), args.format) {
+            match show_structural_flow(
+                args.workspace,
+                id,
+                None,
+                false,
+                args.compact,
+                paging_cfg.clone(),
+                args.format,
+            ) {
                 Ok(()) => Ok(()),
                 Err(err) if err.to_string().contains("no flow matching") => {
                     match show_sdk_structural_flow(args.workspace, id, args.format) {
@@ -178,6 +211,8 @@ fn show_security_or_structural_flow(
 fn show_flow_group(
     workspace: &Path,
     id: &str,
+    query: Option<&str>,
+    is_regex: bool,
     compact: bool,
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
@@ -185,13 +220,10 @@ fn show_flow_group(
     cmd_inspect(
         workspace,
         InspectCommandOptions {
-            pattern: None,
-            is_regex: false,
+            pattern: query,
+            is_regex,
             kind_filter: &[],
             filters: InspectFilters::default(),
-            max_flows: usize::MAX,
-            max_entry_probes: usize::MAX,
-            max_hits: usize::MAX,
             render: InspectRenderOptions {
                 compact,
                 flow_id_filter: None,
@@ -201,7 +233,6 @@ fn show_flow_group(
             },
             graph_flow: true,
             taint_flow: false,
-            taint_flow_explicit: false,
             paging_cfg,
             format,
         },
@@ -213,12 +244,38 @@ fn show_security_or_structural_group(
     id: &str,
     paging_cfg: paging::PagingConfig,
 ) -> Result<()> {
+    if let Some(query) = args.query {
+        return show_flow_group(
+            args.workspace,
+            id,
+            Some(query),
+            false,
+            args.compact,
+            paging_cfg,
+            args.format,
+        );
+    }
+    if args.rules_dir.is_none() {
+        if let Some(hint) = crate::page_cache::structural_id_hint(args.workspace, id)? {
+            return show_flow_group(
+                args.workspace,
+                id,
+                Some(&hint.query),
+                hint.regex,
+                args.compact,
+                paging_cfg,
+                args.format,
+            );
+        }
+    }
     match show_security_group(args, id) {
         Ok(()) => Ok(()),
         Err(security_err) => {
             match show_flow_group(
                 args.workspace,
                 id,
+                None,
+                false,
                 args.compact,
                 paging_cfg.clone(),
                 args.format,
@@ -316,9 +373,6 @@ fn show_raw_taint_flow(
             is_regex: false,
             kind_filter: &[],
             filters: InspectFilters::default(),
-            max_flows: usize::MAX,
-            max_entry_probes: usize::MAX,
-            max_hits: usize::MAX,
             render: InspectRenderOptions {
                 compact,
                 flow_id_filter: Some(id.to_string()),
@@ -328,7 +382,6 @@ fn show_raw_taint_flow(
             },
             graph_flow: false,
             taint_flow: true,
-            taint_flow_explicit: true,
             paging_cfg,
             format,
         },

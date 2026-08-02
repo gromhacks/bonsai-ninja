@@ -3332,6 +3332,7 @@ fn structured_receiver_fact_drives_receiver_flow() {
         call_span,
         receiver_span: call_span,
         value_flow: bonsai_lang_api::ExpressionFlow::from_place("state.client"),
+        role: bonsai_lang_api::CallReceiverRole::Value,
         static_value: None,
     }];
     let out = transfer_function_for_with_options_and_syntax_facts(
@@ -3354,6 +3355,43 @@ fn structured_receiver_fact_drives_receiver_flow() {
 }
 
 #[test]
+fn namespace_receiver_fact_does_not_create_runtime_receiver_flow() {
+    let mut decl = empty_decl(1, "f");
+    let call_span = span(40, 52);
+    decl.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "pickle.loads".to_string(),
+        receiver: Some("pickle".to_string()),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Method,
+        args: Vec::new(),
+    }];
+    let receiver_facts = vec![bonsai_lang_api::CallReceiverFact {
+        call_span,
+        receiver_span: span(40, 46),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("pickle"),
+        role: bonsai_lang_api::CallReceiverRole::Namespace,
+        static_value: None,
+    }];
+    let out = transfer_function_for_with_options_and_syntax_facts(
+        &decl,
+        &TransferOptions::default(),
+        &[],
+        &receiver_facts,
+    );
+    let site = out.call_sites.first().expect("call site");
+
+    assert!(site.receiver_arg_node.is_none());
+    assert!(site.receiver_storage_base.is_none());
+    assert!(out
+        .nodes
+        .nodes
+        .iter()
+        .filter_map(|node| out.places.get(node.place))
+        .all(|place| !matches!(place, Place::Read { name, .. } if out.names.get(*name) == Some("pickle"))));
+}
+
+#[test]
 fn structured_implicit_receiver_fact_defers_storage_identity_to_stitching() {
     let mut decl = empty_decl(1, "method");
     decl.implicit_receiver_names = vec!["$this".to_string()];
@@ -3370,6 +3408,7 @@ fn structured_implicit_receiver_fact_defers_storage_identity_to_stitching() {
         call_span,
         receiver_span: call_span,
         value_flow: bonsai_lang_api::ExpressionFlow::from_place("$this"),
+        role: bonsai_lang_api::CallReceiverRole::Value,
         static_value: None,
     }];
     let out = transfer_function_for_with_options_and_syntax_facts(

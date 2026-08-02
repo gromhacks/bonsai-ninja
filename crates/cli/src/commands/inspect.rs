@@ -7,10 +7,10 @@ use anyhow::{Context, Result};
 use bonsai_lang_api::{DeclKind, FlowEvent, RefKind};
 use bonsai_sdk::Workspace;
 use bonsai_sdk::{
-    compute_flow_id, compute_flow_labels_from, compute_group_id, compute_taint_flow_id,
+    compute_flow_labels_from, compute_structural_flow_id, compute_structural_group_id, compute_taint_flow_id,
     file_path_matches_filter, find_call_span_to_func_uncached, func_display_name, CallEdgeResolver,
-    CallPathTruncation, ChainCache, EntryTaintGraph, ResolvedChain, SyntaxFlowPlan, SyntaxFlowQuery,
-    TaintFlowIdentityStep, TaintedCall, TaintedCallEdge, TaintedCallKind,
+    ChainCache, EntryTaintGraph, ResolvedChain, SyntaxFlowPlan, SyntaxFlowQuery, TaintFlowIdentityStep,
+    TaintedCall, TaintedCallEdge, TaintedCallKind,
 };
 use comfy_table::Cell;
 use serde::{Deserialize, Serialize};
@@ -35,14 +35,12 @@ use super::{
     truncate,
 };
 
-/// Above this size, default inspect stays on the indexed syntax
-/// surface unless the user explicitly asks for exhaustive graph
-/// evidence via `--all`, `--flow`, or `--group`. Building the
-/// workspace call graph for every broad query is the wrong scaling
-/// shape on repos like Elasticsearch.
+/// Above this size, default inspect stays on the indexed syntax surface.
+/// Graph work is requested explicitly with `--graph-flow`, `--flow`,
+/// `--group`, or an endpoint pair. Building a workspace call graph merely
+/// because output paging is disabled would be the wrong scaling shape on
+/// repositories like Elasticsearch.
 const INSPECT_GRAPH_FLOW_FILE_LIMIT: usize = 5_000;
-const INSPECT_DEFAULT_TAINT_ENTRY_LIMIT: usize = 8;
-const INSPECT_DEFAULT_TAINT_FLOW_LIMIT: usize = 100;
 const FLOW_LABEL_PLACEHOLDER: &str = "__BONSAI_FLOW_LABEL__";
 
 #[derive(Serialize, Clone)]
@@ -74,13 +72,6 @@ struct InspectSummary {
     total_flows: u32,
     max_chain_depth: u32,
     unique_entry_points: u32,
-    /// `Some("max-flows cap")` / `Some("entry-probe budget")` when chain
-    /// enumeration hit a cap and dropped at least one flow that exists
-    /// in the call graph; `None` when every reachable chain was
-    /// enumerated. Surfaced in the text output so users know to re-run
-    /// with `--all` (or a higher `--max-flows`) when chains were lost.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    truncated_by: Option<String>,
 }
 
 /// One start→sink execution flow, with the full call chain and, for each
@@ -143,15 +134,14 @@ pub(crate) struct InspectLine {
     pub(crate) annotation: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct InspectReport {
     query: String,
     regex: bool,
     kind_filter: Vec<String>,
-    /// Top-level completion verdict for the inspect result set. False
-    /// means at least one requested occurrence or flow evidence set is
-    /// a capped prefix and downstream tooling must not treat the JSON
-    /// as complete.
+    /// Top-level completion verdict for the semantic result set. False means
+    /// a compiler/graph backend explicitly reported incomplete evidence;
+    /// output-page coverage is reported separately by paged JSON wrappers.
     analysis_complete: bool,
     analysis_incomplete_reasons: Vec<String>,
     /// Per-decl flow rendering: each matching decl gets its own
@@ -161,80 +151,60 @@ struct InspectReport {
     /// decorators) with the enclosing function and a chain preview.
     hits: Vec<HitOut>,
     /// Raw taint-engine paths matching the inspect query / filters.
-    /// Populated by default for normal inspect queries; no rulepack
+    /// Populated only by explicit `--taint-flow`/`T:` requests; no rulepack
     /// source/sink/sanitizer semantics are involved.
     #[serde(default)]
     taint_flows: Vec<InspectTaintFlow>,
     summary: InspectReportSummary,
 }
 
-#[derive(Clone, Serialize)]
-#[serde(tag = "section", content = "value")]
+#[derive(Clone)]
 enum InspectJsonPageUnit<'a> {
-    #[serde(rename = "decl_hits")]
-    DeclHit(&'a InspectOut),
-    #[serde(rename = "hits")]
-    Hit(&'a HitOut),
-    #[serde(rename = "taint_flows")]
-    TaintFlow(&'a InspectTaintFlow),
+    Decl {
+        index: usize,
+        hit: &'a InspectOut,
+        flow: Option<&'a InspectFlowRendered>,
+    },
+    Hit {
+        index: usize,
+        hit: &'a HitOut,
+        flow: Option<&'a InspectFlowRendered>,
+    },
+    Taint(&'a InspectTaintFlow),
 }
 
-#[derive(Serialize)]
+impl Serialize for InspectJsonPageUnit<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct as _;
+        let mut state = serializer.serialize_struct("InspectJsonPageUnit", 2)?;
+        match self {
+            Self::Decl { hit, flow, .. } => {
+                state.serialize_field("section", "decl_hits")?;
+                state.serialize_field("value", &paged_decl_hit(hit, *flow))?;
+            }
+            Self::Hit { hit, flow, .. } => {
+                state.serialize_field("section", "hits")?;
+                state.serialize_field("value", &paged_occurrence_hit(hit, *flow))?;
+            }
+            Self::Taint(flow) => {
+                state.serialize_field("section", "taint_flows")?;
+                state.serialize_field("value", flow)?;
+            }
+        }
+        state.end()
+    }
+}
+
+#[derive(Serialize, Default)]
 struct InspectReportSummary {
     total_decl_hits: usize,
     total_hits: usize,
     #[serde(default)]
     total_taint_flows: usize,
     hit_counts_by_kind: serde_json::Value,
-    /// Number of non-decl hits whose flow evidence is known to be a
-    /// capped prefix rather than a complete chain/path set.
-    #[serde(skip_serializing_if = "is_zero_usize", default)]
-    flow_truncated_hits: usize,
-    /// Stable, human-readable set of truncation reasons observed
-    /// across occurrence-hit flow evidence.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    flow_truncation_reasons: Vec<String>,
-    /// `true` when the non-decl-hit pass hit `--max-hits` and dropped
-    /// at least one occurrence. Surfaced in the text output so users
-    /// know to re-run with `--all` (or a higher `--max-hits`).
-    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
-    hits_truncated: bool,
-    /// Exact bounded-mode reason(s) for `hits_truncated`. The normal
-    /// result cap and the filtered-candidate attempt cap are separate
-    /// so machine consumers can distinguish "shown hit list is full"
-    /// from "the query rejected too many candidates before reaching
-    /// the shown-hit cap".
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    hit_truncation_reasons: Vec<String>,
-    /// Number of non-decl candidates that reached the flow/filter
-    /// phase. Present only when truncation happened so capped runs are
-    /// auditable without noisy default metadata.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hit_candidates_attempted: Option<usize>,
-    /// The candidate-attempt cap in effect for this run. Present only
-    /// when truncation happened.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hit_attempt_cap: Option<usize>,
-    /// `true` when the default taint overlay had more query-matching
-    /// enclosing entry points than it was allowed to analyze.
-    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
-    taint_candidates_truncated: bool,
-    /// Number of taint entry points actually analyzed. Present only
-    /// when the taint overlay is truncated.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    taint_candidate_entries_considered: Option<usize>,
-    /// The taint entry-point cap in effect for this run. Present only
-    /// when the taint overlay is truncated.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    taint_candidate_entry_cap: Option<usize>,
-    /// `true` when the default taint overlay found more matching raw
-    /// taint paths than it was allowed to render.
-    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
-    taint_flows_truncated: bool,
-    /// The raw taint-flow row cap in effect for this run. Present only
-    /// when the taint overlay is truncated.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    taint_flow_cap: Option<usize>,
     /// Number of entry graphs requested through the shared semantic flow
     /// facade while building raw inspect taint-flow evidence.
     #[serde(skip_serializing_if = "is_zero_usize", default)]
@@ -267,10 +237,6 @@ struct InspectReportSummary {
     /// unavailable.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     graph_flow_incomplete_reasons: Vec<String>,
-    /// Present when default inspect intentionally skipped the raw
-    /// taint overlay to keep a large, broad syntax query bounded.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    taint_overlay_skipped_reason: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -339,7 +305,7 @@ impl TaintFlowIdentityStep for InspectTaintStep {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct HitOut {
     kind: String,
     text: String,
@@ -355,10 +321,6 @@ struct HitOut {
     /// Suffix-clustered view of `flows`. Populated alongside `flows`.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     groups: Vec<InspectFlowGroup>,
-    /// Present when this hit's flow list is known to be incomplete
-    /// because chain or downstream path enumeration hit a cap.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    flow_truncated_by: Option<String>,
     /// When `--from` is set, the first reachable name that matched the
     /// `--from` needle on this hit's chain plus its source location
     /// (`name (file:line:col)`). Lets users see not just which
@@ -525,7 +487,7 @@ fn retrieval_prefilter_for_inspect_with_limit(
     pattern: Option<&str>,
     is_regex: bool,
     filters: InspectFilters<'_>,
-    graph_flows_enabled: bool,
+    _graph_flows_enabled: bool,
     group_id_filter_active: bool,
     large_workspace_limit: usize,
 ) -> Result<Option<Vec<String>>> {
@@ -534,7 +496,6 @@ fn retrieval_prefilter_for_inspect_with_limit(
     };
     if is_regex
         || pattern.len() < 3
-        || graph_flows_enabled
         || group_id_filter_active
         || !workspace_file_count_exceeds(root, large_workspace_limit)
     {
@@ -555,34 +516,33 @@ pub(crate) struct InspectCommandOptions<'a> {
     pub(crate) is_regex: bool,
     pub(crate) kind_filter: &'a [String],
     pub(crate) filters: InspectFilters<'a>,
-    pub(crate) max_flows: usize,
-    pub(crate) max_entry_probes: usize,
-    pub(crate) max_hits: usize,
     pub(crate) render: InspectRenderOptions,
     pub(crate) graph_flow: bool,
     pub(crate) taint_flow: bool,
-    pub(crate) taint_flow_explicit: bool,
     pub(crate) paging_cfg: paging::PagingConfig,
     pub(crate) format: BrowseFormat,
 }
 
 struct TaintCandidates {
     entries: ahash::AHashSet<bonsai_common::FuncId>,
-    limit: usize,
-    truncated: std::cell::Cell<bool>,
+    target_spans: Vec<(bonsai_common::FuncId, bonsai_common::Span)>,
 }
 
 impl TaintCandidates {
-    fn new(entries: ahash::AHashSet<bonsai_common::FuncId>, limit: usize) -> Self {
+    fn new(entries: ahash::AHashSet<bonsai_common::FuncId>) -> Self {
         Self {
             entries,
-            limit,
-            truncated: std::cell::Cell::new(false),
+            target_spans: Vec::new(),
         }
     }
 
     fn insert(&mut self, entry: bonsai_common::FuncId) {
-        insert_taint_candidate_entry(&mut self.entries, self.limit, &self.truncated, entry);
+        self.entries.insert(entry);
+    }
+
+    fn insert_target(&mut self, entry: bonsai_common::FuncId, span: bonsai_common::Span) {
+        self.entries.insert(entry);
+        self.target_spans.push((entry, span));
     }
 }
 
@@ -593,10 +553,6 @@ struct DeclHitPass<'a> {
     filters: InspectFilters<'a>,
     taint_flow: bool,
     graph_flows_enabled: bool,
-    max_flows: usize,
-    max_entry_probes: usize,
-    downstream_max_extra: usize,
-    downstream_max_paths: usize,
     full_source_for_large_bodies: bool,
 }
 
@@ -677,7 +633,7 @@ fn collect_decl_hits(
                     | DeclKind::Global
             )
         {
-            taint_candidates.insert(target_func);
+            taint_candidates.insert_target(target_func, decl.name_span);
         }
         if !options.graph_flows_enabled {
             hits.push(InspectOut {
@@ -696,19 +652,13 @@ fn collect_decl_hits(
                     total_flows: 0,
                     max_chain_depth: 0,
                     unique_entry_points: 0,
-                    truncated_by: None,
                 },
             });
             continue;
         }
 
-        let (chains, chain_truncation) =
-            chain_cache.chains_resolved(target_func, options.max_flows, options.max_entry_probes);
-        let _downstream = chain_cache.downstream_resolved(
-            target_func,
-            options.downstream_max_extra,
-            options.downstream_max_paths,
-        );
+        let (chains, _) = chain_cache.chains_resolved(target_func, usize::MAX, usize::MAX);
+        let _downstream = chain_cache.downstream_resolved(target_func, usize::MAX, usize::MAX);
         let chains: Vec<ResolvedChain> = chains
             .into_iter()
             .filter(|chain| {
@@ -722,17 +672,14 @@ fn collect_decl_hits(
             continue;
         }
 
-        let mut truncation_labels = Vec::new();
-        push_chain_truncation(&mut truncation_labels, chain_truncation);
         let mut extended_chains = Vec::new();
         for chain in &chains {
-            let (paths, path_truncation) = edge_resolver.enumerate_call_paths_from_with_truncation(
+            let (paths, _) = edge_resolver.enumerate_call_paths_from_with_truncation(
                 chain_cache,
                 &chain.funcs,
-                options.downstream_max_extra,
-                options.downstream_max_paths,
+                usize::MAX,
+                usize::MAX,
             );
-            push_call_path_truncation(&mut truncation_labels, path_truncation);
             extended_chains.extend(paths.into_iter().map(|path| (path, chain.precision)));
         }
         if options.filters.from.is_some() || options.filters.to.is_some() {
@@ -775,7 +722,7 @@ fn collect_decl_hits(
             .map(|(chain, _)| edge_resolver.call_spans_for_chain(chain))
             .collect();
         use rayon::prelude::*;
-        let flows: Vec<InspectFlowRendered> = extended_chains
+        let mut flows: Vec<InspectFlowRendered> = extended_chains
             .par_iter()
             .zip(call_spans.par_iter())
             .filter_map(|((extended, precision), spans)| {
@@ -804,6 +751,7 @@ fn collect_decl_hits(
                 )
             })
             .collect();
+        dedup_structural_flows(&mut flows);
         let direct_callers = semantic_direct_callers(ws, chain_cache.resolved_graph(), target_func);
         let callees = semantic_callees(ws, chain_cache.resolved_graph(), target_func);
         let unique_entries: ahash::AHashSet<&String> =
@@ -816,7 +764,6 @@ fn collect_decl_hits(
                 .max()
                 .unwrap_or(0),
             unique_entry_points: unique_entries.len() as u32,
-            truncated_by: truncation_summary(&truncation_labels),
         };
         let groups = group_flows_by_suffix(&flows);
         hits.push(InspectOut {
@@ -844,17 +791,10 @@ struct OccurrenceHitPass<'a> {
     kind_selection: &'a InspectKindSelection,
     filter_only_occurrence_kind: Option<bonsai_sdk::FactKindFilter>,
     filters: InspectFilters<'a>,
-    max_flows: usize,
-    max_entry_probes: usize,
-    max_hits: usize,
-    downstream_max_extra: usize,
-    downstream_max_paths: usize,
     full_source_for_large_bodies: bool,
     graph_flows_enabled: bool,
     syntax_fast_path: bool,
     taint_flow: bool,
-    paging_cfg: &'a paging::PagingConfig,
-    direct_taint_id_lookup: bool,
     occurrence_scan_skipped_for_id_lookup: bool,
     partial_workspace: bool,
     large_syntax_scan: bool,
@@ -865,7 +805,6 @@ struct OccurrenceChainResolution {
     call_targets: Vec<(bonsai_common::FuncId, bonsai_common::Precision)>,
     from_match: Option<FilterMatch>,
     to_match: Option<FilterMatch>,
-    truncation_labels: Vec<&'static str>,
 }
 
 struct OccurrenceChainContext<'query, 'workspace> {
@@ -873,10 +812,6 @@ struct OccurrenceChainContext<'query, 'workspace> {
     chain_cache: &'query ChainCache<'workspace>,
     edge_resolver: &'query mut CallEdgeResolver<'workspace>,
     filters: InspectFilters<'query>,
-    max_flows: usize,
-    max_entry_probes: usize,
-    downstream_max_extra: usize,
-    downstream_max_paths: usize,
 }
 
 fn resolve_occurrence_chains(
@@ -891,27 +826,23 @@ fn resolve_occurrence_chains(
         call_targets: Vec::new(),
         from_match: None,
         to_match: None,
-        truncation_labels: Vec::new(),
     };
     let Some(containing_id) = containing_id else {
         return resolution;
     };
 
-    let containing_downstream = context.chain_cache.downstream_resolved(
-        containing_id,
-        context.downstream_max_extra,
-        context.downstream_max_paths,
-    );
+    let containing_downstream =
+        context
+            .chain_cache
+            .downstream_resolved(containing_id, usize::MAX, usize::MAX);
     let mut seed = Vec::new();
     let mut seed_from_call_target = false;
     if kind == "call" {
         resolution.call_targets = resolve_call_hit_targets(context.chain_cache, containing_id, span);
         for (target, direct_precision) in resolution.call_targets.iter().copied() {
-            let (raw, truncation) =
-                context
-                    .chain_cache
-                    .chains_resolved(target, context.max_flows, context.max_entry_probes);
-            push_chain_truncation(&mut resolution.truncation_labels, truncation);
+            let (raw, _) = context
+                .chain_cache
+                .chains_resolved(target, usize::MAX, usize::MAX);
             let target_seed = if raw.is_empty() {
                 vec![ResolvedChain {
                     funcs: vec![target],
@@ -936,11 +867,9 @@ fn resolve_occurrence_chains(
         seed_from_call_target = !seed.is_empty();
     }
     if seed.is_empty() {
-        let (raw, truncation) =
-            context
-                .chain_cache
-                .chains_resolved(containing_id, context.max_flows, context.max_entry_probes);
-        push_chain_truncation(&mut resolution.truncation_labels, truncation);
+        let (raw, _) = context
+            .chain_cache
+            .chains_resolved(containing_id, usize::MAX, usize::MAX);
         seed = if raw.is_empty() {
             vec![ResolvedChain {
                 funcs: vec![containing_id],
@@ -1052,10 +981,6 @@ fn resolve_occurrence_chains(
 
 struct OccurrenceHitResult {
     hits: Vec<HitOut>,
-    truncated_by_output_cap: bool,
-    truncated_by_attempt_cap: bool,
-    candidates_attempted: usize,
-    attempt_cap: usize,
 }
 
 struct OccurrenceScan<'a> {
@@ -1064,15 +989,9 @@ struct OccurrenceScan<'a> {
     kind_selection: &'a InspectKindSelection,
     endpoint_kind: Option<bonsai_sdk::FactKindFilter>,
     syntax_fast_path: bool,
-    taint_flow: bool,
     large_syntax_scan: bool,
-    max_hits: usize,
-    attempt_cap: usize,
     skip: bool,
     partial_workspace: bool,
-    hits_attempted: &'a std::cell::Cell<usize>,
-    truncated_by_output_cap: &'a std::cell::Cell<bool>,
-    truncated_by_attempt_cap: &'a std::cell::Cell<bool>,
 }
 
 fn scan_occurrence_facts(
@@ -1095,15 +1014,9 @@ fn scan_occurrence_facts(
         kind_selection,
         endpoint_kind: filter_only_occurrence_kind,
         syntax_fast_path,
-        taint_flow,
         large_syntax_scan,
-        max_hits,
-        attempt_cap,
         skip: occurrence_scan_skipped_for_id_lookup,
         partial_workspace,
-        hits_attempted,
-        truncated_by_output_cap: hits_truncated_by_output_cap,
-        truncated_by_attempt_cap: hits_truncated_by_attempt_cap,
     } = options;
     if !occurrence_scan_skipped_for_id_lookup {
         let hit_phase = if partial_workspace {
@@ -1113,14 +1026,6 @@ fn scan_occurrence_facts(
         };
         let hit_bar = progress::progress_bar(hit_phase, files_in_path_order.len() as u64);
         for file in files_in_path_order.iter().copied() {
-            if syntax_fast_path && hits_attempted.get() >= attempt_cap {
-                hits_truncated_by_attempt_cap.set(true);
-                break;
-            }
-            if syntax_fast_path && !taint_flow && hits.len() >= max_hits {
-                hits_truncated_by_output_cap.set(true);
-                break;
-            }
             hit_bar.inc(1);
             // Occurrence facts are file-local Tree-sitter IR. Stream the
             // exact compiler object in every mode instead of retaining a
@@ -1238,22 +1143,14 @@ fn collect_occurrence_hits<'workspace>(
         kind_selection,
         filter_only_occurrence_kind,
         filters,
-        max_flows,
-        max_entry_probes,
-        max_hits,
-        downstream_max_extra,
-        downstream_max_paths,
         full_source_for_large_bodies,
         graph_flows_enabled,
         syntax_fast_path,
         taint_flow,
-        paging_cfg,
-        direct_taint_id_lookup,
         occurrence_scan_skipped_for_id_lookup,
         partial_workspace,
         large_syntax_scan,
     } = options;
-    let taint_candidate_entry_cap = taint_candidates.limit;
     // ----- 2. Non-decl hits: calls, assignments, strings, imports, args, decorators, refs.
     let mut hits: Vec<HitOut> = Vec::new();
     // Warm the resolved graph only when this invocation is actually
@@ -1274,49 +1171,12 @@ fn collect_occurrence_hits<'workspace>(
                     .collect::<ahash::AHashSet<_>>()
             },
         );
-    // Counts candidates we silently dropped because `max_hits` was
-    // already saturated. An overestimate (some of these would also
-    // have been filtered out by `--from`/`--to`/etc.) but the right
-    // semantics for the truncation flag: "at least one candidate was
-    // not given a chance to land in the output."
-    let hits_truncated_by_output_cap = std::cell::Cell::new(false);
-    let hits_truncated_by_attempt_cap = std::cell::Cell::new(false);
-    // Independent attempt counter: every call that passed the
-    // pre-filter checks (file / in-fn) bumps it, regardless of
-    // whether the chain filter later accepts or rejects the hit.
-    // Without an attempt cap, `--from X` queries can walk an
-    // unbounded portion of the workspace before the `out.len()`
-    // cap fires — on large repos (zod, jackson) this turns a
-    // 200-hit budget into a 5000-hit walk and minutes of render
-    // time. The 5x multiplier on `max_hits` is a soft headroom
-    // so the filter still has room to skip rejected hits without
-    // exploding into the worst case. Default taint-overlay mode uses
-    // a smaller headroom because it only needs enough visible syntax
-    // hits to seed a capped taint entry set; explicit exhaustive
-    // modes still get the wider budget.
-    let attempt_cap = if syntax_fast_path && taint_flow && !paging_cfg.all && !direct_taint_id_lookup {
-        max_hits.saturating_add(taint_candidate_entry_cap).max(max_hits)
-    } else {
-        max_hits.saturating_mul(5).max(max_hits)
-    };
-    let hits_attempted = std::cell::Cell::new(0_usize);
     let mut push_hit = |kind: &str,
                         text: String,
                         span: bonsai_common::Span,
                         containing: Option<(bonsai_common::FuncId, String)>,
                         assignment_source_call: bool,
                         out: &mut Vec<HitOut>| {
-        let output_capped = out.len() >= max_hits;
-        if output_capped {
-            hits_truncated_by_output_cap.set(true);
-            if !taint_flow {
-                return;
-            }
-        }
-        if hits_attempted.get() >= attempt_cap {
-            hits_truncated_by_attempt_cap.set(true);
-            return;
-        }
         let (path, line, col) = format_span(&span, ws);
         // `--file` filter (substring) on the hit's source path.
         if filters
@@ -1350,19 +1210,11 @@ fn collect_occurrence_hits<'workspace>(
         }) {
             return;
         }
-        // Count this candidate toward the cap regardless of whether
-        // the chain filter accepts or rejects it. See the
-        // `hits_attempted` declaration for why.
-        hits_attempted.set(hits_attempted.get() + 1);
         if taint_flow {
             if let Some(entry) = containing_id {
-                taint_candidates.insert(entry);
+                taint_candidates.insert_target(entry, span);
             }
         }
-        if output_capped {
-            return;
-        }
-
         if !graph_flows_enabled {
             let filter_hit = inspect_filter_hit(&text, kind);
             let visible_match = |needle: &str, requested_kind: Option<bonsai_sdk::FactKindFilter>| -> bool {
@@ -1396,7 +1248,6 @@ fn collect_occurrence_hits<'workspace>(
                     .unwrap_or_default(),
                 flows: Vec::new(),
                 groups: Vec::new(),
-                flow_truncated_by: None,
                 from_match: None,
                 to_match: None,
             });
@@ -1409,10 +1260,6 @@ fn collect_occurrence_hits<'workspace>(
                 chain_cache,
                 edge_resolver: &mut *edge_resolver,
                 filters,
-                max_flows,
-                max_entry_probes,
-                downstream_max_extra,
-                downstream_max_paths,
             },
             kind,
             &text,
@@ -1424,7 +1271,6 @@ fn collect_occurrence_hits<'workspace>(
             call_targets: call_hit_targets,
             from_match: hit_from_match,
             to_match: hit_to_match,
-            truncation_labels: mut flow_truncation_labels,
         } = resolution;
         // If chain filters rejected every chain AND the user explicitly
         // asked for --from / --to, drop this hit entirely (they didn't
@@ -1472,27 +1318,22 @@ fn collect_occurrence_hits<'workspace>(
         // tail — same contract as the decl-hit branch. Unresolvable
         // downstream hops terminate the extension rather than getting
         // appended as bogus `(over-approx)` edges.
-        if working_chains_r.len() > max_flows {
-            push_truncation_label(&mut flow_truncation_labels, "max-flows cap");
-        }
         let mut extended_chains_r: Vec<(Vec<bonsai_common::FuncId>, bonsai_common::Precision)> = Vec::new();
         let extend_downstream = kind != "call" || !call_hit_targets.is_empty() || assignment_source_call;
         if extend_downstream {
-            for chain in working_chains_r.iter().take(max_flows) {
-                let (paths, path_truncation) = edge_resolver.enumerate_call_paths_from_with_truncation(
+            for chain in &working_chains_r {
+                let (paths, _) = edge_resolver.enumerate_call_paths_from_with_truncation(
                     chain_cache,
                     &chain.funcs,
-                    downstream_max_extra,
-                    downstream_max_paths,
+                    usize::MAX,
+                    usize::MAX,
                 );
-                push_call_path_truncation(&mut flow_truncation_labels, path_truncation);
                 extended_chains_r.extend(paths.into_iter().map(|path| (path, chain.precision)));
             }
         } else {
             extended_chains_r.extend(
                 working_chains_r
                     .iter()
-                    .take(max_flows)
                     .map(|chain| (chain.funcs.clone(), chain.precision)),
             );
         }
@@ -1544,7 +1385,7 @@ fn collect_occurrence_hits<'workspace>(
         // Parallel render — see the decl-hit path above for the
         // determinism argument. Same shape, same guarantee.
         use rayon::prelude::*;
-        let flows: Vec<InspectFlowRendered> = extended_chains_r
+        let mut flows: Vec<InspectFlowRendered> = extended_chains_r
             .par_iter()
             .zip(call_spans.par_iter())
             .enumerate()
@@ -1566,6 +1407,7 @@ fn collect_occurrence_hits<'workspace>(
                 )
             })
             .collect();
+        dedup_structural_flows(&mut flows);
         if flows.is_empty() && (filters.from.is_some() || filters.to.is_some()) {
             return;
         }
@@ -1580,7 +1422,6 @@ fn collect_occurrence_hits<'workspace>(
             chains_preview,
             flows,
             groups,
-            flow_truncated_by: truncation_summary(&flow_truncation_labels),
             from_match: hit_from_match,
             to_match: hit_to_match,
         });
@@ -1595,27 +1436,15 @@ fn collect_occurrence_hits<'workspace>(
             kind_selection,
             endpoint_kind: filter_only_occurrence_kind,
             syntax_fast_path,
-            taint_flow,
             large_syntax_scan,
-            max_hits,
-            attempt_cap,
             skip: occurrence_scan_skipped_for_id_lookup,
             partial_workspace,
-            hits_attempted: &hits_attempted,
-            truncated_by_output_cap: &hits_truncated_by_output_cap,
-            truncated_by_attempt_cap: &hits_truncated_by_attempt_cap,
         },
         &mut hits,
         &mut push_hit,
     );
 
-    OccurrenceHitResult {
-        hits,
-        truncated_by_output_cap: hits_truncated_by_output_cap.get(),
-        truncated_by_attempt_cap: hits_truncated_by_attempt_cap.get(),
-        candidates_attempted: hits_attempted.get(),
-        attempt_cap,
-    }
+    OccurrenceHitResult { hits }
 }
 
 struct InspectFinish<'a> {
@@ -1627,14 +1456,8 @@ struct InspectFinish<'a> {
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
     taint_flow: bool,
-    taint_flow_explicit: bool,
-    taint_flow_id_lookup: bool,
-    syntax_fast_path: bool,
-    large_syntax_scan: bool,
     graph_flows_enabled: bool,
     graph_flow_incomplete_reason: Option<&'a str>,
-    occurrence_scan_skipped_for_id_lookup: bool,
-    taint_flow_cap: usize,
 }
 
 fn finish_inspect(
@@ -1654,21 +1477,10 @@ fn finish_inspect(
         paging_cfg,
         format,
         taint_flow,
-        taint_flow_explicit,
-        taint_flow_id_lookup,
-        syntax_fast_path,
-        large_syntax_scan,
         graph_flows_enabled,
         graph_flow_incomplete_reason,
-        occurrence_scan_skipped_for_id_lookup,
-        taint_flow_cap,
     } = options;
-    let taint_candidate_entry_cap = taint_candidates.limit;
     let mut hits = occurrence_hits.hits;
-    let hits_truncated_by_output_cap = std::cell::Cell::new(occurrence_hits.truncated_by_output_cap);
-    let hits_truncated_by_attempt_cap = std::cell::Cell::new(occurrence_hits.truncated_by_attempt_cap);
-    let hits_attempted = std::cell::Cell::new(occurrence_hits.candidates_attempted);
-    let attempt_cap = occurrence_hits.attempt_cap;
     // Determinism: `global.all_files()` iterates an AHashMap, so discovery
     // order varies run-to-run. Sort hits and decl_hits by a stable key
     // (file, line, column, kind, text) so two back-to-back runs produce
@@ -1690,36 +1502,11 @@ fn finish_inspect(
     });
 
     // ----- 3. Summary.
-    let (flow_truncated_hits, flow_truncation_reasons) = occurrence_flow_truncation_summary(&hits);
-    let hits_truncated = hits_truncated_by_output_cap.get()
-        || hits_truncated_by_attempt_cap.get()
-        || occurrence_scan_skipped_for_id_lookup;
     let summary = InspectReportSummary {
         total_decl_hits: decl_hits.len(),
         total_hits: hits.len(),
         total_taint_flows: 0,
         hit_counts_by_kind: sorted_hit_counts_json(&hits),
-        flow_truncated_hits,
-        flow_truncation_reasons,
-        hits_truncated,
-        hit_truncation_reasons: inspect_hit_truncation_reasons(
-            hits_truncated_by_output_cap.get(),
-            hits_truncated_by_attempt_cap.get(),
-            occurrence_scan_skipped_for_id_lookup,
-        ),
-        hit_candidates_attempted: hits_truncated.then_some(hits_attempted.get()),
-        hit_attempt_cap: hits_truncated.then_some(attempt_cap),
-        taint_candidates_truncated: taint_candidates.truncated.get(),
-        taint_candidate_entries_considered: taint_candidates
-            .truncated
-            .get()
-            .then_some(taint_candidates.entries.len()),
-        taint_candidate_entry_cap: taint_candidates
-            .truncated
-            .get()
-            .then_some(taint_candidate_entry_cap),
-        taint_flows_truncated: false,
-        taint_flow_cap: None,
         semantic_flow_entry_queries: 0,
         semantic_flow_backend_counts: BTreeMap::new(),
         semantic_flow_cache_hits: 0,
@@ -1731,7 +1518,6 @@ fn finish_inspect(
             .into_iter()
             .map(str::to_string)
             .collect(),
-        taint_overlay_skipped_reason: None,
     };
 
     let mut report = InspectReport {
@@ -1745,46 +1531,50 @@ fn finish_inspect(
         taint_flows: Vec::new(),
         summary,
     };
-    let broad_default_taint_overlay_skipped = taint_flow
-        && !taint_flow_explicit
-        && !paging_cfg.all
-        && !taint_flow_id_lookup
-        && syntax_fast_path
-        && large_syntax_scan
-        && hits_truncated
-        && filters.from.is_none()
-        && filters.to.is_none()
-        && filters.file.is_none()
-        && filters.in_fn.is_none()
-        && kind_filter.is_empty();
-    if broad_default_taint_overlay_skipped {
-        report.summary.taint_candidates_truncated = false;
-        report.summary.taint_candidate_entries_considered = None;
-        report.summary.taint_candidate_entry_cap = None;
-        report.summary.taint_overlay_skipped_reason = Some(
-            "large broad query; use --taint-flow, --all, or narrower filters for raw taint paths".to_string(),
-        );
-    } else if taint_flow {
-        let (taint_flows, taint_flows_truncated, semantic_flow_stats) = inspect_taint_flows(
+    if taint_flow {
+        let (taint_flows, semantic_flow_stats) = inspect_taint_flows(
             ws,
-            &taint_candidates.entries,
+            &taint_candidates,
             InspectTaintFlowOptions {
                 pattern,
                 is_regex,
                 filters,
                 kind_filter,
-                flow_cap: taint_flow_cap,
                 prefer_warmed_idg: true,
                 flow_id_filter: render.flow_id_filter.as_deref(),
             },
         )?;
         report.taint_flows = taint_flows;
         report.summary.total_taint_flows = report.taint_flows.len();
-        report.summary.taint_flows_truncated = taint_flows_truncated;
-        report.summary.taint_flow_cap = taint_flows_truncated.then_some(taint_flow_cap);
         apply_semantic_flow_stats(&mut report.summary, semantic_flow_stats);
     }
     refresh_inspect_completeness(&mut report);
+
+    // A structural F:/G: hash is intentionally content-stable but not
+    // invertible. Preserve the exact query that produced each id so `show`
+    // can reopen the same compiler-scoped graph instead of enumerating the
+    // workspace or speculatively invoking security analysis.
+    if graph_flows_enabled {
+        if let Some(query) = pattern.filter(|query| !query.is_empty()) {
+            let ids = report
+                .decl_hits
+                .iter()
+                .flat_map(|hit| {
+                    hit.flows
+                        .iter()
+                        .map(|flow| flow.flow_id.as_str())
+                        .chain(hit.groups.iter().map(|group| group.group_id.as_str()))
+                })
+                .chain(report.hits.iter().flat_map(|hit| {
+                    hit.flows
+                        .iter()
+                        .map(|flow| flow.flow_id.as_str())
+                        .chain(hit.groups.iter().map(|group| group.group_id.as_str()))
+                }))
+                .collect::<Vec<_>>();
+            crate::page_cache::remember_structural_id_hints(root, ids, query, is_regex);
+        }
+    }
 
     // Secondary `--contains` / `--not-contains`: keep only the decl /
     // occurrence records whose text (name, file, code, flow bodies)
@@ -1927,16 +1717,38 @@ fn finish_inspect(
                         analysis_incomplete_reasons.extend(paged_json_incomplete_reasons("inspect", info));
                         analysis_incomplete_reasons.sort();
                         analysis_incomplete_reasons.dedup();
-                        let mut decl_hits: Vec<&InspectOut> = Vec::new();
-                        let mut hits: Vec<&HitOut> = Vec::new();
+                        let mut decl_hits = BTreeMap::<usize, InspectOut>::new();
+                        let mut hits = BTreeMap::<usize, HitOut>::new();
                         let mut taint_flows: Vec<&InspectTaintFlow> = Vec::new();
                         for unit in slice {
                             match unit {
-                                InspectJsonPageUnit::DeclHit(hit) => decl_hits.push(*hit),
-                                InspectJsonPageUnit::Hit(hit) => hits.push(*hit),
-                                InspectJsonPageUnit::TaintFlow(flow) => taint_flows.push(*flow),
+                                InspectJsonPageUnit::Decl { index, hit, flow } => {
+                                    let entry = decl_hits
+                                        .entry(*index)
+                                        .or_insert_with(|| paged_decl_hit(hit, None));
+                                    if let Some(flow) = flow {
+                                        entry.flows.push((*flow).clone());
+                                    }
+                                }
+                                InspectJsonPageUnit::Hit { index, hit, flow } => {
+                                    let entry = hits
+                                        .entry(*index)
+                                        .or_insert_with(|| paged_occurrence_hit(hit, None));
+                                    if let Some(flow) = flow {
+                                        entry.flows.push((*flow).clone());
+                                    }
+                                }
+                                InspectJsonPageUnit::Taint(flow) => taint_flows.push(*flow),
                             }
                         }
+                        for hit in decl_hits.values_mut() {
+                            hit.groups = group_flows_by_suffix(&hit.flows);
+                        }
+                        for hit in hits.values_mut() {
+                            hit.groups = group_flows_by_suffix(&hit.flows);
+                        }
+                        let decl_hits = decl_hits.into_values().collect::<Vec<_>>();
+                        let hits = hits.into_values().collect::<Vec<_>>();
                         let wrapped = serde_json::json!({
                             "analysis_complete": analysis_incomplete_reasons.is_empty(),
                             "analysis_incomplete_reasons": analysis_incomplete_reasons,
@@ -2023,9 +1835,24 @@ fn inspect_literal_candidate(pattern: &str) -> &str {
     bonsai_common::short_qualified_tail(pattern)
 }
 
+fn source_contains_inspect_literal(source: &str, literal: &str) -> bool {
+    if source.contains(literal) {
+        return true;
+    }
+    if literal.is_ascii() {
+        let needle = literal.as_bytes();
+        return !needle.is_empty()
+            && source
+                .as_bytes()
+                .windows(needle.len())
+                .any(|candidate| candidate.eq_ignore_ascii_case(needle));
+    }
+    source.to_lowercase().contains(&literal.to_lowercase())
+}
+
 #[cfg(test)]
 mod inspect_literal_candidate_tests {
-    use super::inspect_literal_candidate;
+    use super::{inspect_literal_candidate, source_contains_inspect_literal};
 
     #[test]
     fn semantic_qualified_names_prefilter_by_source_level_tail() {
@@ -2044,6 +1871,19 @@ mod inspect_literal_candidate_tests {
     fn short_qualified_tails_do_not_search_for_a_synthesized_identity() {
         assert_eq!(inspect_literal_candidate("pkg.io"), "io");
     }
+
+    #[test]
+    fn source_literal_anchor_matches_without_allocating_ascii_lowercase_copies() {
+        assert!(source_contains_inspect_literal(
+            "void executeQuery() {}",
+            "execute"
+        ));
+        assert!(source_contains_inspect_literal(
+            "void EXECUTEQUERY() {}",
+            "execute"
+        ));
+        assert!(!source_contains_inspect_literal("void dispatch() {}", "execute"));
+    }
 }
 
 pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions<'_>) -> Result<()> {
@@ -2052,13 +1892,9 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         is_regex,
         kind_filter,
         filters,
-        max_flows,
-        max_entry_probes,
-        max_hits,
         render,
         graph_flow,
         taint_flow,
-        taint_flow_explicit,
         paging_cfg,
         format,
     } = options;
@@ -2093,8 +1929,8 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         };
         absolute.is_file().then_some(requested)
     });
-    let large_workspace =
-        exact_file_path.is_none() && workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT);
+    let workspace_is_large = workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT);
+    let large_workspace = exact_file_path.is_none() && workspace_is_large;
     let structural_flow_lookup = render
         .flow_id_filter
         .as_deref()
@@ -2104,19 +1940,30 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // graph evidence is part of that command's job. A plain query remains a
     // syntax/index lookup unless the caller opts into graph or taint facts.
     let graph_flows_enabled = graph_flow || structural_flow_lookup || explicit_endpoint_graph_flow;
+    // A broad large-repository target query and an explicitly file-scoped
+    // query both need the complete reverse caller relation. The latter is
+    // easy to miss: opening only that file gives exact local syntax, but
+    // cannot prove callers in sibling files. Publish/reuse the compact graph
+    // generation for both shapes so `--file ... --graph-flow` is exact even
+    // on a cold small workspace.
+    let requires_persisted_graph_scope = (workspace_is_large || exact_file_path.is_some())
+        && graph_flows_enabled
+        && !taint_flow
+        && (pattern.is_some() || explicit_endpoint_graph_flow);
+    if requires_persisted_graph_scope {
+        // Exact target/corridor queries need compact reverse-callgraph and
+        // compiler-header partitions, not every workspace body resident in
+        // this process. Isolated workers publish one coherent generation;
+        // candidate lookup below then opens only the AST-derived target cut.
+        super::diagnostics::run_graph_query_workers(root)?;
+    }
     let literal_prefilter = pattern.map(inspect_literal_candidate).filter(|p| {
-        !is_regex
-            && p.len() >= 3
-            && !taint_flow_explicit
-            && !graph_flows_enabled
-            && render.group_id_filter.is_none()
-            && large_workspace
+        !is_regex && p.len() >= 3 && !taint_flow && render.group_id_filter.is_none() && large_workspace
     });
-    let retrieval_project = if !taint_flow_explicit
+    let retrieval_project = if !taint_flow
         && exact_file_path.is_none()
         && !is_regex
         && pattern.is_some_and(|pattern| pattern.len() >= 3)
-        && !graph_flows_enabled
         && render.group_id_filter.is_none()
         && large_workspace
     {
@@ -2131,7 +1978,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     } else {
         None
     };
-    let endpoint_retrieval_project = if !taint_flow_explicit
+    let endpoint_retrieval_project = if !taint_flow
         && exact_file_path.is_none()
         && !is_regex
         && explicit_endpoint_graph_flow
@@ -2152,18 +1999,31 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         None
     };
     let endpoint_retrieval_used = endpoint_retrieval_project.is_some();
-    let direct_file_scope = exact_file_path.is_some() && !taint_flow_explicit;
-    let target_inspect_scope =
-        direct_file_scope && graph_flows_enabled && !explicit_endpoint_graph_flow && pattern.is_some();
+    let direct_file_scope = exact_file_path.is_some() && !taint_flow;
+    let large_target_header_scope = requires_persisted_graph_scope
+        && !explicit_endpoint_graph_flow
+        && (is_regex || retrieval_project.is_none());
+    let large_endpoint_header_scope = requires_persisted_graph_scope
+        && explicit_endpoint_graph_flow
+        && endpoint_retrieval_project.is_none();
+    let target_inspect_scope = graph_flows_enabled
+        && !explicit_endpoint_graph_flow
+        && pattern.is_some()
+        && (direct_file_scope
+            || retrieval_project.is_some()
+            || literal_prefilter.is_some()
+            || large_target_header_scope);
     let partial_workspace = direct_file_scope
         || retrieval_project.is_some()
         || endpoint_retrieval_used
-        || literal_prefilter.is_some();
-    let (project, _footer) = if taint_flow_explicit {
-        // Retain the complete compiler header generation, but do not map the
-        // whole persisted IDG. `syntax_flow_session` compiles one exact
-        // source/target corridor after syntax matching, so a broad repository
-        // pays only for functions that can contribute to this query.
+        || literal_prefilter.is_some()
+        || large_target_header_scope
+        || large_endpoint_header_scope;
+    let (project, _footer) = if taint_flow {
+        // Keep syntax candidate discovery and semantic closure as separate
+        // compiler phases. The persisted IDG is opened only after exact body
+        // caches are released below, so a broad query never retains its
+        // syntax working set beside the graph.
         open_project(root)?
     } else if direct_file_scope {
         open_project_index_matching_path(root, exact_file_path.expect("checked exact file path"))?
@@ -2171,6 +2031,14 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         project
     } else if let Some(project) = retrieval_project {
         project
+    } else if large_target_header_scope || large_endpoint_header_scope {
+        // Regex and short-name retrieval are intentionally unsupported. Scan
+        // only compact persisted declaration headers to identify exact target
+        // FuncIds; the query workspace then streams their callgraph cut.
+        (
+            super::open_project_sidecar_validation_only(root)?,
+            super::WorkspaceFooter::new(),
+        )
     } else if let Some(literal) = literal_prefilter {
         open_project_index_matching_literal(root, literal)?
     } else {
@@ -2211,12 +2079,29 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     );
     let endpoint_funcs = if explicit_endpoint_graph_flow && partial_workspace {
         let candidate_files = initial_ws.vfs().all_files();
-        let from = filters
-            .from
-            .and_then(|from| initial_ws.lookup_functions_in_persisted_headers(from, &candidate_files));
-        let to = filters
-            .to
-            .and_then(|to| initial_ws.lookup_functions_in_persisted_headers(to, &candidate_files));
+        let resolve = |query: &str| {
+            if !is_regex {
+                return initial_ws.lookup_functions_in_persisted_headers(query, &candidate_files);
+            }
+            let matcher = Matcher::build(Some(query), true).ok()?;
+            let headers = initial_ws.compiler_header_index_for_files(&candidate_files);
+            let mut funcs = headers
+                .all_files()
+                .flat_map(|file| headers.decls_in(file))
+                .filter(|decl| {
+                    matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    ) && matcher.is_declaration_match(decl)
+                })
+                .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
+                .collect::<Vec<_>>();
+            funcs.sort_unstable_by_key(|func| func.raw());
+            funcs.dedup();
+            Some(funcs)
+        };
+        let from = filters.from.and_then(resolve);
+        let to = filters.to.and_then(resolve);
         bonsai_diagnostics::debug_log!(
             "compiler-cache",
             "inspect endpoint candidates: files={} from_matches={} to_matches={}",
@@ -2250,7 +2135,9 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     } else {
         None
     };
-    let target_graph_index_unavailable = target_inspect_scope && target_inspect_workspace.is_none();
+    let target_graph_index_unavailable = target_inspect_funcs
+        .as_ref()
+        .is_some_and(|targets| !targets.is_empty() && target_inspect_workspace.is_none());
     let ws = if let Some(workspace) = target_inspect_workspace.as_ref() {
         workspace
     } else if let Some(workspace) = endpoint_workspace.as_ref() {
@@ -2327,11 +2214,6 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // `--no-cache` / `BONSAI_NO_CACHE` swaps this for a pass-through
     // variant that always takes the cold path.
     let chain_cache = build_chain_cache(ws, query_graph.clone());
-    let (downstream_max_extra, downstream_max_paths) = if paging_cfg.all {
-        (usize::MAX, usize::MAX)
-    } else {
-        (6, 12)
-    };
     // Edge resolvability is queried heavily when `inspect` extends raw
     // upstream chains into concrete downstream call paths. Cache the
     // per-file alias maps and per-edge span lookups for this invocation;
@@ -2411,9 +2293,25 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // Iterate files by PATH order (not FileId). This matches the final
     // display sort, which keeps discovery and final label assignment
     // deterministic across cache state and hash-map iteration order.
+    // A literal syntax fact must have a spelling in its source file. On a
+    // complete workspace opened for a persisted taint IDG, apply that exact
+    // raw-source anchor before decoding compiler bodies. This retains the
+    // full IDG/header universe for semantics while making body hydration
+    // proportional to candidate files rather than repository size.
+    let taint_source_literal = taint_flow
+        .then(|| pattern.map(inspect_literal_candidate))
+        .flatten()
+        .filter(|literal| !is_regex && literal.len() >= 3);
     let files_in_path_order: Vec<bonsai_common::FileId> = {
         let mut v: Vec<(String, bonsai_common::FileId)> = global
             .all_files()
+            .filter(|file| {
+                taint_source_literal.is_none_or(|literal| {
+                    ws.vfs()
+                        .snapshot(*file)
+                        .is_ok_and(|snapshot| source_contains_inspect_literal(&snapshot.text, literal))
+                })
+            })
             .map(|f| {
                 let path = ws
                     .vfs()
@@ -2444,12 +2342,13 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // lookups exist to avoid. Small workspaces keep the folded
     // occurrence context (vars/calls sharing the flow id); dropping it
     // everywhere lost render context the folding contract pins. The
-    // large-workspace skip is announced via `hit_truncation_reasons`,
-    // never silent.
+    // large-workspace skip is safe because the stable structural id itself
+    // defines the requested relation; occurrence matches are optional query
+    // context, not part of that graph result.
     // `show F:` / `show G:` drilldowns skip the occurrence scan
     // unconditionally — they are pure structural-chain views; the id
     // IS the query. `inspect --flow` keeps the folded occurrence
-    // context except on large workspaces (announced, never silent).
+    // context except on large workspaces.
     let occurrence_scan_skipped_for_id_lookup =
         structural_id_only_lookup && (large_syntax_scan || render.structural_drilldown);
     // Raw inspect taint-flow is query-bounded by default: syntax hits add
@@ -2477,17 +2376,11 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     } else {
         ahash::AHashSet::default()
     };
-    let taint_candidate_entry_cap = if taint_flow && !taint_flow_id_lookup && !paging_cfg.all {
-        INSPECT_DEFAULT_TAINT_ENTRY_LIMIT.min(max_hits).max(1)
-    } else {
-        usize::MAX
-    };
-    let taint_flow_cap = if taint_flow && !taint_flow_id_lookup && !paging_cfg.all {
-        INSPECT_DEFAULT_TAINT_FLOW_LIMIT.min(max_hits).max(1)
-    } else {
-        usize::MAX
-    };
-    let mut taint_candidates = TaintCandidates::new(initial_taint_candidates, taint_candidate_entry_cap);
+    // Raw taint evidence is semantic output, not a preview budget. Analyze
+    // every syntax-derived candidate and retain every matching path; the
+    // text/JSON renderers page the owned rows afterward. `--all` therefore
+    // changes presentation only and can never change taint results.
+    let mut taint_candidates = TaintCandidates::new(initial_taint_candidates);
     let decl_hits = collect_decl_hits(
         ws,
         &chain_cache,
@@ -2499,10 +2392,6 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             filters,
             taint_flow,
             graph_flows_enabled,
-            max_flows,
-            max_entry_probes,
-            downstream_max_extra,
-            downstream_max_paths,
             full_source_for_large_bodies,
         },
         &mut taint_candidates,
@@ -2517,17 +2406,10 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             kind_selection: &kind_selection,
             filter_only_occurrence_kind,
             filters,
-            max_flows,
-            max_entry_probes,
-            max_hits,
-            downstream_max_extra,
-            downstream_max_paths,
             full_source_for_large_bodies,
             graph_flows_enabled,
             syntax_fast_path,
             taint_flow,
-            paging_cfg: &paging_cfg,
-            direct_taint_id_lookup,
             occurrence_scan_skipped_for_id_lookup,
             partial_workspace,
             large_syntax_scan,
@@ -2549,6 +2431,20 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         ws.release_compiler_linkage_cache();
         ws.release_exact_body_cache();
         ws.release_decl_name_index_cache();
+        // Reuse a fresh complete semantic generation only after the syntax
+        // phase has relinquished its body/cache owners. A miss remains an
+        // ordinary acceleration miss: `syntax_flow_session` compiles the
+        // exact source/target corridor without changing query scope.
+        let semantic_stage = progress::ScopedSpinner::new("loading semantic index");
+        if let Err(error) = ws.load_idg_sidecar(root) {
+            bonsai_diagnostics::debug_log!(
+                "idg-build",
+                "inspect persisted IDG load failed at {}: {}",
+                root.display(),
+                error
+            );
+        }
+        semantic_stage.finish();
     }
     finish_inspect(
         root,
@@ -2562,16 +2458,10 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             paging_cfg,
             format,
             taint_flow,
-            taint_flow_explicit,
-            taint_flow_id_lookup,
-            syntax_fast_path,
-            large_syntax_scan,
             graph_flows_enabled,
             graph_flow_incomplete_reason: target_graph_index_unavailable.then_some(
                 "the complete reverse-call index is not warmed; run `bonsai-ninja index <workspace> --semantic`",
             ),
-            occurrence_scan_skipped_for_id_lookup,
-            taint_flow_cap,
         },
         decl_hits,
         occurrence_hits,
@@ -2593,7 +2483,6 @@ struct InspectTaintFlowOptions<'a> {
     is_regex: bool,
     filters: InspectFilters<'a>,
     kind_filter: &'a [String],
-    flow_cap: usize,
     prefer_warmed_idg: bool,
     flow_id_filter: Option<&'a str>,
 }
@@ -2602,7 +2491,6 @@ struct TaintFlowMatchContext<'a> {
     matcher: Option<&'a Matcher>,
     filters: InspectFilters<'a>,
     kind_filter: &'a [String],
-    flow_cap: usize,
     /// When reopening a single raw taint id (`show T:`), skip building
     /// the expensive display for every candidate whose id doesn't match.
     flow_id_filter: Option<&'a str>,
@@ -2643,15 +2531,14 @@ impl InspectSemanticFlowStats {
 
 fn inspect_taint_flows(
     ws: &Workspace,
-    candidate_entries: &ahash::AHashSet<bonsai_common::FuncId>,
+    candidates: &TaintCandidates,
     options: InspectTaintFlowOptions<'_>,
-) -> Result<(Vec<InspectTaintFlow>, bool, InspectSemanticFlowStats)> {
+) -> Result<(Vec<InspectTaintFlow>, InspectSemanticFlowStats)> {
     let InspectTaintFlowOptions {
         pattern,
         is_regex,
         filters,
         kind_filter,
-        flow_cap,
         prefer_warmed_idg,
         flow_id_filter,
     } = options;
@@ -2661,44 +2548,196 @@ fn inspect_taint_flows(
         matcher: matcher.as_ref(),
         filters,
         kind_filter: &kind_filter,
-        flow_cap,
         flow_id_filter,
     };
+    let candidate_entries = &candidates.entries;
     let mut entries: Vec<bonsai_common::FuncId> = candidate_entries.iter().copied().collect();
     entries.sort_by_key(|func| func.raw());
-    let target_funcs = if prefer_warmed_idg {
-        Some(candidate_entries.clone())
+    let fallback_target_funcs = if prefer_warmed_idg {
+        candidate_entries.clone()
+    } else {
+        ahash::AHashSet::default()
+    };
+    let lineage_started = std::time::Instant::now();
+    let lineage_targets = if prefer_warmed_idg && pattern.is_some() {
+        let headers = ws.compiler_header_index();
+        let mut targets = headers
+            .all_files()
+            .flat_map(|file| headers.decls_in(file))
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) && matcher
+                    .as_ref()
+                    .is_some_and(|matcher| matcher.is_declaration_match(decl))
+            })
+            .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
+            .collect::<Vec<_>>();
+        targets.sort_unstable_by_key(|func| func.raw());
+        targets.dedup();
+        Some(targets)
     } else {
         None
     };
+    let lineage_funcs = if prefer_warmed_idg {
+        lineage_targets.as_ref().and_then(|targets| {
+            if targets.is_empty() {
+                // A query with no callable declaration target is an exact
+                // local syntax question (for example, a variable or external
+                // API call). Its owning functions contain every matching
+                // compiler point; no invented callee/name search is needed.
+                return Some(candidate_entries.clone());
+            }
+            let mut funcs =
+                ws.target_inspect_lineage_funcs(targets, Some(bonsai_common::Precision::Narrowed))?;
+            // Unresolved call sites and non-call syntax matches may not occur
+            // in the resolved reverse graph. Their exact local bodies remain
+            // part of the query by construction.
+            funcs.extend(candidate_entries.iter().copied());
+            Some(funcs)
+        })
+    } else {
+        None
+    };
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect taint scope: entries={} declaration_targets={} lineage_funcs={} fallback_global={} elapsed={:.3}s",
+        entries.len(),
+        lineage_targets.as_ref().map_or(0, Vec::len),
+        lineage_funcs.as_ref().map_or(0, |funcs| funcs.len()),
+        prefer_warmed_idg && lineage_funcs.is_none(),
+        lineage_started.elapsed().as_secs_f64()
+    );
     let session = if prefer_warmed_idg {
-        target_funcs
-            .as_ref()
-            .and_then(|targets| ws.syntax_flow_session(&entries, targets))
+        (!fallback_target_funcs.is_empty())
+            .then(|| ws.syntax_flow_session(&entries, &fallback_target_funcs))
+            .flatten()
     } else {
         None
     };
-    let mut flows = Vec::new();
-    let mut truncated = false;
-    let mut semantic_flow_stats = InspectSemanticFlowStats::default();
-    for entry in entries {
-        if flows.len() >= flow_cap {
-            truncated = true;
-            break;
+    let target_stage = progress::ScopedSpinner::new("preparing taint target cut");
+    let (target_nodes_by_source, unresolved_target_funcs) = if prefer_warmed_idg {
+        ws.syntax_flow_target_nodes_by_source_with_session(&candidates.target_spans, session.as_ref())
+            .unwrap_or_else(|| (ahash::AHashMap::new(), fallback_target_funcs.clone()))
+    } else {
+        (ahash::AHashMap::new(), fallback_target_funcs.clone())
+    };
+    let mut target_nodes: Vec<_> = target_nodes_by_source.values().flatten().copied().collect();
+    target_nodes.sort_unstable();
+    target_nodes.dedup();
+    // Exact syntax endpoints are the strongest compiler target. Retain a
+    // whole-function fallback only for a span that the adapter/IDG could not
+    // represent. If no endpoint resolved (notably direct T: lookup), the
+    // complete candidate function set remains the conservative surface.
+    let target_funcs = if target_nodes.is_empty() {
+        fallback_target_funcs
+    } else {
+        unresolved_target_funcs.clone()
+    };
+    // Broad syntax queries can produce many independent target owners. Build
+    // the conservative backward target-demand fixed point once for their
+    // exact union, then reuse it for every owner-specific forward closure.
+    // The forward solver still receives only that owner's concrete target
+    // nodes and preserves call contexts, so shared demand can admit extra
+    // candidates but cannot manufacture a path or cross-contaminate owners.
+    // This is the same compiler dataflow shape used by security batches and
+    // avoids N identical walks over the persisted reverse relations.
+    let source_rooted_targets = prefer_warmed_idg
+        && !candidates.target_spans.is_empty()
+        && lineage_funcs.as_ref().is_some_and(|funcs| !funcs.is_empty());
+    let target_relevance = if prefer_warmed_idg {
+        ws.syntax_flow_target_relevance_with_session(
+            &target_nodes,
+            &target_funcs,
+            lineage_funcs.as_ref(),
+            session.as_ref(),
+        )
+    } else {
+        None
+    };
+    let unfiltered_entry_count = entries.len();
+    if let Some(relevance) = target_relevance.as_ref() {
+        if let Some(relevant_entries) =
+            ws.syntax_flow_relevant_sources_with_session(&entries, relevance, session.as_ref())
+        {
+            entries = relevant_entries;
         }
+    }
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect taint source demand: candidates={} relevant={} elapsed={:.3}s",
+        unfiltered_entry_count,
+        entries.len(),
+        lineage_started.elapsed().as_secs_f64()
+    );
+    target_stage.finish();
+    let mut flows = Vec::new();
+    let mut semantic_flow_stats = InspectSemanticFlowStats::default();
+    let entry_bar = progress::progress_bar("tracing taint entries", entries.len() as u64);
+    let analyze_entry = |entry: bonsai_common::FuncId| {
+        entry_bar.inc(1);
+        let entry_target_nodes = if source_rooted_targets {
+            target_nodes_by_source
+                .get(&entry)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+        } else {
+            target_nodes.as_slice()
+        };
+        let entry_target_funcs = if source_rooted_targets {
+            let needs_fallback = entry_target_nodes.is_empty() || unresolved_target_funcs.contains(&entry);
+            needs_fallback.then(|| ahash::AHashSet::from([entry]))
+        } else {
+            None
+        };
+        let entry_target_funcs_ref = entry_target_funcs.as_ref().unwrap_or(&target_funcs);
         let query = SyntaxFlowQuery::new(entry)
-            .target_funcs(target_funcs.as_ref())
+            .target_nodes((!entry_target_nodes.is_empty()).then_some(entry_target_nodes))
+            .target_funcs((!entry_target_funcs_ref.is_empty()).then_some(entry_target_funcs_ref))
+            .lineage_funcs(lineage_funcs.as_ref())
+            .target_relevance(target_relevance.as_ref())
             .prefer_warmed_idg(prefer_warmed_idg)
             .session(session.as_ref());
         let graph = ws.syntax_flow_graph(query);
-        semantic_flow_stats.record_plan(&graph.plan);
-        let entry_truncated =
-            collect_taint_flows_for_entry(ws, entry, graph.graph.as_ref(), &match_context, &mut flows);
-        if entry_truncated {
-            truncated = true;
-            break;
-        }
+        let mut entry_flows = Vec::new();
+        collect_taint_flows_for_entry(ws, entry, graph.graph.as_ref(), &match_context, &mut entry_flows);
+        (entry_flows, graph.plan)
+    };
+    let mut results = Vec::new();
+    let remaining = if let Some((&first, remaining)) = entries.split_first() {
+        // Hydrate shared immutable contextual/symbolic indexes before sizing
+        // parallelism from the process's actual resident working set.
+        results.push(analyze_entry(first));
+        remaining
+    } else {
+        &[]
+    };
+    let workers = bonsai_common::rooted_semantic_query_worker_count(rayon::current_num_threads());
+    bonsai_diagnostics::debug_log!("compiler-cache", "inspect rooted taint workers: {}", workers);
+    if workers == 1 {
+        results.extend(remaining.iter().copied().map(&analyze_entry));
+    } else {
+        use rayon::prelude::*;
+        let parallel = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .thread_name(|index| format!("bonsai-inspect-flow-{index}"))
+            .build()
+            .expect("build memory-bounded inspect flow pool")
+            .install(|| {
+                remaining
+                    .par_iter()
+                    .copied()
+                    .map(&analyze_entry)
+                    .collect::<Vec<_>>()
+            });
+        results.extend(parallel);
     }
+    for (mut entry_flows, plan) in results {
+        semantic_flow_stats.record_plan(&plan);
+        flows.append(&mut entry_flows);
+    }
+    entry_bar.finish_and_clear();
     dedup_taint_flows(&mut flows);
     flows.sort_by(|a, b| {
         a.steps
@@ -2709,7 +2748,7 @@ fn inspect_taint_flows(
             .then(a.terminal.cmp(&b.terminal))
             .then(a.taint_id.cmp(&b.taint_id))
     });
-    Ok((flows, truncated, semantic_flow_stats))
+    Ok((flows, semantic_flow_stats))
 }
 
 fn all_callable_entries(
@@ -2746,7 +2785,7 @@ fn collect_taint_flows_for_entry(
     graph: &EntryTaintGraph,
     match_context: &TaintFlowMatchContext<'_>,
     out: &mut Vec<InspectTaintFlow>,
-) -> bool {
+) {
     let trace_index = trace_record_index_for_inspect(&graph.call_records);
     for call in &graph.tainted_calls {
         if let Some(flow) = taint_flow_for_terminal_call(
@@ -2764,9 +2803,6 @@ fn collect_taint_flows_for_entry(
                 match_context.filters,
                 match_context.kind_filter,
             ) {
-                if out.len() >= match_context.flow_cap {
-                    return true;
-                }
                 out.push(flow);
             }
         }
@@ -2782,14 +2818,10 @@ fn collect_taint_flows_for_entry(
                 match_context.filters,
                 match_context.kind_filter,
             ) {
-                if out.len() >= match_context.flow_cap {
-                    return true;
-                }
                 out.push(flow);
             }
         }
     }
-    false
 }
 
 fn taint_flow_for_terminal_call(
@@ -3206,6 +3238,16 @@ fn dedup_taint_flows(flows: &mut Vec<InspectTaintFlow>) {
     flows.retain(|flow| seen.insert(flow.taint_id.clone()));
 }
 
+/// Callgraph resolution can discover the same exact FuncId path through
+/// several equivalent evidence edges (for example, an override edge plus an
+/// inherited receiver edge). The compiler-identity `F:` id proves those
+/// rendered paths are the same; retain the first deterministic occurrence so
+/// paging, summaries, and output size represent unique execution paths.
+fn dedup_structural_flows(flows: &mut Vec<InspectFlowRendered>) {
+    let mut seen = ahash::AHashSet::with_capacity(flows.len());
+    flows.retain(|flow| seen.insert(flow.flow_id.clone()));
+}
+
 fn precision_label(precision: bonsai_common::Precision) -> &'static str {
     match precision {
         bonsai_common::Precision::Exact => "exact",
@@ -3237,84 +3279,9 @@ fn build_chain_cache(
     }
 }
 
-fn insert_taint_candidate_entry(
-    entries: &mut ahash::AHashSet<bonsai_common::FuncId>,
-    cap: usize,
-    truncated: &std::cell::Cell<bool>,
-    entry: bonsai_common::FuncId,
-) {
-    if entries.contains(&entry) || entries.len() < cap {
-        entries.insert(entry);
-    } else {
-        truncated.set(true);
-    }
-}
-
 #[allow(clippy::trivially_copy_pass_by_ref)] // Serde skip_serializing_if requires `fn(&T) -> bool`.
 fn is_zero_usize(n: &usize) -> bool {
     usize::eq(n, &0)
-}
-
-fn inspect_hit_truncation_reasons(
-    output_cap: bool,
-    attempt_cap: bool,
-    id_lookup_scan_skipped: bool,
-) -> Vec<String> {
-    let mut reasons = Vec::new();
-    if output_cap {
-        reasons.push("max-hits output cap".to_string());
-    }
-    if attempt_cap {
-        reasons.push("candidate-attempt cap derived from max-hits".to_string());
-    }
-    if id_lookup_scan_skipped {
-        reasons.push(
-            "direct id lookup on a large workspace skips the occurrence scan; add --query/--from/--to to scope one"
-                .to_string(),
-        );
-    }
-    reasons
-}
-
-fn push_truncation_label(labels: &mut Vec<&'static str>, label: &'static str) {
-    if !labels.contains(&label) {
-        labels.push(label);
-    }
-}
-
-fn push_chain_truncation(labels: &mut Vec<&'static str>, truncation: bonsai_callgraph::ChainTruncation) {
-    if let Some(label) = truncation.label() {
-        push_truncation_label(labels, label);
-    }
-}
-
-fn push_call_path_truncation(labels: &mut Vec<&'static str>, truncation: CallPathTruncation) {
-    if let Some(label) = truncation.label() {
-        push_truncation_label(labels, label);
-    }
-}
-
-fn truncation_summary(labels: &[&'static str]) -> Option<String> {
-    if labels.is_empty() {
-        return None;
-    }
-    let mut ordered = Vec::new();
-    for known in [
-        "max-flows cap",
-        "entry-probe budget",
-        "downstream-depth cap",
-        "downstream-path cap",
-    ] {
-        if labels.contains(&known) {
-            ordered.push(known);
-        }
-    }
-    for label in labels {
-        if !ordered.contains(label) {
-            ordered.push(label);
-        }
-    }
-    Some(ordered.join(", "))
 }
 
 fn semantic_direct_callers(
@@ -3398,36 +3365,87 @@ fn sorted_hit_counts_json(hits: &[HitOut]) -> serde_json::Value {
     )
 }
 
-fn occurrence_flow_truncation_summary(hits: &[HitOut]) -> (usize, Vec<String>) {
-    let mut reasons: Vec<&'static str> = Vec::new();
-    let mut truncated_hits = 0usize;
-    for hit in hits {
-        let Some(reason) = hit.flow_truncated_by.as_deref() else {
-            continue;
-        };
-        truncated_hits += 1;
-        for part in reason.split(", ") {
-            match part {
-                "max-flows cap" => push_truncation_label(&mut reasons, "max-flows cap"),
-                "entry-probe budget" => push_truncation_label(&mut reasons, "entry-probe budget"),
-                "downstream-depth cap" => push_truncation_label(&mut reasons, "downstream-depth cap"),
-                "downstream-path cap" => push_truncation_label(&mut reasons, "downstream-path cap"),
-                _ => {}
-            }
+fn inspect_json_page_units(report: &InspectReport) -> Vec<InspectJsonPageUnit<'_>> {
+    let flow_units = report
+        .decl_hits
+        .iter()
+        .map(|hit| hit.flows.len().max(1))
+        .sum::<usize>()
+        + report
+            .hits
+            .iter()
+            .map(|hit| hit.flows.len().max(1))
+            .sum::<usize>();
+    let mut units = Vec::with_capacity(flow_units + report.taint_flows.len());
+    for (index, hit) in report.decl_hits.iter().enumerate() {
+        if hit.flows.is_empty() {
+            units.push(InspectJsonPageUnit::Decl {
+                index,
+                hit,
+                flow: None,
+            });
+        } else {
+            units.extend(hit.flows.iter().map(|flow| InspectJsonPageUnit::Decl {
+                index,
+                hit,
+                flow: Some(flow),
+            }));
         }
     }
-    let reason_vec = truncation_summary(&reasons)
-        .map(|s| s.split(", ").map(str::to_string).collect())
-        .unwrap_or_default();
-    (truncated_hits, reason_vec)
+    for (index, hit) in report.hits.iter().enumerate() {
+        if hit.flows.is_empty() {
+            units.push(InspectJsonPageUnit::Hit {
+                index,
+                hit,
+                flow: None,
+            });
+        } else {
+            units.extend(hit.flows.iter().map(|flow| InspectJsonPageUnit::Hit {
+                index,
+                hit,
+                flow: Some(flow),
+            }));
+        }
+    }
+    units.extend(report.taint_flows.iter().map(InspectJsonPageUnit::Taint));
+    units
 }
 
-fn inspect_json_page_units(report: &InspectReport) -> Vec<InspectJsonPageUnit<'_>> {
-    let mut units = Vec::with_capacity(report.decl_hits.len() + report.hits.len() + report.taint_flows.len());
-    units.extend(report.decl_hits.iter().map(InspectJsonPageUnit::DeclHit));
-    units.extend(report.hits.iter().map(InspectJsonPageUnit::Hit));
-    units.extend(report.taint_flows.iter().map(InspectJsonPageUnit::TaintFlow));
-    units
+fn paged_decl_hit(hit: &InspectOut, flow: Option<&InspectFlowRendered>) -> InspectOut {
+    let mut page = InspectOut {
+        symbol: hit.symbol.clone(),
+        kind: hit.kind.clone(),
+        file: hit.file.clone(),
+        line: hit.line,
+        column: hit.column,
+        params: hit.params.clone(),
+        direct_callers: hit.direct_callers.clone(),
+        callees: hit.callees.clone(),
+        graph_flows_evaluated: hit.graph_flows_evaluated,
+        flows: flow.into_iter().cloned().collect(),
+        groups: Vec::new(),
+        summary: hit.summary.clone(),
+    };
+    page.groups = group_flows_by_suffix(&page.flows);
+    page
+}
+
+fn paged_occurrence_hit(hit: &HitOut, flow: Option<&InspectFlowRendered>) -> HitOut {
+    let mut page = HitOut {
+        kind: hit.kind.clone(),
+        text: hit.text.clone(),
+        file: hit.file.clone(),
+        line: hit.line,
+        column: hit.column,
+        in_function: hit.in_function.clone(),
+        chains_preview: hit.chains_preview.clone(),
+        flows: flow.into_iter().cloned().collect(),
+        groups: Vec::new(),
+        from_match: hit.from_match.clone(),
+        to_match: hit.to_match.clone(),
+    };
+    page.groups = group_flows_by_suffix(&page.flows);
+    page
 }
 
 fn inspect_json_unit_cost(unit: &InspectJsonPageUnit<'_>) -> u64 {
@@ -3518,9 +3536,6 @@ fn rebuild_report_summary(report: &mut InspectReport) {
     report.summary.total_hits = report.hits.len();
     report.summary.total_taint_flows = report.taint_flows.len();
     report.summary.hit_counts_by_kind = sorted_hit_counts_json(&report.hits);
-    let (flow_truncated_hits, flow_truncation_reasons) = occurrence_flow_truncation_summary(&report.hits);
-    report.summary.flow_truncated_hits = flow_truncated_hits;
-    report.summary.flow_truncation_reasons = flow_truncation_reasons;
     refresh_inspect_completeness(report);
 }
 
@@ -3618,33 +3633,11 @@ fn apply_semantic_flow_stats(summary: &mut InspectReportSummary, stats: InspectS
 
 fn refresh_inspect_completeness(report: &mut InspectReport) {
     let mut reasons = Vec::new();
-    for reason in &report.summary.hit_truncation_reasons {
-        reasons.push(format!("inspect hit list capped by {reason}"));
-    }
-    for reason in &report.summary.flow_truncation_reasons {
-        reasons.push(format!("inspect occurrence flow evidence capped by {reason}"));
-    }
-    if report.summary.taint_candidates_truncated {
-        reasons.push("inspect taint flow overlay capped by default taint candidate limit".to_string());
-    }
-    if report.summary.taint_flows_truncated {
-        reasons.push("inspect taint flow overlay capped by default taint row limit".to_string());
-    }
     for reason in &report.summary.semantic_flow_incomplete_reasons {
         reasons.push(format!("inspect semantic flow query incomplete: {reason}"));
     }
     for reason in &report.summary.graph_flow_incomplete_reasons {
         reasons.push(format!("inspect graph flow query incomplete: {reason}"));
-    }
-    if let Some(reason) = report.summary.taint_overlay_skipped_reason.as_deref() {
-        reasons.push(format!("inspect taint flow overlay skipped: {reason}"));
-    }
-    for reason in report
-        .decl_hits
-        .iter()
-        .filter_map(|decl| decl.summary.truncated_by.as_deref())
-    {
-        reasons.push(format!("inspect decl flow evidence capped by {reason}"));
     }
     reasons.sort();
     reasons.dedup();
@@ -3782,72 +3775,6 @@ fn render_inspect_header(u: &Ui, report: &InspectReport, view: ResolvedView) {
         };
         cli_println!("  {} {}", u.warn("analysis incomplete:"), u.dim(&reasons));
     }
-    if report.summary.hits_truncated {
-        // Loud warning: at least one occurrence was dropped. Include
-        // the exact bounded-mode reason so this is never a silent or
-        // misleading miss.
-        let reasons = if report.summary.hit_truncation_reasons.is_empty() {
-            "unknown cap".to_string()
-        } else {
-            report.summary.hit_truncation_reasons.join(", ")
-        };
-        let attempted = report
-            .summary
-            .hit_candidates_attempted
-            .map(|n| format!("; {n} candidate(s) attempted"))
-            .unwrap_or_default();
-        let attempt_cap = report
-            .summary
-            .hit_attempt_cap
-            .map(|n| format!("; candidate-attempt cap {n}"))
-            .unwrap_or_default();
-        cli_println!(
-            "  {}",
-            u.warn(&format!(
-                "[truncated] hit list capped by {reasons} ({} shown{attempted}{attempt_cap}); re-run with --all or larger inspect caps to see every occurrence",
-                report.hits.len(),
-            ))
-        );
-    }
-    if report.summary.flow_truncated_hits > 0 {
-        let reasons = if report.summary.flow_truncation_reasons.is_empty() {
-            "unknown cap".to_string()
-        } else {
-            report.summary.flow_truncation_reasons.join(", ")
-        };
-        cli_println!(
-            "  {}",
-            u.warn(&format!(
-                "[truncated] flow evidence capped for {} occurrence hit(s) by {}; re-run with --all or larger inspect caps to enumerate every chain/path",
-                report.summary.flow_truncated_hits, reasons
-            ))
-        );
-    }
-    if report.summary.taint_candidates_truncated {
-        let considered = report
-            .summary
-            .taint_candidate_entries_considered
-            .unwrap_or_default();
-        let cap = report.summary.taint_candidate_entry_cap.unwrap_or_default();
-        cli_println!(
-            "  {}",
-            u.warn(&format!(
-                "[truncated] taint flow overlay analyzed {considered} candidate entry point(s) (cap {cap}); re-run with --all or narrower filters for exhaustive taint paths"
-            ))
-        );
-    }
-    if report.summary.taint_flows_truncated {
-        let cap = report.summary.taint_flow_cap.unwrap_or_default();
-        cli_println!(
-            "  {}",
-            u.warn(&format!(
-                "[truncated] taint flow table capped at {cap} row(s); re-run with --all or narrower filters for every matching raw taint path"
-            ))
-        );
-    }
-    if let Some(reason) = report.summary.taint_overlay_skipped_reason.as_deref() {
-        cli_println!("  {}", u.warn(&format!("[skipped] taint flow overlay: {reason}")));
-    }
     for reason in &report.summary.semantic_flow_fallback_reasons {
         cli_println!("  {}", u.dim(&format!("[semantic-flow] {reason}")));
     }
@@ -3859,7 +3786,10 @@ struct InspectPageContext<'a> {
     report: &'a InspectReport,
     render: &'a InspectRenderOptions,
     view: ResolvedView,
+    flowless_hits: &'a [&'a HitOut],
     folded_order: &'a [&'a InspectFlowRendered],
+    taint_units: usize,
+    structural_base: usize,
     total_decls: usize,
     total_units: usize,
     page_starts: &'a [usize],
@@ -3881,7 +3811,10 @@ fn render_inspect_page(
         report,
         render,
         view,
+        flowless_hits,
         folded_order,
+        taint_units,
+        structural_base,
         total_decls,
         total_units,
         page_starts,
@@ -3891,31 +3824,9 @@ fn render_inspect_page(
         filters_hash,
         mut paging_info,
     } = context;
-    const TAINT_FLOW_ROW_AVG_BYTES: u64 = 320;
     const HITS_ROW_AVG_BYTES: u64 = 220;
-    const TAINT_FLOW_TABLE_BUDGET_PCT: u64 = 10;
     const HITS_TABLE_BUDGET_PCT: u64 = 10;
     let bytes_before_payload = out_count::bytes();
-
-    let mut rendered_taint_rows = 0usize;
-    if start_offset == 0 && !report.taint_flows.is_empty() {
-        // The taint overlay is rendered before the structural page units,
-        // so it must take its own slice of the page budget. Otherwise broad
-        // rulepack-free taint rows can consume the entire first page before
-        // the normal unit paginator has a chance to enforce --context.
-        const TAINT_FLOW_TEXT_LIMIT: usize = 50;
-        let taint_flow_text_limit = budget_bytes
-            .map(|budget| {
-                let taint_budget = (budget * TAINT_FLOW_TABLE_BUDGET_PCT / 100).max(TAINT_FLOW_ROW_AVG_BYTES);
-                ((taint_budget / TAINT_FLOW_ROW_AVG_BYTES) as usize).clamp(1, TAINT_FLOW_TEXT_LIMIT)
-            })
-            .unwrap_or(TAINT_FLOW_TEXT_LIMIT);
-        render_taint_flows_table(u, &report.taint_flows, taint_flow_text_limit);
-        rendered_taint_rows = report.taint_flows.len().min(taint_flow_text_limit);
-        if should_render_raw_taint_bodies(render, total_units) {
-            render_raw_taint_flow_bodies(ws, u, &report.taint_flows, taint_flow_text_limit);
-        }
-    }
 
     // Determine which units will render on THIS page (simulate).
     // Used to build a per-page OCCURRENCE HITS table that only
@@ -3931,44 +3842,73 @@ fn render_inspect_page(
             .unwrap_or(total_units);
         next_start
     };
+    let taint_start = start_offset.min(taint_units);
+    let taint_end = page_end_unit.min(taint_units);
+    let page_taint_flows = &report.taint_flows[taint_start..taint_end];
+    if !page_taint_flows.is_empty() {
+        render_taint_flows_table(u, page_taint_flows);
+        if should_render_raw_taint_bodies(render, total_units.saturating_sub(structural_base)) {
+            // Raw T: drilldowns can contain very large source bodies. Under
+            // a token budget render the exact chain/step evidence compactly;
+            // `--all` retains the full source-body transcript.
+            render_raw_taint_flow_bodies(
+                ws,
+                u,
+                page_taint_flows,
+                taint_start,
+                render.compact || budget_bytes.is_some(),
+            );
+        }
+    }
+
     let page_flow_ids: ahash::AHashSet<String> = {
         let mut ids = ahash::AHashSet::new();
         for unit_index in start_offset..page_end_unit {
-            if unit_index < total_decls {
-                for f in &report.decl_hits[unit_index].flows {
+            if unit_index < structural_base {
+                continue;
+            }
+            let structural_index = unit_index - structural_base;
+            if structural_index < total_decls {
+                for f in &report.decl_hits[structural_index].flows {
                     ids.insert(f.flow_id.clone());
                 }
             } else {
-                ids.insert(folded_order[unit_index - total_decls].flow_id.clone());
+                ids.insert(folded_order[structural_index - total_decls].flow_id.clone());
             }
         }
         ids
     };
-    // Flow-matching hits go on the page whose flow set they belong
-    // to. Flow-less hits (module-level calls, imports, top-of-file
-    // strings — no enclosing function so no chain) stay on page 1
-    // where they're always visible.
-    let page_hits: Vec<&HitOut> = report
-        .hits
+    // Flow-less syntax facts are first-class pageable units. Flow-associated
+    // hits are a compact index for structural blocks on this page; their full
+    // match-point details are also rendered with those blocks.
+    let flowless_page_start = start_offset.max(taint_units).min(structural_base);
+    let flowless_page_end = page_end_unit.max(taint_units).min(structural_base);
+    let mut page_hits: Vec<(&HitOut, bool)> = flowless_hits
+        [flowless_page_start - taint_units..flowless_page_end - taint_units]
         .iter()
-        .filter(|hit| {
-            if hit.flows.is_empty() {
-                start_offset == 0
-            } else {
-                hit.flows.iter().any(|f| page_flow_ids.contains(&f.flow_id))
-            }
-        })
+        .map(|hit| (*hit, true))
         .collect();
+    if !render.structural_drilldown {
+        page_hits.extend(
+            report
+                .hits
+                .iter()
+                .filter(|hit| {
+                    !hit.flows.is_empty()
+                        && hit.flows.iter().any(|flow| page_flow_ids.contains(&flow.flow_id))
+                })
+                .map(|hit| (hit, false)),
+        );
+    }
 
     // OCCURRENCE HITS table — per-page, filtered to the flows
     // rendered on THIS page. Every hit in this table points at a
     // FLOW block that appears below.
-    let mut rendered_hit_rows = 0usize;
     if !page_hits.is_empty() {
         cli_println!();
         cli_println!("{}", u.heading("══ OCCURRENCE HITS"));
-        let show_from_column = page_hits.iter().any(|hit| hit.from_match.is_some());
-        let show_to_column = page_hits.iter().any(|hit| hit.to_match.is_some());
+        let show_from_column = page_hits.iter().any(|(hit, _)| hit.from_match.is_some());
+        let show_to_column = page_hits.iter().any(|(hit, _)| hit.to_match.is_some());
         let mut table_headers: Vec<&str> = vec!["flow", "kind", "location", "in"];
         if show_from_column {
             table_headers.push("from");
@@ -3980,11 +3920,14 @@ fn render_inspect_page(
         let mut hits_table = u.table(&table_headers);
         let hits_budget_bytes = budget_bytes.map(|b| (b * HITS_TABLE_BUDGET_PCT) / 100);
         let mut rendered_hits = 0usize;
-        for hit in &page_hits {
-            if let Some(b) = hits_budget_bytes {
-                if rendered_hits > 0 && (rendered_hits as u64).saturating_mul(HITS_ROW_AVG_BYTES) >= b {
-                    break;
-                }
+        let mut rendered_optional_hits = 0usize;
+        for (hit, required_page_unit) in &page_hits {
+            if !required_page_unit
+                && hits_budget_bytes.is_some_and(|budget| {
+                    (rendered_optional_hits as u64).saturating_mul(HITS_ROW_AVG_BYTES) >= budget
+                })
+            {
+                continue;
             }
             let location = format!("{}:{}:{}", short_file(&hit.file), hit.line, hit.column);
             let enclosing = hit.in_function.clone().unwrap_or_else(|| "—".into());
@@ -4022,25 +3965,25 @@ fn render_inspect_page(
             row.push(Cell::new(u.name(&text_preview)));
             hits_table.add_row(row);
             rendered_hits += 1;
+            if !required_page_unit {
+                rendered_optional_hits += 1;
+            }
         }
-        rendered_hit_rows = rendered_hits;
         cli_println!("{hits_table}");
         if rendered_hits < page_hits.len() {
             let skipped = page_hits.len() - rendered_hits;
             cli_println!(
                 "{}",
                 u.dim(&format!(
-                    "[{skipped} occurrence hit(s) not shown on this page — pass --all for the full table]",
+                    "[{skipped} flow-associated hit summary row(s) omitted from this page; every match point remains in the flow blocks below]",
                 ))
             );
         }
     }
 
-    // After-table anchor so the unit-loop's budget check matches
-    // the simulator's view (which doesn't see the table). Total
-    // stdout still respects `budget_bytes` overall — that's
-    // enforced by `unit_budget_bytes = budget_bytes - 35%` (the
-    // table cap); units never get more than the remaining 65 %.
+    // After-table anchor so the structural unit loop measures only the
+    // payload it emits. Taint and flow-less-hit units were already priced by
+    // the common page simulator and rendered above.
     let bytes_before_units = out_count::bytes();
     let emitted_so_far = |anchor: u64| (out_count::bytes() as u64).saturating_sub(anchor);
     let fits = |cost: u64| -> bool {
@@ -4063,7 +4006,12 @@ fn render_inspect_page(
     // "squeeze in on this page" tool, it's a "too big for any
     // page" tool. Users walking pages get the full source bodies
     // in almost every case.
-    let mut unit_cursor = start_offset;
+    let special_page_end = page_end_unit.min(structural_base);
+    let mut unit_cursor = if start_offset < structural_base {
+        special_page_end
+    } else {
+        start_offset
+    };
     let mut rendered_units = 0usize;
     let mut compact_fallback_used = false;
     // Strict cap measured against the render budget after the
@@ -4076,7 +4024,8 @@ fn render_inspect_page(
     let strict_emitted = || emitted_so_far(bytes_before_payload as u64);
     let strict_remaining =
         || -> Option<u64> { strict_budget_bytes.map(|b| b.saturating_sub(strict_emitted())) };
-    for unit_index in start_offset..page_end_unit {
+    let first_unit = unit_cursor;
+    for unit_index in first_unit..page_end_unit {
         let is_first_on_page = rendered_units == 0;
         // Budget-exhaustion breaks only apply after the first unit.
         // A page must always advance the cursor by at least one unit
@@ -4112,14 +4061,15 @@ fn render_inspect_page(
                 // within budget — no reactive cleanup needed.
                 if let Some(rem) = strict_remaining() {
                     if compact_estimate > rem {
-                        let flow_id_label = if unit_index < total_decls {
-                            report.decl_hits[unit_index]
+                        let structural_index = unit_index - structural_base;
+                        let flow_id_label = if structural_index < total_decls {
+                            report.decl_hits[structural_index]
                                 .flows
                                 .first()
                                 .map(|f| f.flow_id.clone())
-                                .unwrap_or_else(|| report.decl_hits[unit_index].symbol.clone())
+                                .unwrap_or_else(|| report.decl_hits[structural_index].symbol.clone())
                         } else {
-                            folded_order[unit_index - total_decls].flow_id.clone()
+                            folded_order[structural_index - total_decls].flow_id.clone()
                         };
                         let est_tokens = paging::bytes_to_tokens(full_estimate);
                         cli_println!();
@@ -4143,12 +4093,13 @@ fn render_inspect_page(
                 break;
             }
         }
-        if unit_index < total_decls {
-            let decl_hit = &report.decl_hits[unit_index];
+        let structural_index = unit_index - structural_base;
+        if structural_index < total_decls {
+            let decl_hit = &report.decl_hits[structural_index];
             cli_println!();
             render_inspect_text(decl_hit, &effective_render, view);
         } else {
-            let flow = folded_order[unit_index - total_decls];
+            let flow = folded_order[structural_index - total_decls];
             cli_println!();
             let header_name = flow
                 .chain
@@ -4160,19 +4111,21 @@ fn render_inspect_page(
             // Find the fold's match points for this flow by scanning
             // `report.hits` for entries whose flows list contains
             // this flow_id.
-            let matches: Vec<FoldMatch<'_>> = report
-                .hits
-                .iter()
-                .filter(|hit| hit.flows.iter().any(|f| f.flow_id == flow.flow_id))
-                .map(|hit| FoldMatch {
-                    kind: &hit.kind,
-                    text: &hit.text,
-                    file: &hit.file,
-                    line: hit.line,
-                    column: hit.column,
-                })
-                .collect();
-            render_match_points(u, &matches);
+            if !render.structural_drilldown {
+                let matches: Vec<FoldMatch<'_>> = report
+                    .hits
+                    .iter()
+                    .filter(|hit| hit.flows.iter().any(|f| f.flow_id == flow.flow_id))
+                    .map(|hit| FoldMatch {
+                        kind: &hit.kind,
+                        text: &hit.text,
+                        file: &hit.file,
+                        line: hit.line,
+                        column: hit.column,
+                    })
+                    .collect();
+                render_match_points(u, &matches);
+            }
         }
         rendered_units += 1;
         unit_cursor = unit_index + 1;
@@ -4191,27 +4144,21 @@ fn render_inspect_page(
         cli_println!(
             "{}",
             u.dim(&format!(
-                "[{remaining} flow(s) not shown — context budget reached; pass --page {} or --all to continue]",
+                "[{remaining} inspect unit(s) not shown — context budget reached; pass --page {} or --all to continue]",
                 paging_info.page_number + 1,
             ))
         );
     }
 
-    // Patch paging metadata to reflect visible result rows, not only
-    // structural flow units. The raw taint table and occurrence table are
-    // first-class user-facing inspect results now that default output shows
-    // the code needed to understand them.
-    let shown_rows = rendered_units + rendered_taint_rows + rendered_hit_rows;
-    let total_rows = total_units + report.summary.total_taint_flows + report.hits.len();
-    paging_info.shown_rows = shown_rows as u64;
-    paging_info.page_size = shown_rows as u64;
+    // Page metadata counts canonical pageable units. Optional
+    // flow-associated hit summary rows are chrome for their structural unit,
+    // not independent rows; flow-less hits and taint rows are units and are
+    // therefore reachable on later pages.
+    let shown_units = unit_cursor.saturating_sub(start_offset);
+    paging_info.shown_rows = shown_units as u64;
+    paging_info.page_size = shown_units as u64;
     paging_info.start_offset = start_offset as u64;
-    paging_info.total_rows = total_rows as u64;
-    // Page cursors advance over render units (decl / flow blocks). The
-    // occurrence table is an index for the current page, not its own
-    // pageable result set; when only that table is capped, its inline
-    // `--all` hint is the correct continuation. Advertising a next
-    // page would replay an empty or duplicate render-unit page.
+    paging_info.total_rows = total_units as u64;
     let any_truncation = !units_fully_rendered;
     if any_truncation {
         paging_info.is_last = false;
@@ -4244,16 +4191,21 @@ fn render_inspect_report_text(
     let u = ui();
     let view = resolve_view(render, report);
     render_inspect_header(u, report, view);
-    // Paginate over a UNIFIED render-unit list: every decl_hit
-    // followed by every unique folded occurrence flow. This way
-    // `--page 2` truly advances — when page 1 renders decls + a
-    // handful of folded flows, page 2 picks up from the next
-    // folded flow, not re-render the same decls. The cursor
-    // offset is a position in that combined list.
+    // Paginate over one lossless unit stream: raw taint rows, syntax hits
+    // without a structural flow, declaration blocks, then unique folded
+    // occurrence flows. Every independently visible result is therefore
+    // reachable by walking `--page`; table previews are never hidden caps.
     let filters_hash = inspect_filters_hash(pattern, is_regex);
+    let flowless_hits = report
+        .hits
+        .iter()
+        .filter(|hit| hit.flows.is_empty())
+        .collect::<Vec<_>>();
     let folded_order: Vec<&InspectFlowRendered> = collect_folded_flow_order(&report.hits);
+    let taint_units = report.taint_flows.len();
+    let structural_base = taint_units + flowless_hits.len();
     let total_decls = report.decl_hits.len();
-    let total_units = total_decls + folded_order.len();
+    let total_units = structural_base + total_decls + folded_order.len();
 
     // Safety factor on full-body byte estimates. The raw estimate
     // already matches actual output to within ~20 %. A 1.2× cushion
@@ -4289,23 +4241,39 @@ fn render_inspect_report_text(
         header + decl.flows.iter().map(&flow_full_cost).sum::<u64>()
     };
     let unit_full_cost = |idx: usize| -> u64 {
-        let raw = if idx < total_decls {
-            decl_full_cost(&report.decl_hits[idx])
+        let raw = if idx < taint_units {
+            serde_json::to_string(&report.taint_flows[idx]).map_or(320, |row| row.len() as u64 + 256)
+        } else if idx < structural_base {
+            let hit = flowless_hits[idx - taint_units];
+            (hit.text.len() + hit.file.len() + hit.kind.len() + 256) as u64
         } else {
-            flow_full_cost(folded_order[idx - total_decls])
+            let structural_index = idx - structural_base;
+            if structural_index < total_decls {
+                decl_full_cost(&report.decl_hits[structural_index])
+            } else {
+                flow_full_cost(folded_order[structural_index - total_decls])
+            }
         };
         scale(raw)
     };
     let unit_compact_cost = |idx: usize| -> u64 {
-        let raw = if idx < total_decls {
-            report.decl_hits[idx]
-                .flows
-                .iter()
-                .map(|f| 64 + (f.chain.len() as u64) * 80)
-                .sum::<u64>()
-                + 128
+        let raw = if idx < taint_units {
+            serde_json::to_string(&report.taint_flows[idx]).map_or(320, |row| row.len() as u64 + 256)
+        } else if idx < structural_base {
+            let hit = flowless_hits[idx - taint_units];
+            (hit.text.len() + hit.file.len() + hit.kind.len() + 256) as u64
         } else {
-            64 + (folded_order[idx - total_decls].chain.len() as u64) * 80
+            let structural_index = idx - structural_base;
+            if structural_index < total_decls {
+                report.decl_hits[structural_index]
+                    .flows
+                    .iter()
+                    .map(|f| 64 + (f.chain.len() as u64) * 80)
+                    .sum::<u64>()
+                    + 128
+            } else {
+                64 + (folded_order[structural_index - total_decls].chain.len() as u64) * 80
+            }
         };
         scale(raw)
     };
@@ -4327,31 +4295,9 @@ fn render_inspect_report_text(
     // capped pages at ~50 % budget fill — closing the gap so
     // pages now hit ~70-75 % of the stated budget.
     let unit_budget_bytes: Option<u64> = budget_bytes.map(|b| b - (b * 12 / 100));
-    const TAINT_FLOW_ROW_AVG_BYTES: u64 = 320;
-    const HITS_ROW_AVG_BYTES: u64 = 220;
-    const TAINT_FLOW_TABLE_BUDGET_PCT: u64 = 10;
-    const HITS_TABLE_BUDGET_PCT: u64 = 10;
-    let first_page_unit_budget_bytes = match (unit_budget_bytes, budget_bytes) {
-        (Some(unit_budget), Some(total_budget))
-            if !report.taint_flows.is_empty() || !report.hits.is_empty() =>
-        {
-            let taint_budget = if report.taint_flows.is_empty() {
-                0
-            } else {
-                (total_budget * TAINT_FLOW_TABLE_BUDGET_PCT / 100).max(TAINT_FLOW_ROW_AVG_BYTES)
-            };
-            let hits_budget = if report.hits.is_empty() {
-                0
-            } else {
-                (total_budget * HITS_TABLE_BUDGET_PCT / 100).max(HITS_ROW_AVG_BYTES)
-            };
-            Some(unit_budget.saturating_sub(taint_budget + hits_budget))
-        }
-        _ => unit_budget_bytes,
-    };
     let page_starts: Vec<usize> = simulate_page_starts(
         total_units,
-        first_page_unit_budget_bytes,
+        unit_budget_bytes,
         unit_budget_bytes,
         &unit_full_cost,
         &unit_compact_cost,
@@ -4440,7 +4386,10 @@ fn render_inspect_report_text(
             report,
             render,
             view,
+            flowless_hits: &flowless_hits,
             folded_order: &folded_order,
+            taint_units,
+            structural_base,
             total_decls,
             total_units,
             page_starts: &page_starts,
@@ -4583,7 +4532,7 @@ fn folded_flow_hit_kind_rank(kind: &str) -> u8 {
     }
 }
 
-fn render_taint_flows_table(u: &Ui, flows: &[InspectTaintFlow], text_limit: usize) {
+fn render_taint_flows_table(u: &Ui, flows: &[InspectTaintFlow]) {
     cli_println!();
     cli_println!("{}", u.heading("══ TAINT FLOWS"));
     cli_println!(
@@ -4591,7 +4540,7 @@ fn render_taint_flows_table(u: &Ui, flows: &[InspectTaintFlow], text_limit: usiz
         u.dim("rulepack-free taint-engine paths containing this inspect query / filters")
     );
     let mut table = u.table(&["taint", "entry", "terminal", "location", "args", "chain"]);
-    for flow in flows.iter().take(text_limit) {
+    for flow in flows {
         table.add_row(vec![
             Cell::new(u.annotation(&flow.taint_id)),
             Cell::new(u.kind(&flow.entry)),
@@ -4602,15 +4551,6 @@ fn render_taint_flows_table(u: &Ui, flows: &[InspectTaintFlow], text_limit: usiz
         ]);
     }
     cli_println!("{table}");
-    if flows.len() > text_limit {
-        cli_println!(
-            "{}",
-            u.dim(&format!(
-                "[{} additional taint flow(s) omitted from the text summary — use --format json for the full set]",
-                flows.len() - text_limit,
-            ))
-        );
-    }
 }
 
 fn should_render_raw_taint_bodies(render: &InspectRenderOptions, structural_units: usize) -> bool {
@@ -4623,10 +4563,20 @@ fn should_render_raw_taint_bodies(render: &InspectRenderOptions, structural_unit
                 .is_some_and(|id| id.starts_with("T:")))
 }
 
-fn render_raw_taint_flow_bodies(ws: &Workspace, u: &Ui, flows: &[InspectTaintFlow], text_limit: usize) {
-    let render_opts = InspectRenderOptions::default();
-    for (idx, flow) in flows.iter().take(text_limit).enumerate() {
-        let Some(rendered) = rendered_flow_from_raw_taint(ws, flow, (idx + 1) as u32) else {
+fn render_raw_taint_flow_bodies(
+    ws: &Workspace,
+    u: &Ui,
+    flows: &[InspectTaintFlow],
+    first_flow_number: usize,
+    compact: bool,
+) {
+    let render_opts = InspectRenderOptions {
+        compact,
+        ..InspectRenderOptions::default()
+    };
+    for (idx, flow) in flows.iter().enumerate() {
+        let Some(rendered) = rendered_flow_from_raw_taint(ws, flow, (first_flow_number + idx + 1) as u32)
+        else {
             continue;
         };
         let header_name = if flow.terminal.is_empty() {
@@ -5779,19 +5729,11 @@ fn render_inspect_text(out: &InspectOut, render: &InspectRenderOptions, view: Re
         );
         return;
     }
-    let truncation_suffix = match out.summary.truncated_by.as_deref() {
-        Some(why) => format!(" [truncated by {why} — re-run with --all to enumerate all chains]"),
-        None => String::new(),
-    };
     cli_println!(
         "\n   {}",
         u.dim(&format!(
-            "{} flow(s) reaching {} — {} unique entry points, max depth {}{}",
-            out.summary.total_flows,
-            out.symbol,
-            out.summary.unique_entry_points,
-            out.summary.max_chain_depth,
-            truncation_suffix
+            "{} flow(s) reaching {} — {} unique entry points, max depth {}",
+            out.summary.total_flows, out.symbol, out.summary.unique_entry_points, out.summary.max_chain_depth
         ))
     );
     match view {
@@ -6039,7 +5981,8 @@ pub(crate) fn render_flow_with_cached_call_spans(
     }
 
     let chain_display = disambiguate_func_display_names(ws, chain, &chain_names).join(" -> ");
-    let flow_id = compute_flow_id(&chain_names);
+    let headers = ws.compiler_header_index();
+    let flow_id = compute_structural_flow_id(headers.as_ref(), ws.db(), ws.vfs(), chain);
     Some(InspectFlowRendered {
         flow_number,
         flow_label: flow_label.to_string(),
@@ -6222,7 +6165,7 @@ fn group_flows_by_suffix(flows: &[InspectFlowRendered]) -> Vec<InspectFlowGroup>
         }
 
         groups.push(InspectFlowGroup {
-            group_id: compute_group_id(&shared_suffix),
+            group_id: compute_structural_group_id(&member_flow_ids),
             member_flow_ids,
             shared_suffix,
             unique_prefixes,

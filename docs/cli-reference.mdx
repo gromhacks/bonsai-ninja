@@ -6,7 +6,7 @@ description: "Command and flag reference for security analysis, flow inspection,
 # CLI Reference
 
 Global options accepted before the command include `--no-color`,
-`--theme`, `--no-cache`, `--no-progress`, `--contains`,
+`--theme`, `--no-cache`, `--no-progress`, `--html-output`, `--contains`,
 `--not-contains`, `--parse-timeout`, `--help`, and `--version`.
 `--theme` and `BONSAI_THEME` accept exactly `moss`, `earthy-dark`,
 `dracula`, or `retro-amber`; unknown values are errors.
@@ -19,6 +19,12 @@ and files written with
 `--output-path` stay free of progress text. Use `--no-progress` or
 `NO_PROGRESS=1` for quiet script/LLM runs; use `--no-color` separately to
 disable ANSI styling while keeping progress visible.
+
+`--html-output <PATH>` writes the selected command's ordinary human-readable
+view as a standalone responsive report using the active bonsai theme. It is a
+presentation sink only: it never enables semantic or security work. It is
+mutually exclusive with a command's `--output-path`; use `--format json` or
+SARIF instead when a machine will consume the artifact.
 
 Long security commands expose detailed scope/cache notes through
 `AnalysisProgress`. The CLI renders those notes only when progress is
@@ -56,7 +62,7 @@ bonsai-ninja index ./src --prewarm-dataflow
 | Flag | Default | Description |
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root to analyze. |
-| `--semantic` | false | Explicitly build and persist the immutable compiler-object generation, resolved callgraph, compiler linkage, retrieval factstore, streamed workspace IDG, and `.bonsai/manifest.json`. This does not run all-entry dataflow prewarm. |
+| `--semantic` | false | Explicitly build and persist the immutable compiler-object generation, resolved callgraph, compiler linkage, retrieval factstore, streamed workspace IDG, and external-cache `manifest.json`. This does not run all-entry dataflow prewarm. |
 | `--structural-only` | false | Explicit spelling for default syntax/construct indexing; do not warm reusable semantic sidecars. |
 | `--prewarm-dataflow` | false | Compute and persist the compatibility dataflow projection used by older SDK/query surfaces. This does not select another taint engine and can be expensive on large workspaces. |
 | `--watch` | false | Keep running, poll the source tree, hot-reload saved changes into the live workspace, and print fresh stats. |
@@ -73,7 +79,7 @@ workspaces. Large-workspace inspect can use a warmed sidecar only to choose a
 pre-open candidate file scope; once the workspace is open, inspect hydrates
 from canonical syntax and graph facts. Large/scoped query workspaces fall back
 to canonical syntax-backed collection when the sidecar is absent or stale
-instead of writing partial `.bonsai/retrieval.*` state. Use `--semantic` only
+instead of writing partial retrieval state into the complete workspace cache. Use `--semantic` only
 when a workflow deliberately wants to front-load the full semantic sidecar cost.
 
 Semantic prewarm uses ordered process phases: compiler objects, callgraph,
@@ -152,7 +158,7 @@ Common inventory flags for `sources`, `sinks`, `sanitizers`, and `deps`:
 | `--severity <LEVEL>` | None | Severity floor where supported: `info`, `low`, `medium`, `high`, `critical`. |
 | `--file <TEXT>` | None | Include only paths containing this text. Repeatable. |
 | `--exclude-file <TEXT>` | None | Exclude paths containing this text. Repeatable. |
-| `--limit <N>` | 50 or 200 | Rendered row cap for text and row JSON output. `0` is uncapped. |
+| `--limit <N>` | 0 | Maximum rows per page. `0` uses only token-budget pagination; later rows remain reachable with `--page`. |
 | `--context <BUDGET>` | 32k | Token budget for text and JSON output. |
 | `--page <PAGE>` | 1 | Page number, `P:xxxxxxxx` cursor, or `next`. |
 | `--all` | false | Emit all rows or findings without paging. |
@@ -222,30 +228,24 @@ redo work.
 
 ## inspect
 
-`inspect` queries facts and renders the rulepack-free taint paths that
-contain the query or filters. It does not load source, sink, or sanitizer
-YAML; use `security taint-analysis` for rulepack findings. For bounded
-queries, text output includes source-body flow evidence by default and
-paginates when the context budget fills. For large result sets, the
-default taint preview is skipped with a warning unless `--taint-flow` is
-supplied. Use `--syntax-only` when you deliberately want indexed facts
-without flow evidence and `--graph-flow` to request structural
-source-body evidence for large result sets that would otherwise render
-syntax/index facts only. These flags change output scope, not analysis
+`inspect` queries indexed syntax facts and source excerpts that contain the
+query or filters. It does not load source, sink, or sanitizer YAML; use
+`security taint-analysis` for rulepack findings. Add `--taint-flow` for
+rulepack-free raw taint paths or `--graph-flow` for structural callgraph
+paths and source bodies. These flags change output scope, not analysis
 accuracy: emitted graph facts still use the exact/narrowed static
 evidence contract. Raw taint rows come through the workspace syntax-flow
 facade, which uses a warmed IDG only when one already exists and otherwise
 falls back to the canonical cached dataflow graph. JSON summaries and text
 headers report the semantic-flow backend, cache hit/miss counts, target-cut
 scope when used, and fallback reasons so warm/cold inspect behavior is
-visible instead of implicit. For large syntax-only query shapes, inspect
+visible instead of implicit. For large syntax query shapes, inspect
 first validates a warmed retrieval sidecar and uses its candidate files for
 canonical hydration; if retrieval is absent or stale, it falls back to the
 literal file prefilter instead of publishing partial retrieval state.
 
 ```bash
 bonsai-ninja inspect ./src --query os.system --kind call
-bonsai-ninja inspect ./src --query os.system --syntax-only
 bonsai-ninja inspect ./src --query os.system --taint-flow
 bonsai-ninja inspect ./src --query os.system --graph-flow
 bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
@@ -264,17 +264,13 @@ bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
 | `--to-kind <KIND>` | None | Narrow `--to` to a browse-fact kind. Requires `--to`. |
 | `--file <TEXT>` | None | Hit workspace-relative file path filter. Explicit absolute paths are also accepted. |
 | `--in-fn <TEXT>` | None | Enclosing-function filter for non-decl hits. |
-| `--max-flows <N>` | 50 | Max flows per decl hit. |
-| `--max-entry-probes <N>` | 500 | Inspect path-preview probe budget; truncation is reported and semantic reachability is unchanged. |
-| `--max-hits <N>` | 200 | Max non-decl hits. |
-| `--all` | false | Remove flow, probe, and hit caps. |
+| `--all` | false | Emit every result in one artifact instead of paging it. Analysis is already uncapped. |
 | `--compact` | false | Omit inlined source bodies from text output. |
 | `--flow <F:ID>` | None | Re-render one stable flow. |
 | `--view <VIEW>` | trace | `trace`, `grouped`, or `auto`. |
 | `--group <G:ID>` | None | Re-render one stable flow group. |
-| `--graph-flow` | false | Request structural source-body flow rendering for large result sets; bounded inspect renders code by default. |
-| `--taint-flow` | false | Request bounded raw taint-engine paths, including for large result sets or when `--syntax-only` is also present. |
-| `--syntax-only` | false | Omit the default rulepack-free taint paths and render only indexed syntax hits. Output scope only, not a lower-accuracy mode. |
+| `--graph-flow` | false | Request structural source-body flow rendering, including for large result sets. |
+| `--taint-flow` | false | Request raw taint-engine paths, including for large result sets. |
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--format <FORMAT>` | text | `text` or native `json`. |
@@ -322,7 +318,7 @@ bonsai-ninja show ./src T:aabbccdd --taint-source update_user --taint-seed token
 | `--compact` | false | Render compact delegated output when supported. |
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
-| `--all` | false | Lift delegated command caps where supported. |
+| `--all` | false | Disable delegated command output paging. Semantic work is unchanged. |
 | `--rules-dir <DIR>` | Auto-discovered | Rulepack directory for `S:` finding IDs and security-owned `F:` flow IDs. |
 | `--format <FORMAT>` | text | `text` or native `json`. |
 | `--output-path <PATH>` | stdout | Write the delegated output to a file. |
@@ -339,25 +335,19 @@ bonsai-ninja trace ./src --from handle_request --to os.system --format dot --out
 | Flag | Default | Description |
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root. |
-| `[SYMBOL]` | None | Positional function to trace. |
-| `--function <NAME>` | None | Function name; takes precedence over positional symbol. |
+| `[TARGET]` | None | Positional function/symbol to trace. |
+| `--symbol <NAME>` | None | Function/symbol name; takes precedence over the positional target. `--function` is a compatibility alias. |
 | `--from <TEXT>` | None | Restrict to flows starting at or passing through this text. |
 | `--to <TEXT>` | None | Restrict to flows reaching this text. Requires `--from`. |
 | `--context <BUDGET>` | 32k | Token budget for text. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit full trace. |
-| `--max-depth <N>` | 0 (uncapped) | Optional cross-module call-depth cutoff. |
-| `--max-steps <N>` | 0 (uncapped) | Optional emitted semantic-step cutoff. |
-| `--max-branch-fanout <N>` | 0 (uncapped) | Optional alternatives expanded at each structured split. |
-| `--max-loop-iters <N>` | 0 (fixed point) | Optional distinct loop binding-state cutoff. |
 | `--format <FORMAT>` | text | `text`, `json`, or `dot`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
-Default tracing follows the structured AST and resolved semantic call graph to
-a cycle-safe fixed point. JSON `summary.analysis_complete` is false when an
-explicit nonzero cutoff is hit or
-cannot resolve a call it would need to expand. Budget failures are listed
-in `summary.truncation_reasons`; semantic gaps such as unresolved calls
+Tracing follows the structured AST and resolved semantic call graph to a
+cycle-safe fixed point. JSON `summary.analysis_complete` is false when it
+cannot resolve a call it would need to expand. Semantic gaps such as unresolved calls
 are listed in `summary.analysis_incomplete_reasons`. Text renderers keep
 unresolved syntactic call breadcrumbs visible, but mark those steps inline
 as `non-semantic`; they are not reviewed flow evidence.
@@ -367,13 +357,12 @@ as `non-semantic`; they are not reviewed flow evidence.
 `path` returns ranked structural call paths between two callables. It starts
 from the shared resolved callgraph, augments it with warmed IDG cross-call
 edges when a semantic sidecar has been hydrated, and marks output incomplete
-when traversal caps, unavailable semantic graph facts, or unresolved call
+when unavailable semantic graph facts or unresolved call
 sites mean missing paths cannot be ruled out.
 
 ```bash
 bonsai-ninja path ./src --from handle_request --to run_admin_command
 bonsai-ninja path ./src --from handle_request --to os.system
-bonsai-ninja path ./src --from controller --to execute --max-paths 25 --max-depth 16
 bonsai-ninja path ./src --from handle_request --to verify --format json
 ```
 
@@ -382,9 +371,6 @@ bonsai-ninja path ./src --from handle_request --to verify --format json
 | `--from <PATTERN>` | Required | Source callable substring or regex. |
 | `--to <PATTERN>` | Required | Target callable substring or regex. |
 | `--regex` | false | Interpret `--from` and `--to` as regexes. |
-| `--max-paths <N>` | 10 | Maximum ranked paths to emit. |
-| `--max-depth <N>` | 12 | Maximum semantic call edges in one path. |
-| `--max-probes <N>` | 4096 | Maximum graph states to inspect before marking incomplete. |
 | `--context`, `--page`, `--all` | 32k / 1 / false | Standard paging controls. |
 | `--format <FORMAT>` | text | `text` or `json`. |
 | `--output-path <PATH>` | stdout | Write the selected format to a file. |
@@ -405,14 +391,14 @@ or otherwise undeclared target call sites.
 
 ## slice
 
-`slice` builds a bounded backwards slice for one normalized symbol at a
+`slice` builds an exact backwards slice for one normalized symbol at a
 source line. It consumes the shared value-flow/IDG graph when a semantic
 sidecar was hydrated by `index`, then merges adapter-emitted
 syntax-flow facts for local detail: assignments, call arguments, returns,
 throws, awaits, lifecycle transitions, and structured branch/loop bodies.
 It does not search raw text or invent missing edges. When a slice reaches
 a function parameter, unavailable semantic graph, missing operands,
-multiple candidate callables, or a step cap, the output marks analysis
+multiple candidate callables, the output marks analysis
 incomplete and explains why.
 
 ```bash
@@ -426,7 +412,6 @@ bonsai-ninja slice ./src --symbol cmd --line 47 --file ml_pipeline.py --format j
 | `--symbol <NAME>` | Required | Variable, place, or adapter-normalized symbol to slice backwards from. |
 | `--line <N>` | Required | One-based source line where the symbol is inspected. |
 | `--file <TEXT>` | None | Optional workspace-relative file path filter to disambiguate same-line callables. Explicit absolute paths are also accepted. |
-| `--max-steps <N>` | 64 | Maximum slice steps to emit. Use `0` for uncapped. |
 | `--context`, `--page`, `--all` | 32k / 1 / false | Standard paging controls. |
 | `--format <FORMAT>` | text | `text` or `json`. |
 | `--output-path <PATH>` | stdout | Write the selected format to a file. |
@@ -451,13 +436,13 @@ bonsai-ninja export ./src --format graphml --output-path graph.graphml
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root. |
 | `--full-propagations` | false | Force exhaustive interprocedural propagation records. |
-| `--all` | false | Include the complete propagation relation in canonical `compiled_idg` form. Chain and flow-label relations are always exact `compressed_callgraph` data; add `--full-propagations` only when concrete per-entry propagation rows are intentionally required. |
 | `--format <FORMAT>` | json | `json`, `networkx`, `graphml`, or `cypher`. |
 | `--output-path <PATH>` | stdout | Write the selected export format to a file. |
 
 Native export never enumerates a capped prefix of call paths. The resolved
 callgraph is the exact linear-space representation of that path language, so
-the default remains complete without an exponential materialization step.
+the default includes the complete `compiled_idg` relation without an
+exponential materialization step.
 A one-shot cache miss streams directly to the selected output; use
 `cache rebuild <workspace> --export` only when repeated exports justify a
 persisted copy.
@@ -504,8 +489,9 @@ JSON rows include `analysis_complete`, `analysis_incomplete_reasons`, and
 
 ## cache
 
-`cache` inspects, clears, or rebuilds on-disk artifacts under
-`<workspace>/.bonsai/`. In-process memo caches are per run and do not need
+`cache` inspects, clears, or rebuilds on-disk artifacts in the workspace's
+canonical-path-keyed OS cache directory. `cache stats` prints the exact path;
+`BONSAI_WORKSPACE_DIR` overrides it. In-process memo caches are per run and do not need
 manual clearing.
 
 ```bash
@@ -519,13 +505,13 @@ bonsai-ninja cache rebuild ./src
 | `stats [WORKSPACE]` | current directory | Print cache configuration plus validated freshness/readiness for `manifest.json`, compiler objects, retrieval, dataflow, value-flow, flow-id, callgraph, linkage, IDG, taint-graph, and export sidecars. |
 | `stats --format <FORMAT>` | text | `text` or `json`; SARIF requests fall back to JSON for this non-finding command. |
 | `stats --output-path <PATH>` | stdout | Write the selected `stats --format` output to a file. |
-| `clear [WORKSPACE]` | current directory | Remove persisted `.bonsai/` analysis sidecars for the workspace. |
+| `clear [WORKSPACE]` | current directory | Remove persisted analysis sidecars from the workspace's external cache. |
 | `--dataflow-only` | false | For `clear`, remove only `dataflow.v3.factstore` and the compatibility `dataflow.v2.bin`. |
 | `rebuild [WORKSPACE]` | current directory | Remove persisted analysis sidecars and rebuild reusable structural artifacts: compiler objects, callgraph, linkage, streamed IDG, and retrieval factstore. It does not run the legacy full-workspace dataflow prewarm. |
 | `rebuild --export` | false | Also warm the default export JSON cache. |
 
 `index --semantic`, SDK semantic/full-prewarm facades, `cache rebuild`, and
-security source/taint analysis runs publish `.bonsai/manifest.json` after
+security source/taint analysis runs publish the external-cache `manifest.json` after
 they produce reusable sidecars. The manifest is JSON metadata for cache
 coverage and fingerprints; command hot paths still use the binary factstores
 and validate sidecar headers and payload readability before reuse. Retrieval
@@ -536,7 +522,7 @@ facts and semantic graph verification decide truth. Vector similarity is
 never evidence. Retrieval sidecars are complete-workspace artifacts; scoped
 query opens do not persist partial retrieval snapshots. Path-scoped security
 runs likewise keep taint graph reuse in memory for that command and do not
-overwrite full-workspace `.bonsai/taint_graph.v*.<mode>.<config>.factstore` files.
+overwrite full-workspace `taint_graph.v*.<mode>.<config>.factstore` files in that cache.
 `cache stats --format json` includes the same validation report the
 SDK exposes: `manifest_status`, semantic/dataflow/taint/export readiness,
 per-sidecar freshness, and stale reasons.
@@ -583,7 +569,7 @@ Common browse output flags:
 
 | Flag | Default | Description |
 |---|---:|---|
-| `--limit <N>` | 200 | Legacy row cap for text and row JSON output. `0` is uncapped. |
+| `--limit <N>` | 0 | Maximum rows per page. `0` uses only token-budget pagination; later rows remain reachable with `--page`. |
 | `--context <BUDGET>` | 32k | Token-budget paging, e.g. `4k`, `16k`, `128k`, `all`. |
 | `--page <PAGE>` | 1 | Page number, `next`, or a printed `P:xxxxxxxx` cursor. |
 | `--all` | false | Emit all rows with no paging/context cap. |
@@ -596,8 +582,8 @@ never unresolved fan-out. Dense text tables render compact local labels
 (`F1`, `F2`, ...) and print a `flow ids:` legend below the table with the
 complete copyable `F:<16-hex>` ids. If a rendered flow cell ends in `…`, the
 command also prints `semantic-only flows column incomplete`; those IDs are a
-bounded prefix, not the complete label set for that row. Use
-`inspect --query ... --all` for full flow evidence.
+compact navigation preview, not the complete label set for that row. Use
+`inspect --query ... --graph-flow` and follow its pages for full flow evidence.
 
 ## Navigation
 
@@ -624,7 +610,9 @@ incomplete; use `--all` and avoid restrictive `--max-depth` when you need every
 node. `read-file`
 finding digests repeat their own completion fields. If caller/callee bodies
 are omitted by the default inline-body cap, the view is marked incomplete;
-use `--all` or `--max-inlined-bodies 0` when you need every cross-file body.
+use `--max-inlined-bodies 0` when you need every cross-file body. `--all`
+only disables output pagination; it does not enable semantic work or widen
+the body set.
 
 ## Debug Dumps
 
@@ -656,7 +644,9 @@ dynamic calls, macro calls, and receiver-type-gap counts without inventing
 edges. `coverage_percent` is workspace-resolution coverage:
 `resolved_call_sites / (resolved_call_sites + unresolved_call_sites)`, so
 import-proven external calls are visible as `external_call_sites` but do not
-masquerade as missing workspace edges.
+masquerade as missing workspace edges. Native export applies the same
+classification when it streams a persisted callgraph, so warming the cache
+cannot change `analysis_complete` or its reason counts.
 
 `dump-taint --format json` includes top-level `analysis_complete` and
 `analysis_incomplete_reasons`. The IDG-backed path computes the requested

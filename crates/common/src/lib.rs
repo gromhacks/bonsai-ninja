@@ -30,12 +30,19 @@ pub use names::{
 };
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;
+pub use resources::callgraph_worker_count;
+pub use resources::candidate_index_worker_count;
 pub use resources::compiler_weighted_batches;
 pub use resources::compiler_worker_count;
+pub use resources::current_process_resident_bytes;
 pub use resources::effective_memory_limit_bytes;
 pub use resources::memory_bounded_worker_count;
+pub use resources::rooted_semantic_query_worker_count;
+pub use resources::semantic_query_worker_count;
+pub use resources::source_ingestion_batches;
 pub use resources::syntax_weighted_batches;
 pub use resources::syntax_worker_count;
+pub use resources::syntax_worker_count_for_sources;
 pub use span::{LineCol, Span, SpanMap};
 pub use span_cache::{cached_span_map, cached_span_map_arc};
 

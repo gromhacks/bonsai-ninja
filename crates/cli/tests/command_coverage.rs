@@ -251,8 +251,17 @@ fn one_shot_index_reports_every_file_without_retaining_local_ir() {
     let Some(out) = run(&["index", ws.to_str().unwrap()]) else {
         return;
     };
-    assert_contains(&out, "\"files\": 4", "index");
-    assert_contains(&out, "\"cached_decl_indexes\": 0", "index");
+    let stats: serde_json::Value = serde_json::from_str(&out).expect("one-shot index output must be JSON");
+    assert_eq!(stats["files"].as_u64(), Some(4));
+    assert_eq!(stats["compiler_objects"].as_u64(), Some(4));
+    assert!(
+        matches!(stats["compiler_cache"].as_str(), Some("hit" | "rebuilt")),
+        "index must report whether its persistent compiler generation was reused: {stats}"
+    );
+    assert!(
+        stats.get("cached_decl_indexes").is_none(),
+        "one-shot index must not expose process-local body-cache occupancy: {stats}"
+    );
 }
 
 // -------- diagnostics --------
@@ -408,7 +417,7 @@ fn imports_finds_flask_and_local_modules() {
 fn imports_flows_column_is_populated() {
     // Regression from the symbol-level flow lookup — imports with a
     // resolvable target must show at least one F:id.
-    let Some(out) = run(&["imports", ws().to_str().unwrap()]) else {
+    let Some(out) = run(&["imports", ws().to_str().unwrap(), "--flows"]) else {
         return;
     };
     assert!(
@@ -879,7 +888,13 @@ fn dump_taint_from_update_user_propagates_to_verify_token() {
 
 #[test]
 fn show_raw_taint_id_reopens_inspect_view() {
-    let Some(full) = run(&["inspect", ws().to_str().unwrap(), "--query", "os.system"]) else {
+    let Some(full) = run(&[
+        "inspect",
+        ws().to_str().unwrap(),
+        "--query",
+        "os.system",
+        "--taint-flow",
+    ]) else {
         return;
     };
     let target = first_stable_id(&full, 'T', 8)

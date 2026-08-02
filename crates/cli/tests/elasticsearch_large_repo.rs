@@ -134,7 +134,7 @@ fn temp_output_path(name: &str) -> PathBuf {
     ))
 }
 
-fn run_bonsai(bin: &Path, args: &[String]) -> Output {
+fn bonsai_command(bin: &Path, args: &[String]) -> Command {
     let mut command = Command::new(bin);
     command
         .args(args)
@@ -153,12 +153,15 @@ fn run_bonsai(bin: &Path, args: &[String]) -> Output {
         command.env("MIMALLOC_PURGE_DELAY", "0");
     }
     command
+}
+
+fn run_bonsai(bin: &Path, args: &[String]) -> Output {
+    bonsai_command(bin, args)
         .output()
         .unwrap_or_else(|err| panic!("run bonsai-ninja {args:?}: {err}"))
 }
 
-fn assert_success(bin: &Path, args: &[String]) -> String {
-    let output = run_bonsai(bin, args);
+fn assert_success_output(args: &[String], output: Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     assert!(
@@ -174,6 +177,10 @@ fn assert_success(bin: &Path, args: &[String]) -> String {
         "large-repo command regressed to the old guard/error path: {args:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     stdout
+}
+
+fn assert_success(bin: &Path, args: &[String]) -> String {
+    assert_success_output(args, run_bonsai(bin, args))
 }
 
 fn performance_limit(variable: &str, default_seconds: u64) -> Duration {
@@ -509,4 +516,71 @@ fn elasticsearch_production_taint_analysis_does_not_regress() {
         );
     }
     let _ = std::fs::remove_file(output);
+}
+
+#[test]
+fn elasticsearch_fresh_cache_taint_planning_does_not_regress() {
+    let _guard = elasticsearch_test_lock();
+    let (Some(bin), Some(es)) = (release_bin(), elasticsearch_root()) else {
+        return;
+    };
+    let cache = temp_output_path("cold-cache");
+    std::fs::create_dir_all(&cache).expect("create isolated Elasticsearch cache");
+    let output = temp_output_path("cold-taint-summary");
+    let args = es_args(
+        &es,
+        &[
+            "security",
+            "{es}",
+            "taint-analysis",
+            "--profile",
+            "production",
+            "--summary",
+            "--format",
+            "json",
+            "--output-path",
+            output.to_str().expect("temp output path utf8"),
+            "--rules-dir",
+            "{rules}",
+        ],
+    );
+    let started = Instant::now();
+    let command_output = bonsai_command(&bin, &args)
+        .env("BONSAI_WORKSPACE_DIR", &cache)
+        .output()
+        .unwrap_or_else(|error| panic!("run cold Elasticsearch taint analysis: {error}"));
+    let stdout = assert_success_output(&args, command_output);
+    let elapsed = started.elapsed();
+    // This assertion runs only after the exact command exits. It cannot time
+    // out, cap, or truncate semantic work.
+    assert_performance(
+        "Elasticsearch fresh-cache production taint analysis",
+        elapsed,
+        "BONSAI_ES_COLD_TAINT_MAX_SECS",
+        45,
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "cold taint-analysis with --output-path should keep stdout empty, got:\n{stdout}"
+    );
+    let written = std::fs::read_to_string(&output).expect("read cold taint summary output");
+    let parsed: serde_json::Value = serde_json::from_str(&written)
+        .unwrap_or_else(|error| panic!("valid cold taint summary JSON ({error}):\n{written}"));
+    assert_eq!(
+        parsed
+            .get("analysis_complete")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "fresh-cache taint summary must report exact completed analysis: {parsed}"
+    );
+    assert_eq!(
+        parsed
+            .get("analysis_incomplete_reasons")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(0),
+        "fresh-cache taint summary must not hide unchecked compiler work: {parsed}"
+    );
+    let _ = std::fs::remove_file(output);
+    let _ = std::fs::remove_dir_all(cache);
 }

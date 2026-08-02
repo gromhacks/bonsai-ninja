@@ -3,7 +3,8 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_node, collect_kinds, language_from_pack, node_at_span, node_text, parse_with, span_of,
+        apply_lexical_member_qualified_names, call_arg_from_node, collect_kinds, language_from_pack,
+        node_at_span, node_text, parse_with, span_of,
     },
     AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
     FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
@@ -67,7 +68,12 @@ const HANDLER: GrammarHandler = GrammarHandler {
     class_decl_kinds: &[
         ("contract_declaration", DeclKind::Class),
         ("interface_declaration", DeclKind::Interface),
-        ("library_declaration", DeclKind::Module),
+        // A Solidity library is a non-instantiable type container whose
+        // functions are selected through `Library.member(...)`. Lower it as
+        // class-like compiler ownership so typed/member resolution can use
+        // the AST declaration identity. `DeclKind::Module` would discard
+        // that owner relationship and leave library calls unresolved.
+        ("library_declaration", DeclKind::Class),
     ],
     method_kinds: &["function_definition"],
     method_context_kinds: &[
@@ -259,6 +265,11 @@ impl LanguageAdapter for SolidityAdapter {
             }
         }
         attach_solidity_method_owners(&mut idx);
+        // Some grammar versions omit the callable's lexical parent during
+        // the generic declaration walk. Ownership is attached above from
+        // exact contract/library spans, so refresh member identities after
+        // that fact exists rather than leaving them module-only qualified.
+        apply_lexical_member_qualified_names(&mut idx, "::");
         // Recognised Solidity lifecycle transitions. `selfdestruct`
         // wipes contract code/state (freed). `transfer` moves ETH
         // ownership (modeled as `moved`); the matcher treats this

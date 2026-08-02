@@ -77,6 +77,10 @@ pub enum IdgEdgeKind {
     /// resolved local calls propagate exact fields through
     /// [`Self::InterFieldCallArg`].
     IntraAggregateConsume = 13,
+    /// `callee.Yield` -> caller-side block/generator binding at the
+    /// resolved call site. Kept distinct from `InterReturn` because several
+    /// languages expose both channels at one invocation.
+    InterYield = 14,
 }
 
 impl IdgEdgeKind {
@@ -183,6 +187,13 @@ impl IdgEdgeKind {
                 FlowEdgeKind::ContainerLoad,
                 FlowEdgeKind::Sink,
             ],
+            Self::InterYield => &[
+                FlowEdgeKind::Yield,
+                FlowEdgeKind::Iteration,
+                FlowEdgeKind::CallbackInvocation,
+                FlowEdgeKind::InterFile,
+                FlowEdgeKind::InterPackage,
+            ],
         }
     }
 
@@ -197,6 +208,7 @@ impl IdgEdgeKind {
                 | Self::InterThrow
                 | Self::InterFieldCallArg
                 | Self::InterFieldReturn
+                | Self::InterYield
         )
     }
 
@@ -233,6 +245,7 @@ impl IdgEdgeKind {
             11 => Some(Self::InterFieldCallArg),
             12 => Some(Self::InterFieldReturn),
             13 => Some(Self::IntraAggregateConsume),
+            14 => Some(Self::InterYield),
             _ => None,
         }
     }
@@ -329,6 +342,27 @@ impl IdgEdge {
             meta: EdgeMeta {
                 precision,
                 kind: IdgEdgeKind::InterReturn,
+                call_kind,
+                via_span: span,
+            },
+        }
+    }
+
+    /// Construct an inter-procedural yield-to-consumer edge.
+    #[must_use]
+    pub const fn inter_yield(
+        from: NodeId,
+        to: NodeId,
+        span: Span,
+        precision: Precision,
+        call_kind: CallEdgeKind,
+    ) -> Self {
+        Self {
+            from,
+            to,
+            meta: EdgeMeta {
+                precision,
+                kind: IdgEdgeKind::InterYield,
                 call_kind,
                 via_span: span,
             },

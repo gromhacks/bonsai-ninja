@@ -527,8 +527,8 @@ impl CallgraphQueryService {
                     ),
                 )
             })?;
-            if !loaded.contains_key(&file.raw()) {
-                loaded.insert(file.raw(), self.partition(file)?);
+            if let std::collections::btree_map::Entry::Vacant(entry) = loaded.entry(file.raw()) {
+                entry.insert(self.partition(file)?);
             }
             let partition = loaded
                 .get(&file.raw())

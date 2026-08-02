@@ -178,16 +178,18 @@ class RestSearchAction {
 }
 
 #[test]
-fn exact_file_graph_flow_does_not_expand_to_a_cold_workspace_graph() {
+fn exact_file_graph_flow_builds_complete_cold_workspace_linkage() {
     if require_binary_built().is_none() {
         return;
     }
     let root = tempdir_for_test("inspect-cold-file-graph");
+    std::fs::write(root.join("target.py"), "def target(value):\n    return value\n")
+        .expect("write selected target");
     std::fs::write(
         root.join("entry.py"),
-        "def entry(value):\n    return target(value)\n\ndef target(value):\n    return value\n",
+        "from target import target\n\ndef entry(value):\n    return target(value)\n",
     )
-    .expect("write selected source");
+    .expect("write sibling caller");
     std::fs::write(
         root.join("unrelated.py"),
         "def unrelated(value):\n    return value\n",
@@ -199,7 +201,7 @@ fn exact_file_graph_flow_does_not_expand_to_a_cold_workspace_graph() {
         root.to_str().unwrap(),
         "target",
         "--file",
-        "entry.py",
+        "target.py",
         "--graph-flow",
         "--format",
         "json",
@@ -207,14 +209,14 @@ fn exact_file_graph_flow_does_not_expand_to_a_cold_workspace_graph() {
     ]);
     let report: serde_json::Value = serde_json::from_str(&out).expect("cold graph inspect JSON");
     assert_eq!(report["summary"]["total_decl_hits"], 1);
-    assert_eq!(report["analysis_complete"], false);
+    assert_eq!(report["analysis_complete"], true);
     assert!(
-        report["analysis_incomplete_reasons"]
+        report["decl_hits"][0]["flows"]
             .as_array()
-            .is_some_and(|reasons| reasons.iter().any(|reason| reason
-                .as_str()
-                .is_some_and(|reason| reason.contains("reverse-call index is not warmed")))),
-        "cold exact-file graph query must disclose unavailable upstream coverage: {out}"
+            .is_some_and(|flows| flows.iter().any(|flow| flow["chain"]
+                .as_array()
+                .is_some_and(|chain| chain.iter().any(|name| name == "entry")))),
+        "file-scoped graph query must retain sibling callers through the exact compiler linkage: {out}"
     );
 }
 

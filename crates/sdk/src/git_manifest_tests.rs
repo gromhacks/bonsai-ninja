@@ -50,6 +50,22 @@ fn init_git_workspace(label: &str, source: &str) -> Option<PathBuf> {
 }
 
 #[test]
+fn workspace_cache_persists_canonical_workspace_identity() {
+    let root = tempdir("canonical-cache-root");
+    std::fs::create_dir(root.join("nested")).expect("create nested directory");
+    std::fs::write(root.join("app.py"), "def run():\n    return 1\n").expect("write source");
+    let spelled = root.join("nested").join("..");
+    let expected = root.canonicalize().expect("canonical root");
+
+    let cache = WorkspaceCache::new(&spelled);
+    assert_eq!(cache.root(), expected);
+    let manifest = cache.manifest().expect("build manifest");
+    assert_eq!(manifest.workspace_root, expected);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn unchanged_git_snapshot_reuses_manifest_source_hashes() {
     let Some(root) = init_git_workspace("git-manifest-reuse", "def original():\n    return 1\n") else {
         return;

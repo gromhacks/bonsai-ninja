@@ -1,5 +1,5 @@
 use super::{
-    collect_callees, exact_identifier_regex_literal, format_flow_labels_for_cell, rendered_table_row_cost,
+    exact_identifier_regex_literal, format_flow_labels_for_cell, rendered_table_row_cost,
     retrieval_prefilter_for_browse_literal_with_limit, retrieval_prefilter_for_search_with_limit, truncate,
     FlowColumnStatus, SearchFilters,
 };
@@ -63,8 +63,7 @@ fn collect_callees_includes_assignment_source_calls() {
             span: span(),
         },
     ];
-    let mut out = Vec::new();
-    collect_callees(&events, &mut out);
+    let out = bonsai_sdk::collect_callee_names(&events);
     assert_eq!(out, vec!["read_user", "sink"]);
 }
 

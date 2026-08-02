@@ -224,6 +224,20 @@ impl FactStoreReader {
         binary_search_index(&self.index_bytes, self.header.index_count as usize, key).is_some()
     }
 
+    /// Return the immutable content hash and payload length for `key` without
+    /// reading the payload. This supports cheap validation of independently
+    /// paged compiler relations before any query trusts their byte ranges.
+    pub fn entry_metadata(&self, key: u64) -> FactStoreResult<Option<(u64, u32)>> {
+        let count = self.header.index_count as usize;
+        let Some(row) = binary_search_index(&self.index_bytes, count, key) else {
+            return Ok(None);
+        };
+        let entry =
+            IndexEntry::from_bytes(&self.index_bytes[row * INDEX_ENTRY_SIZE..(row + 1) * INDEX_ENTRY_SIZE])
+                .ok_or(FactStoreError::BadIndexEntry { row })?;
+        Ok(Some((entry.body_hash, entry.payload_len)))
+    }
+
     /// Borrow the string pool. Free after open; cheap to call
     /// repeatedly. The view borrows from the resident bookkeeping
     /// buffers so its lifetime is tied to the reader.
@@ -275,6 +289,93 @@ impl FactStoreReader {
                 },
             ),
         }))
+    }
+
+    /// Open one exact subrange of a payload as a positioned bounded reader.
+    ///
+    /// Compiler-object containers use this for independently compressed
+    /// function frames: the fact-store entry remains content-addressed as one
+    /// file object while a query reads only the selected function's bytes.
+    /// The requested range is checked against the indexed payload boundary;
+    /// it can never bleed into a neighboring entry.
+    pub fn payload_range_reader(
+        &self,
+        key: u64,
+        relative_offset: u64,
+        length: u64,
+    ) -> FactStoreResult<Option<PayloadReader<'_>>> {
+        let count = self.header.index_count as usize;
+        let Some(row) = binary_search_index(&self.index_bytes, count, key) else {
+            return Ok(None);
+        };
+        let entry =
+            IndexEntry::from_bytes(&self.index_bytes[row * INDEX_ENTRY_SIZE..(row + 1) * INDEX_ENTRY_SIZE])
+                .ok_or(FactStoreError::BadIndexEntry { row })?;
+        let payload_length = u64::from(entry.payload_len);
+        let end = relative_offset
+            .checked_add(length)
+            .filter(|end| *end <= payload_length)
+            .ok_or(FactStoreError::BadPayloadRange {
+                key,
+                offset: relative_offset,
+                length,
+                payload_length,
+            })?;
+        debug_assert!(end <= payload_length);
+        Ok(Some(PayloadReader {
+            body_hash: entry.body_hash,
+            inner: BufReader::with_capacity(
+                usize::try_from(length.min(64 * 1024)).unwrap_or(64 * 1024).max(1),
+                PositionedEntryReader {
+                    file: &self.file,
+                    offset: entry.payload_offset.saturating_add(relative_offset),
+                    remaining: length,
+                },
+            ),
+        }))
+    }
+
+    /// Read one exact payload subrange into a caller-owned buffer.
+    ///
+    /// This is the allocation-free counterpart to [`Self::payload_range_reader`]
+    /// for paged compiler relations. The range is validated against the
+    /// indexed entry before positioned I/O begins, so a corrupt offset cannot
+    /// cross into a neighboring fact-store payload.
+    pub fn read_payload_range(
+        &self,
+        key: u64,
+        relative_offset: u64,
+        output: &mut [u8],
+    ) -> FactStoreResult<bool> {
+        let count = self.header.index_count as usize;
+        let Some(row) = binary_search_index(&self.index_bytes, count, key) else {
+            return Ok(false);
+        };
+        let entry =
+            IndexEntry::from_bytes(&self.index_bytes[row * INDEX_ENTRY_SIZE..(row + 1) * INDEX_ENTRY_SIZE])
+                .ok_or(FactStoreError::BadIndexEntry { row })?;
+        let length = u64::try_from(output.len()).map_err(|_| FactStoreError::BadPayloadRange {
+            key,
+            offset: relative_offset,
+            length: u64::MAX,
+            payload_length: u64::from(entry.payload_len),
+        })?;
+        let payload_length = u64::from(entry.payload_len);
+        relative_offset
+            .checked_add(length)
+            .filter(|end| *end <= payload_length)
+            .ok_or(FactStoreError::BadPayloadRange {
+                key,
+                offset: relative_offset,
+                length,
+                payload_length,
+            })?;
+        read_exact_at(
+            &self.file,
+            entry.payload_offset.saturating_add(relative_offset),
+            output,
+        )?;
+        Ok(true)
     }
 
     /// Iterate every `(key, body_hash, payload)` triple in index
