@@ -17,6 +17,9 @@
     parameterized_query:
       query_arg_index: 0
       bindings_arg_index: 1
+    character_constraint:
+      required_excluded_characters: ["'"]
+      required_enclosing_literal_delimiter: "'"
   match_examples:
   - name: sqli cursor execute
     code: |
@@ -106,6 +109,9 @@
     parameterized_query:
       query_arg_index: 0
       bindings_arg_index: 1
+    character_constraint:
+      required_excluded_characters: ["'"]
+      required_enclosing_literal_delimiter: "'"
   match_examples:
   - name: abbreviated cursor execute
     code: |
@@ -300,6 +306,9 @@
     parameterized_query:
       query_arg_index: 0
       bindings_arg_index: 1
+    character_constraint:
+      required_excluded_characters: ["'"]
+      required_enclosing_literal_delimiter: "'"
   match_examples:
   - name: sqli psycopg2 cursor execute
     code: |

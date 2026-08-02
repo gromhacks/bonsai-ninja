@@ -1171,6 +1171,8 @@ fn collect_occurrence_hits<'workspace>(
                     .collect::<ahash::AHashSet<_>>()
             },
         );
+    type OccurrenceHitKey = (String, String, String, u32, u32, Option<String>);
+    let mut seen_hits = ahash::AHashSet::<OccurrenceHitKey>::default();
     let mut push_hit = |kind: &str,
                         text: String,
                         span: bonsai_common::Span,
@@ -1200,14 +1202,15 @@ fn collect_occurrence_hits<'workspace>(
         {
             return;
         }
-        if out.iter().any(|hit| {
-            hit.kind == kind
-                && hit.text == text
-                && hit.file == path
-                && hit.line == line
-                && hit.column == col
-                && hit.in_function.as_deref() == containing_name
-        }) {
+        let hit_key = (
+            kind.to_string(),
+            text.clone(),
+            path.clone(),
+            line,
+            col,
+            containing_name.map(str::to_string),
+        );
+        if seen_hits.contains(&hit_key) {
             return;
         }
         if taint_flow {
@@ -1236,6 +1239,7 @@ fn collect_occurrence_hits<'workspace>(
             {
                 return;
             }
+            seen_hits.insert(hit_key);
             out.push(HitOut {
                 kind: kind.to_string(),
                 text,
@@ -1412,6 +1416,7 @@ fn collect_occurrence_hits<'workspace>(
             return;
         }
         let groups = group_flows_by_suffix(&flows);
+        seen_hits.insert(hit_key);
         out.push(HitOut {
             kind: kind.to_string(),
             text,
@@ -2381,6 +2386,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // text/JSON renderers page the owned rows afterward. `--all` therefore
     // changes presentation only and can never change taint results.
     let mut taint_candidates = TaintCandidates::new(initial_taint_candidates);
+    let syntax_inspect_started = std::time::Instant::now();
     let decl_hits = collect_decl_hits(
         ws,
         &chain_cache,
@@ -2415,6 +2421,16 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             large_syntax_scan,
         },
         &mut taint_candidates,
+    );
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect syntax hydration: files={} decl_hits={} occurrence_hits={} taint_entries={} targets={} elapsed={:.3}s",
+        files_in_path_order.len(),
+        decl_hits.len(),
+        occurrence_hits.hits.len(),
+        taint_candidates.entries.len(),
+        taint_candidates.target_spans.len(),
+        syntax_inspect_started.elapsed().as_secs_f64()
     );
     drop(edge_resolver);
     drop(chain_cache);
@@ -2496,6 +2512,114 @@ struct TaintFlowMatchContext<'a> {
     flow_id_filter: Option<&'a str>,
 }
 
+#[derive(Clone, Debug)]
+struct TaintFunctionDisplay {
+    short_name: String,
+    qualified_name: String,
+    kind: Option<DeclKind>,
+}
+
+/// Immutable display metadata for the exact function scope of one raw-taint
+/// query. Elasticsearch-sized queries can materialize many paths through the
+/// same functions. Looking each name up through `compiler_header_index()` for
+/// every rendered path needlessly reacquires the workspace cache lock millions
+/// of times. Build this small projection once from the compiler headers and
+/// reuse it while the semantic workers render their results.
+struct TaintDisplayIndex {
+    functions: ahash::AHashMap<bonsai_common::FuncId, TaintFunctionDisplay>,
+}
+
+impl TaintDisplayIndex {
+    fn new(ws: &Workspace, funcs: impl IntoIterator<Item = bonsai_common::FuncId>) -> Self {
+        let headers = ws.compiler_header_index();
+        let mut functions = ahash::AHashMap::default();
+        for func in funcs {
+            functions.entry(func).or_insert_with(|| {
+                let symbol = bonsai_common::SymbolId::new(func.raw());
+                let Some(decl) = headers.decl_of(symbol) else {
+                    return TaintFunctionDisplay {
+                        short_name: "<unknown>".to_string(),
+                        qualified_name: "<unknown>".to_string(),
+                        kind: None,
+                    };
+                };
+
+                let mut owner_names = Vec::new();
+                let mut parent = decl.parent;
+                while let Some(parent_symbol) = parent {
+                    let Some(parent_decl) = headers.decl_of(parent_symbol) else {
+                        break;
+                    };
+                    if is_renderable_owner(parent_decl.kind) {
+                        owner_names.push(parent_decl.name.clone());
+                    }
+                    parent = parent_decl.parent;
+                }
+                owner_names.reverse();
+                let qualified_name = if owner_names.is_empty() {
+                    decl.qualified_name
+                        .as_ref()
+                        .filter(|qualified| qualified.as_str() != decl.name)
+                        .cloned()
+                        .unwrap_or_else(|| decl.name.clone())
+                } else {
+                    format!("{}.{}", owner_names.join("."), decl.name)
+                };
+                TaintFunctionDisplay {
+                    short_name: decl.name.clone(),
+                    qualified_name,
+                    kind: Some(decl.kind),
+                }
+            });
+        }
+        Self { functions }
+    }
+
+    fn short_name(&self, ws: &Workspace, func: bonsai_common::FuncId) -> String {
+        self.functions
+            .get(&func)
+            .map(|display| display.short_name.clone())
+            .unwrap_or_else(|| func_display_name(ws, func))
+    }
+
+    fn kind(&self, ws: &Workspace, func: bonsai_common::FuncId) -> Option<DeclKind> {
+        self.functions.get(&func).map_or_else(
+            || {
+                ws.compiler_header_index()
+                    .decl_of(bonsai_common::SymbolId::new(func.raw()))
+                    .map(|decl| decl.kind)
+            },
+            |display| display.kind,
+        )
+    }
+
+    fn disambiguated_names(&self, ws: &Workspace, funcs: &[bonsai_common::FuncId]) -> Vec<String> {
+        let short_names: Vec<String> = funcs.iter().map(|&func| self.short_name(ws, func)).collect();
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for name in short_names.iter().filter(|name| !name.is_empty()) {
+            *counts.entry(name.clone()).or_default() += 1;
+        }
+        funcs
+            .iter()
+            .zip(short_names)
+            .filter_map(|(&func, short_name)| {
+                if short_name.is_empty() {
+                    None
+                } else if counts.get(short_name.as_str()).copied().unwrap_or(0) > 1 {
+                    Some(
+                        self.functions
+                            .get(&func)
+                            .map(|display| display.qualified_name.clone())
+                            .unwrap_or_else(|| func_disambiguated_display_name(ws, func, &short_name)),
+                    )
+                } else {
+                    Some(short_name)
+                }
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct InspectSemanticFlowStats {
     entry_queries: usize,
@@ -2534,6 +2658,7 @@ fn inspect_taint_flows(
     candidates: &TaintCandidates,
     options: InspectTaintFlowOptions<'_>,
 ) -> Result<(Vec<InspectTaintFlow>, InspectSemanticFlowStats)> {
+    let inspect_taint_started = std::time::Instant::now();
     let InspectTaintFlowOptions {
         pattern,
         is_regex,
@@ -2609,6 +2734,17 @@ fn inspect_taint_flows(
         prefer_warmed_idg && lineage_funcs.is_none(),
         lineage_started.elapsed().as_secs_f64()
     );
+    let display_stage = progress::ScopedSpinner::new("preparing taint symbol display");
+    let mut display_funcs = lineage_funcs
+        .as_ref()
+        .map(|funcs| funcs.iter().copied().collect::<Vec<_>>())
+        .unwrap_or_else(|| entries.clone());
+    display_funcs.extend(candidate_entries.iter().copied());
+    if let Some(targets) = lineage_targets.as_ref() {
+        display_funcs.extend(targets.iter().copied());
+    }
+    let display_index = TaintDisplayIndex::new(ws, display_funcs);
+    display_stage.finish();
     let session = if prefer_warmed_idg {
         (!fallback_target_funcs.is_empty())
             .then(|| ws.syntax_flow_session(&entries, &fallback_target_funcs))
@@ -2701,7 +2837,14 @@ fn inspect_taint_flows(
             .session(session.as_ref());
         let graph = ws.syntax_flow_graph(query);
         let mut entry_flows = Vec::new();
-        collect_taint_flows_for_entry(ws, entry, graph.graph.as_ref(), &match_context, &mut entry_flows);
+        collect_taint_flows_for_entry(
+            ws,
+            &display_index,
+            entry,
+            graph.graph.as_ref(),
+            &match_context,
+            &mut entry_flows,
+        );
         (entry_flows, graph.plan)
     };
     let mut results = Vec::new();
@@ -2733,11 +2876,19 @@ fn inspect_taint_flows(
             });
         results.extend(parallel);
     }
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect taint closures: entries={} elapsed={:.3}s",
+        results.len(),
+        inspect_taint_started.elapsed().as_secs_f64()
+    );
     for (mut entry_flows, plan) in results {
         semantic_flow_stats.record_plan(&plan);
         flows.append(&mut entry_flows);
     }
     entry_bar.finish_and_clear();
+    let flow_count_before_dedup = flows.len();
+    let finalize_started = std::time::Instant::now();
     dedup_taint_flows(&mut flows);
     flows.sort_by(|a, b| {
         a.steps
@@ -2748,6 +2899,14 @@ fn inspect_taint_flows(
             .then(a.terminal.cmp(&b.terminal))
             .then(a.taint_id.cmp(&b.taint_id))
     });
+    bonsai_diagnostics::debug_log!(
+        "compiler-cache",
+        "inspect taint finalize: raw_flows={} unique_flows={} elapsed={:.3}s total={:.3}s",
+        flow_count_before_dedup,
+        flows.len(),
+        finalize_started.elapsed().as_secs_f64(),
+        inspect_taint_started.elapsed().as_secs_f64()
+    );
     Ok((flows, semantic_flow_stats))
 }
 
@@ -2781,21 +2940,24 @@ fn all_callable_entries(
 
 fn collect_taint_flows_for_entry(
     ws: &Workspace,
+    display_index: &TaintDisplayIndex,
     entry: bonsai_common::FuncId,
     graph: &EntryTaintGraph,
     match_context: &TaintFlowMatchContext<'_>,
     out: &mut Vec<InspectTaintFlow>,
 ) {
     let trace_index = trace_record_index_for_inspect(&graph.call_records);
+    let edge_steps = edge_step_index_for_inspect(ws, display_index, &graph.call_records);
+    let build_context = TaintFlowBuildContext {
+        ws,
+        display_index,
+        entry,
+        trace_index: &trace_index,
+        edge_steps: &edge_steps,
+        flow_id_filter: match_context.flow_id_filter,
+    };
     for call in &graph.tainted_calls {
-        if let Some(flow) = taint_flow_for_terminal_call(
-            ws,
-            entry,
-            &trace_index,
-            call,
-            graph.precision,
-            match_context.flow_id_filter,
-        ) {
+        if let Some(flow) = taint_flow_for_terminal_call(&build_context, call, graph.precision) {
             if taint_flow_matches(
                 ws,
                 &flow,
@@ -2808,9 +2970,7 @@ fn collect_taint_flows_for_entry(
         }
     }
     for record in &graph.call_records {
-        if let Some(flow) =
-            taint_flow_for_terminal_edge(ws, entry, &trace_index, record, match_context.flow_id_filter)
-        {
+        if let Some(flow) = taint_flow_for_terminal_edge(&build_context, record) {
             if taint_flow_matches(
                 ws,
                 &flow,
@@ -2824,66 +2984,81 @@ fn collect_taint_flows_for_entry(
     }
 }
 
-fn taint_flow_for_terminal_call(
-    ws: &Workspace,
+struct TaintFlowBuildContext<'a> {
+    ws: &'a Workspace,
+    display_index: &'a TaintDisplayIndex,
     entry: bonsai_common::FuncId,
-    trace_index: &ahash::AHashMap<u64, &TaintedCallEdge>,
+    trace_index: &'a ahash::AHashMap<u64, &'a TaintedCallEdge>,
+    edge_steps: &'a ahash::AHashMap<u64, InspectTaintStep>,
+    flow_id_filter: Option<&'a str>,
+}
+
+fn taint_flow_for_terminal_call(
+    context: &TaintFlowBuildContext<'_>,
     call: &TaintedCall,
     graph_precision: bonsai_common::Precision,
-    flow_id_filter: Option<&str>,
 ) -> Option<InspectTaintFlow> {
     let records = match call.parent_trace_id {
-        Some(trace_id) => lineage_records_for_trace_id_inspect(trace_index, trace_id)?,
+        Some(trace_id) => lineage_records_for_trace_id_inspect(context.trace_index, trace_id)?,
         None => Vec::new(),
     };
     let mut steps: Vec<InspectTaintStep> = records
         .iter()
-        .filter_map(|record| taint_step_for_edge(ws, record))
+        .filter_map(|record| {
+            cached_taint_step_for_edge(context.ws, context.display_index, context.edge_steps, record)
+        })
         .collect();
-    steps.push(taint_step_for_terminal_call(ws, call, graph_precision));
+    steps.push(taint_step_for_terminal_call(
+        context.ws,
+        context.display_index,
+        call,
+        graph_precision,
+    ));
     build_inspect_taint_flow(
-        ws,
-        entry,
+        context.ws,
+        context.display_index,
+        context.entry,
         &records,
         Some(call),
         terminal_kind_label(&call.kind),
         graph_precision,
         steps,
-        flow_id_filter,
+        context.flow_id_filter,
     )
 }
 
 fn taint_flow_for_terminal_edge(
-    ws: &Workspace,
-    entry: bonsai_common::FuncId,
-    trace_index: &ahash::AHashMap<u64, &TaintedCallEdge>,
+    context: &TaintFlowBuildContext<'_>,
     record: &TaintedCallEdge,
-    flow_id_filter: Option<&str>,
 ) -> Option<InspectTaintFlow> {
     let records = if record.trace_id == 0 {
         vec![record]
     } else {
-        lineage_records_for_trace_id_inspect(trace_index, record.trace_id)?
+        lineage_records_for_trace_id_inspect(context.trace_index, record.trace_id)?
     };
     let steps: Vec<InspectTaintStep> = records
         .iter()
-        .filter_map(|record| taint_step_for_edge(ws, record))
+        .filter_map(|record| {
+            cached_taint_step_for_edge(context.ws, context.display_index, context.edge_steps, record)
+        })
         .collect();
     build_inspect_taint_flow(
-        ws,
-        entry,
+        context.ws,
+        context.display_index,
+        context.entry,
         &records,
         None,
         "propagation",
         record.precision,
         steps,
-        flow_id_filter,
+        context.flow_id_filter,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_inspect_taint_flow(
     ws: &Workspace,
+    display_index: &TaintDisplayIndex,
     entry: bonsai_common::FuncId,
     records: &[&TaintedCallEdge],
     terminal_call: Option<&TaintedCall>,
@@ -2906,7 +3081,7 @@ fn build_inspect_taint_flow(
             funcs.push(call.caller);
         }
     }
-    let entry_name = func_display_name(ws, entry);
+    let entry_name = display_index.short_name(ws, entry);
     let terminal = terminal_call
         .map(|call| call.name.clone())
         .or_else(|| steps.last().map(|step| step.callee.clone()))
@@ -2924,11 +3099,8 @@ fn build_inspect_taint_flow(
         }
     }
     let func_ids: Vec<u32> = funcs.iter().map(|func| func.raw()).collect();
-    let chain_display = disambiguated_func_names_for_output(ws, &funcs);
-    let entry_kind = ws
-        .compiler_header_index()
-        .decl_of(bonsai_common::SymbolId::new(entry.raw()))
-        .map(|decl| decl.kind);
+    let chain_display = display_index.disambiguated_names(ws, &funcs);
+    let entry_kind = display_index.kind(ws, entry);
     Some(InspectTaintFlow {
         taint_id,
         entry: entry_name,
@@ -2942,14 +3114,18 @@ fn build_inspect_taint_flow(
     })
 }
 
-fn taint_step_for_edge(ws: &Workspace, record: &TaintedCallEdge) -> Option<InspectTaintStep> {
+fn taint_step_for_edge(
+    ws: &Workspace,
+    display_index: &TaintDisplayIndex,
+    record: &TaintedCallEdge,
+) -> Option<InspectTaintStep> {
     if record.caller == record.callee {
         return None;
     }
     let (file, line, column) = format_span(&record.call_span, ws);
     Some(InspectTaintStep {
-        caller: func_display_name(ws, record.caller),
-        callee: func_display_name(ws, record.callee),
+        caller: display_index.short_name(ws, record.caller),
+        callee: display_index.short_name(ws, record.callee),
         file,
         line,
         column,
@@ -2967,8 +3143,21 @@ fn taint_step_for_edge(ws: &Workspace, record: &TaintedCallEdge) -> Option<Inspe
     })
 }
 
+fn cached_taint_step_for_edge(
+    ws: &Workspace,
+    display_index: &TaintDisplayIndex,
+    edge_steps: &ahash::AHashMap<u64, InspectTaintStep>,
+    record: &TaintedCallEdge,
+) -> Option<InspectTaintStep> {
+    if record.trace_id != 0 {
+        return edge_steps.get(&record.trace_id).cloned();
+    }
+    taint_step_for_edge(ws, display_index, record)
+}
+
 fn taint_step_for_terminal_call(
     ws: &Workspace,
+    display_index: &TaintDisplayIndex,
     call: &TaintedCall,
     precision: bonsai_common::Precision,
 ) -> InspectTaintStep {
@@ -2990,7 +3179,7 @@ fn taint_step_for_terminal_call(
         });
     }
     InspectTaintStep {
-        caller: func_display_name(ws, call.caller),
+        caller: display_index.short_name(ws, call.caller),
         callee: call.name.clone(),
         file,
         line,
@@ -3009,6 +3198,20 @@ fn trace_record_index_for_inspect(records: &[TaintedCallEdge]) -> ahash::AHashMa
         }
     }
     by_id
+}
+
+fn edge_step_index_for_inspect(
+    ws: &Workspace,
+    display_index: &TaintDisplayIndex,
+    records: &[TaintedCallEdge],
+) -> ahash::AHashMap<u64, InspectTaintStep> {
+    records
+        .iter()
+        .filter(|record| record.trace_id != 0)
+        .filter_map(|record| {
+            taint_step_for_edge(ws, display_index, record).map(|step| (record.trace_id, step))
+        })
+        .collect()
 }
 
 fn lineage_records_for_trace_id_inspect<'a>(

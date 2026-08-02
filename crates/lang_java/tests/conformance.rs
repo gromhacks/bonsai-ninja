@@ -12,6 +12,43 @@ fn conformance_traced() {
 }
 
 #[test]
+fn url_rebuild_assignment_lowers_exact_call_composition() {
+    use bonsai_lang_api::{LanguageAdapter, StringCompositionPart};
+    use std::sync::Arc;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "UrlProbe.java",
+            r#"
+class UrlProbe {
+  String rebuild(java.net.URI uri) {
+    String safe = "https://" + uri.getHost()
+        + (uri.getPath() == null ? "/" : uri.getPath());
+    return safe;
+  }
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+    let [fact] = index.string_compositions.as_slice() else {
+        panic!("expected one composition: {:#?}", index.string_compositions);
+    };
+    assert_eq!(fact.target.as_deref(), Some("safe"));
+    assert!(matches!(
+        fact.parts.as_slice(),
+        [
+            StringCompositionPart::Literal { value },
+            StringCompositionPart::Call { .. },
+            StringCompositionPart::CallOrLiteral { fallback, .. }
+        ] if value == "https://" && fallback == "/"
+    ));
+}
+
+#[test]
 fn url_guard_syntax_emits_typed_conditions_and_static_scalars() {
     use bonsai_lang_api::{ConditionExpressionFact, LanguageAdapter, StaticScalarValue};
 

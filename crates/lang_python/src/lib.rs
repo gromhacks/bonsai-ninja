@@ -6,10 +6,11 @@ use bonsai_lang_api::{
         call_arg_from_nodes, collect_kinds, language_from_pack, node_text, normalize_call_name_whitespace,
         parse_with, span_of, GENERIC_HANDLER,
     },
-    AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, ConditionEquality,
+    AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, CharacterClass,
+    CharacterConstraintDomain, CharacterConstraintFact, CharacterConstraintOutput, ConditionEquality,
     ConditionExpressionFact, ConditionOperandFact, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, StaticScalarValue,
-    StringCompositionFact, StringCompositionPart, TypeAliasBinding, Visibility,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, SameOriginPathConstraintFact,
+    StaticScalarValue, StringCompositionFact, StringCompositionPart, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -207,6 +208,8 @@ impl LanguageAdapter for PythonAdapter {
             let src = snapshot.text.as_bytes();
             populate_python_condition_expressions(&mut idx, &tree, file, src);
             idx.string_compositions = python_string_compositions(&tree, file, src);
+            idx.character_constraints = python_character_constraints(&idx, &tree, file, src);
+            idx.same_origin_path_constraints = python_same_origin_path_constraints(&idx, &tree, file, src);
             // Phase-6 return-type extraction: `def f() -> T:` populates
             // `Decl.return_type`, which `apply_assign_call_result_types`
             // then propagates onto LHS type_aliases.
@@ -497,6 +500,9 @@ fn python_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue>
 }
 
 fn python_static_string(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "string" {
+        return None;
+    }
     let text = node_text(&node, src).trim();
     let quote_start = text.find(['\'', '"'])?;
     let prefix = text.get(..quote_start)?.to_ascii_lowercase();
@@ -519,9 +525,633 @@ fn python_static_string(node: Node<'_>, src: &[u8]) -> Option<String> {
     if prefix.contains('r') {
         return Some(inner.to_string());
     }
-    // Exact comparison fails closed for escaped strings until the Python
-    // adapter owns a complete escape decoder.
-    (!inner.contains('\\')).then(|| inner.to_string())
+    let mut decoded = String::new();
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        decoded.push(match characters.next()? {
+            'r' => '\r',
+            'n' => '\n',
+            't' => '\t',
+            '\\' => '\\',
+            '\'' => '\'',
+            '"' => '"',
+            'x' => {
+                let digits = [characters.next()?, characters.next()?];
+                let value = u8::from_str_radix(&digits.iter().collect::<String>(), 16).ok()?;
+                char::from(value)
+            }
+            _ => return None,
+        });
+    }
+    Some(decoded)
+}
+
+fn python_character_constraints(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<CharacterConstraintFact> {
+    let mut facts = python_comprehension_character_constraints(index, tree, file, src);
+    facts.extend(python_regex_substitution_constraints(index, tree, file, src));
+    facts.sort_by_key(|fact| (fact.transform_span.start, fact.transform_span.end));
+    facts.dedup_by_key(|fact| fact.transform_span);
+    facts
+}
+
+fn python_comprehension_character_constraints(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<CharacterConstraintFact> {
+    let mut facts = Vec::new();
+    for assignment in collect_kinds(tree, &["assignment"]) {
+        let Some(target_node) = assignment.child_by_field_name("left") else {
+            continue;
+        };
+        let Some(mut value_node) = assignment.child_by_field_name("right") else {
+            continue;
+        };
+        if target_node.kind() != "identifier" {
+            continue;
+        }
+        while matches!(value_node.kind(), "subscript" | "parenthesized_expression") {
+            let Some(inner) = value_node
+                .child_by_field_name("value")
+                .or_else(|| value_node.named_child(0))
+            else {
+                break;
+            };
+            value_node = inner;
+        }
+        let Some((function, arguments)) = python_call_parts(value_node) else {
+            continue;
+        };
+        let Some((receiver, method)) = python_attribute_parts(function, src) else {
+            continue;
+        };
+        if method != "join" || python_static_string(receiver, src).as_deref() != Some("") {
+            continue;
+        }
+        let generator = if arguments.kind() == "generator_expression" {
+            arguments
+        } else {
+            let args = python_argument_nodes(arguments);
+            let [generator] = args.as_slice() else {
+                continue;
+            };
+            *generator
+        };
+        let Some((input_place, classes, exact_characters)) =
+            python_filtered_character_generator(generator, src)
+        else {
+            continue;
+        };
+        let transform_span = span_of(file, &assignment);
+        let Some(decl) = python_enclosing_callable(index, transform_span) else {
+            continue;
+        };
+        let target = node_text(&target_node, src).trim().to_string();
+        let input_param_index = decl.params.iter().position(|param| param == &input_place);
+        facts.push(CharacterConstraintFact {
+            function_span: decl.span,
+            transform_span,
+            input_place,
+            input_param_index,
+            output: CharacterConstraintOutput::Assignment { target },
+            domain: CharacterConstraintDomain::AllowOnly {
+                classes,
+                exact_characters,
+            },
+        });
+    }
+    facts
+}
+
+fn python_filtered_character_generator(
+    generator: Node<'_>,
+    src: &[u8],
+) -> Option<(String, Vec<CharacterClass>, Vec<String>)> {
+    if generator.kind() != "generator_expression" {
+        return None;
+    }
+    let body = generator.named_child(0)?;
+    if body.kind() != "identifier" {
+        return None;
+    }
+    let loop_variable = node_text(&body, src).trim();
+    let mut cursor = generator.walk();
+    let clauses: Vec<_> = generator.named_children(&mut cursor).skip(1).collect();
+    let [for_clause, if_clause] = clauses.as_slice() else {
+        return None;
+    };
+    if for_clause.kind() != "for_in_clause" || if_clause.kind() != "if_clause" {
+        return None;
+    }
+    let left = for_clause
+        .child_by_field_name("left")
+        .or_else(|| for_clause.named_child(0))?;
+    let right = for_clause
+        .child_by_field_name("right")
+        .or_else(|| for_clause.named_child(1))?;
+    if left.kind() != "identifier"
+        || right.kind() != "identifier"
+        || node_text(&left, src).trim() != loop_variable
+    {
+        return None;
+    }
+    let condition = if_clause
+        .child_by_field_name("condition")
+        .or_else(|| if_clause.named_child(0))?;
+    let mut classes = Vec::new();
+    let mut exact_characters = Vec::new();
+    if !python_character_predicate(condition, loop_variable, src, &mut classes, &mut exact_characters) {
+        return None;
+    }
+    classes.sort_by_key(|class| match class {
+        CharacterClass::Alphabetic => 0,
+        CharacterClass::Alphanumeric => 1,
+        CharacterClass::Digit => 2,
+    });
+    classes.dedup();
+    exact_characters.sort();
+    exact_characters.dedup();
+    Some((
+        node_text(&right, src).trim().to_string(),
+        classes,
+        exact_characters,
+    ))
+}
+
+fn python_character_predicate(
+    node: Node<'_>,
+    variable: &str,
+    src: &[u8],
+    classes: &mut Vec<CharacterClass>,
+    exact_characters: &mut Vec<String>,
+) -> bool {
+    if node.kind() == "boolean_operator" {
+        let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) else {
+            return false;
+        };
+        let operator = src
+            .get(left.end_byte()..right.start_byte())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::trim);
+        return operator == Some("or")
+            && python_character_predicate(left, variable, src, classes, exact_characters)
+            && python_character_predicate(right, variable, src, classes, exact_characters);
+    }
+    if let Some((function, arguments)) = python_call_parts(node) {
+        let Some((receiver, method)) = python_attribute_parts(function, src) else {
+            return false;
+        };
+        if receiver.kind() != "identifier"
+            || node_text(&receiver, src).trim() != variable
+            || !python_argument_nodes(arguments).is_empty()
+        {
+            return false;
+        }
+        let class = match method {
+            "isalpha" => CharacterClass::Alphabetic,
+            "isalnum" => CharacterClass::Alphanumeric,
+            "isdigit" => CharacterClass::Digit,
+            _ => return false,
+        };
+        classes.push(class);
+        return true;
+    }
+    if node.kind() != "comparison_operator" || node.named_child_count() != 2 {
+        return false;
+    }
+    let (Some(left), Some(right)) = (node.named_child(0), node.named_child(1)) else {
+        return false;
+    };
+    let operator = src
+        .get(left.end_byte()..right.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim);
+    if operator != Some("==") {
+        return false;
+    }
+    let literal = if left.kind() == "identifier" && node_text(&left, src).trim() == variable {
+        python_static_string(right, src)
+    } else if right.kind() == "identifier" && node_text(&right, src).trim() == variable {
+        python_static_string(left, src)
+    } else {
+        None
+    };
+    let Some(literal) = literal.filter(|value| value.chars().count() == 1) else {
+        return false;
+    };
+    exact_characters.push(literal);
+    true
+}
+
+fn python_regex_substitution_constraints(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<CharacterConstraintFact> {
+    let assignments = collect_kinds(tree, &["assignment"]);
+    let mut compiled = Vec::new();
+    for assignment in &assignments {
+        let (Some(target), Some(value)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if target.kind() != "identifier" {
+            continue;
+        }
+        let Some((function, arguments)) = python_call_parts(value) else {
+            continue;
+        };
+        let Some((receiver, method)) = python_attribute_parts(function, src) else {
+            continue;
+        };
+        if receiver.kind() != "identifier" || node_text(&receiver, src).trim() != "re" || method != "compile"
+        {
+            continue;
+        }
+        let args = python_argument_nodes(arguments);
+        let Some(pattern) = args.first().and_then(|node| python_static_string(*node, src)) else {
+            continue;
+        };
+        let Some(characters) = python_exact_regex_character_class(&pattern) else {
+            continue;
+        };
+        let name = node_text(&target, src).trim().to_string();
+        let writes = assignments
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .child_by_field_name("left")
+                    .is_some_and(|left| node_text(&left, src).trim() == name)
+            })
+            .count();
+        if writes == 1 {
+            compiled.push((name, span_of(file, assignment), characters));
+        }
+    }
+
+    let mut facts = Vec::new();
+    for return_node in collect_kinds(tree, &["return_statement"]) {
+        let Some(call) = return_node.named_child(0) else {
+            continue;
+        };
+        let Some((function, arguments)) = python_call_parts(call) else {
+            continue;
+        };
+        let Some((receiver, method)) = python_attribute_parts(function, src) else {
+            continue;
+        };
+        if receiver.kind() != "identifier" || method != "sub" {
+            continue;
+        }
+        let receiver_name = node_text(&receiver, src).trim();
+        let Some((_, _, mut excluded)) = compiled
+            .iter()
+            .find(|(name, assignment_span, _)| {
+                name == receiver_name && assignment_span.start < return_node.start_byte() as u64
+            })
+            .cloned()
+        else {
+            continue;
+        };
+        let args = python_argument_nodes(arguments);
+        let [replacement, input] = args.as_slice() else {
+            continue;
+        };
+        let (Some(replacement), true) = (
+            python_exact_replacement_string(*replacement, src),
+            input.kind() == "identifier",
+        ) else {
+            continue;
+        };
+        excluded.retain(|character| !replacement.contains(character));
+        if excluded.is_empty() {
+            continue;
+        }
+        let return_span = span_of(file, &return_node);
+        let Some(decl) = python_enclosing_callable(index, return_span) else {
+            continue;
+        };
+        if !python_is_single_statement_return(return_node) {
+            continue;
+        }
+        let input_place = node_text(input, src).trim().to_string();
+        let Some(input_param_index) = decl.params.iter().position(|param| param == &input_place) else {
+            continue;
+        };
+        facts.push(CharacterConstraintFact {
+            function_span: decl.span,
+            transform_span: return_span,
+            input_place,
+            input_param_index: Some(input_param_index),
+            output: CharacterConstraintOutput::Return,
+            domain: CharacterConstraintDomain::ExcludesExact { characters: excluded },
+        });
+    }
+    facts
+}
+
+fn python_exact_replacement_string(node: Node<'_>, src: &[u8]) -> Option<String> {
+    python_static_string(node, src)
+}
+
+fn python_exact_regex_character_class(pattern: &str) -> Option<Vec<String>> {
+    let inner = pattern.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.starts_with('^') {
+        return None;
+    }
+    let mut characters = Vec::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '-' {
+            return None;
+        }
+        let decoded = if character != '\\' {
+            character
+        } else {
+            match chars.next()? {
+                'r' => '\r',
+                'n' => '\n',
+                't' => '\t',
+                '\\' => '\\',
+                '"' => '"',
+                '\'' => '\'',
+                'x' => {
+                    let digits = [chars.next()?, chars.next()?];
+                    let value = u8::from_str_radix(&digits.iter().collect::<String>(), 16).ok()?;
+                    char::from(value)
+                }
+                _ => return None,
+            }
+        };
+        characters.push(decoded.to_string());
+    }
+    characters.sort();
+    characters.dedup();
+    (!characters.is_empty()).then_some(characters)
+}
+
+fn python_call_parts(call: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    (call.kind() == "call").then_some((
+        call.child_by_field_name("function")?,
+        call.child_by_field_name("arguments")?,
+    ))
+}
+
+fn python_attribute_parts<'a>(attribute: Node<'a>, src: &'a [u8]) -> Option<(Node<'a>, &'a str)> {
+    if attribute.kind() != "attribute" {
+        return None;
+    }
+    let object = attribute.child_by_field_name("object")?;
+    let name = attribute.child_by_field_name("attribute")?;
+    Some((object, node_text(&name, src).trim()))
+}
+
+fn python_argument_nodes(arguments: Node<'_>) -> Vec<Node<'_>> {
+    let mut cursor = arguments.walk();
+    arguments
+        .named_children(&mut cursor)
+        .filter(|node| node.kind() != "keyword_argument")
+        .collect()
+}
+
+fn python_enclosing_callable(index: &DeclIndex, span: Span) -> Option<&bonsai_lang_api::Decl> {
+    index
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                bonsai_lang_api::DeclKind::Function
+                    | bonsai_lang_api::DeclKind::Method
+                    | bonsai_lang_api::DeclKind::Constructor
+            ) && decl.span.start <= span.start
+                && span.end <= decl.span.end
+        })
+        .min_by_key(|decl| decl.span.len())
+}
+
+fn python_is_single_statement_return(return_node: Node<'_>) -> bool {
+    return_node.parent().is_some_and(|block| {
+        block.kind() == "block"
+            && block
+                .named_children(&mut block.walk())
+                .filter(|node| node.kind() != "comment")
+                .count()
+                == 1
+    })
+}
+
+fn python_same_origin_path_constraints(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<SameOriginPathConstraintFact> {
+    if !python_imports_stdlib_urlparse(tree, src) || index.defs.iter().any(|decl| decl.name == "urlparse") {
+        return Vec::new();
+    }
+    let mut facts = Vec::new();
+    for function in collect_kinds(tree, &["function_definition"]) {
+        let function_span = span_of(file, &function);
+        let Some(decl) = index.defs.iter().find(|decl| decl.span == function_span) else {
+            continue;
+        };
+        let Some(body) = function.child_by_field_name("body") else {
+            continue;
+        };
+        let mut cursor = body.walk();
+        let statements: Vec<_> = body
+            .named_children(&mut cursor)
+            .filter(|node| node.kind() != "comment")
+            .collect();
+        let [assignment, guard, final_return] = statements.as_slice() else {
+            continue;
+        };
+        if assignment.kind() != "expression_statement" && assignment.kind() != "assignment" {
+            continue;
+        }
+        let assignment = if assignment.kind() == "assignment" {
+            *assignment
+        } else {
+            assignment.named_child(0).unwrap_or(*assignment)
+        };
+        let (Some(parsed_node), Some(parser_call)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if parsed_node.kind() != "identifier" {
+            continue;
+        }
+        let parsed = node_text(&parsed_node, src).trim();
+        let Some((parser, parser_arguments)) = python_call_parts(parser_call) else {
+            continue;
+        };
+        if parser.kind() != "identifier" || node_text(&parser, src).trim() != "urlparse" {
+            continue;
+        }
+        let parser_args = python_argument_nodes(parser_arguments);
+        let [input_node] = parser_args.as_slice() else {
+            continue;
+        };
+        if input_node.kind() != "identifier" {
+            continue;
+        }
+        let input = node_text(input_node, src).trim();
+        let Some(input_param_index) = decl.params.iter().position(|parameter| parameter == input) else {
+            continue;
+        };
+        if guard.kind() != "if_statement" || guard.child_by_field_name("alternative").is_some() {
+            continue;
+        }
+        let (Some(condition), Some(consequence)) = (
+            guard.child_by_field_name("condition"),
+            guard.child_by_field_name("consequence"),
+        ) else {
+            continue;
+        };
+        if !python_block_returns_static_path(consequence, src, "/")
+            || !python_return_is_exact_place(*final_return, input, src)
+        {
+            continue;
+        }
+        let mut terms = Vec::new();
+        python_collect_or_terms(condition, src, &mut terms);
+        if terms.len() != 4 {
+            continue;
+        }
+        let rejects_scheme = terms
+            .iter()
+            .any(|term| python_attribute_is(*term, parsed, "scheme", src));
+        let rejects_authority = terms
+            .iter()
+            .any(|term| python_attribute_is(*term, parsed, "netloc", src));
+        let requires_absolute_path = terms.iter().any(|term| {
+            term.kind() == "not_operator"
+                && term
+                    .named_child(0)
+                    .is_some_and(|operand| python_startswith_literal(operand, input, "/", src))
+        });
+        let rejects_scheme_relative_path = terms
+            .iter()
+            .any(|term| python_startswith_literal(*term, input, "//", src));
+        if rejects_scheme && rejects_authority && requires_absolute_path && rejects_scheme_relative_path {
+            facts.push(SameOriginPathConstraintFact {
+                function_span,
+                guard_span: span_of(file, guard),
+                input_param_index,
+                rejects_scheme,
+                rejects_authority,
+                requires_absolute_path,
+                rejects_scheme_relative_path,
+            });
+        }
+    }
+    facts.sort_by_key(|fact| (fact.function_span.start, fact.guard_span.start));
+    facts.dedup();
+    facts
+}
+
+fn python_imports_stdlib_urlparse(tree: &Tree, src: &[u8]) -> bool {
+    collect_kinds(tree, &["import_from_statement"])
+        .into_iter()
+        .any(|import| {
+            let mut cursor = import.walk();
+            let names: Vec<_> = import
+                .named_children(&mut cursor)
+                .map(|node| node_text(&node, src).trim())
+                .collect();
+            names.first() == Some(&"urllib.parse") && names.iter().skip(1).any(|name| *name == "urlparse")
+        })
+}
+
+fn python_collect_or_terms<'tree>(node: Node<'tree>, src: &[u8], out: &mut Vec<Node<'tree>>) {
+    if node.kind() == "boolean_operator" {
+        let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) else {
+            out.push(node);
+            return;
+        };
+        let operator = src
+            .get(left.end_byte()..right.start_byte())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::trim);
+        if operator == Some("or") {
+            python_collect_or_terms(left, src, out);
+            python_collect_or_terms(right, src, out);
+            return;
+        }
+    }
+    out.push(node);
+}
+
+fn python_attribute_is(node: Node<'_>, object: &str, field: &str, src: &[u8]) -> bool {
+    python_attribute_parts(node, src).is_some_and(|(receiver, name)| {
+        receiver.kind() == "identifier" && node_text(&receiver, src).trim() == object && name == field
+    })
+}
+
+fn python_startswith_literal(node: Node<'_>, receiver: &str, literal: &str, src: &[u8]) -> bool {
+    let Some((function, arguments)) = python_call_parts(node) else {
+        return false;
+    };
+    let Some((object, method)) = python_attribute_parts(function, src) else {
+        return false;
+    };
+    let args = python_argument_nodes(arguments);
+    object.kind() == "identifier"
+        && node_text(&object, src).trim() == receiver
+        && method == "startswith"
+        && args
+            .as_slice()
+            .first()
+            .and_then(|node| python_static_string(*node, src))
+            .as_deref()
+            == Some(literal)
+        && args.len() == 1
+}
+
+fn python_block_returns_static_path(block: Node<'_>, src: &[u8], expected: &str) -> bool {
+    let mut cursor = block.walk();
+    let statements: Vec<_> = block
+        .named_children(&mut cursor)
+        .filter(|node| node.kind() != "comment")
+        .collect();
+    let [return_node] = statements.as_slice() else {
+        return false;
+    };
+    return_node.kind() == "return_statement"
+        && return_node
+            .named_child(0)
+            .and_then(|value| python_static_string(value, src))
+            .as_deref()
+            == Some(expected)
+}
+
+fn python_return_is_exact_place(return_node: Node<'_>, expected: &str, src: &[u8]) -> bool {
+    return_node.kind() == "return_statement"
+        && return_node
+            .named_child(0)
+            .is_some_and(|value| value.kind() == "identifier" && node_text(&value, src).trim() == expected)
 }
 
 /// Lower Python string concatenation and `value or literal` fallback syntax
@@ -529,15 +1159,36 @@ fn python_static_string(node: Node<'_>, src: &[u8]) -> Option<String> {
 /// consumers never infer safety from a partial expression.
 fn python_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<StringCompositionFact> {
     let mut facts = Vec::new();
+    for assignment in collect_kinds(tree, &["assignment"]) {
+        let (Some(target), Some(value)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if target.kind() != "identifier" {
+            continue;
+        }
+        let mut parts = Vec::new();
+        if lower_python_string_composition(value, file, src, &mut parts) && parts.len() > 1 {
+            facts.push(StringCompositionFact {
+                container_span: span_of(file, &assignment),
+                value_span: span_of(file, &value),
+                target: Some(node_text(&target, src).trim().to_string()),
+                parts,
+            });
+        }
+    }
     for return_node in collect_kinds(tree, &["return_statement"]) {
         let Some(value) = return_node.named_child(0) else {
             continue;
         };
         let mut parts = Vec::new();
-        if lower_python_string_composition(value, src, &mut parts) && parts.len() > 1 {
+        if lower_python_string_composition(value, file, src, &mut parts) && parts.len() > 1 {
             facts.push(StringCompositionFact {
                 container_span: span_of(file, &return_node),
                 value_span: span_of(file, &value),
+                target: None,
                 parts,
             });
         }
@@ -556,6 +1207,7 @@ fn python_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<Stri
 
 fn lower_python_string_composition(
     mut node: Node<'_>,
+    file: FileId,
     src: &[u8],
     out: &mut Vec<StringCompositionPart>,
 ) -> bool {
@@ -572,8 +1224,17 @@ fn lower_python_string_composition(
         out.push(StringCompositionPart::Literal { value });
         return true;
     }
+    if node.kind() == "string" && lower_python_formatted_string(node, src, out) {
+        return true;
+    }
     if let Some(place) = python_exact_place(node, src) {
         out.push(StringCompositionPart::Place { place });
+        return true;
+    }
+    if let Some((function, _)) = python_call_parts(node) {
+        out.push(StringCompositionPart::Call {
+            span: span_of(file, &function),
+        });
         return true;
     }
     if node.kind() == "binary_operator" {
@@ -588,8 +1249,8 @@ fn lower_python_string_composition(
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .map(str::trim);
         return operator == Some("+")
-            && lower_python_string_composition(left, src, out)
-            && lower_python_string_composition(right, src, out);
+            && lower_python_string_composition(left, file, src, out)
+            && lower_python_string_composition(right, file, src, out);
     }
     if node.kind() == "boolean_operator" {
         let (Some(left), Some(right)) = (
@@ -612,6 +1273,64 @@ fn lower_python_string_composition(
         }
     }
     false
+}
+
+fn lower_python_formatted_string(node: Node<'_>, src: &[u8], out: &mut Vec<StringCompositionPart>) -> bool {
+    let text = node_text(&node, src).trim();
+    let Some(quote_start) = text.find(['\'', '"']) else {
+        return false;
+    };
+    let prefix = text[..quote_start].to_ascii_lowercase();
+    if !prefix.contains('f')
+        || prefix.contains('b')
+        || prefix
+            .chars()
+            .any(|character| !matches!(character, 'f' | 'r' | 'u'))
+    {
+        return false;
+    }
+    let mut saw_interpolation = false;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "string_start" | "string_end" => {}
+            "string_content" => {
+                let value = node_text(&child, src);
+                if value.contains('\\') {
+                    return false;
+                }
+                push_python_composition_literal(out, value);
+            }
+            "interpolation" => {
+                let Some(expression) = child
+                    .child_by_field_name("expression")
+                    .or_else(|| child.named_child(0))
+                else {
+                    return false;
+                };
+                let Some(place) = python_exact_place(expression, src) else {
+                    return false;
+                };
+                out.push(StringCompositionPart::Place { place });
+                saw_interpolation = true;
+            }
+            _ => return false,
+        }
+    }
+    saw_interpolation
+}
+
+fn push_python_composition_literal(out: &mut Vec<StringCompositionPart>, value: &str) {
+    if value.is_empty() {
+        return;
+    }
+    if let Some(StringCompositionPart::Literal { value: previous }) = out.last_mut() {
+        previous.push_str(value);
+    } else {
+        out.push(StringCompositionPart::Literal {
+            value: value.to_string(),
+        });
+    }
 }
 
 fn python_exact_place(node: Node<'_>, src: &[u8]) -> Option<String> {

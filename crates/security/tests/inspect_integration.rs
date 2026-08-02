@@ -22,12 +22,12 @@ fn repo_root() -> PathBuf {
 }
 
 fn bin_path() -> Option<PathBuf> {
-    let debug = repo_root().join("target/debug/bonsai-ninja");
-    if debug.exists() {
-        return Some(debug);
-    }
     let release = repo_root().join("target/release/bonsai-ninja");
-    release.exists().then_some(release)
+    if release.exists() {
+        return Some(release);
+    }
+    let debug = repo_root().join("target/debug/bonsai-ninja");
+    debug.exists().then_some(debug)
 }
 
 fn run(args: &[&str]) -> Option<String> {
@@ -37,14 +37,12 @@ fn run(args: &[&str]) -> Option<String> {
         .env("COLUMNS", "200")
         .output()
         .ok()?;
-    if !out.status.success() {
-        eprintln!(
-            "skipping CLI-backed inspect integration; command failed: {}\n{}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return None;
-    }
+    assert!(
+        out.status.success(),
+        "CLI-backed inspect integration failed: {}\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 

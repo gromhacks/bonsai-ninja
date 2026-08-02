@@ -541,6 +541,15 @@ pub struct DynamicKeyDenylistGuardSemantics {
     pub collection_values_arg_index: usize,
     /// Every value that must be rejected before a sink is safe.
     pub rejected_exact_values: Vec<String>,
+    /// Require a helper summary proving nested values pass through the same
+    /// filter before a recursive object-merge sink.
+    #[serde(default)]
+    pub require_recursive_filter: bool,
+    /// Sink argument that must be the exact result of a compiler-proven
+    /// recursive key-filter helper. Required when `require_recursive_filter`
+    /// is true; omitted for inline dynamic-write guards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filtered_value_argument_index: Option<usize>,
 }
 
 /// Rulepack-owned factory roles that make a receiver safe for one sink rule.
@@ -582,6 +591,27 @@ pub struct ConfiguredArgumentFactoryGuardSemantics {
     pub required_named_arguments: Vec<RequiredNamedArgumentSemantics>,
 }
 
+/// One exact aggregate field required on a configuration argument.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredAggregateFieldSemantics {
+    pub path: Vec<String>,
+    pub value: StaticScalarValue,
+}
+
+/// Rulepack-owned safe configuration for a direct sink call.
+///
+/// The adapter decodes a complete, spread-free aggregate argument. The
+/// engine compares typed field/value facts and credits only the explicitly
+/// listed value arguments; neither layer reparses source text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredCallArgumentGuardSemantics {
+    pub configuration_argument_index: usize,
+    pub guarded_value_argument_indices: Vec<usize>,
+    pub required_fields: Vec<RequiredAggregateFieldSemantics>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExactStringMapping {
@@ -600,6 +630,31 @@ pub struct CharacterEscapeSemantics {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub value_arg_indices: Vec<usize>,
     pub required_mappings: Vec<ExactStringMapping>,
+}
+
+/// Security-specific forbidden characters for a compiler-proven local
+/// alphabet constraint. Language frontends own transform syntax; this rule
+/// metadata owns the boundary requirements for the selected sink.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterConstraintSemantics {
+    pub required_excluded_characters: Vec<String>,
+    /// Optional delimiter that must compiler-provably enclose the constrained
+    /// value in the final string composition. SQL sinks use this to
+    /// distinguish a quote-safe string value from an unquoted identifier or
+    /// expression, where an alphanumeric allowlist alone is not a sanitizer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_enclosing_literal_delimiter: Option<String>,
+}
+
+/// Required facets of a compiler-proven same-origin path helper.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SameOriginPathConstraintSemantics {
+    pub require_scheme_rejection: bool,
+    pub require_authority_rejection: bool,
+    pub require_absolute_path: bool,
+    pub require_scheme_relative_rejection: bool,
 }
 
 /// Where the guarded parsed URL value appears at the matched sink.
@@ -782,7 +837,13 @@ pub struct AnalysisSemantics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configured_argument_factory_guard: Option<ConfiguredArgumentFactoryGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured_call_argument_guard: Option<ConfiguredCallArgumentGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_escape: Option<CharacterEscapeSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_constraint: Option<CharacterConstraintSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_origin_path_constraint: Option<SameOriginPathConstraintSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_network_guard: Option<UrlNetworkGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

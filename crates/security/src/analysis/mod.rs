@@ -81,18 +81,20 @@ use findings_build::{
 #[cfg(test)]
 use guard_sanitizers::header_char_allowlist_condition;
 use guard_sanitizers::{
-    character_escape_sanitizer, configured_argument_factory_guard_sanitizer,
-    dev_only_environment_guard_sanitizer, finite_literal_map_lookup_allowlist_sanitizer,
-    finite_literal_selection_sanitizer, go_jwt_inline_keyfunc_algorithm_guard_sanitizer,
-    go_same_origin_redirect_helper_guard_sanitizer, go_xml_decoder_hardening_sanitizer,
-    guarded_char_append_allowlist_sanitizer, java_local_html_escape_helper_return_sanitizer,
-    js_ts_local_html_escape_helper_sanitizer, local_ldap_escape_helper_sanitizer,
-    nosql_eq_filter_wrapper_sanitizer, parameterized_query_guard_sanitizer,
-    path_consumer_containment_guard_sanitizer, path_containment_guard_sanitizer, place_is_assigned_between,
-    python_compiled_regex_guard_sanitizer, python_url_ssrf_guard_sanitizer, receiver_factory_guard_sanitizer,
+    character_constraint_sanitizer, character_escape_sanitizer, configured_argument_factory_guard_sanitizer,
+    configured_call_argument_guard_sanitizer, dev_only_environment_guard_sanitizer,
+    finite_literal_map_lookup_allowlist_sanitizer, finite_literal_selection_sanitizer,
+    go_jwt_inline_keyfunc_algorithm_guard_sanitizer, go_same_origin_redirect_helper_guard_sanitizer,
+    go_xml_decoder_hardening_sanitizer, guarded_char_append_allowlist_sanitizer,
+    java_local_html_escape_helper_return_sanitizer, js_ts_local_html_escape_helper_sanitizer,
+    local_ldap_escape_helper_sanitizer, nosql_eq_filter_wrapper_sanitizer,
+    parameterized_query_guard_sanitizer, path_consumer_containment_guard_sanitizer,
+    path_containment_guard_sanitizer, place_is_assigned_between, python_compiled_regex_guard_sanitizer,
+    python_url_ssrf_guard_sanitizer, receiver_factory_guard_sanitizer,
     relative_path_containment_guard_sanitizer, runtime_type_rejection_guard_sanitizer,
-    source_sink_pair_is_low_signal, terminal_rejection_predicate_guard_span, url_network_guard_sanitizer,
-    url_reconstruction_guard_sanitizer,
+    same_origin_path_constraint_sanitizer, source_sink_pair_is_low_signal,
+    terminal_rejection_predicate_guard_span, url_network_guard_sanitizer, url_reconstruction_guard_sanitizer,
+    CompilerGuardContext,
 };
 use prototype_guard::prototype_pollution_sink_is_guarded;
 #[cfg(test)]
@@ -915,7 +917,7 @@ where
         .into_iter()
         .map(combined_from_raw_finding)
         .collect::<Vec<_>>();
-    drop_rulepack_terminal_dominated_findings(&mut route_findings, pack);
+    drop_rulepack_terminal_dominated_findings(&mut route_findings, pack, Some(ws));
     drop_dominated_wrapper_findings(&mut route_findings);
     drop_dominated_receiver_projection_findings(&mut route_findings);
     // §C cleanup pass: when `--inferred-sources` synthesizes
@@ -5134,14 +5136,18 @@ fn tainted_arg_infos_are_subset(subset: &[TaintedArgInfo], superset: &[TaintedAr
 /// function chain must be a proper prefix of the downstream finding's chain.
 /// Sibling sinks, equal-length paths, and unrelated flows therefore remain
 /// independently reportable.
-fn drop_rulepack_terminal_dominated_findings(findings: &mut Vec<CombinedFindingWithChain>, pack: &Rulepack) {
+fn drop_rulepack_terminal_dominated_findings(
+    findings: &mut Vec<CombinedFindingWithChain>,
+    pack: &Rulepack,
+    ws: Option<&Workspace>,
+) {
     if findings.len() < 2 {
         return;
     }
     let mut dominated = AHashSet::new();
     for (idx, downstream) in findings.iter().enumerate() {
         if findings.iter().enumerate().any(|(other_idx, preferred)| {
-            other_idx != idx && terminal_finding_dominates(preferred, downstream, pack)
+            other_idx != idx && terminal_finding_dominates(preferred, downstream, pack, ws)
         }) {
             dominated.insert(idx);
         }
@@ -5161,6 +5167,7 @@ fn terminal_finding_dominates(
     preferred: &CombinedFindingWithChain,
     downstream: &CombinedFindingWithChain,
     pack: &Rulepack,
+    ws: Option<&Workspace>,
 ) -> bool {
     let preferred_finding = &preferred.finding;
     let downstream_finding = &downstream.finding;
@@ -5174,7 +5181,167 @@ fn terminal_finding_dominates(
         && preferred_finding.status == downstream_finding.status
         && same_source_site(&preferred_finding.source, &downstream_finding.source)
         && cwe_sets_overlap_or_unknown(&preferred_finding.cwe, &downstream_finding.cwe)
-        && function_chain_is_strict_prefix(&preferred.chain_funcs, &downstream.chain_funcs)
+        && (function_chain_is_strict_prefix(&preferred.chain_funcs, &downstream.chain_funcs)
+            || ws.is_some_and(|ws| preferred_helper_return_feeds_transport(preferred, downstream, ws)))
+}
+
+fn preferred_helper_return_feeds_transport(
+    preferred: &CombinedFindingWithChain,
+    transport: &CombinedFindingWithChain,
+    ws: &Workspace,
+) -> bool {
+    if !function_chain_is_strict_prefix(&transport.chain_funcs, &preferred.chain_funcs) {
+        return false;
+    }
+    let (Some(&caller_func), Some(&preferred_func)) =
+        (transport.chain_funcs.last(), preferred.chain_funcs.last())
+    else {
+        return false;
+    };
+    if caller_func == preferred_func {
+        return false;
+    }
+    let Some(caller) = ws.exact_decl(SymbolId::new(caller_func.raw())) else {
+        return false;
+    };
+    let tainted_targets = transport
+        .finding
+        .sink
+        .tainted_args
+        .iter()
+        .flat_map(tainted_arg_target_keys)
+        .collect::<AHashSet<_>>();
+    if tainted_targets.is_empty() {
+        return false;
+    }
+    fn call_span_at_location(
+        events: &[FlowEvent],
+        line: u32,
+        column: u32,
+        span_map: &bonsai_common::SpanMap,
+    ) -> Option<Span> {
+        for event in events {
+            match event {
+                FlowEvent::Call { span, .. } => {
+                    let location = span_map.line_col(span.start);
+                    if location.line == line && (column == 0 || location.column == column) {
+                        return Some(*span);
+                    }
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    if let Some(span) = call_span_at_location(then_events, line, column, span_map)
+                        .or_else(|| call_span_at_location(else_events, line, column, span_map))
+                    {
+                        return Some(span);
+                    }
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => {
+                    if let Some(span) = call_span_at_location(body, line, column, span_map) {
+                        return Some(span);
+                    }
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    if let Some(span) = call_span_at_location(body, line, column, span_map)
+                        .or_else(|| call_span_at_location(catch_events, line, column, span_map))
+                        .or_else(|| call_span_at_location(finally_events, line, column, span_map))
+                    {
+                        return Some(span);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    fn exact_assignment_feeds(
+        events: &[FlowEvent],
+        before: Span,
+        tainted_targets: &AHashSet<String>,
+        exact_call_spans: &AHashSet<Span>,
+    ) -> bool {
+        for event in events {
+            match event {
+                FlowEvent::Assign { span, target, .. }
+                    if span.start < before.start
+                        && clean_overwrite_target_key(target)
+                            .as_ref()
+                            .is_some_and(|target| tainted_targets.contains(target))
+                        && exact_call_spans.iter().any(|call| span_contains(*span, *call)) =>
+                {
+                    return true;
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    if exact_assignment_feeds(then_events, before, tainted_targets, exact_call_spans)
+                        || exact_assignment_feeds(else_events, before, tainted_targets, exact_call_spans)
+                    {
+                        return true;
+                    }
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => {
+                    if exact_assignment_feeds(body, before, tainted_targets, exact_call_spans) {
+                        return true;
+                    }
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    if exact_assignment_feeds(body, before, tainted_targets, exact_call_spans)
+                        || exact_assignment_feeds(catch_events, before, tainted_targets, exact_call_spans)
+                        || exact_assignment_feeds(finally_events, before, tainted_targets, exact_call_spans)
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    let exact_call_spans = ws
+        .cached_resolved_call_graph()
+        .callees_of(caller_func)
+        .filter(|edge| edge.to == preferred_func && edge.precision.is_semantic())
+        .map(|edge| edge.span)
+        .collect::<AHashSet<_>>();
+    let Some(snapshot) = ws.vfs().snapshot(caller.span.file).ok() else {
+        return false;
+    };
+    let span_map = bonsai_common::cached_span_map_arc(caller.span.file, snapshot.version, &snapshot.text);
+    let Some(transport_span) = call_span_at_location(
+        &caller.flow_events,
+        transport.finding.sink.line,
+        transport.finding.sink.column,
+        &span_map,
+    ) else {
+        return false;
+    };
+    !exact_call_spans.is_empty()
+        && exact_assignment_feeds(
+            &caller.flow_events,
+            transport_span,
+            &tainted_targets,
+            &exact_call_spans,
+        )
 }
 
 fn sink_terminal_priority(pack: &Rulepack, finding: &CombinedFindingWithChain) -> u8 {

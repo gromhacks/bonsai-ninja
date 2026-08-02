@@ -223,6 +223,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
   match_examples:
   - name: response headers location assignment
     code: |
@@ -267,6 +270,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
   match_examples:
   - name: response content disposition assignment
     code: |

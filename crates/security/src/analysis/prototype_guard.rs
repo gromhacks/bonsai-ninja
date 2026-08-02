@@ -13,6 +13,7 @@ pub(super) fn prototype_pollution_sink_is_guarded(
     ws: &Workspace,
     sink_rule: &Rule,
     sink: &RuleMatch,
+    tainted_call: &TaintedCall,
 ) -> bool {
     let Some(semantics) = sink_rule
         .analysis_semantics
@@ -21,6 +22,12 @@ pub(super) fn prototype_pollution_sink_is_guarded(
     else {
         return false;
     };
+    if recursive_dynamic_key_filter_is_guarded(ws, sink, tainted_call, semantics) {
+        return true;
+    }
+    if semantics.require_recursive_filter {
+        return false;
+    }
     let Some(file_index) = ws.exact_decl_index_shared(sink.span.file) else {
         return false;
     };
@@ -50,6 +57,77 @@ pub(super) fn prototype_pollution_sink_is_guarded(
     };
     let mut guarded = false;
     flow_guard_state_at_sink(&decl.flow_events, *call_span, &context, &mut guarded) && guarded
+}
+
+fn recursive_dynamic_key_filter_is_guarded(
+    ws: &Workspace,
+    sink: &RuleMatch,
+    tainted_call: &TaintedCall,
+    semantics: &DynamicKeyDenylistGuardSemantics,
+) -> bool {
+    let Some(argument_index) = semantics.filtered_value_argument_index else {
+        return false;
+    };
+    if !tainted_call
+        .tainted_args
+        .iter()
+        .any(|argument| argument.index == argument_index)
+    {
+        return false;
+    }
+    let Some(file_index) = ws.exact_decl_index_shared(sink.span.file) else {
+        return false;
+    };
+    let Some(argument) = bonsai_lang_api::call_argument_value_fact(
+        &file_index.call_argument_values,
+        tainted_call.call_span,
+        argument_index,
+    ) else {
+        return false;
+    };
+    let Some(helper_call_span) = argument.direct_call_span else {
+        return false;
+    };
+    if argument.value_flow.place.is_some()
+        || argument.value_flow.projection.is_some()
+        || !argument.value_flow.aggregate_fields.is_empty()
+        || !argument.value_flow.tuple_items.is_empty()
+        || !argument.value_flow.spreads.is_empty()
+    {
+        return false;
+    }
+
+    let call_graph = ws.cached_resolved_call_graph();
+    let targets: AHashSet<_> = call_graph
+        .callees_of(tainted_call.caller)
+        .filter(|edge| edge.precision.is_semantic() && edge.span == helper_call_span)
+        .map(|edge| edge.to)
+        .collect();
+    let mut targets = targets.into_iter();
+    let Some(helper) = targets.next() else {
+        return false;
+    };
+    if targets.next().is_some() {
+        return false;
+    }
+    let Some(decl) = ws.exact_decl(SymbolId::new(helper.raw())) else {
+        return false;
+    };
+    let Some(helper_index) = ws.exact_decl_index_shared(decl.span.file) else {
+        return false;
+    };
+    helper_index.dynamic_key_filters.iter().any(|fact| {
+        fact.function_span == decl.span
+            && fact.input_param_index < decl.params.len()
+            && (!semantics.require_recursive_filter || fact.recursive)
+            && rule_target_matches_call(
+                &fact.collection_constructor,
+                &[],
+                &semantics.collection_constructor,
+            )
+            && rule_target_matches_call(&fact.membership_check, &[], &semantics.membership_check)
+            && exact_string_sets_equal(&fact.rejected_exact_values, &semantics.rejected_exact_values)
+    })
 }
 
 fn dynamic_sink_key_variables(call: &FlowEvent) -> AHashSet<String> {

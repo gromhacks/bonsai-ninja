@@ -7,9 +7,10 @@ use bonsai_lang_api::{
         with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
-    ConditionExpressionFact, ConditionOperandFact, DeclIndex, FiniteLiteralSelectionFact, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    StaticStringMapEntry, StaticStringMapFact, TypeAliasBinding, Visibility,
+    ConditionExpressionFact, ConditionOperandFact, DeclIndex, DynamicKeyFilterFact,
+    FiniteLiteralSelectionFact, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
+    LanguageCapabilities, LanguageId, StaticScalarValue, StaticStringMapEntry, StaticStringMapFact,
+    TypeAliasBinding, Visibility,
 };
 use bonsai_lang_api::{CallArg, DeclKind, FlowEvent};
 use std::collections::{HashMap, HashSet};
@@ -225,6 +226,310 @@ pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, fi
     index.static_string_maps = ecmascript_static_string_maps(index, tree, file, src);
     index.finite_literal_selections = ecmascript_finite_literal_selections(index, tree, file, src);
     index.character_substitutions = ecmascript_character_substitutions(&index.defs, tree, file, src);
+    index.dynamic_key_filters = ecmascript_dynamic_key_filters(index, tree, file, src);
+    bonsai_lang_api::kit::populate_call_argument_static_values(
+        index,
+        tree,
+        file,
+        src,
+        ecmascript_static_scalar,
+    );
+}
+
+fn ecmascript_dynamic_key_filters(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<DynamicKeyFilterFact> {
+    let mut facts = Vec::new();
+    for function in collect_kinds(tree, &["function_declaration"]) {
+        let function_span = span_of(file, &function);
+        let Some(decl) = index.defs.iter().find(|decl| decl.span == function_span) else {
+            continue;
+        };
+        let Some(body) = function.child_by_field_name("body") else {
+            continue;
+        };
+        for block in named_descendants_of_kind(body, "statement_block") {
+            let Some(fact) =
+                ecmascript_dynamic_key_filter_in_block(tree, function, body, block, decl, file, src)
+            else {
+                continue;
+            };
+            facts.push(fact);
+        }
+    }
+    facts.sort_by_key(|fact| (fact.function_span.start, fact.guard_span.start));
+    facts.dedup_by_key(|fact| (fact.function_span, fact.guard_span));
+    facts
+}
+
+fn ecmascript_dynamic_key_filter_in_block(
+    tree: &Tree,
+    function: Node<'_>,
+    function_body: Node<'_>,
+    block: Node<'_>,
+    decl: &bonsai_lang_api::Decl,
+    file: FileId,
+    src: &[u8],
+) -> Option<DynamicKeyFilterFact> {
+    let statements = named_children(block);
+    let [output_decl, loop_node, return_node] = statements.as_slice() else {
+        return None;
+    };
+    if output_decl.kind() != "lexical_declaration"
+        || loop_node.kind() != "for_in_statement"
+        || return_node.kind() != "return_statement"
+    {
+        return None;
+    }
+
+    let (output_name, output_value) = single_variable_declaration(*output_decl, src)?;
+    if output_value.kind() != "object" || !named_children(output_value).is_empty() {
+        return None;
+    }
+    let returned = return_node.named_child(0)?;
+    if returned.kind() != "identifier" || node_text(&returned, src).trim() != output_name {
+        return None;
+    }
+
+    let left = loop_node.child_by_field_name("left")?;
+    let bindings = named_children(left);
+    let [key_node, value_node] = bindings.as_slice() else {
+        return None;
+    };
+    if key_node.kind() != "identifier" || value_node.kind() != "identifier" {
+        return None;
+    }
+    let key = node_text(key_node, src).trim();
+    let value = node_text(value_node, src).trim();
+
+    let iteration = loop_node.child_by_field_name("right")?;
+    let iteration_call = unwrap_ecmascript_expression(iteration);
+    let (iteration_receiver, iteration_method) = ecmascript_member_call(iteration_call, src)?;
+    if iteration_receiver != "Object" || iteration_method != "entries" {
+        return None;
+    }
+    let iteration_args = ecmascript_call_arguments(iteration_call);
+    let [iteration_input] = iteration_args.as_slice() else {
+        return None;
+    };
+    let input = unwrap_ecmascript_expression(*iteration_input);
+    if input.kind() != "identifier" {
+        return None;
+    }
+    let input_name = node_text(&input, src).trim();
+    let input_param_index = decl.params.iter().position(|param| param == input_name)?;
+
+    let loop_body = loop_node.child_by_field_name("body")?;
+    let loop_statements = named_children(loop_body);
+    let [guard, write_statement] = loop_statements.as_slice() else {
+        return None;
+    };
+    if guard.kind() != "if_statement" || write_statement.kind() != "expression_statement" {
+        return None;
+    }
+    if guard.child_by_field_name("alternative").is_some()
+        || guard.child_by_field_name("consequence")?.kind() != "continue_statement"
+    {
+        return None;
+    }
+    let condition = unwrap_ecmascript_expression(guard.child_by_field_name("condition")?);
+    let (collection, membership_check) = ecmascript_member_call(condition, src)?;
+    let membership_args = ecmascript_call_arguments(condition);
+    let [membership_subject] = membership_args.as_slice() else {
+        return None;
+    };
+    if membership_subject.kind() != "identifier" || node_text(membership_subject, src).trim() != key {
+        return None;
+    }
+
+    let write = write_statement.named_child(0)?;
+    if write.kind() != "assignment_expression" {
+        return None;
+    }
+    let target = write.child_by_field_name("left")?;
+    if target.kind() != "subscript_expression"
+        || target
+            .child_by_field_name("object")
+            .is_none_or(|node| node.kind() != "identifier" || node_text(&node, src).trim() != output_name)
+        || target
+            .child_by_field_name("index")
+            .is_none_or(|node| node.kind() != "identifier" || node_text(&node, src).trim() != key)
+    {
+        return None;
+    }
+    let recursive_call = unwrap_ecmascript_expression(write.child_by_field_name("right")?);
+    if recursive_call.kind() != "call_expression" {
+        return None;
+    }
+    let recursive_function = recursive_call.child_by_field_name("function")?;
+    let recursive_args = ecmascript_call_arguments(recursive_call);
+    let [recursive_value] = recursive_args.as_slice() else {
+        return None;
+    };
+    if recursive_function.kind() != "identifier"
+        || node_text(&recursive_function, src).trim() != decl.name
+        || recursive_value.kind() != "identifier"
+        || node_text(recursive_value, src).trim() != value
+    {
+        return None;
+    }
+
+    // The denylist must be one immutable top-level lexical binding shared by
+    // this top-level helper. This gives the adapter a closed lexical proof
+    // without teaching shared analysis JavaScript name-resolution rules.
+    if function.parent().is_none_or(|parent| parent.kind() != "program") {
+        return None;
+    }
+    let (collection_constructor, rejected_exact_values) =
+        ecmascript_exact_top_level_collection(tree, function, function_body, collection, src)?;
+
+    Some(DynamicKeyFilterFact {
+        function_span: decl.span,
+        guard_span: span_of(file, guard),
+        input_param_index,
+        collection_constructor,
+        membership_check: membership_check.to_string(),
+        rejected_exact_values,
+        recursive: true,
+    })
+}
+
+fn ecmascript_exact_top_level_collection(
+    tree: &Tree,
+    function: Node<'_>,
+    function_body: Node<'_>,
+    collection: &str,
+    src: &[u8],
+) -> Option<(String, Vec<String>)> {
+    if named_descendants_of_kind(function_body, "variable_declarator")
+        .iter()
+        .any(|declarator| {
+            declarator
+                .child_by_field_name("name")
+                .is_some_and(|name| name.kind() == "identifier" && node_text(&name, src).trim() == collection)
+        })
+    {
+        return None;
+    }
+    let mut candidates = Vec::new();
+    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+        if declarator.start_byte() >= function.start_byte()
+            || declarator
+                .parent()
+                .and_then(|parent| parent.parent())
+                .is_none_or(|parent| parent.kind() != "program")
+        {
+            continue;
+        }
+        let Some(name) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        if name.kind() != "identifier" || node_text(&name, src).trim() != collection {
+            continue;
+        }
+        let declaration = declarator.parent()?;
+        if declaration.child(0).is_none_or(|token| token.kind() != "const") {
+            continue;
+        }
+        let value = declarator.child_by_field_name("value")?;
+        if value.kind() != "new_expression" {
+            continue;
+        }
+        let constructor = value.child_by_field_name("constructor")?;
+        if constructor.kind() != "identifier" {
+            continue;
+        }
+        let arguments = ecmascript_call_arguments(value);
+        let [array] = arguments.as_slice() else {
+            continue;
+        };
+        if array.kind() != "array" {
+            continue;
+        }
+        let items = named_children(*array);
+        if items.is_empty() || items.iter().any(|item| item.kind() == "spread_element") {
+            continue;
+        }
+        let values: Option<Vec<_>> = items
+            .iter()
+            .map(|item| ecmascript_static_string_literal(*item, src))
+            .collect();
+        let Some(values) = values else {
+            continue;
+        };
+        candidates.push((node_text(&constructor, src).trim().to_string(), values));
+    }
+    let [candidate] = candidates.as_slice() else {
+        return None;
+    };
+    if collect_kinds(
+        tree,
+        &["assignment_expression", "augmented_assignment_expression"],
+    )
+    .iter()
+    .any(|assignment| {
+        assignment
+            .child_by_field_name("left")
+            .is_some_and(|left| left.kind() == "identifier" && node_text(&left, src).trim() == collection)
+    }) {
+        return None;
+    }
+    Some(candidate.clone())
+}
+
+fn named_descendants_of_kind<'tree>(root: Node<'tree>, kind: &str) -> Vec<Node<'tree>> {
+    let mut found = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == kind {
+                found.push(child);
+            }
+            stack.push(child);
+        }
+    }
+    found
+}
+
+fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).collect()
+}
+
+fn single_variable_declaration<'tree, 'src>(
+    declaration: Node<'tree>,
+    src: &'src [u8],
+) -> Option<(&'src str, Node<'tree>)> {
+    let declarators: Vec<_> = named_children(declaration)
+        .into_iter()
+        .filter(|node| node.kind() == "variable_declarator")
+        .collect();
+    let [declarator] = declarators.as_slice() else {
+        return None;
+    };
+    let name = declarator.child_by_field_name("name")?;
+    let value = declarator.child_by_field_name("value")?;
+    (name.kind() == "identifier").then_some((node_text(&name, src).trim(), value))
+}
+
+fn ecmascript_member_call<'a>(call: Node<'_>, src: &'a [u8]) -> Option<(&'a str, &'a str)> {
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let function = call.child_by_field_name("function")?;
+    if function.kind() != "member_expression" {
+        return None;
+    }
+    let object = function.child_by_field_name("object")?;
+    let property = function.child_by_field_name("property")?;
+    if object.kind() != "identifier" || property.kind() != "property_identifier" {
+        return None;
+    }
+    Some((node_text(&object, src).trim(), node_text(&property, src).trim()))
 }
 
 fn ecmascript_static_string_maps(
@@ -1086,8 +1391,19 @@ fn ecmascript_character_substitution(
 }
 
 fn unwrap_ecmascript_expression(mut node: Node<'_>) -> Node<'_> {
-    while matches!(node.kind(), "parenthesized_expression" | "expression") && node.named_child_count() == 1 {
-        node = node.named_child(0).expect("single named child");
+    loop {
+        if matches!(node.kind(), "parenthesized_expression" | "expression") && node.named_child_count() == 1 {
+            node = node.named_child(0).expect("single named child");
+            continue;
+        }
+        if matches!(node.kind(), "as_expression" | "type_assertion") {
+            let Some(value) = node.named_child(0) else {
+                break;
+            };
+            node = value;
+            continue;
+        }
+        break;
     }
     node
 }
@@ -1365,6 +1681,18 @@ fn ecmascript_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String
     }
     let inner = text.get(1..text.len().checked_sub(1)?)?;
     decode_ecmascript_string_contents(inner, quote as char)
+}
+
+fn ecmascript_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
+    match node.kind() {
+        "true" => Some(StaticScalarValue::Boolean(true)),
+        "false" => Some(StaticScalarValue::Boolean(false)),
+        "null" => Some(StaticScalarValue::Null),
+        "string" | "string_literal" => Some(StaticScalarValue::String(ecmascript_static_string_literal(
+            node, src,
+        )?)),
+        _ => None,
+    }
 }
 
 fn decode_ecmascript_string_contents(inner: &str, quote: char) -> Option<String> {

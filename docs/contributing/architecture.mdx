@@ -175,6 +175,14 @@ validates every sidecar against the same current workspace snapshot; if a file
 changed between workers, it reruns the exact phases until one coherent atomic
 generation is current. That retry reaches quiescence without an iteration cap.
 
+The accelerator core is a versioned fixed-width compiler header, not a generic
+object-graph serialization. Its dense node/function arrays are decoded in one
+buffered pass after checked row-count and byte-length validation, then checked
+against the canonical workspace segment layout and stable identities. The
+contextual and symbolic relations remain independently decodable streams. This
+keeps startup proportional to encoded facts and prevents a warm query from
+allocating a second temporary object graph beside the IDG.
+
 The linkage factstore publishes three independently decodable views of that
 generation:
 

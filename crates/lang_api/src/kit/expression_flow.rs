@@ -326,6 +326,70 @@ fn is_nested_aggregate(kind: &str) -> bool {
     )
 }
 
+/// Decode every scalar field in a complete, spread-free aggregate.
+///
+/// The shared walker contributes only grammar structure and static field
+/// relationships already used by [`expression_flow_from_node`]. Literal
+/// spelling remains language-owned through `decode`. Any dynamic key,
+/// spread, duplicate field, or non-scalar leaf makes the aggregate inexact.
+pub(super) fn exact_static_aggregate_fields(
+    node: Node<'_>,
+    src: &[u8],
+    decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
+) -> Option<Vec<crate::StaticAggregateFieldValue>> {
+    fn collect(
+        node: Node<'_>,
+        src: &[u8],
+        decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
+        path: &mut Vec<String>,
+        out: &mut Vec<crate::StaticAggregateFieldValue>,
+    ) -> Option<()> {
+        if !is_nested_aggregate(node.kind()) {
+            return None;
+        }
+        let mut saw_field = false;
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if is_spread_node(child.kind()) {
+                return None;
+            }
+            let Some((key, value)) = field_pair_nodes(child) else {
+                // Comments and grammar-owned punctuation are not named
+                // members. Any other named aggregate child is unsupported
+                // and therefore cannot prove a complete configuration.
+                if child.kind() != "comment" {
+                    return None;
+                }
+                continue;
+            };
+            let name = static_field_name(key, src)?;
+            if out.iter().any(|field| {
+                field.path.len() == path.len() + 1
+                    && field.path[..path.len()] == path[..]
+                    && field.path.last() == Some(&name)
+            }) {
+                return None;
+            }
+            saw_field = true;
+            path.push(name);
+            if is_nested_aggregate(value.kind()) {
+                collect(value, src, decode, path, out)?;
+            } else {
+                out.push(crate::StaticAggregateFieldValue {
+                    path: path.clone(),
+                    value: decode(value, src)?,
+                });
+            }
+            path.pop();
+        }
+        saw_field.then_some(())
+    }
+
+    let mut out = Vec::new();
+    collect(node, src, decode, &mut Vec::new(), &mut out)?;
+    Some(out)
+}
+
 fn is_positional_aggregate(kind: &str) -> bool {
     matches!(
         kind,

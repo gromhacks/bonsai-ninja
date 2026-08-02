@@ -315,6 +315,12 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    same_origin_path_constraint:
+      require_scheme_rejection: true
+      require_authority_rejection: true
+      require_absolute_path: true
+      require_scheme_relative_rejection: true
   match_examples:
   - name: open redirect response redirect
     code: |

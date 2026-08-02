@@ -297,15 +297,38 @@ tainted just because a GraphQL package is imported.
 
 ## Sanitizer credit
 
-Sanitizer rules don't change the engine's propagation. After the engine
-emits findings, the security layer walks each finding's chain and looks
-for sanitizer matches in scope. The credit table maps `tag -> tag` (e.g.
-`unescaped-html -> escaped-html`) and downgrades the finding's severity or
-suppresses it based on the rule's declared coverage.
+Crediting sanitizer matches do not erase IDG reachability. After the engine
+emits a complete source-to-sink path, the security layer relates matched
+sanitizers and compiler-proven guard summaries to the exact lineage. The
+credit table maps compatible security contexts and downgrades or suppresses
+the finding according to the rule's declared coverage.
 
 This keeps sanitizer attribution conservative: false positives over false
 negatives. A sanitizer rule that doesn't match a real call doesn't credit
 anything.
+
+Passthrough rules are different. They extend taint through a transform and
+never receive sanitizer credit. Text output labels them `TAINT TRANSFORM`;
+SARIF code-flow steps use `taint-transform`; structured output stores their
+ids in `taint_transform_rule_ids`, separate from `sanitizer_rule_ids`.
+
+### Compiler-proven guard semantics
+
+`analysis_semantics` lets a sink describe a security boundary over exact
+adapter IR without hardcoding an API or a language in the engine:
+
+| Field | Exact proof consumed |
+|---|---|
+| `configured_call_argument_guard` | A complete spread-free aggregate argument whose frontend-decoded scalar fields equal the rule's required values. |
+| `character_constraint` | A constrained alphabet reaches the selected sink value; SQL rules may also require that value to be enclosed by a particular literal delimiter. |
+| `same_origin_path_constraint` | A unique helper rejects URL schemes and authorities, requires `/`, and rejects `//` before returning the path. |
+| `dynamic_key_denylist_guard` | A unique helper drops the rule-owned static key set and, when required, recursively rebuilds nested values. |
+| `url_reconstruction_guard` | A unique helper parses a URL, restricts scheme and host against static facts, and rebuilds the outbound URL from the declared components. |
+| `sink_terminal_priority` | Presentation-only collapse of a lower-priority downstream transport sink in the same vulnerability class when an exact resolved call/assignment chain proves both sites belong to one flow. |
+
+The adapter owns Tree-sitter syntax recognition; the rulepack owns API roles
+and security values; shared analysis only joins those typed facts. Missing,
+ambiguous, mutable, or partially decoded evidence never grants credit.
 
 ## Output formats
 

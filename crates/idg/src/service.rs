@@ -31,7 +31,7 @@ use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 use std::hash::Hash;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 
@@ -213,24 +213,11 @@ struct UnifiedAddressSpace {
 /// same immutable graph generation; it never admits or suppresses a semantic
 /// edge. Keeping the wire version separate lets us evolve this acceleration
 /// layer without conflating it with the canonical workspace IDG ABI.
-const IDG_QUERY_ACCELERATOR_VERSION: u32 = 4;
+const IDG_QUERY_ACCELERATOR_VERSION: u32 = 5;
+const IDG_QUERY_CORE_MAGIC: [u8; 8] = *b"BNSIQC01";
+const IDG_QUERY_CORE_COUNT_FIELDS: usize = 12;
+const IDG_QUERY_CORE_HEADER_BYTES: u64 = 8 + 4 + 1 + 3 + 4 + (IDG_QUERY_CORE_COUNT_FIELDS as u64 * 8);
 
-#[derive(serde::Serialize)]
-struct PersistedQueryAcceleratorRef<'a> {
-    version: u32,
-    max_precision: Precision,
-    segment_count: u32,
-    segment_bases: &'a [u32],
-    func_segments: &'a [u32],
-    node_funcs: &'a [FuncId],
-    node_boundaries: &'a [u8],
-    projected_storage: &'a [u8],
-    nodes_by_func: &'a NodesByFunc,
-    call_args: &'a CallArgIdentityIndex,
-    params: &'a ParamIdentityIndex,
-}
-
-#[derive(serde::Deserialize)]
 struct PersistedQueryAccelerator {
     version: u32,
     max_precision: Precision,
@@ -266,11 +253,6 @@ impl NodesByFunc {
         let start = *self.offsets.get(index)? as usize;
         let end = *self.offsets.get(index + 1)? as usize;
         Some(&self.nodes[start..end])
-    }
-
-    fn is_valid_for(&self, node_count: usize) -> bool {
-        offsets_are_valid(&self.offsets, self.nodes.len())
-            && self.nodes.iter().all(|node| (node.0 as usize) < node_count)
     }
 }
 
@@ -2585,10 +2567,87 @@ fn cross_call_is_valid(call: CrossCallEdge, func_segments: &[u32]) -> bool {
 }
 
 impl PersistedQueryAccelerator {
-    fn decode(reader: impl std::io::Read, workspace: &IdgWorkspace) -> crate::IdgResult<Self> {
-        let decoded: Self = bonsai_common::wire::decode_from_reader(reader).map_err(|error| {
-            invalid_query_accelerator(format!("workspace IDG query accelerator decode failed: {error}"))
-        })?;
+    fn decode(reader: impl Read, encoded_bytes: u64, workspace: &IdgWorkspace) -> crate::IdgResult<Self> {
+        let mut reader = BufReader::with_capacity(1024 * 1024, reader);
+        let mut magic = [0_u8; 8];
+        reader.read_exact(&mut magic)?;
+        if magic != IDG_QUERY_CORE_MAGIC {
+            return Err(invalid_query_accelerator(
+                "workspace IDG query accelerator core magic mismatch",
+            ));
+        }
+        let version = read_core_u32(&mut reader)?;
+        let mut precision = [0_u8; 1];
+        reader.read_exact(&mut precision)?;
+        let mut reserved = [0_u8; 3];
+        reader.read_exact(&mut reserved)?;
+        if precision[0] != encode_precision(SEMANTIC_MAX_PRECISION) || reserved != [0; 3] {
+            return Err(invalid_query_accelerator(
+                "workspace IDG query accelerator precision header mismatch",
+            ));
+        }
+        let segment_count = read_core_u32(&mut reader)?;
+        let mut counts = [0_u64; IDG_QUERY_CORE_COUNT_FIELDS];
+        for count in &mut counts {
+            *count = read_core_u64(&mut reader)?;
+        }
+        let widths = [4_u64, 4, 4, 1, 1, 4, 4, 4, 20, 4, 4, 4];
+        let expected_bytes =
+            counts
+                .iter()
+                .zip(widths)
+                .try_fold(IDG_QUERY_CORE_HEADER_BYTES, |total, (count, width)| {
+                    count
+                        .checked_mul(width)
+                        .and_then(|bytes| total.checked_add(bytes))
+                        .ok_or_else(|| {
+                            invalid_query_accelerator("workspace IDG query accelerator size overflow")
+                        })
+                })?;
+        if expected_bytes != encoded_bytes {
+            return Err(invalid_query_accelerator(format!(
+                "workspace IDG query accelerator byte length mismatch: expected {expected_bytes}, got {encoded_bytes}",
+            )));
+        }
+        let counts = counts
+            .map(|count| {
+                usize::try_from(count).map_err(|_| {
+                    invalid_query_accelerator("workspace IDG query accelerator row count exceeds usize")
+                })
+            })
+            .into_iter()
+            .collect::<crate::IdgResult<Vec<_>>>()?;
+        let segment_bases = read_core_u32_values(&mut reader, counts[0], std::convert::identity)?;
+        let func_segments = read_core_u32_values(&mut reader, counts[1], std::convert::identity)?;
+        let node_funcs = read_core_u32_values(&mut reader, counts[2], FuncId::new)?;
+        let node_boundaries = read_core_bytes(&mut reader, counts[3])?;
+        let projected_storage = read_core_bytes(&mut reader, counts[4])?;
+        let nodes_by_func = NodesByFunc {
+            offsets: read_core_u32_values(&mut reader, counts[5], std::convert::identity)?,
+            nodes: read_core_u32_values(&mut reader, counts[6], NodeId)?,
+        };
+        let call_args = CallArgIdentityIndex {
+            nodes: read_core_u32_values(&mut reader, counts[7], WsNodeId)?,
+            sites: read_core_spans(&mut reader, counts[8])?,
+            indices: read_core_u32_values(&mut reader, counts[9], std::convert::identity)?,
+        };
+        let params = ParamIdentityIndex {
+            nodes: read_core_u32_values(&mut reader, counts[10], WsNodeId)?,
+            indices: read_core_u32_values(&mut reader, counts[11], std::convert::identity)?,
+        };
+        let decoded = Self {
+            version,
+            max_precision: SEMANTIC_MAX_PRECISION,
+            segment_count,
+            segment_bases,
+            func_segments,
+            node_funcs,
+            node_boundaries,
+            projected_storage,
+            nodes_by_func,
+            call_args,
+            params,
+        };
         decoded.validate(workspace)?;
         Ok(decoded)
     }
@@ -2606,11 +2665,6 @@ impl PersistedQueryAccelerator {
             && self.node_funcs.len() == node_count
             && self.node_boundaries.len() == node_count
             && self.projected_storage.len() == node_count
-            && self
-                .node_boundaries
-                .iter()
-                .all(|kind| *kind <= NODE_BOUNDARY_CALL_RET)
-            && self.projected_storage.iter().all(|value| *value <= 1)
             && self.func_segments.iter().all(|segment| {
                 *segment == u32::MAX || usize::try_from(*segment).is_ok_and(|value| value < segment_count)
             });
@@ -2623,19 +2677,22 @@ impl PersistedQueryAccelerator {
         for segment in 0..segment_count {
             let start = self.segment_bases[segment] as usize;
             let end = self.segment_bases[segment + 1] as usize;
-            if self.node_funcs[start..end]
-                .iter()
-                .any(|func| self.func_segments.get(func.raw() as usize).copied() != Some(segment as u32))
-            {
-                return Err(invalid_query_accelerator(
-                    "query accelerator node ownership disagrees with its function directory",
-                ));
+            for node in start..end {
+                let func = self.node_funcs[node];
+                if self.node_boundaries[node] > NODE_BOUNDARY_CALL_RET
+                    || self.projected_storage[node] > 1
+                    || self.func_segments.get(func.raw() as usize).copied() != Some(segment as u32)
+                {
+                    return Err(invalid_query_accelerator(
+                        "query accelerator node layout or ownership is invalid",
+                    ));
+                }
             }
         }
 
         let identity_layout_valid =
             self.nodes_by_func.offsets.len() == self.func_segments.len().saturating_add(1)
-                && self.nodes_by_func.is_valid_for(node_count)
+                && offsets_are_valid(&self.nodes_by_func.offsets, self.nodes_by_func.nodes.len())
                 && self.call_args.is_valid_for(node_count)
                 && self.params.is_valid_for(node_count)
                 && self.params.nodes.iter().all(|node| {
@@ -2650,11 +2707,13 @@ impl PersistedQueryAccelerator {
             let func = FuncId::new(u32::try_from(func_raw).map_err(|_| {
                 invalid_query_accelerator("query accelerator function directory exceeds u32")
             })?);
-            if self
-                .nodes_by_func
-                .get(func)
-                .is_some_and(|nodes| nodes.iter().any(|node| self.node_funcs[node.0 as usize] != func))
-            {
+            if self.nodes_by_func.get(func).is_some_and(|nodes| {
+                nodes.iter().any(|node| {
+                    self.node_funcs
+                        .get(node.0 as usize)
+                        .is_none_or(|owner| *owner != func)
+                })
+            }) {
                 return Err(invalid_query_accelerator(
                     "query accelerator function-to-node directory is inconsistent",
                 ));
@@ -2680,6 +2739,136 @@ impl PersistedQueryAccelerator {
             symbolic_runtime: OnceLock::new(),
         }
     }
+}
+
+fn read_core_u32(reader: &mut impl Read) -> crate::IdgResult<u32> {
+    let mut bytes = [0_u8; 4];
+    reader.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_core_u64(reader: &mut impl Read) -> crate::IdgResult<u64> {
+    let mut bytes = [0_u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn read_core_u32_values<T>(
+    reader: &mut impl Read,
+    count: usize,
+    map: impl Fn(u32) -> T,
+) -> crate::IdgResult<Box<[T]>> {
+    const VALUES_PER_PAGE: usize = 16 * 1024;
+    let mut values = Vec::with_capacity(count);
+    let mut bytes = vec![0_u8; VALUES_PER_PAGE * 4];
+    let mut remaining = count;
+    while remaining > 0 {
+        let rows = remaining.min(VALUES_PER_PAGE);
+        let payload = &mut bytes[..rows * 4];
+        reader.read_exact(payload)?;
+        values.extend(
+            payload
+                .chunks_exact(4)
+                .map(|row| map(u32::from_le_bytes(row.try_into().expect("core word bytes")))),
+        );
+        remaining -= rows;
+    }
+    Ok(values.into_boxed_slice())
+}
+
+fn read_core_bytes(reader: &mut impl Read, count: usize) -> crate::IdgResult<Box<[u8]>> {
+    let mut values = vec![0_u8; count];
+    reader.read_exact(&mut values)?;
+    Ok(values.into_boxed_slice())
+}
+
+fn read_core_spans(reader: &mut impl Read, count: usize) -> crate::IdgResult<Box<[Span]>> {
+    let mut spans = Vec::with_capacity(count);
+    for _ in 0..count {
+        let file = FileId::new(read_core_u32(reader)?);
+        let start = read_core_u64(reader)?;
+        let end = read_core_u64(reader)?;
+        spans.push(Span::new(file, start, end));
+    }
+    Ok(spans.into_boxed_slice())
+}
+
+fn encode_query_accelerator_core(
+    unified: &UnifiedAddressSpace,
+    segment_count: u32,
+) -> crate::IdgResult<CompiledQueryAcceleratorFrame> {
+    let file = tempfile::tempfile()?;
+    let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+    writer.write_all(&IDG_QUERY_CORE_MAGIC)?;
+    writer.write_all(&IDG_QUERY_ACCELERATOR_VERSION.to_le_bytes())?;
+    writer.write_all(&[encode_precision(SEMANTIC_MAX_PRECISION), 0, 0, 0])?;
+    writer.write_all(&segment_count.to_le_bytes())?;
+    let counts = [
+        unified.segment_bases.len(),
+        unified.func_segments.len(),
+        unified.node_funcs.len(),
+        unified.node_boundaries.len(),
+        unified.projected_storage.len(),
+        unified.nodes_by_func.offsets.len(),
+        unified.nodes_by_func.nodes.len(),
+        unified.call_args.nodes.len(),
+        unified.call_args.sites.len(),
+        unified.call_args.indices.len(),
+        unified.params.nodes.len(),
+        unified.params.indices.len(),
+    ];
+    for count in counts {
+        writer.write_all(
+            &u64::try_from(count)
+                .map_err(|_| invalid_query_accelerator("query accelerator row count exceeds u64"))?
+                .to_le_bytes(),
+        )?;
+    }
+    write_core_u32_values(&mut writer, unified.segment_bases.iter().copied())?;
+    write_core_u32_values(&mut writer, unified.func_segments.iter().copied())?;
+    write_core_u32_values(&mut writer, unified.node_funcs.iter().map(|func| func.raw()))?;
+    writer.write_all(&unified.node_boundaries)?;
+    writer.write_all(&unified.projected_storage)?;
+    write_core_u32_values(&mut writer, unified.nodes_by_func.offsets.iter().copied())?;
+    write_core_u32_values(&mut writer, unified.nodes_by_func.nodes.iter().map(|node| node.0))?;
+    write_core_u32_values(&mut writer, unified.call_args.nodes.iter().map(|node| node.0))?;
+    for span in &unified.call_args.sites {
+        writer.write_all(&span.file.raw().to_le_bytes())?;
+        writer.write_all(&span.start.to_le_bytes())?;
+        writer.write_all(&span.end.to_le_bytes())?;
+    }
+    write_core_u32_values(&mut writer, unified.call_args.indices.iter().copied())?;
+    write_core_u32_values(&mut writer, unified.params.nodes.iter().map(|node| node.0))?;
+    write_core_u32_values(&mut writer, unified.params.indices.iter().copied())?;
+    writer.flush()?;
+    let mut file = writer
+        .into_inner()
+        .map_err(|error| crate::IdgError::Io(error.into_error()))?;
+    let bytes = file.metadata()?.len();
+    file.seek(SeekFrom::Start(0))?;
+    Ok(CompiledQueryAcceleratorFrame {
+        file: Arc::new(file),
+        bytes,
+    })
+}
+
+fn write_core_u32_values(
+    writer: &mut impl Write,
+    values: impl IntoIterator<Item = u32>,
+) -> crate::IdgResult<()> {
+    const VALUES_PER_PAGE: usize = 16 * 1024;
+    let mut bytes = Vec::with_capacity(VALUES_PER_PAGE * 4);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+        if bytes.len() == VALUES_PER_PAGE * 4 {
+            writer.write_all(&bytes)?;
+            bytes.clear();
+        }
+    }
+    if !bytes.is_empty() {
+        writer.write_all(&bytes)?;
+    }
+    Ok(())
 }
 
 fn invalid_query_accelerator(message: impl Into<String>) -> crate::IdgError {
@@ -3827,7 +4016,7 @@ impl IdgQueryService {
                         .map(QueryAcceleratorBlobReader::len)
                         .sum::<u64>()
                 );
-                PersistedQueryAccelerator::decode(parts.core.stream(), &workspace)
+                PersistedQueryAccelerator::decode(parts.core.stream(), parts.core.len(), &workspace)
                     .map(PersistedQueryAccelerator::into_unified_core)
                     .map(Arc::new)
             })
@@ -3879,20 +4068,7 @@ impl IdgQueryService {
         );
         let segment_count = u32::try_from(self.workspace.segment_count())
             .map_err(|_| invalid_query_accelerator("workspace IDG segment count exceeds u32"))?;
-        let persisted = PersistedQueryAcceleratorRef {
-            version: IDG_QUERY_ACCELERATOR_VERSION,
-            max_precision: SEMANTIC_MAX_PRECISION,
-            segment_count,
-            segment_bases: &unified.segment_bases,
-            func_segments: &unified.func_segments,
-            node_funcs: &unified.node_funcs,
-            node_boundaries: &unified.node_boundaries,
-            projected_storage: &unified.projected_storage,
-            nodes_by_func: &unified.nodes_by_func,
-            call_args: &unified.call_args,
-            params: &unified.params,
-        };
-        let core = encode_query_accelerator_frame(&persisted, "core")?;
+        let core = encode_query_accelerator_core(&unified, segment_count)?;
         bonsai_diagnostics::debug_log!(
             "idg-query",
             "compile accelerator core-encoded rss_mib={}",
@@ -6734,7 +6910,7 @@ impl IdgQueryService {
             self.persisted_query_accelerator
                 .as_ref()
                 .and_then(|parts| {
-                    PersistedQueryAccelerator::decode(parts.core.stream(), &self.workspace)
+                    PersistedQueryAccelerator::decode(parts.core.stream(), parts.core.len(), &self.workspace)
                         .map(PersistedQueryAccelerator::into_unified_core)
                         .map_err(|error| {
                             bonsai_diagnostics::debug_log!(

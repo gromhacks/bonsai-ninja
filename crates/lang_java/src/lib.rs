@@ -11,7 +11,8 @@ use bonsai_lang_api::{
     AdapterContext, AdapterError, AssignValueKind, ConditionEquality, ConditionExpressionFact,
     ConditionOperandFact, DeclIndex, DeclKind, FileSnapshot, FiniteLiteralSelectionFact, FlowEvent,
     GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ParseRecoveryEdit, StaticScalarValue, SyntaxTree, TypeAliasBinding, Vfs, Visibility,
+    ParseRecoveryEdit, StaticScalarValue, StringCompositionFact, StringCompositionPart, SyntaxTree,
+    TypeAliasBinding, Vfs, Visibility,
 };
 use parse_recovery::java_parse_recovery_edits;
 use tree_sitter::{Language, Node, Tree};
@@ -159,6 +160,7 @@ impl LanguageAdapter for JavaAdapter {
         let src = snapshot.text.as_bytes();
         populate_java_condition_expressions(&mut index.branch_conditions, &tree, file, src);
         populate_java_static_scalar_facts(&mut index, &tree, file, src);
+        index.string_compositions = java_string_compositions(&tree, file, src);
         index.finite_literal_selections = java_finite_literal_selections(&index, &tree, file, src);
         // Phase-6 return-type extraction: `T method() {}` populates
         // `Decl.return_type` for `apply_assign_call_result_types`.
@@ -841,6 +843,149 @@ fn java_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
         "null_literal" => Some(StaticScalarValue::Null),
         _ => None,
     }
+}
+
+fn java_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<StringCompositionFact> {
+    let mut facts = Vec::new();
+    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+        let (Some(name), Some(value)) = (
+            declarator.child_by_field_name("name"),
+            declarator.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        if name.kind() != "identifier" {
+            continue;
+        }
+        let mut parts = Vec::new();
+        if java_lower_string_composition(value, file, src, &mut parts) && parts.len() > 1 {
+            facts.push(StringCompositionFact {
+                container_span: span_of(file, &declarator),
+                value_span: span_of(file, &value),
+                target: Some(node_text(&name, src).trim().to_string()),
+                parts,
+            });
+        }
+    }
+    facts.sort_by_key(|fact| (fact.container_span.start, fact.container_span.end));
+    facts.dedup();
+    facts
+}
+
+fn java_lower_string_composition(
+    mut node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<StringCompositionPart>,
+) -> bool {
+    while node.kind() == "parenthesized_expression" && node.named_child_count() == 1 {
+        let Some(inner) = node.named_child(0) else {
+            return false;
+        };
+        node = inner;
+    }
+    if let Some(value) = java_static_string_literal(node, src) {
+        out.push(StringCompositionPart::Literal { value });
+        return true;
+    }
+    if node.kind() == "method_invocation" {
+        let Some(name) = node.child_by_field_name("name") else {
+            return false;
+        };
+        out.push(StringCompositionPart::Call {
+            span: span_of(file, &name),
+        });
+        return true;
+    }
+    if node.kind() == "binary_expression" {
+        let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) else {
+            return false;
+        };
+        let operator = src
+            .get(left.end_byte()..right.start_byte())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::trim);
+        return operator == Some("+")
+            && java_lower_string_composition(left, file, src, out)
+            && java_lower_string_composition(right, file, src, out);
+    }
+    if node.kind() == "ternary_expression" {
+        let condition = node
+            .child_by_field_name("condition")
+            .or_else(|| node.named_child(0));
+        let consequence = node
+            .child_by_field_name("consequence")
+            .or_else(|| node.named_child(1));
+        let alternative = node
+            .child_by_field_name("alternative")
+            .or_else(|| node.named_child(2));
+        let (Some(condition), Some(consequence), Some(alternative)) = (condition, consequence, alternative)
+        else {
+            return false;
+        };
+        let Some(condition_call) = java_null_equality_call(condition, src) else {
+            return false;
+        };
+        let (call, fallback) = if alternative.kind() == "method_invocation" {
+            (alternative, java_static_string_literal(consequence, src))
+        } else if consequence.kind() == "method_invocation" {
+            (consequence, java_static_string_literal(alternative, src))
+        } else {
+            return false;
+        };
+        let Some(fallback) = fallback else {
+            return false;
+        };
+        if java_method_call_identity(condition_call, src) != java_method_call_identity(call, src) {
+            return false;
+        }
+        out.push(StringCompositionPart::CallOrLiteral {
+            span: span_of(file, &call.child_by_field_name("name").unwrap_or(call)),
+            fallback,
+        });
+        return true;
+    }
+    false
+}
+
+fn java_null_equality_call<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
+    if node.kind() != "binary_expression" {
+        return None;
+    }
+    let left = node.child_by_field_name("left")?;
+    let right = node.child_by_field_name("right")?;
+    let operator = src
+        .get(left.end_byte()..right.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim);
+    if operator != Some("==") {
+        return None;
+    }
+    if left.kind() == "method_invocation" && right.kind() == "null_literal" {
+        Some(left)
+    } else if right.kind() == "method_invocation" && left.kind() == "null_literal" {
+        Some(right)
+    } else {
+        None
+    }
+}
+
+fn java_method_call_identity(node: Node<'_>, src: &[u8]) -> Option<(String, String, usize)> {
+    if node.kind() != "method_invocation" {
+        return None;
+    }
+    let receiver = node.child_by_field_name("object")?;
+    let name = node.child_by_field_name("name")?;
+    let arguments = node.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    Some((
+        node_text(&receiver, src).trim().to_string(),
+        node_text(&name, src).trim().to_string(),
+        arguments.named_children(&mut cursor).count(),
+    ))
 }
 
 fn populate_java_static_scalar_facts(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {

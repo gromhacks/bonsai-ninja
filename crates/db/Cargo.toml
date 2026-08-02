@@ -21,6 +21,7 @@ bonsai_abstract_interp = { workspace = true }
 bonsai_trace = { workspace = true }
 bonsai_idg = { workspace = true }
 parking_lot = { workspace = true }
+lru = { workspace = true }
 ahash = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }

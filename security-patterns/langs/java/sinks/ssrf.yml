@@ -789,6 +789,25 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    url_reconstruction_guard:
+      sink_argument_index: 0
+      parser:
+        attribute: [URI, create]
+      scheme:
+        component:
+          accessor: {name: getScheme}
+        comparison_predicate: {name: equals}
+        allowed_values: [https]
+      host_allowlist:
+        component:
+          accessor: {name: getHost}
+        membership_predicate: {name: contains}
+        static_collection_factories:
+        - attribute: [Set, of]
+      path_component:
+        accessor: {name: getPath}
+      path_fallback: "/"
   match_examples:
   - name: play wsclient url
     code: |

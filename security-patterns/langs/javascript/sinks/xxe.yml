@@ -345,6 +345,19 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    configured_call_argument_guard:
+      configuration_argument_index: 1
+      guarded_value_argument_indices: [0]
+      required_fields:
+      - path: [noent]
+        value: {kind: boolean, value: false}
+      - path: [replaceEntities]
+        value: {kind: boolean, value: false}
+      - path: [nonet]
+        value: {kind: boolean, value: true}
+      - path: [dtdload]
+        value: {kind: boolean, value: false}
   match_examples:
   - name: libxmljs2 parseXml noent
     code: |

@@ -309,6 +309,7 @@ dependencies = [
  "bonsai_parser",
  "bonsai_trace",
  "bonsai_vfs",
+ "lru",
  "parking_lot",
  "rayon",
  "serde",
@@ -584,6 +585,7 @@ dependencies = [
  "bonsai_conformance",
  "bonsai_db",
  "bonsai_lang_api",
+ "bonsai_testkit",
  "bonsai_vfs",
  "tree-sitter",
 ]

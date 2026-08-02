@@ -193,7 +193,15 @@ Review and harden the taint engine and language adapters so taint behavior is se
 
 `security ... taint-analysis`, `dump-taint`, `inspect`, and the mega-flow regression run on the **IDG value-flow engine**. The former `crates/taint/src/inter/mod.rs` walker has been deleted; `crates/taint/src/idg_api.rs` is the compatibility façade over the same closure. The taint graph is produced by `entry_taint_graph_from_idg*` in `crates/taint/src/reachable.rs`, built from IDG facts in `crates/idg/src/{builder,transfer,workspace_adapter}.rs`. Debug the IDG (`--debug idg-closure,idg-closure-detail,idg-resolve`).
 
-Also note: `Workspace::index` reuses the on-disk `.bonsai/` sidecar (gitignored). Source edits and analyzer upgrades invalidate safely because each semantic sidecar binds its explicit schema/semantic ABI plus exact workspace/dependency, transfer, matcher, rulepack, and configuration inputs. The release/commit build fingerprint is retained only as producer provenance. Manual sidecar clearing is not required to measure a rebuilt analyzer.
+Also note: `Workspace::index` reuses sidecars from the workspace's canonical
+directory below the operating-system cache root. Normal analysis never writes
+generated state into the inspected repository; `.bonsai/rules/` is reserved
+for an optional user-authored rule overlay. Source edits and analyzer upgrades
+invalidate safely because each semantic sidecar binds its explicit
+schema/semantic ABI plus exact workspace/dependency, transfer, matcher,
+rulepack, and configuration inputs. The release/commit build fingerprint is
+retained only as producer provenance. Manual sidecar clearing is not required
+to measure a rebuilt analyzer.
 
 ### DONE this session - Ruby mega_flow stdin path fixed
 

@@ -155,6 +155,39 @@ facts automatically. A custom declaration-index path must call
 `extract_branch_condition_facts`; downstream analyses must not reconstruct
 condition polarity from `FlowEvent::Branch.condition` text.
 
+## Value-shape summary contract
+
+Security guards that are not a single library call are still compiler facts,
+not shared source-text heuristics. The owning adapter may attach the following
+exact, serializable summaries to `DeclIndex`:
+
+- `CharacterConstraintFact` for a character comprehension, regular-expression
+  substitution, or equivalent runtime construct whose output alphabet is
+  proven by the parsed syntax;
+- `SameOriginPathConstraintFact` for a helper that rejects schemes and
+  authorities, requires an absolute path, and rejects `//` paths;
+- `DynamicKeyFilterFact` for a helper that drops a finite static key set before
+  reconstructing an object;
+- `StringCompositionFact` for concatenations, interpolations, accessor calls,
+  and language-level literal fallbacks used to reconstruct a value;
+- exact static aggregate/scalar fields on `CallArgumentValueFact` for
+  constructor or call configuration.
+
+These facts describe language/runtime behavior only. They do not name a CWE,
+sink, package, or security API. The rulepack assigns security meaning by
+declaring the forbidden characters, required configuration values, URL
+component roles, or denied keys. Shared analysis relates those rule-owned
+requirements to the typed facts and never branches on a language id.
+
+Lowering must fail closed. A summary is omitted when the frontend sees a
+spread, computed property, mutable/shadowed configuration binding, ambiguous
+helper target, unsupported escape, partially parsed expression, or a value
+that can reintroduce a forbidden character. `direct_call_span` is set only
+when the complete argument expression is one direct call; a nested call inside
+a larger expression must not receive that proof. Every positive adapter test
+for one of these summaries needs a nearby negative test that breaks exactly
+one proof condition.
+
 ## Capability declarations are the narrow source of truth
 
 `LanguageCapabilities` (`crates/lang_api/src/capabilities.rs`) is

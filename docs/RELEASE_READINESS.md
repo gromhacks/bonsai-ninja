@@ -25,7 +25,7 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated on 2026-07-29:
+Validated on 2026-08-02:
 
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` passed;
   this strict gate compiled the complete workspace and every test target.
@@ -113,16 +113,33 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The 2026-07-29 exact large-workspace integration gate
-passed 4/4 in 210.39 seconds under a 3 GiB scheduling budget. It starts fresh
-processes and covers warm semantic reuse, nine navigation commands, targeted
-inspect with taint evidence, security inventory, and production taint. Its
-enforced ceilings are 15 seconds for warm semantic reuse and 30 seconds for
-each measured query/analysis command.
+Elasticsearch checkout. The 2026-08-02 exact large-workspace integration gate
+passed 5/5 in 235.33 seconds under a 3 GiB scheduling budget. It starts fresh
+processes and covers fresh-cache taint planning, warm semantic reuse, nine
+navigation commands, targeted inspect with taint evidence, security inventory,
+and production taint. Its enforced ceilings are 15 seconds for warm semantic
+reuse and 30 seconds for each measured query/analysis command.
 
-The current compiler-object generation required 212.19 seconds once and
-reopened in 4.34 seconds in the final gate. A default exact inspect query
-completed in 17.33 seconds. Exact sanitizer inventory examined all 30,055 files, rejected
+The generation validation/open phase completed in 12.23 seconds and the
+immediate fresh-process warm reuse completed in 2.52 seconds. The broad exact
+`inspect execute --taint-flow` regression query completed in 26.74 seconds and
+reported 3,895 declaration hits, 26,148 other syntax hits, 140,531 unique raw
+taint flows, and 12,355/12,355 warmed-IDG entry closures. It used
+3,229,761,536 bytes maximum RSS, a 2,257,724,096-byte peak physical footprint,
+and zero swaps. The scheduler budget controls live compiler phase overlap and
+spill policy; clean mapped factstore pages can make OS RSS exceed that budget
+slightly without increasing the dirty physical footprint.
+
+The IDG query accelerator's dense compiler header is a fixed-width,
+little-endian representation with checked row counts and exact byte-length,
+ownership, boundary, and identity validation. It does not deserialize the
+15-million-node core through a generic object codec. Inspect occurrence
+collection uses an exact hash identity set, so a broad query is linear in
+surviving compiler hits instead of comparing every hit with every prior row.
+Both properties are covered by the exact Elasticsearch gate; neither changes
+the admitted syntax facts, graph, closure, or rendered paging contract.
+
+Exact sanitizer inventory examined all 30,055 files, rejected
 25,673 through raw/import/syntax compiler headers, decoded 4,382 bodies, and
 emitted 11,446 matches in 28.01 seconds. These are syntax/compiler facts, not
 Elasticsearch-specific name lists.

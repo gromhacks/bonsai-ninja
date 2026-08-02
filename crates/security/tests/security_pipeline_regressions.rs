@@ -12,13 +12,15 @@ use bonsai_lang_api::{FlowEvent, StaticScalarValue};
 use bonsai_security::loader::LanguagePack;
 use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
 use bonsai_security::{
-    run_taint_analysis, run_taint_analysis_with_phase_progress, AnalysisSemantics, ConstraintKind,
-    FindingStatus, FlowClass, GuardProfile, MatchKind, MatchSpec, NoSqlFilterSemantics,
-    PathContainmentGuardSemantics, RelativePathContainmentGuardSemantics, RequiredNamedArgumentSemantics,
-    Rule, RuleConstraint, RuleKind, RuleTarget, Rulepack, SourceAnalysisOptions, SourceLineageLimits,
-    TaintAnalysisOptions, TrustClass, UrlComponentSemantics, UrlDnsGuardSemantics, UrlGuardRootSemantics,
-    UrlHostAllowlistSemantics, UrlNetworkGuardSemantics, UrlReconstructionGuardSemantics,
-    UrlRedirectGuardSemantics, UrlSchemeGuardSemantics,
+    run_taint_analysis, run_taint_analysis_with_phase_progress, AnalysisSemantics,
+    CharacterConstraintSemantics, ConfiguredCallArgumentGuardSemantics, ConstraintKind,
+    DynamicKeyDenylistGuardSemantics, FindingStatus, FlowClass, GuardProfile, MatchKind, MatchSpec,
+    NoSqlFilterSemantics, PathContainmentGuardSemantics, RelativePathContainmentGuardSemantics,
+    RequiredAggregateFieldSemantics, RequiredNamedArgumentSemantics, Rule, RuleConstraint, RuleKind,
+    RuleTarget, Rulepack, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions, TrustClass,
+    UrlComponentSemantics, UrlDnsGuardSemantics, UrlGuardRootSemantics, UrlHostAllowlistSemantics,
+    UrlNetworkGuardSemantics, UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics,
+    UrlSchemeGuardSemantics,
 };
 use bonsai_taint::{compose_idg_seed_nodes, ensure_idg_service, IdgSeedRequest, TokenSet};
 use bonsai_workspace::Workspace;
@@ -3282,6 +3284,435 @@ def handle():
         "an even number of AST negations must not prove a rejection guard: {:#?}",
         double_negated_report.findings
     );
+
+    let exact_base_or_contained_ws = workspace(&[(
+        "/app/app.py",
+        r#"
+import os
+
+def source():
+    return "user"
+
+def handle():
+    base = os.path.realpath("/srv/uploads")
+    name = source()
+    candidate = os.path.realpath(os.path.join(base, name))
+    if candidate != base and not candidate.startswith(base + os.sep):
+        raise PermissionError("outside upload root")
+    return candidate
+"#,
+    )]);
+    let exact_base_or_contained_report = run_taint_analysis(
+        &exact_base_or_contained_ws,
+        &pack,
+        TaintAnalysisOptions::default(),
+    )
+    .expect("taint analysis");
+    assert!(
+        exact_base_or_contained_report.findings.is_empty(),
+        "the typed base-equality-or-containment rejection must sanitize: {:#?}",
+        exact_base_or_contained_report.findings
+    );
+
+    let inverted_compound_ws = workspace(&[(
+        "/app/app.py",
+        r#"
+import os
+
+def source():
+    return "user"
+
+def handle():
+    base = os.path.realpath("/srv/uploads")
+    name = source()
+    candidate = os.path.realpath(os.path.join(base, name))
+    if candidate != base and candidate.startswith(base + os.sep):
+        raise PermissionError("rejects the safe path")
+    return candidate
+"#,
+    )]);
+    let inverted_compound_report =
+        run_taint_analysis(&inverted_compound_ws, &pack, TaintAnalysisOptions::default())
+            .expect("taint analysis");
+    assert!(
+        inverted_compound_report.findings.iter().any(|finding| {
+            finding.finding.sink.rule_id == "python.test.sink"
+                && finding.finding.status == FindingStatus::Unsanitized
+        }),
+        "an inverted compound guard must remain vulnerable: {:#?}",
+        inverted_compound_report.findings
+    );
+}
+
+#[test]
+fn direct_parser_configuration_requires_complete_typed_aggregate() {
+    let mut pack = rulepack("javascript", "source", "parseXml");
+    let sink = pack
+        .packs
+        .get_mut("javascript")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("JavaScript sink");
+    sink.tag = Some("xxe".to_string());
+    sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(0),
+            kw: None,
+        },
+    }]);
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        configured_call_argument_guard: Some(ConfiguredCallArgumentGuardSemantics {
+            configuration_argument_index: 1,
+            guarded_value_argument_indices: vec![0],
+            required_fields: vec![
+                RequiredAggregateFieldSemantics {
+                    path: vec!["noent".to_string()],
+                    value: StaticScalarValue::Boolean(false),
+                },
+                RequiredAggregateFieldSemantics {
+                    path: vec!["replaceEntities".to_string()],
+                    value: StaticScalarValue::Boolean(false),
+                },
+                RequiredAggregateFieldSemantics {
+                    path: vec!["nonet".to_string()],
+                    value: StaticScalarValue::Boolean(true),
+                },
+                RequiredAggregateFieldSemantics {
+                    path: vec!["dtdload".to_string()],
+                    value: StaticScalarValue::Boolean(false),
+                },
+            ],
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/parser.js",
+        r#"
+function source() { return ""; }
+function safe() {
+  return parseXml(source(), {
+    noent: false,
+    replaceEntities: false,
+    nonet: true,
+    dtdload: false,
+  });
+}
+function partial() {
+  return parseXml(source(), {
+    noent: false,
+    replaceEntities: false,
+    nonet: true,
+  });
+}
+function spread(defaults) {
+  return parseXml(source(), {
+    ...defaults,
+    noent: false,
+    replaceEntities: false,
+    nonet: true,
+    dtdload: false,
+  });
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let finding = |function: &str| {
+        &report
+            .findings
+            .iter()
+            .find(|finding| finding.finding.sink.enclosing_fn.as_deref() == Some(function))
+            .unwrap_or_else(|| panic!("missing {function}: {:#?}", report.findings))
+            .finding
+    };
+    assert_eq!(finding("safe").status, FindingStatus::Sanitized);
+    assert!(finding("safe")
+        .sanitizers_seen
+        .iter()
+        .any(|sanitizer| { sanitizer.rule_id == "engine.sanitizer.configured_call_argument_guard" }));
+    assert_eq!(finding("partial").status, FindingStatus::Unsanitized);
+    assert_eq!(finding("spread").status, FindingStatus::Unsanitized);
+}
+
+#[test]
+fn comprehension_character_constraint_sanitizes_only_its_exact_lineage() {
+    let mut pack = rulepack("python", "source", "cursor.execute");
+    let sink = pack
+        .packs
+        .get_mut("python")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("Python sink");
+    sink.tag = Some("sql-injection".to_string());
+    sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(0),
+            kw: None,
+        },
+    }]);
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        character_constraint: Some(CharacterConstraintSemantics {
+            required_excluded_characters: vec!["'".to_string()],
+            required_enclosing_literal_delimiter: Some("'".to_string()),
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/search.py",
+        r#"
+def source():
+    return ""
+
+def execute(sql):
+    return cursor.execute(sql)
+
+def safe_search():
+    body = source()
+    q = body.get("q", "")
+    safe = "".join(ch for ch in q if ch.isalnum() or ch == " ")[:64]
+    sql = f"SELECT * FROM users WHERE name ILIKE '%{safe}%'"
+    return execute(sql)
+
+def unsafe_search():
+    q = source()
+    sql = f"SELECT * FROM users WHERE name ILIKE '%{q}%'"
+    return execute(sql)
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let unsafe_finding = report
+        .findings
+        .first()
+        .unwrap_or_else(|| panic!("missing grouped sink finding: {:#?}", report.findings));
+    assert_eq!(
+        unsafe_finding.finding.status,
+        FindingStatus::Unsanitized,
+        "{unsafe_finding:#?}"
+    );
+    let safe = unsafe_finding
+        .finding
+        .alternate_flows
+        .iter()
+        .find(|flow| {
+            flow.chain_display
+                .iter()
+                .any(|function| function == "safe_search")
+        })
+        .unwrap_or_else(|| panic!("missing safe alternate route: {unsafe_finding:#?}"));
+    assert_eq!(safe.status, FindingStatus::Sanitized, "{safe:#?}");
+    assert!(safe
+        .sanitizers_seen
+        .iter()
+        .any(|sanitizer| { sanitizer.rule_id == "engine.sanitizer.character_constraint" }));
+
+    let unquoted_ws = workspace(&[(
+        "/app/order.py",
+        r#"
+def source():
+    return ""
+
+def unsafe_order():
+    q = source()
+    safe = "".join(ch for ch in q if ch.isalnum() or ch == " ")
+    return cursor.execute(f"SELECT * FROM users ORDER BY {safe}")
+"#,
+    )]);
+    let unquoted = run_taint_analysis(
+        &unquoted_ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(unquoted.findings.len(), 1, "{:#?}", unquoted.findings);
+    assert_eq!(
+        unquoted.findings[0].finding.status,
+        FindingStatus::Unsanitized,
+        "an alphanumeric allowlist is not a SQL sanitizer in an unquoted grammar position"
+    );
+}
+
+#[test]
+fn regex_character_constraint_summary_sanitizes_only_exact_helper_result() {
+    let mut pack = constrained_call_sink_rulepack("python", "source", "sink");
+    let sink = pack
+        .packs
+        .get_mut("python")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("Python sink");
+    sink.tag = Some("header-injection".to_string());
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        character_constraint: Some(CharacterConstraintSemantics {
+            required_excluded_characters: vec!["\r".to_string(), "\n".to_string()],
+            required_enclosing_literal_delimiter: None,
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/header.py",
+        r#"
+import re
+
+_UNSAFE = re.compile(r'[\r\n"\\]')
+
+def source():
+    return ""
+
+def cleaned(filename: str) -> str:
+    return _UNSAFE.sub("_", filename)
+
+def safe_header():
+    filename = source()
+    value = 'attachment; filename="' + cleaned(filename) + '"'
+    sink(value)
+
+def unsafe_header():
+    filename = source()
+    value = 'attachment; filename="' + filename + '"'
+    sink(value)
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    assert_eq!(
+        report.findings[0].finding.sink.enclosing_fn.as_deref(),
+        Some("unsafe_header"),
+        "{:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn same_origin_path_summary_sanitizes_only_direct_helper_result() {
+    let mut pack = constrained_call_sink_rulepack("python", "source", "sink");
+    let sink = pack
+        .packs
+        .get_mut("python")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("Python sink");
+    sink.tag = Some("open-redirect".to_string());
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        same_origin_path_constraint: Some(bonsai_security::SameOriginPathConstraintSemantics {
+            require_scheme_rejection: true,
+            require_authority_rejection: true,
+            require_absolute_path: true,
+            require_scheme_relative_rejection: true,
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/redirect.py",
+        r#"
+from urllib.parse import urlparse
+
+def source():
+    return ""
+
+def same_site(target: str) -> str:
+    parsed = urlparse(target)
+    if parsed.scheme or parsed.netloc or not target.startswith("/") or target.startswith("//"):
+        return "/"
+    return target
+
+def safe_redirect():
+    target = source()
+    sink(same_site(target))
+
+def unsafe_redirect():
+    target = source()
+    sink(target)
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    assert_eq!(
+        report.findings[0].finding.sink.enclosing_fn.as_deref(),
+        Some("unsafe_redirect"),
+        "{:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn recursive_dynamic_key_filter_guards_only_exact_helper_output() {
+    let mut pack = constrained_call_sink_rulepack("typescript", "source", "merge");
+    let sink = pack
+        .packs
+        .get_mut("typescript")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("TypeScript sink");
+    sink.tag = Some("prototype-pollution".to_string());
+    sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(1),
+            kw: None,
+        },
+    }]);
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        dynamic_key_denylist_guard: Some(DynamicKeyDenylistGuardSemantics {
+            collection_constructor: RuleTarget {
+                name: Some("Set".to_string()),
+                ..RuleTarget::default()
+            },
+            membership_check: RuleTarget {
+                name: Some("has".to_string()),
+                ..RuleTarget::default()
+            },
+            membership_subject_arg_index: 0,
+            collection_values_arg_index: 0,
+            rejected_exact_values: vec![
+                "__proto__".to_string(),
+                "constructor".to_string(),
+                "prototype".to_string(),
+            ],
+            require_recursive_filter: true,
+            filtered_value_argument_index: Some(1),
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/merge.ts",
+        r#"
+const BLOCKED = new Set(["__proto__", "constructor", "prototype"]);
+function source(): unknown { return {}; }
+function sanitize(value: unknown): unknown {
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (BLOCKED.has(key)) continue;
+      out[key] = sanitize(item);
+    }
+    return out;
+  }
+  return value;
+}
+function shallow(value: any): any { return value; }
+function safeApply(): void { merge({}, sanitize(source())); }
+function unsafeApply(): void { merge({}, shallow(source())); }
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    assert_eq!(
+        report.findings[0].finding.sink.enclosing_fn.as_deref(),
+        Some("unsafeApply"),
+        "only the exact recursive reconstruction may suppress the sink"
+    );
 }
 
 fn relative_path_containment_semantics(guarded_path_arg_index: Option<usize>) -> AnalysisSemantics {
@@ -4654,6 +5085,99 @@ def unsafe_redirects():
         guarded_urlopen.finding.status,
         FindingStatus::Sanitized,
         "{guarded_urlopen:#?}"
+    );
+}
+
+#[test]
+fn java_url_reconstruction_assignment_requires_exact_components_and_guards() {
+    let mut pack = constrained_call_sink_rulepack("java", "source", "ws.url");
+    let sink = pack
+        .packs
+        .get_mut("java")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("Java sink");
+    sink.tag = Some("ssrf".to_string());
+    let target = |name: &str| RuleTarget {
+        name: Some(name.to_string()),
+        ..RuleTarget::default()
+    };
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        url_reconstruction_guard: Some(UrlReconstructionGuardSemantics {
+            sink_argument_index: 0,
+            parser: RuleTarget {
+                attribute: Some(vec!["URI".to_string(), "create".to_string()]),
+                ..RuleTarget::default()
+            },
+            scheme: UrlSchemeGuardSemantics {
+                component: UrlComponentSemantics {
+                    field: None,
+                    accessor: Some(target("getScheme")),
+                },
+                comparison_predicate: Some(target("equals")),
+                allowed_values: vec!["https".to_string()],
+            },
+            host_allowlist: UrlHostAllowlistSemantics {
+                component: UrlComponentSemantics {
+                    field: None,
+                    accessor: Some(target("getHost")),
+                },
+                membership_predicate: Some(target("contains")),
+                static_collection_factories: vec![RuleTarget {
+                    attribute: Some(vec!["Set".to_string(), "of".to_string()]),
+                    ..RuleTarget::default()
+                }],
+            },
+            path_component: UrlComponentSemantics {
+                field: None,
+                accessor: Some(target("getPath")),
+            },
+            path_fallback: "/".to_string(),
+            required_sink_named_arguments: Vec::new(),
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/UrlProbe.java",
+        r#"
+import java.net.URI;
+import java.util.Set;
+
+class Client { void url(String value) {} }
+class UrlProbe {
+  static final Set<String> ALLOWED = Set.of("api.example.test");
+  Client ws = new Client();
+  static String source() { return ""; }
+
+  void entry() {
+    guarded(source());
+    missingHostGuard(source());
+  }
+
+  void guarded(String url) {
+    URI uri = URI.create(url);
+    if (!"https".equals(uri.getScheme()) || !ALLOWED.contains(uri.getHost())) {
+      throw new IllegalArgumentException();
+    }
+    String safe = "https://" + uri.getHost() + (uri.getPath() == null ? "/" : uri.getPath());
+    ws.url(safe);
+  }
+
+  void missingHostGuard(String url) {
+    URI uri = URI.create(url);
+    if (!"https".equals(uri.getScheme())) throw new IllegalArgumentException();
+    String safe = "https://" + uri.getHost() + (uri.getPath() == null ? "/" : uri.getPath());
+    ws.url(safe);
+  }
+}
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    assert_eq!(
+        report.findings[0].finding.sink.enclosing_fn.as_deref(),
+        Some("missingHostGuard"),
+        "{:#?}",
+        report.findings
     );
 }
 
