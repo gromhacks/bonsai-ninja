@@ -227,6 +227,7 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
             },
             static_value: None,
             exact_static_aggregate_fields: Vec::new(),
+            exact_static_sequence_values: None,
         }],
         static_string_maps: vec![bonsai_lang_api::StaticStringMapFact {
             assignment_span: Span::new(file, 1, 9),
@@ -240,6 +241,7 @@ fn linkage_headers_flatten_exact_ast_facts_and_drop_flow_bodies() {
             function_span: Span::new(file, 1, 90),
             transform_span: Span::new(file, 5, 80),
             input_param_index: 0,
+            exact_mappings: Vec::new(),
             table: "lookup".to_string(),
             domain: bonsai_lang_api::CharacterSubstitutionDomain::ExactCharacters {
                 characters: vec!["a".to_string()],

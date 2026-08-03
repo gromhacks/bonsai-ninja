@@ -37,6 +37,15 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {attribute: [os, path, realpath]}
+      path_constructor: {attribute: [os, path, join]}
+      containment_check: {name: startswith}
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: [os.sep]
   match_examples:
   - name: path os makedirs
     code: "def example(user_input):\n    return os.makedirs(user_input)\n"
@@ -180,8 +189,48 @@
   description: "Bare `open(...)` with a tainted path - use `os.path.normpath` + validation. Merged collision aliases: python.path.open_read_chain."
   aliases:
   - python.path.open_read_chain
-- id: python.path.os_path_join
+- id: python.path.starlette_file_response
   enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  category: file-read
+  packages: [fastapi, starlette]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: FileResponse
+  constraints:
+  - arg_tainted:
+      index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {attribute: [os, path, realpath]}
+      path_constructor: {attribute: [os, path, join]}
+      containment_check: {name: startswith}
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: [os.sep]
+  match_examples:
+  - name: fastapi file response from request path
+    code: |
+      from fastapi.responses import FileResponse
+      def download(user_path):
+          return FileResponse(user_path)
+    expect_match_text: [FileResponse]
+  - name: fastapi file response literal negative
+    code: |
+      from fastapi.responses import FileResponse
+      def download():
+          return FileResponse("/srv/assets/report.pdf")
+    expect_no_match: true
+  description: "FastAPI/Starlette FileResponse opens and streams the selected filesystem path. Canonicalize a joined path and prove it remains under the intended base before constructing the response."
+- id: python.path.os_path_join
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: path-traversal
   severity: high
@@ -219,7 +268,7 @@
   - name: os path join literal segment negative
     code: "import os\ndef read_file():\n    path = os.path.join('/srv/files', 'report.txt')\n    return path\n"
     expect_no_match: true
-  description: "os.path.join(base, tainted) - join does not prevent `..` traversal; use normpath/resolve plus containment checks before open/read."
+  description: "Disabled as a finding: os.path.join constructs a value but performs no filesystem access. python.passthrough.os_path_join preserves its exact taint into real consumers."
 - id: python.path.pathlib_pureposixpath
   enabled: true
   language: python

@@ -482,7 +482,7 @@ pub(crate) enum Cmd {
         output: OutputPathArg,
     },
 
-    /// Backward slice for a symbol at a source line.
+    /// Backward slice for a symbol, optionally narrowed to a source line.
     #[command(
         display_order = 4,
         long_about = themed_subcommand_long_about("Build an exact backwards slice for one normalized symbol \
@@ -493,7 +493,7 @@ pub(crate) enum Cmd {
                       boundaries are reported as incomplete analysis reasons."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # What influences result at line 15?\n  \
-                      $ bonsai-ninja slice ./src --symbol result --line 15\n  \
+                      $ bonsai-ninja slice ./src --symbol result\n  \
                       \n  \
                       # Disambiguate same-line callables by file\n  \
                       $ bonsai-ninja slice ./src --symbol action --line 15 --file gateway.py\n  \
@@ -507,9 +507,10 @@ pub(crate) enum Cmd {
         /// Variable / place / normalized symbol to slice backwards from.
         #[arg(long)]
         symbol: String,
-        /// One-based source line where `--symbol` is inspected.
+        /// Optional one-based source line where `--symbol` is inspected.
+        /// Omit it when the symbol has one unambiguous syntax-flow site.
         #[arg(long)]
-        line: u32,
+        line: Option<u32>,
         /// Optional workspace-relative file path filter used to narrow candidates.
         /// Explicit absolute paths are also accepted.
         #[arg(long)]

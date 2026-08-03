@@ -192,6 +192,7 @@ fn collect_aggregate_members(
         if let Some(name) = static_field_name(key, src) {
             fields.push(ExpressionField {
                 name,
+                value_span: Some(span_of(file, &value)),
                 value: expression_flow_from_node(value, file, src),
             });
         }
@@ -202,6 +203,7 @@ fn collect_aggregate_members(
         if !name.is_empty() {
             fields.push(ExpressionField {
                 name: name.to_string(),
+                value_span: Some(span_of(file, &node)),
                 value: expression_flow_from_node(node, file, src),
             });
         }
@@ -390,6 +392,33 @@ pub(super) fn exact_static_aggregate_fields(
     Some(out)
 }
 
+/// Decode the complete ordered shape of one positional aggregate. Structure
+/// comes from Tree-sitter; scalar spelling remains adapter-owned through
+/// `decode`. Dynamic items are retained as `None`, while spreads or unknown
+/// container shapes reject the entire fact.
+pub(super) fn exact_static_sequence_values(
+    node: Node<'_>,
+    src: &[u8],
+    decode: fn(Node<'_>, &[u8]) -> Option<crate::StaticScalarValue>,
+) -> Option<Vec<Option<crate::StaticScalarValue>>> {
+    if !is_positional_aggregate(node.kind()) {
+        return None;
+    }
+    let mut values = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if is_spread_node(child.kind()) {
+            return None;
+        }
+        if is_syntax_only_tuple_child(child.kind()) {
+            continue;
+        }
+        let value = aggregate_value_node(child).unwrap_or(child);
+        values.push(decode(value, src));
+    }
+    (!values.is_empty()).then_some(values)
+}
+
 fn is_positional_aggregate(kind: &str) -> bool {
     matches!(
         kind,
@@ -403,6 +432,7 @@ fn is_positional_aggregate(kind: &str) -> bool {
             | "array"
             | "array_literal"
             | "array_expression"
+            | "array_initializer"
             | "initializer_list"
             | "array_creation_expression"
     )

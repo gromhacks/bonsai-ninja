@@ -127,9 +127,7 @@
       name: XMLParser
   description: "Disabled - fast-xml-parser doesn't resolve external entities."
 - id: typescript.xxe.fast_xml_parser_entities_enabled
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: typescript
   tag: xxe
   category: source-independent
@@ -137,7 +135,7 @@
   packages:
   - fast-xml-parser
   cwe:
-  - CWE-611
+  - CWE-776
   match:
     kind: new
     callee:
@@ -164,7 +162,7 @@
         return new XMLParser({ processEntities: false });
       }
     expect_no_match: true
-  description: "Disabled - fast-xml-parser expands supported internal/named entities but rejects external SYSTEM entities; these options do not establish an XXE file/network access boundary."
+  description: "fast-xml-parser internal/named entity expansion is explicitly enabled. This is an entity-expansion resource-exhaustion hazard (CWE-776), not a claim that the parser resolves external SYSTEM entities."
 - id: typescript.xxe.fast_xml_parser_parse
   enabled: false
   disabled_reason:

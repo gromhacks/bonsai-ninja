@@ -5,7 +5,6 @@
   severity: high
   packages:
   - org.thymeleaf
-  - freemarker.template
   cwe:
   - CWE-1336
   match:
@@ -15,7 +14,6 @@
   constraints:
   - receiver_type_in:
     - TemplateEngine
-    - Template
   - arg_tainted:
       index: 0
   match_examples:
@@ -29,23 +27,13 @@
       \ fragment, ctx);\n  }\n}\n"
     expect_match_text:
     - engine.process
-  - name: freemarker template process local
-    code: "import freemarker.template.*;\nclass App {\n  Object handle(Template template,\
-      \ Object model) throws Exception {\n    return template.process(model);\n  }\n\
-      }\nclass Template {\n  Object process(Object... args) { return null; }\n}\n"
-    expect_match_text:
-    - template.process
   - name: arg tainted literal negative
     code: "import org.thymeleaf.*;\nclass App {\n  void handle(TemplateEngine engine,\
       \ String input) throws Exception {\n    engine.process(\"safe\");\n  }\n}\n\
       "
     expect_no_match: true
-  description: "Thymeleaf TemplateEngine.process - flag when template source\
-    \ is tainted. Merged collision aliases: java.template.freemarker_process, java.template.freemarker_template_process_local,\
-    \ java.template.thymeleaf_fragment_concat."
+  description: "Thymeleaf TemplateEngine.process - flag when the template source/fragment selector is tainted. FreeMarker Template.process receives a data model, not template source, and is intentionally excluded."
   aliases:
-  - java.template.freemarker_process
-  - java.template.freemarker_template_process_local
   - java.template.thymeleaf_fragment_concat
 - id: java.template.thymeleaf_fragment_concat
   enabled: false

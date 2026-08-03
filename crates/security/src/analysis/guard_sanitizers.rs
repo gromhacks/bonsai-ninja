@@ -16,6 +16,7 @@ use super::*;
 /// growing a separate, order-sensitive argument list.
 pub(super) struct CompilerGuardContext<'a> {
     pub(super) ws: &'a Workspace,
+    pub(super) call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
     pub(super) source: &'a RuleMatch,
     pub(super) source_func: FuncId,
     pub(super) sink: &'a RuleMatch,
@@ -45,6 +46,151 @@ pub(super) fn source_sink_pair_is_low_signal(
         rule.analysis_semantics
             .as_ref()
             .is_some_and(|semantics| semantics.flow_classes.contains(&FlowClass::EnvironmentInput))
+    })
+}
+
+/// Prove that a sanitized write replaces an implicit context value before a
+/// later consumer. A straight-line write is sufficient. A conditional write
+/// is sufficient only when the owning frontend proves that the true arm is
+/// selected for every non-null value read from the context channel.
+pub(super) fn sanitized_context_rewrite_covers_consumer(
+    ws: &Workspace,
+    rewrite: &RuleMatch,
+    consumer: &RuleMatch,
+    rewrite_targets: &AHashSet<String>,
+) -> bool {
+    if rewrite.span.file != consumer.span.file
+        || rewrite.span.end > consumer.span.start
+        || rewrite_targets.is_empty()
+    {
+        return false;
+    }
+    let headers = ws.compiler_linkage_index();
+    let Some(rewrite_owner) =
+        ws.enclosing_index()
+            .enclosing_for(headers.as_ref(), rewrite.span.file, rewrite.span.start)
+    else {
+        return false;
+    };
+    let Some(consumer_owner) =
+        ws.enclosing_index()
+            .enclosing_for(headers.as_ref(), consumer.span.file, consumer.span.start)
+    else {
+        return false;
+    };
+    if rewrite_owner.symbol != consumer_owner.symbol {
+        return false;
+    }
+    let Some(decl) = ws.exact_decl(consumer_owner.symbol) else {
+        return false;
+    };
+    if guaranteed_calls_before(&decl.flow_events, consumer.span)
+        .iter()
+        .any(|call| call.span == rewrite.span)
+    {
+        return true;
+    }
+
+    let Some(file_index) = ws.exact_decl_index_shared(consumer.span.file) else {
+        return false;
+    };
+    let mut branches = Vec::new();
+    collect_completed_branches_on_path(&decl.flow_events, consumer.span, &mut branches);
+    branches.into_iter().rev().any(|branch| {
+        let mut branch_calls = Vec::new();
+        collect_structured_calls(branch.then_events, &mut branch_calls);
+        let rewrite_is_in_true_arm = branch_calls.iter().any(|call| call.span == rewrite.span);
+        rewrite_is_in_true_arm
+            && branch_condition_fact_for_span(&file_index.branch_conditions, branch.span)
+                .and_then(|fact| fact.expression.as_ref())
+                .is_some_and(|expression| {
+                    condition_is_true_for_non_null_targets(expression, rewrite_targets) == GuardTruth::True
+                })
+    })
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum GuardTruth {
+    True,
+    False,
+    Unknown,
+}
+
+fn condition_is_true_for_non_null_targets(
+    expression: &ConditionExpressionFact,
+    targets: &AHashSet<String>,
+) -> GuardTruth {
+    match expression {
+        ConditionExpressionFact::Not { operand, .. } => {
+            match condition_is_true_for_non_null_targets(operand, targets) {
+                GuardTruth::True => GuardTruth::False,
+                GuardTruth::False => GuardTruth::True,
+                GuardTruth::Unknown => GuardTruth::Unknown,
+            }
+        }
+        ConditionExpressionFact::All { operands, .. } => {
+            let mut saw_unknown = false;
+            for operand in operands {
+                match condition_is_true_for_non_null_targets(operand, targets) {
+                    GuardTruth::False => return GuardTruth::False,
+                    GuardTruth::Unknown => saw_unknown = true,
+                    GuardTruth::True => {}
+                }
+            }
+            if saw_unknown {
+                GuardTruth::Unknown
+            } else {
+                GuardTruth::True
+            }
+        }
+        ConditionExpressionFact::Any { operands, .. } => {
+            let mut saw_unknown = false;
+            for operand in operands {
+                match condition_is_true_for_non_null_targets(operand, targets) {
+                    GuardTruth::True => return GuardTruth::True,
+                    GuardTruth::Unknown => saw_unknown = true,
+                    GuardTruth::False => {}
+                }
+            }
+            if saw_unknown {
+                GuardTruth::Unknown
+            } else {
+                GuardTruth::False
+            }
+        }
+        ConditionExpressionFact::Equality {
+            relation,
+            left,
+            right,
+            ..
+        } => non_null_target_equality(*relation, left, right, targets)
+            .or_else(|| non_null_target_equality(*relation, right, left, targets))
+            .unwrap_or(GuardTruth::Unknown),
+        ConditionExpressionFact::Atom { .. }
+        | ConditionExpressionFact::TypeTest { .. }
+        | ConditionExpressionFact::Membership { .. } => GuardTruth::Unknown,
+    }
+}
+
+fn non_null_target_equality(
+    relation: ConditionEquality,
+    candidate: &ConditionOperandFact,
+    literal: &ConditionOperandFact,
+    targets: &AHashSet<String>,
+) -> Option<GuardTruth> {
+    let candidate = candidate
+        .value_flow
+        .place
+        .as_deref()
+        .and_then(clean_overwrite_target_key)?;
+    if !targets.contains(&candidate)
+        || literal.static_value.as_ref() != Some(&bonsai_lang_api::StaticScalarValue::Null)
+    {
+        return None;
+    }
+    Some(match relation {
+        ConditionEquality::Equal => GuardTruth::False,
+        ConditionEquality::NotEqual => GuardTruth::True,
     })
 }
 
@@ -186,6 +332,25 @@ pub(super) fn finite_literal_selection_sanitizer(
         .enclosing_index()
         .enclosing_for(headers.as_ref(), sink.span.file, sink.span.start)?;
     let decl = ws.exact_decl(enclosing.symbol)?;
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    if let Some(sink_call) = structured_call_at_match(&calls, sink.span, "") {
+        if let Some(selection) = tainted_args.iter().find_map(|argument| {
+            file_index.finite_literal_selections.iter().find(|selection| {
+                selection.call_span == Some(sink_call.span)
+                    && selection.argument_index == Some(argument.index)
+            })
+        }) {
+            return finding_for_guard_span_in_workspace(
+                ws,
+                sink,
+                selection.selection_span,
+                "engine.sanitizer.finite_literal_selection",
+                "compiler-clean-value",
+                "compiler-proven-finite-literal-selection",
+            );
+        }
+    }
     let mut assignments = Vec::new();
     collect_structured_assignments_before(&decl.flow_events, sink.span, &mut assignments);
     assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
@@ -227,7 +392,7 @@ fn finite_literal_selection_dependency<'a>(
     })?;
     if let Some(selection) = selections
         .iter()
-        .find(|selection| selection.assignment_span == assignment.span)
+        .find(|selection| selection.assignment_span == Some(assignment.span))
     {
         return Some(selection);
     }
@@ -517,6 +682,7 @@ pub(super) fn path_containment_guard_sanitizer(
 
 pub(super) fn path_consumer_containment_guard_sanitizer(
     ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
     sink_func: FuncId,
     sink: &RuleMatch,
     sink_rule: &Rule,
@@ -527,25 +693,34 @@ pub(super) fn path_consumer_containment_guard_sanitizer(
     }
     let guard = semantics.path_consumer_containment_guard.as_ref()?;
     let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
-    let guarded_span = path_consumer_guard_span(ws, &decl, sink.span, guard.sink_path_arg_index, guard, None)
-        .or_else(|| {
-            let call_graph = ws.cached_resolved_call_graph();
-            let guarded = call_graph
-                .callers_of(sink_func)
-                .filter(|edge| edge.precision.is_semantic())
-                .find_map(|edge| {
-                    let caller = ws.exact_decl(SymbolId::new(edge.from.raw()))?;
-                    path_consumer_guard_span(
-                        ws,
-                        &caller,
-                        edge.span,
-                        guard.sink_path_arg_index,
-                        guard,
-                        Some(&decl.name),
-                    )
-                });
-            guarded
-        })?;
+    let guarded_span = path_consumer_guard_span(
+        ws,
+        call_graph,
+        &decl,
+        sink.span,
+        guard.sink_path_arg_index,
+        guard,
+        None,
+    )
+    .or_else(|| path_consumer_helper_guard_span(ws, call_graph, sink_func, &decl, sink.span, guard))
+    .or_else(|| {
+        let guarded = call_graph
+            .callers_of(sink_func)
+            .filter(|edge| edge.precision.is_semantic())
+            .find_map(|edge| {
+                let caller = ws.exact_decl(SymbolId::new(edge.from.raw()))?;
+                path_consumer_guard_span(
+                    ws,
+                    call_graph,
+                    &caller,
+                    edge.span,
+                    guard.sink_path_arg_index,
+                    guard,
+                    Some(&decl.name),
+                )
+            });
+        guarded
+    })?;
     finding_for_guard_span_in_workspace(
         ws,
         sink,
@@ -554,6 +729,264 @@ pub(super) fn path_consumer_containment_guard_sanitizer(
         "path-sanitize",
         "canonical-path-consumer-containment",
     )
+}
+
+fn path_consumer_helper_guard_span(
+    ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    sink_func: FuncId,
+    sink_decl: &bonsai_lang_api::Decl,
+    sink_span: Span,
+    guard: &crate::rule::PathConsumerContainmentGuardSemantics,
+) -> Option<Span> {
+    let sink_index = ws.exact_decl_index_shared(sink_span.file)?;
+    let mut sink_calls = Vec::new();
+    collect_structured_calls(&sink_decl.flow_events, &mut sink_calls);
+    let sink_call = sink_calls
+        .iter()
+        .find(|call| call.span == sink_span || spans_overlap(call.span, sink_span))?;
+    let argument_fact = bonsai_lang_api::call_argument_value_fact(
+        &sink_index.call_argument_values,
+        sink_call.span,
+        guard.sink_path_arg_index,
+    )?;
+    let mut reaching_call_sites = Vec::new();
+    if let Some(span) = argument_fact.direct_call_span {
+        reaching_call_sites.push(span);
+    }
+    collect_compiler_call_sites_reaching_value(
+        &sink_index,
+        &argument_fact.value_flow,
+        sink_call.span,
+        &mut reaching_call_sites,
+        &mut AHashSet::new(),
+    );
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "path_helper_sink sink={} argument={} reaching_calls={:?}",
+        sink_decl.name,
+        guard.sink_path_arg_index,
+        reaching_call_sites
+    );
+    for helper_call in sink_calls.iter().filter(|call| {
+        call.span != sink_call.span
+            && reaching_call_sites
+                .iter()
+                .any(|site| spans_overlap(call.span, *site))
+    }) {
+        let targets = call_graph
+            .callees_of(sink_func)
+            .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, helper_call.span))
+            .map(|edge| edge.to)
+            .collect::<AHashSet<_>>();
+        let mut targets = targets.into_iter();
+        let Some(helper_func) = targets.next() else {
+            continue;
+        };
+        if targets.next().is_some() {
+            continue;
+        }
+        let Some(helper) = ws.exact_decl(SymbolId::new(helper_func.raw())) else {
+            continue;
+        };
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "path_helper_candidate sink={} helper={} call={:?}",
+            sink_decl.name,
+            helper.name,
+            helper_call.span
+        );
+        if let Some(span) =
+            path_guarded_helper_return_span(ws, call_graph, helper_func, &helper, guard, &mut AHashSet::new())
+        {
+            return Some(span);
+        }
+    }
+    None
+}
+
+fn path_guarded_helper_return_span(
+    ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    helper_func: FuncId,
+    helper: &bonsai_lang_api::Decl,
+    guard: &crate::rule::PathConsumerContainmentGuardSemantics,
+    visited: &mut AHashSet<FuncId>,
+) -> Option<Span> {
+    if !visited.insert(helper_func) {
+        return None;
+    }
+    if let Some(span) = path_guarded_helper_direct_return_span(ws, call_graph, helper, guard) {
+        return Some(span);
+    }
+    let file_index = ws.exact_decl_index_shared(helper.span.file)?;
+    let mut returns = Vec::new();
+    collect_return_bindings(&helper.flow_events, &mut returns);
+    let [(return_span, _)] = returns.as_slice() else {
+        return None;
+    };
+    let flow = return_value_flow_at_match(&helper.flow_events, *return_span)?;
+    if flow.call_sites.len() != 1
+        || flow.place.is_some()
+        || flow.projection.is_some()
+        || !flow.source_names.is_empty()
+        || !flow.aggregate_fields.is_empty()
+        || !flow.tuple_items.is_empty()
+        || !flow.spreads.is_empty()
+    {
+        return None;
+    }
+    let call_site = flow.call_sites[0];
+    let mut calls = Vec::new();
+    collect_structured_calls(&helper.flow_events, &mut calls);
+    let call = calls.iter().find(|call| spans_overlap(call.span, call_site))?;
+    let targets = call_graph
+        .callees_of(helper_func)
+        .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, call.span))
+        .map(|edge| edge.to)
+        .collect::<AHashSet<_>>();
+    let mut targets = targets.into_iter();
+    let target = targets.next()?;
+    if targets.next().is_some() {
+        return None;
+    }
+    let target_decl = ws.exact_decl(SymbolId::new(target.raw()))?;
+    drop(file_index);
+    path_guarded_helper_return_span(ws, call_graph, target, &target_decl, guard, visited)
+}
+
+fn path_guarded_helper_direct_return_span(
+    ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    helper: &bonsai_lang_api::Decl,
+    guard: &crate::rule::PathConsumerContainmentGuardSemantics,
+) -> Option<Span> {
+    let file_index = ws.exact_decl_index_shared(helper.span.file)?;
+    let mut returns = Vec::new();
+    collect_return_bindings(&helper.flow_events, &mut returns);
+    let [(return_span, Some(candidate))] = returns.as_slice() else {
+        return None;
+    };
+    let candidate = clean_overwrite_target_key(candidate)?;
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(&helper.flow_events, *return_span, &mut assignments);
+    let candidate_assignment = assignments.iter().rev().find(|assignment| {
+        clean_overwrite_target_key(assignment.target).as_deref() == Some(candidate.as_str())
+            && assignment
+                .source_call
+                .is_some_and(|call| rule_target_matches_call(call, &[], &guard.canonicalizer))
+    })?;
+    let mut calls = Vec::new();
+    collect_structured_calls(&helper.flow_events, &mut calls);
+    let path_constructor_calls = calls
+        .iter()
+        .filter(|call| {
+            span_contains(candidate_assignment.span, call.span)
+                && rule_target_matches_call(call.name, &[], &guard.path_constructor)
+        })
+        .collect::<Vec<_>>();
+    let [path_constructor_call] = path_constructor_calls.as_slice() else {
+        return None;
+    };
+    let base = if guard.path_constructor_base_from_receiver {
+        path_constructor_call
+            .receiver
+            .and_then(clean_overwrite_target_key)?
+    } else {
+        compiler_call_argument_place(
+            &file_index,
+            path_constructor_call.span,
+            guard.path_constructor_base_arg_index,
+        )?
+    };
+    let base_is_static =
+        place_has_static_canonical_provenance_or_static_callers(StaticCanonicalProvenanceContext {
+            ws,
+            call_graph,
+            decl: helper,
+            place: &base,
+            assignments: &assignments,
+            assignment_values: &file_index.assignment_values,
+            call_argument_values: &file_index.call_argument_values,
+            canonicalizer: guard.base_canonicalizer.as_ref().unwrap_or(&guard.canonicalizer),
+            static_base_factories: &guard.static_base_factories,
+            before: candidate_assignment.span,
+        });
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "path_helper_direct helper={} candidate={} base={} base_static={}",
+        helper.name,
+        candidate,
+        base,
+        base_is_static
+    );
+    if !base_is_static {
+        return None;
+    }
+    let mut branches = Vec::new();
+    collect_completed_branches_on_path(&helper.flow_events, *return_span, &mut branches);
+    let guarded = branches.into_iter().rev().find_map(|branch| {
+        (branch_arm_abruptly_exits(branch.then_events)
+            && path_containment_guard_condition(
+                &helper.flow_events,
+                &file_index.branch_conditions,
+                branch,
+                &candidate,
+                &base,
+                &guard.containment_check,
+                &guard.boundary_places,
+            ))
+        .then_some(branch.span)
+    });
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "path_helper_result helper={} guarded={:?}",
+        helper.name,
+        guarded
+    );
+    guarded
+}
+
+fn compiler_call_argument_place(
+    file_index: &bonsai_lang_api::DeclIndex,
+    call_span: Span,
+    argument_index: usize,
+) -> Option<String> {
+    let fact = bonsai_lang_api::call_argument_value_fact(
+        &file_index.call_argument_values,
+        call_span,
+        argument_index,
+    )?;
+    fact.value_flow
+        .projection
+        .as_ref()
+        .map(bonsai_lang_api::ExpressionProjection::canonical_place)
+        .or_else(|| {
+            fact.value_flow
+                .place
+                .as_deref()
+                .and_then(clean_overwrite_target_key)
+        })
+}
+
+fn compiler_call_receiver_place(
+    file_index: &bonsai_lang_api::DeclIndex,
+    call: &StructuredCall<'_>,
+) -> Option<String> {
+    bonsai_lang_api::call_receiver_fact_for_span(&file_index.call_receivers, call.span)
+        .and_then(|fact| {
+            fact.value_flow
+                .projection
+                .as_ref()
+                .map(bonsai_lang_api::ExpressionProjection::canonical_place)
+                .or_else(|| {
+                    fact.value_flow
+                        .place
+                        .as_deref()
+                        .and_then(clean_overwrite_target_key)
+                })
+        })
+        .or_else(|| call.receiver.and_then(clean_overwrite_target_key))
 }
 
 pub(super) fn receiver_factory_guard_sanitizer(
@@ -570,11 +1003,10 @@ pub(super) fn receiver_factory_guard_sanitizer(
     let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let mut calls = Vec::new();
     collect_structured_calls(&decl.flow_events, &mut calls);
-    let receiver =
-        structured_call_at_match(&calls, sink.span, &clean_overwrite_callee_tail(&sink.match_text))?
-            .receiver
-            .and_then(clean_overwrite_target_key)?;
     let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let sink_call =
+        structured_call_at_match(&calls, sink.span, &clean_overwrite_callee_tail(&sink.match_text))?;
+    let receiver = compiler_call_receiver_place(&file_index, sink_call)?;
     let assignment = file_index
         .assignment_values
         .iter()
@@ -596,6 +1028,25 @@ pub(super) fn receiver_factory_guard_sanitizer(
     {
         return None;
     }
+    if !guard.required_nested_factories.is_empty() {
+        let file_decls = file_index
+            .defs
+            .iter()
+            .filter_map(|header| ws.exact_decl(header.symbol))
+            .collect::<Vec<_>>();
+        let mut file_calls = Vec::new();
+        for candidate in &file_decls {
+            collect_structured_calls(&candidate.flow_events, &mut file_calls);
+        }
+        if !guard.required_nested_factories.iter().all(|required| {
+            file_calls.iter().any(|call| {
+                span_contains(assignment.value_span, call.span)
+                    && rule_target_matches_call(call.name, call.receiver_types, required)
+            })
+        }) {
+            return None;
+        }
+    }
     let sink_tag = sink_rule.tag.as_deref()?;
     finding_for_guard_span_in_workspace(
         ws,
@@ -605,6 +1056,290 @@ pub(super) fn receiver_factory_guard_sanitizer(
         sink_tag,
         "receiver-factory-guard",
     )
+}
+
+pub(super) fn receiver_configuration_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<FindingMatch> {
+    let guard = sink_rule
+        .analysis_semantics
+        .as_ref()?
+        .receiver_configuration_guard
+        .as_ref()?;
+    let sink_decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let mut sink_calls = Vec::new();
+    collect_structured_calls(&sink_decl.flow_events, &mut sink_calls);
+    let sink_call = structured_call_at_match(&sink_calls, sink.span, "")?;
+    let receiver = compiler_call_receiver_place(&file_index, sink_call)?;
+
+    let local_calls = guaranteed_calls_before(&sink_decl.flow_events, sink.span);
+    if let Some(span) =
+        receiver_configuration_proof_span(&file_index, &local_calls, &receiver, &guard.required_calls)
+    {
+        let overwritten_after_proof =
+            latest_assignment_to_compiler_place(&file_index.assignment_values, &receiver, sink.span.start)
+                .is_some_and(|assignment| assignment.assignment_span.start > span.start);
+        if !overwritten_after_proof {
+            return finding_for_guard_span_in_workspace(
+                ws,
+                sink,
+                span,
+                "engine.sanitizer.receiver_configuration_guard",
+                sink_rule.tag.as_deref()?,
+                "compiler-proven-receiver-configuration",
+            );
+        }
+    }
+
+    let parent = sink_decl.parent?;
+    let parent_decl = ws.exact_decl(parent)?;
+    if !file_index.assignment_values.iter().any(|assignment| {
+        assignment.target_is_immutable
+            && assignment.assignment_span.file == parent_decl.span.file
+            && parent_decl.span.start <= assignment.assignment_span.start
+            && assignment.assignment_span.end <= parent_decl.span.end
+            && assignment
+                .target
+                .as_deref()
+                .and_then(clean_overwrite_target_key)
+                .as_deref()
+                == Some(receiver.as_str())
+    }) {
+        return None;
+    }
+    let constructors = file_index
+        .defs
+        .iter()
+        .filter(|decl| decl.kind == DeclKind::Constructor && decl.parent == Some(parent))
+        .filter_map(|decl| ws.exact_decl(decl.symbol))
+        .collect::<Vec<_>>();
+    if constructors.is_empty() {
+        return None;
+    }
+    let mut proof_spans = Vec::with_capacity(constructors.len());
+    for constructor in &constructors {
+        let before_end = Span::empty(constructor.span.file, constructor.span.end);
+        let calls = guaranteed_calls_before(&constructor.flow_events, before_end);
+        proof_spans.push(receiver_configuration_proof_span(
+            &file_index,
+            &calls,
+            &receiver,
+            &guard.required_calls,
+        )?);
+    }
+    let proof = proof_spans
+        .into_iter()
+        .min_by_key(|span| (span.start, span.end))?;
+    finding_for_guard_span_in_workspace(
+        ws,
+        sink,
+        proof,
+        "engine.sanitizer.receiver_configuration_guard",
+        sink_rule.tag.as_deref()?,
+        "compiler-proven-receiver-configuration",
+    )
+}
+
+fn latest_assignment_to_compiler_place<'a>(
+    assignments: &'a [bonsai_lang_api::AssignmentValueFact],
+    place: &str,
+    before: u64,
+) -> Option<&'a bonsai_lang_api::AssignmentValueFact> {
+    assignments
+        .iter()
+        .filter(|assignment| {
+            assignment.assignment_span.start < before
+                && assignment
+                    .target
+                    .as_deref()
+                    .and_then(clean_overwrite_target_key)
+                    .as_deref()
+                    == Some(place)
+        })
+        .max_by_key(|assignment| (assignment.assignment_span.start, assignment.assignment_span.end))
+}
+
+fn receiver_configuration_proof_span(
+    file_index: &bonsai_lang_api::DeclIndex,
+    calls: &[StructuredCall<'_>],
+    receiver: &str,
+    required_calls: &[crate::rule::RequiredReceiverCallSemantics],
+) -> Option<Span> {
+    let mut proof = None;
+    for required in required_calls {
+        let call = calls.iter().rev().find(|call| {
+            compiler_call_receiver_place(file_index, call).as_deref() == Some(receiver)
+                && rule_target_matches_call(call.name, call.receiver_types, &required.call)
+                && receiver_configuration_identity_matches(file_index, call.span, required)
+        })?;
+        if !required
+            .required_arguments
+            .iter()
+            .all(|argument| receiver_configuration_argument_matches(file_index, call.span, argument))
+        {
+            return None;
+        }
+        proof = Some(proof.map_or(call.span, |current: Span| {
+            if (call.span.start, call.span.end) < (current.start, current.end) {
+                call.span
+            } else {
+                current
+            }
+        }));
+    }
+    proof
+}
+
+fn receiver_configuration_identity_matches(
+    file_index: &bonsai_lang_api::DeclIndex,
+    call_span: Span,
+    required: &crate::rule::RequiredReceiverCallSemantics,
+) -> bool {
+    required.identity_argument_indices.iter().all(|identity_index| {
+        required
+            .required_arguments
+            .iter()
+            .find(|argument| argument.index == *identity_index)
+            .is_some_and(|argument| receiver_configuration_argument_matches(file_index, call_span, argument))
+    })
+}
+
+fn receiver_configuration_argument_matches(
+    file_index: &bonsai_lang_api::DeclIndex,
+    call_span: Span,
+    argument: &crate::rule::RequiredCallArgumentSemantics,
+) -> bool {
+    let Some(fact) = bonsai_lang_api::call_argument_value_fact(
+        &file_index.call_argument_values,
+        call_span,
+        argument.index,
+    ) else {
+        return false;
+    };
+    let place = fact
+        .value_flow
+        .projection
+        .as_ref()
+        .map(bonsai_lang_api::ExpressionProjection::canonical_place)
+        .or_else(|| {
+            fact.value_flow
+                .place
+                .as_deref()
+                .and_then(clean_overwrite_target_key)
+        });
+    let place_matches = place
+        .is_some_and(|place| argument.accepted_places.iter().any(|accepted| accepted == &place))
+        || fact
+            .value_flow
+            .source_names
+            .iter()
+            .any(|source| argument.accepted_places.iter().any(|accepted| accepted == source));
+    let scalar_matches = fact.static_value.as_ref().is_some_and(|value| {
+        argument.require_static_value
+            || argument
+                .accepted_static_values
+                .iter()
+                .any(|accepted| accepted == value)
+    });
+    place_matches || scalar_matches
+}
+
+fn guaranteed_calls_before<'a>(events: &'a [FlowEvent], target: Span) -> Vec<StructuredCall<'a>> {
+    let mut calls = Vec::new();
+    collect_guaranteed_calls_before(events, target, &mut calls);
+    calls
+}
+
+fn collect_guaranteed_calls_before<'a>(
+    events: &'a [FlowEvent],
+    target: Span,
+    out: &mut Vec<StructuredCall<'a>>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                receiver_types,
+                args,
+                ..
+            } if span.end <= target.start => out.push(StructuredCall {
+                span: *span,
+                name,
+                receiver: receiver.as_deref(),
+                receiver_types,
+                args,
+            }),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if events_contain_span(then_events, target) {
+                    collect_guaranteed_calls_before(then_events, target, out);
+                    return;
+                }
+                if events_contain_span(else_events, target) {
+                    collect_guaranteed_calls_before(else_events, target, out);
+                    return;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if events_contain_span(body, target) {
+                    collect_guaranteed_calls_before(body, target, out);
+                    return;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                for region in [
+                    body.as_slice(),
+                    catch_events.as_slice(),
+                    finally_events.as_slice(),
+                ] {
+                    if events_contain_span(region, target) {
+                        collect_guaranteed_calls_before(region, target, out);
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn events_contain_span(events: &[FlowEvent], target: Span) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Call { span, .. } => *span == target || spans_overlap(*span, target),
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => events_contain_span(then_events, target) || events_contain_span(else_events, target),
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            events_contain_span(body, target)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            events_contain_span(body, target)
+                || events_contain_span(catch_events, target)
+                || events_contain_span(finally_events, target)
+        }
+        _ => false,
+    })
 }
 
 pub(super) fn character_escape_sanitizer(
@@ -617,6 +1352,14 @@ pub(super) fn character_escape_sanitizer(
     let file_index = ws.exact_decl_index_shared(sink.span.file)?;
     let sink_decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let verified_helpers = verified_character_substitution_helpers(&file_index, semantics);
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "character_escape sink={} compiler_facts={} compositions={} verified_helpers={}",
+        sink.rule_id,
+        file_index.character_substitutions.len(),
+        file_index.string_compositions.len(),
+        verified_helpers.len()
+    );
     if verified_helpers.is_empty() {
         return None;
     }
@@ -632,6 +1375,12 @@ pub(super) fn character_escape_sanitizer(
                 .map(|candidate| (*call, *candidate))
         })
         .collect();
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "character_escape sink={} helper_calls={}",
+        sink.rule_id,
+        helper_calls.len()
+    );
     if helper_calls.is_empty() {
         return None;
     }
@@ -646,21 +1395,30 @@ pub(super) fn character_escape_sanitizer(
             &mut AHashSet::new(),
         )
     } else {
-        let sink_call = calls
-            .iter()
-            .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+        let sink_call = structured_call_at_match(&calls, sink.span, "")?;
         semantics.value_arg_indices.iter().all(|index| {
-            let Some(flow) = bonsai_lang_api::call_argument_value_fact(
+            let Some(argument) = bonsai_lang_api::call_argument_value_fact(
                 &file_index.call_argument_values,
                 sink_call.span,
                 *index,
-            )
-            .map(|fact| &fact.value_flow) else {
+            ) else {
                 return false;
             };
-            character_escape_flow_is_safe(flow, sink.span, &file_index, &helper_calls, &mut AHashSet::new())
+            character_escape_flow_is_safe(
+                &argument.value_flow,
+                argument.argument_span,
+                &file_index,
+                &helper_calls,
+                &mut AHashSet::new(),
+            )
         })
     };
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "character_escape sink={} proof={}",
+        sink.rule_id,
+        proof
+    );
     if !proof {
         return None;
     }
@@ -701,21 +1459,29 @@ pub(super) fn character_constraint_sanitizer(context: &CompilerGuardContext<'_>)
         let Some(file_index) = ws.exact_decl_index_shared(decl.span.file) else {
             continue;
         };
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "character_constraint_function function={} decl_span={:?} fact_count={}",
+            decl.name,
+            decl.span,
+            file_index.character_constraints.len()
+        );
         for fact in file_index
             .character_constraints
             .iter()
             .filter(|fact| fact.function_span == decl.span)
         {
             let domain = character_domain_excludes(&fact.domain, &semantics.required_excluded_characters);
-            let input = character_constraint_input_is_tainted(
-                &file_index,
-                &decl,
+            let input = character_constraint_input_is_tainted(CharacterConstraintInputContext {
+                file_index: &file_index,
+                decl: &decl,
                 fact,
                 source,
                 source_func,
                 function,
+                tainted_call_spans,
                 taint_path,
-            );
+            });
             let output = character_constraint_output_reaches_lineage(
                 ws,
                 &file_index,
@@ -780,20 +1546,67 @@ pub(super) fn character_constraint_sanitizer(context: &CompilerGuardContext<'_>)
                                 .any(|argument| argument.param_name == *parameter || argument.index == index)
                     });
                     let from_source = source_func == caller_func
-                        && place_depends_on_match_span(
-                            &file_index,
-                            parameter,
-                            sink.span,
-                            source.span,
-                            &mut AHashSet::new(),
-                        );
-                    (from_path || from_source).then_some(parameter.as_str())
+                        && (source_is_exact_parameter(&caller, source, parameter)
+                            || place_depends_on_match_span(
+                                &file_index,
+                                parameter,
+                                sink.span,
+                                source.span,
+                                &mut AHashSet::new(),
+                            ));
+                    let from_sink_value = sink_tainted_value_depends_on_place(
+                        &file_index,
+                        &caller,
+                        sink.span,
+                        sink_tainted_args,
+                        parameter,
+                    );
+                    (from_path || from_source || from_sink_value).then_some(parameter.as_str())
                 })
                 .collect::<Vec<_>>();
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "character_constraint_caller caller={} tainted_targets={:?} tainted_parameters={:?} compositions={}",
+                caller.name,
+                tainted_targets,
+                tainted_parameters,
+                file_index.string_compositions.len()
+            );
             if tainted_parameters.is_empty() && source_func != caller_func {
                 continue;
             }
-            let graph = ws.cached_resolved_call_graph();
+            let graph = context.call_graph;
+            let mut calls = Vec::new();
+            collect_structured_calls(&caller.flow_events, &mut calls);
+            let mut helper_call_spans = AHashSet::new();
+            if let Some(sink_call) = structured_call_at_match(&calls, sink.span, "") {
+                for sink_argument_index in sink_tainted_args.iter().map(|argument| argument.index) {
+                    let Some(sink_argument) = bonsai_lang_api::call_argument_value_fact(
+                        &file_index.call_argument_values,
+                        sink_call.span,
+                        sink_argument_index,
+                    ) else {
+                        continue;
+                    };
+                    let mut reaching_call_sites = Vec::new();
+                    if let Some(span) = sink_argument.direct_call_span {
+                        reaching_call_sites.push(span);
+                    }
+                    collect_compiler_call_sites_reaching_value(
+                        &file_index,
+                        &sink_argument.value_flow,
+                        sink_call.span,
+                        &mut reaching_call_sites,
+                        &mut AHashSet::new(),
+                    );
+                    helper_call_spans.extend(reaching_call_sites.into_iter().flat_map(|site| {
+                        calls
+                            .iter()
+                            .filter(move |call| spans_overlap(call.span, site))
+                            .map(|call| call.span)
+                    }));
+                }
+            }
             for composition in file_index.string_compositions.iter().filter(|composition| {
                 composition.container_span.start < sink.span.start
                     && composition
@@ -801,80 +1614,96 @@ pub(super) fn character_constraint_sanitizer(context: &CompilerGuardContext<'_>)
                         .as_ref()
                         .is_some_and(|target| tainted_targets.contains(target))
             }) {
-                for call_span in composition.parts.iter().filter_map(|part| match part {
+                helper_call_spans.extend(composition.parts.iter().filter_map(|part| match part {
                     bonsai_lang_api::StringCompositionPart::Call { span }
                     | bonsai_lang_api::StringCompositionPart::CallOrLiteral { span, .. } => Some(*span),
                     _ => None,
+                }));
+            }
+            for call_span in helper_call_spans {
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "character_constraint_helper_call caller={} helper_call_span={:?}",
+                    caller.name,
+                    call_span
+                );
+                let targets = graph
+                    .callees_of(caller_func)
+                    .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, call_span))
+                    .map(|edge| edge.to)
+                    .collect::<AHashSet<_>>();
+                let mut targets = targets.into_iter();
+                let Some(helper_func) = targets.next() else {
+                    continue;
+                };
+                if targets.next().is_some() {
+                    continue;
+                }
+                let Some(helper) = ws.exact_decl(SymbolId::new(helper_func.raw())) else {
+                    continue;
+                };
+                let Some(helper_index) = ws.exact_decl_index_shared(helper.span.file) else {
+                    continue;
+                };
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "character_constraint_helper caller={} helper={} facts={}",
+                    caller.name,
+                    helper.name,
+                    helper_index.character_constraints.len()
+                );
+                for fact in helper_index.character_constraints.iter().filter(|fact| {
+                    fact.function_span == helper.span
+                        && matches!(fact.output, bonsai_lang_api::CharacterConstraintOutput::Return)
+                        && character_domain_excludes(&fact.domain, &semantics.required_excluded_characters)
                 }) {
-                    let targets = graph
-                        .callees_of(caller_func)
-                        .filter(|edge| edge.precision.is_semantic() && edge.span == call_span)
-                        .map(|edge| edge.to)
-                        .collect::<AHashSet<_>>();
-                    let mut targets = targets.into_iter();
-                    let Some(helper_func) = targets.next() else {
+                    let Some(input_index) = fact.input_param_index else {
                         continue;
                     };
-                    if targets.next().is_some() {
-                        continue;
-                    }
-                    let Some(helper) = ws.exact_decl(SymbolId::new(helper_func.raw())) else {
-                        continue;
-                    };
-                    let Some(helper_index) = ws.exact_decl_index_shared(helper.span.file) else {
+                    let Some(argument) = bonsai_lang_api::call_argument_value_fact(
+                        &file_index.call_argument_values,
+                        call_span,
+                        input_index,
+                    ) else {
                         continue;
                     };
-                    for fact in helper_index.character_constraints.iter().filter(|fact| {
-                        fact.function_span == helper.span
-                            && matches!(fact.output, bonsai_lang_api::CharacterConstraintOutput::Return)
-                            && character_domain_excludes(
-                                &fact.domain,
-                                &semantics.required_excluded_characters,
-                            )
-                    }) {
-                        let Some(input_index) = fact.input_param_index else {
-                            continue;
-                        };
-                        let Some(argument) = bonsai_lang_api::call_argument_value_fact(
-                            &file_index.call_argument_values,
+                    let from_tainted_parameter = tainted_parameters.iter().any(|parameter| {
+                        expression_flow_depends_on_place(
+                            &argument.value_flow,
+                            parameter,
                             call_span,
-                            input_index,
-                        ) else {
-                            continue;
-                        };
-                        let from_tainted_parameter = tainted_parameters.iter().any(|parameter| {
-                            expression_flow_depends_on_place(
-                                &argument.value_flow,
-                                parameter,
-                                call_span,
-                                &file_index,
-                                &mut AHashSet::new(),
-                            )
-                        });
-                        let from_local_source = source_func == caller_func
-                            && expression_flow_depends_on_match_span(
-                                &argument.value_flow,
-                                &file_index,
-                                call_span,
-                                source.span,
-                            );
-                        if !from_tainted_parameter && !from_local_source {
-                            continue;
-                        }
-                        let mut finding = finding_for_guard_span_in_workspace(
-                            ws,
-                            sink,
-                            fact.transform_span,
-                            "engine.sanitizer.character_constraint",
-                            sink_rule.tag.as_deref()?,
-                            "compiler-proven-character-constraint",
-                        )?;
-                        finding.sanitised_arg_indices = sink_tainted_args
-                            .iter()
-                            .filter_map(|argument| u32::try_from(argument.index).ok())
-                            .collect();
-                        return Some(finding);
+                            &file_index,
+                            &mut AHashSet::new(),
+                        )
+                    });
+                    let from_local_source = source_func == caller_func
+                        && expression_flow_depends_on_match_span(
+                            &argument.value_flow,
+                            &file_index,
+                            call_span,
+                            source.span,
+                        );
+                    let from_tainted_call = tainted_call_spans.iter().any(|tainted| {
+                        spans_overlap(*tainted, call_span)
+                            || span_contains(*tainted, call_span)
+                            || span_contains(call_span, *tainted)
+                    });
+                    if !from_tainted_parameter && !from_local_source && !from_tainted_call {
+                        continue;
                     }
+                    let mut finding = finding_for_guard_span_in_workspace(
+                        ws,
+                        sink,
+                        fact.transform_span,
+                        "engine.sanitizer.character_constraint",
+                        sink_rule.tag.as_deref()?,
+                        "compiler-proven-character-constraint",
+                    )?;
+                    finding.sanitised_arg_indices = sink_tainted_args
+                        .iter()
+                        .filter_map(|argument| u32::try_from(argument.index).ok())
+                        .collect();
+                    return Some(finding);
                 }
             }
         }
@@ -891,6 +1720,7 @@ pub(super) fn same_origin_path_constraint_sanitizer(
     let sink = context.sink;
     let sink_rule = context.sink_rule;
     let candidate_funcs = context.candidate_funcs;
+    let tainted_call_spans = context.tainted_call_spans;
     let taint_path = context.taint_path;
     let sink_tainted_args = context.sink_tainted_args;
     let required = sink_rule
@@ -898,6 +1728,32 @@ pub(super) fn same_origin_path_constraint_sanitizer(
         .as_ref()?
         .same_origin_path_constraint
         .as_ref()?;
+    if let Some(index) = required.sink_argument_index {
+        if !sink_tainted_args.iter().any(|argument| argument.index == index) {
+            return None;
+        }
+    }
+    if let Some(context_argument) = required.static_context_argument.as_ref() {
+        let rendering = candidate_funcs.iter().find_map(|function| {
+            let decl = ws.exact_decl(SymbolId::new(function.raw()))?;
+            if !span_contains(decl.span, sink.span) {
+                return None;
+            }
+            let mut calls = Vec::new();
+            collect_structured_calls(&decl.flow_events, &mut calls);
+            structured_call_at_match(&calls, sink.span, "")
+                .and_then(|call| call.args.get(context_argument.index))
+                .map(|argument| argument.value_text.trim().to_string())
+        });
+        if rendering.as_deref().is_none_or(|rendering| {
+            !context_argument
+                .accepted_renderings
+                .iter()
+                .any(|accepted| accepted == rendering)
+        }) {
+            return None;
+        }
+    }
     for &function in candidate_funcs {
         let decl = ws.exact_decl(SymbolId::new(function.raw()))?;
         let file_index = ws.exact_decl_index_shared(decl.span.file)?;
@@ -954,16 +1810,23 @@ pub(super) fn same_origin_path_constraint_sanitizer(
             .iter()
             .enumerate()
             .filter_map(|(index, parameter)| {
-                taint_path
-                    .iter()
-                    .any(|step| {
-                        step.callee == caller.name
-                            && step
-                                .tainted_args
-                                .iter()
-                                .any(|argument| argument.param_name == *parameter || argument.index == index)
-                    })
-                    .then_some(parameter.as_str())
+                let from_path = taint_path.iter().any(|step| {
+                    step.callee == caller.name
+                        && step
+                            .tainted_args
+                            .iter()
+                            .any(|argument| argument.param_name == *parameter || argument.index == index)
+                });
+                let from_sink_value = sink_tainted_value_depends_on_place(
+                    &file_index,
+                    &caller,
+                    sink.span,
+                    sink_tainted_args,
+                    parameter,
+                );
+                let from_source =
+                    source_func == caller_func && source_is_exact_parameter(&caller, source, parameter);
+                (from_path || from_sink_value || from_source).then_some(parameter.as_str())
             })
             .collect::<Vec<_>>();
         if tainted_parameters.is_empty() && source_func != caller_func {
@@ -971,10 +1834,7 @@ pub(super) fn same_origin_path_constraint_sanitizer(
         }
         let mut calls = Vec::new();
         collect_structured_calls(&caller.flow_events, &mut calls);
-        let Some(sink_call) = calls
-            .iter()
-            .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))
-        else {
+        let Some(sink_call) = structured_call_at_match(&calls, sink.span, "") else {
             continue;
         };
         for sink_argument_index in sink_tainted_args.iter().map(|argument| argument.index) {
@@ -985,83 +1845,197 @@ pub(super) fn same_origin_path_constraint_sanitizer(
             ) else {
                 continue;
             };
-            let Some(helper_call_span) = sink_argument.direct_call_span else {
-                continue;
-            };
-            let targets = ws
-                .cached_resolved_call_graph()
-                .callees_of(caller_func)
-                .filter(|edge| edge.precision.is_semantic() && edge.span == helper_call_span)
-                .map(|edge| edge.to)
-                .collect::<AHashSet<_>>();
-            let mut targets = targets.into_iter();
-            let Some(helper_func) = targets.next() else {
-                continue;
-            };
-            if targets.next().is_some() {
-                continue;
+            let mut reaching_call_sites = Vec::new();
+            if let Some(span) = sink_argument.direct_call_span {
+                reaching_call_sites.push(span);
             }
-            let Some(helper) = ws.exact_decl(SymbolId::new(helper_func.raw())) else {
-                continue;
-            };
-            let Some(helper_index) = ws.exact_decl_index_shared(helper.span.file) else {
-                continue;
-            };
-            for fact in helper_index
-                .same_origin_path_constraints
+            collect_compiler_call_sites_reaching_value(
+                &file_index,
+                &sink_argument.value_flow,
+                sink_call.span,
+                &mut reaching_call_sites,
+                &mut AHashSet::new(),
+            );
+            reaching_call_sites.sort_by_key(|span| (span.start, span.end));
+            reaching_call_sites.dedup();
+            let helper_call_spans = reaching_call_sites
                 .iter()
-                .filter(|fact| fact.function_span == helper.span)
-            {
-                if (required.require_scheme_rejection && !fact.rejects_scheme)
-                    || (required.require_authority_rejection && !fact.rejects_authority)
-                    || (required.require_absolute_path && !fact.requires_absolute_path)
-                    || (required.require_scheme_relative_rejection && !fact.rejects_scheme_relative_path)
-                {
-                    continue;
-                }
-                let Some(argument) = bonsai_lang_api::call_argument_value_fact(
-                    &file_index.call_argument_values,
-                    helper_call_span,
-                    fact.input_param_index,
-                ) else {
+                .flat_map(|site| {
+                    calls
+                        .iter()
+                        .filter(move |call| spans_overlap(call.span, *site))
+                        .map(|call| call.span)
+                })
+                .collect::<AHashSet<_>>();
+            for helper_call_span in helper_call_spans {
+                let targets = context
+                    .call_graph
+                    .callees_of(caller_func)
+                    .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, helper_call_span))
+                    .map(|edge| edge.to)
+                    .collect::<AHashSet<_>>();
+                let mut targets = targets.into_iter();
+                let Some(helper_func) = targets.next() else {
                     continue;
                 };
-                let from_tainted_parameter = tainted_parameters.iter().any(|parameter| {
-                    expression_flow_depends_on_place(
-                        &argument.value_flow,
-                        parameter,
-                        helper_call_span,
-                        &file_index,
-                        &mut AHashSet::new(),
-                    )
-                });
-                let from_local_source = source_func == caller_func
-                    && expression_flow_depends_on_match_span(
-                        &argument.value_flow,
-                        &file_index,
-                        helper_call_span,
-                        source.span,
-                    );
-                if !from_tainted_parameter && !from_local_source {
+                if targets.next().is_some() {
                     continue;
                 }
-                let mut finding = finding_for_guard_span_in_workspace(
-                    ws,
-                    sink,
-                    fact.guard_span,
-                    "engine.sanitizer.same_origin_path_constraint",
-                    sink_rule.tag.as_deref()?,
-                    "compiler-proven-same-origin-path-constraint",
-                )?;
-                finding.sanitised_arg_indices = sink_tainted_args
+                let Some(helper) = ws.exact_decl(SymbolId::new(helper_func.raw())) else {
+                    continue;
+                };
+                let Some(helper_index) = ws.exact_decl_index_shared(helper.span.file) else {
+                    continue;
+                };
+                for fact in helper_index
+                    .same_origin_path_constraints
                     .iter()
-                    .filter_map(|argument| u32::try_from(argument.index).ok())
-                    .collect();
-                return Some(finding);
+                    .filter(|fact| fact.function_span == helper.span)
+                {
+                    if (required.require_scheme_rejection && !fact.rejects_scheme)
+                        || (required.require_authority_rejection && !fact.rejects_authority)
+                        || (required.require_absolute_path && !fact.requires_absolute_path)
+                        || (required.require_scheme_relative_rejection && !fact.rejects_scheme_relative_path)
+                    {
+                        continue;
+                    }
+                    let Some(argument) = bonsai_lang_api::call_argument_value_fact(
+                        &file_index.call_argument_values,
+                        helper_call_span,
+                        fact.input_param_index,
+                    ) else {
+                        continue;
+                    };
+                    let from_tainted_parameter = tainted_parameters.iter().any(|parameter| {
+                        expression_flow_depends_on_place(
+                            &argument.value_flow,
+                            parameter,
+                            helper_call_span,
+                            &file_index,
+                            &mut AHashSet::new(),
+                        )
+                    });
+                    let from_local_source = source_func == caller_func
+                        && expression_flow_depends_on_match_span(
+                            &argument.value_flow,
+                            &file_index,
+                            helper_call_span,
+                            source.span,
+                        );
+                    let from_tainted_call = tainted_call_spans.iter().any(|tainted| {
+                        spans_overlap(*tainted, helper_call_span)
+                            || span_contains(*tainted, helper_call_span)
+                            || span_contains(helper_call_span, *tainted)
+                    });
+                    if !from_tainted_parameter && !from_local_source && !from_tainted_call {
+                        continue;
+                    }
+                    let mut finding = finding_for_guard_span_in_workspace(
+                        ws,
+                        sink,
+                        fact.guard_span,
+                        "engine.sanitizer.same_origin_path_constraint",
+                        sink_rule.tag.as_deref()?,
+                        "compiler-proven-same-origin-path-constraint",
+                    )?;
+                    finding.sanitised_arg_indices = sink_tainted_args
+                        .iter()
+                        .filter_map(|argument| u32::try_from(argument.index).ok())
+                        .collect();
+                    return Some(finding);
+                }
             }
         }
     }
     None
+}
+
+pub(super) fn collect_compiler_call_sites_reaching_value(
+    file_index: &bonsai_lang_api::DeclIndex,
+    flow: &bonsai_lang_api::ExpressionFlow,
+    before: Span,
+    out: &mut Vec<Span>,
+    seen_places: &mut AHashSet<String>,
+) {
+    out.extend(flow.call_sites.iter().copied());
+    let place = flow.place.clone().or_else(|| {
+        let mut assigned_sources = flow
+            .source_names
+            .iter()
+            .filter_map(|source| clean_overwrite_target_key(source))
+            .filter(|source| {
+                file_index.assignment_values.iter().any(|fact| {
+                    fact.target.as_deref() == Some(source.as_str())
+                        && fact.assignment_span.file == before.file
+                        && fact.assignment_span.end <= before.start
+                })
+            })
+            .collect::<Vec<_>>();
+        assigned_sources.sort();
+        assigned_sources.dedup();
+        (assigned_sources.len() == 1).then(|| assigned_sources.remove(0))
+    });
+    let Some(place) = place.as_deref() else {
+        return;
+    };
+    if !seen_places.insert(place.to_string()) {
+        return;
+    }
+    let Some(assignment) = file_index
+        .assignment_values
+        .iter()
+        .filter(|fact| {
+            fact.target.as_deref() == Some(place)
+                && fact.assignment_span.file == before.file
+                && fact.assignment_span.end <= before.start
+        })
+        .max_by_key(|fact| fact.assignment_span.end)
+    else {
+        return;
+    };
+    out.extend(assignment.call_sites.iter().copied());
+    collect_compiler_call_sites_reaching_value(
+        file_index,
+        &assignment.value_flow,
+        assignment.assignment_span,
+        out,
+        seen_places,
+    );
+}
+
+fn sink_tainted_value_depends_on_place(
+    file_index: &bonsai_lang_api::DeclIndex,
+    decl: &bonsai_lang_api::Decl,
+    sink_span: Span,
+    sink_tainted_args: &[TaintedArgInfo],
+    place: &str,
+) -> bool {
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    if let Some(sink_call) = calls
+        .iter()
+        .find(|call| call.span == sink_span || spans_overlap(call.span, sink_span))
+    {
+        return sink_tainted_args.iter().any(|tainted| {
+            bonsai_lang_api::call_argument_value_fact(
+                &file_index.call_argument_values,
+                sink_call.span,
+                tainted.index,
+            )
+            .is_some_and(|argument| {
+                expression_flow_depends_on_place(
+                    &argument.value_flow,
+                    place,
+                    sink_call.span,
+                    file_index,
+                    &mut AHashSet::new(),
+                )
+            })
+        });
+    }
+    return_value_flow_at_match(&decl.flow_events, sink_span).is_some_and(|flow| {
+        expression_flow_depends_on_place(flow, place, sink_span, file_index, &mut AHashSet::new())
+    })
 }
 
 fn character_domain_excludes(
@@ -1088,15 +2062,35 @@ fn character_domain_excludes(
     }
 }
 
-fn character_constraint_input_is_tainted(
-    file_index: &bonsai_lang_api::DeclIndex,
-    decl: &bonsai_lang_api::Decl,
-    fact: &bonsai_lang_api::CharacterConstraintFact,
-    source: &RuleMatch,
+struct CharacterConstraintInputContext<'a> {
+    file_index: &'a bonsai_lang_api::DeclIndex,
+    decl: &'a bonsai_lang_api::Decl,
+    fact: &'a bonsai_lang_api::CharacterConstraintFact,
+    source: &'a RuleMatch,
     source_func: FuncId,
     function: FuncId,
-    taint_path: &[TaintPropagationStep],
-) -> bool {
+    tainted_call_spans: &'a AHashSet<Span>,
+    taint_path: &'a [TaintPropagationStep],
+}
+
+fn character_constraint_input_is_tainted(context: CharacterConstraintInputContext<'_>) -> bool {
+    let CharacterConstraintInputContext {
+        file_index,
+        decl,
+        fact,
+        source,
+        source_func,
+        function,
+        tainted_call_spans,
+        taint_path,
+    } = context;
+    if tainted_call_spans.iter().any(|span| {
+        spans_overlap(*span, fact.transform_span)
+            || span_contains(*span, fact.transform_span)
+            || span_contains(fact.transform_span, *span)
+    }) {
+        return true;
+    }
     if source_func == function
         && place_depends_on_match_span(
             file_index,
@@ -1119,6 +2113,12 @@ fn character_constraint_input_is_tainted(
                     })
             })
         })
+}
+
+fn source_is_exact_parameter(decl: &bonsai_lang_api::Decl, source: &RuleMatch, parameter: &str) -> bool {
+    span_contains(decl.span, source.span)
+        && decl.params.iter().any(|candidate| candidate == parameter)
+        && source.match_text.trim() == parameter
 }
 
 fn place_depends_on_match_span(
@@ -1152,6 +2152,20 @@ fn place_depends_on_match_span(
             spans_overlap(*call, match_span)
                 || span_contains(*call, match_span)
                 || span_contains(match_span, *call)
+        }) || assignment.call_sites.iter().any(|call_expression| {
+            file_index.call_argument_values.iter().any(|argument| {
+                (spans_overlap(*call_expression, argument.call_span)
+                    || span_contains(*call_expression, argument.call_span)
+                    || span_contains(argument.call_span, *call_expression))
+                    && (spans_overlap(argument.argument_span, match_span)
+                        || span_contains(argument.argument_span, match_span)
+                        || expression_flow_depends_on_match_span(
+                            &argument.value_flow,
+                            file_index,
+                            assignment.assignment_span,
+                            match_span,
+                        ))
+            })
         }) || assignment.call_sites.iter().any(|call_expression| {
             file_index.call_receivers.iter().any(|receiver| {
                 receiver.role == bonsai_lang_api::CallReceiverRole::Value
@@ -1254,6 +2268,29 @@ fn character_constraint_output_reaches_lineage(
                         )
                     },
                 )
+            }),
+        bonsai_lang_api::CharacterConstraintOutput::Expression { span } => file_index
+            .call_argument_values
+            .iter()
+            .filter(|argument| {
+                argument.argument_span.file == span.file
+                    && span_contains(argument.argument_span, *span)
+                    && (tainted_call_spans.contains(&argument.call_span)
+                        || compiler_call_is_on_taint_path(ws, decl, argument.call_span, taint_path))
+            })
+            .any(|argument| {
+                required_delimiter.is_none()
+                    || file_index.string_compositions.iter().any(|composition| {
+                        composition.container_span == argument.argument_span
+                            && composition.parts.iter().any(|part| matches!(
+                                part,
+                                bonsai_lang_api::StringCompositionPart::Call { span: call_span }
+                                    | bonsai_lang_api::StringCompositionPart::CallOrLiteral { span: call_span, .. }
+                                    if spans_overlap(*call_span, *span)
+                                        || span_contains(*call_span, *span)
+                                        || span_contains(*span, *call_span)
+                            ))
+                    })
             }),
     }
 }
@@ -1455,16 +2492,23 @@ fn verified_character_substitution_helpers<'a>(
         if fact.input_param_index >= decl.params.len() {
             continue;
         }
-        let Some(map) = file_index
-            .static_string_maps
-            .iter()
-            .filter(|map| map.target == fact.table && map.assignment_span.start < fact.transform_span.start)
-            .max_by_key(|map| (map.assignment_span.start, map.assignment_span.end))
-        else {
-            continue;
+        let mappings = if fact.exact_mappings.is_empty() {
+            let Some(map) = file_index
+                .static_string_maps
+                .iter()
+                .filter(|map| {
+                    map.target == fact.table && map.assignment_span.start < fact.transform_span.start
+                })
+                .max_by_key(|map| (map.assignment_span.start, map.assignment_span.end))
+            else {
+                continue;
+            };
+            map.entries.as_slice()
+        } else {
+            fact.exact_mappings.as_slice()
         };
         if !semantics.required_mappings.iter().all(|required| {
-            map.entries
+            mappings
                 .iter()
                 .any(|entry| entry.key == required.input && entry.value == required.output)
         }) {
@@ -1544,6 +2588,12 @@ fn character_escape_flow_is_safe(
     helper_calls: &[(StructuredCall<'_>, VerifiedCharacterHelper<'_>)],
     visited_places: &mut AHashSet<String>,
 ) -> bool {
+    if file_index.string_compositions.iter().any(|composition| {
+        (composition.container_span == before || composition.value_span == before)
+            && character_escape_composition_is_safe(&composition.parts, helper_calls)
+    }) {
+        return true;
+    }
     if !flow.spreads.is_empty() {
         return false;
     }
@@ -1584,7 +2634,7 @@ fn character_escape_flow_is_safe(
         let safe = assignment.is_some_and(|assignment| {
             character_escape_flow_is_safe(
                 &assignment.value_flow,
-                assignment.assignment_span,
+                assignment.value_span,
                 file_index,
                 helper_calls,
                 visited_places,
@@ -1597,15 +2647,45 @@ fn character_escape_flow_is_safe(
         return false;
     }
     flow.aggregate_fields.iter().all(|field| {
-        character_escape_flow_is_safe(&field.value, before, file_index, helper_calls, visited_places)
+        character_escape_flow_is_safe(
+            &field.value,
+            field.value_span.unwrap_or(before),
+            file_index,
+            helper_calls,
+            visited_places,
+        )
     }) && flow
         .tuple_items
         .iter()
         .all(|item| character_escape_flow_is_safe(item, before, file_index, helper_calls, visited_places))
 }
 
+fn character_escape_composition_is_safe(
+    parts: &[bonsai_lang_api::StringCompositionPart],
+    helper_calls: &[(StructuredCall<'_>, VerifiedCharacterHelper<'_>)],
+) -> bool {
+    let mut saw_transform = false;
+    let safe = parts.iter().all(|part| match part {
+        bonsai_lang_api::StringCompositionPart::Literal { .. } => true,
+        bonsai_lang_api::StringCompositionPart::Call { span }
+        | bonsai_lang_api::StringCompositionPart::CallOrLiteral { span, .. } => {
+            let verified = helper_calls.iter().any(|(call, _)| {
+                spans_overlap(call.span, *span)
+                    || span_contains(*span, call.span)
+                    || span_contains(call.span, *span)
+            });
+            saw_transform |= verified;
+            verified
+        }
+        bonsai_lang_api::StringCompositionPart::Place { .. }
+        | bonsai_lang_api::StringCompositionPart::PlaceOrLiteral { .. } => false,
+    });
+    safe && saw_transform
+}
+
 fn path_consumer_guard_span(
     ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
     decl: &bonsai_lang_api::Decl,
     consumer_span: Span,
     path_arg_index: usize,
@@ -1615,19 +2695,31 @@ fn path_consumer_guard_span(
     let file_index = ws.exact_decl_index_shared(consumer_span.file)?;
     let mut calls = Vec::new();
     collect_structured_calls(&decl.flow_events, &mut calls);
-    let consumer_call = calls
-        .iter()
-        .filter(|call| call.span == consumer_span || spans_overlap(call.span, consumer_span))
-        .find(|call| {
-            expected_callee
-                .is_none_or(|expected| callee_spelling_tail(call.name) == callee_spelling_tail(expected))
-        })?;
-    let candidate = consumer_call
-        .args
-        .get(path_arg_index)?
+    let required_tail = expected_callee.map(callee_spelling_tail).unwrap_or_default();
+    let consumer_call = structured_call_at_match(&calls, consumer_span, &required_tail)?;
+    let consumer_argument = consumer_call.args.get(path_arg_index)?;
+    let candidate = consumer_argument
         .place
         .as_deref()
-        .and_then(clean_overwrite_target_key)?;
+        .and_then(clean_overwrite_target_key)
+        .or_else(|| {
+            let mut assignments = Vec::new();
+            collect_structured_assignments_before(&decl.flow_events, consumer_span, &mut assignments);
+            let mut candidates = consumer_argument
+                .source_names
+                .iter()
+                .filter_map(|source| clean_overwrite_target_key(source))
+                .filter(|source| {
+                    assignments.iter().rev().any(|assignment| {
+                        clean_overwrite_target_key(assignment.target).as_deref() == Some(source.as_str())
+                            && assignment
+                                .source_call
+                                .is_some_and(|call| rule_target_matches_call(call, &[], &guard.canonicalizer))
+                    })
+                });
+            let candidate = candidates.next()?;
+            candidates.next().is_none().then_some(candidate)
+        })?;
 
     let mut assignments = Vec::new();
     collect_structured_assignments_before(&decl.flow_events, consumer_span, &mut assignments);
@@ -1645,14 +2737,24 @@ fn path_consumer_guard_span(
         })
         .collect();
     if path_constructor_calls.len() != 1 {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "path_consumer constructor_count={} candidate={} sink={}",
+            path_constructor_calls.len(),
+            candidate,
+            consumer_call.name
+        );
         return None;
     }
-    let base = path_constructor_calls[0]
-        .args
-        .get(guard.path_constructor_base_arg_index)?
-        .place
-        .as_deref()
-        .and_then(clean_overwrite_target_key)?;
+    let base = if guard.path_constructor_base_from_receiver {
+        compiler_call_receiver_place(&file_index, path_constructor_calls[0])?
+    } else {
+        compiler_call_argument_place(
+            &file_index,
+            path_constructor_calls[0].span,
+            guard.path_constructor_base_arg_index,
+        )?
+    };
 
     let exact_file_decls: Vec<_> = file_index
         .defs
@@ -1669,13 +2771,28 @@ fn path_consumer_guard_span(
     }
     file_assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
     file_assignments.dedup_by_key(|assignment| assignment.span);
-    if !place_has_static_canonical_provenance(
-        &base,
-        &file_assignments,
-        &file_index.assignment_values,
-        guard.base_canonicalizer.as_ref().unwrap_or(&guard.canonicalizer),
-        candidate_assignment.span,
-    ) {
+    let base_is_static =
+        place_has_static_canonical_provenance_or_static_callers(StaticCanonicalProvenanceContext {
+            ws,
+            call_graph,
+            decl,
+            place: &base,
+            assignments: &file_assignments,
+            assignment_values: &file_index.assignment_values,
+            call_argument_values: &file_index.call_argument_values,
+            canonicalizer: guard.base_canonicalizer.as_ref().unwrap_or(&guard.canonicalizer),
+            static_base_factories: &guard.static_base_factories,
+            before: candidate_assignment.span,
+        });
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "path_consumer sink={} candidate={} base={} base_static={}",
+        consumer_call.name,
+        candidate,
+        base,
+        base_is_static
+    );
+    if !base_is_static {
         return None;
     }
 
@@ -1692,16 +2809,176 @@ fn path_consumer_guard_span(
                 &guard.containment_check,
                 &guard.boundary_places,
             )
-    })?;
+    });
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "path_consumer sink={} guarded={:?}",
+        consumer_call.name,
+        branch.map(|branch| branch.span)
+    );
+    let branch = branch?;
     Some(branch.span)
+}
+
+struct StaticCanonicalProvenanceContext<'a> {
+    ws: &'a Workspace,
+    call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+    decl: &'a bonsai_lang_api::Decl,
+    place: &'a str,
+    assignments: &'a [StructuredAssignment<'a>],
+    assignment_values: &'a [bonsai_lang_api::AssignmentValueFact],
+    call_argument_values: &'a [bonsai_lang_api::CallArgumentValueFact],
+    canonicalizer: &'a RuleTarget,
+    static_base_factories: &'a [RuleTarget],
+    before: Span,
+}
+
+fn place_has_static_canonical_provenance_or_static_callers(
+    context: StaticCanonicalProvenanceContext<'_>,
+) -> bool {
+    let StaticCanonicalProvenanceContext {
+        ws,
+        call_graph,
+        decl,
+        place,
+        assignments,
+        assignment_values,
+        call_argument_values,
+        canonicalizer,
+        static_base_factories,
+        before,
+    } = context;
+    if place_has_static_canonical_provenance(
+        place,
+        assignments,
+        assignment_values,
+        call_argument_values,
+        canonicalizer,
+        static_base_factories,
+        before,
+    ) {
+        return true;
+    }
+    let Some(root) = canonical_provenance_root_place(
+        place,
+        assignments,
+        assignment_values,
+        call_argument_values,
+        canonicalizer,
+        static_base_factories,
+    ) else {
+        return false;
+    };
+    let Some(parameter_index) = decl.params.iter().position(|parameter| parameter == &root) else {
+        return false;
+    };
+    let callers = call_graph
+        .callers_of(FuncId::new(decl.symbol.raw()))
+        .filter(|edge| edge.precision.is_semantic())
+        .collect::<Vec<_>>();
+    !callers.is_empty()
+        && callers.iter().all(|edge| {
+            let Some(caller) = ws.exact_decl(SymbolId::new(edge.from.raw())) else {
+                return false;
+            };
+            let Some(index) = ws.exact_decl_index_shared(caller.span.file) else {
+                return false;
+            };
+            bonsai_lang_api::call_argument_value_fact(&index.call_argument_values, edge.span, parameter_index)
+                .is_some_and(|argument| {
+                    argument.static_value.is_some()
+                        || expression_flow_is_literal(&argument.value_flow)
+                        || expression_flow_has_static_binding_provenance(
+                            &index,
+                            &argument.value_flow,
+                            edge.span,
+                            &mut AHashSet::new(),
+                        )
+                })
+        })
+}
+
+fn expression_flow_has_static_binding_provenance(
+    index: &bonsai_lang_api::DeclIndex,
+    flow: &bonsai_lang_api::ExpressionFlow,
+    before: Span,
+    seen: &mut AHashSet<String>,
+) -> bool {
+    if expression_flow_is_literal(flow) {
+        return true;
+    }
+    let Some(place) = flow.place.as_deref() else {
+        return false;
+    };
+    if !seen.insert(place.to_string()) {
+        return false;
+    }
+    index.assignment_values.iter().rev().any(|fact| {
+        fact.assignment_span.file == before.file
+            && fact.assignment_span.end <= before.start
+            && fact.target.as_deref() == Some(place)
+            && expression_flow_has_static_binding_provenance(
+                index,
+                &fact.value_flow,
+                fact.assignment_span,
+                seen,
+            )
+    })
+}
+
+fn canonical_provenance_root_place(
+    place: &str,
+    assignments: &[StructuredAssignment<'_>],
+    assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+    call_argument_values: &[bonsai_lang_api::CallArgumentValueFact],
+    canonicalizer: &RuleTarget,
+    static_base_factories: &[RuleTarget],
+) -> Option<String> {
+    let mut current = place.to_string();
+    let mut visited = AHashSet::new();
+    while visited.insert(current.clone()) {
+        let Some(assignment) = assignments.iter().rev().find(|assignment| {
+            clean_overwrite_target_key(assignment.target).as_deref() == Some(current.as_str())
+        }) else {
+            return Some(current);
+        };
+        let value = assignment_values
+            .iter()
+            .find(|fact| fact.assignment_span == assignment.span)?;
+        if value.direct_call_name.is_none() && expression_flow_is_literal(&value.value_flow) {
+            return None;
+        }
+        let call = assignment.source_call?;
+        if static_base_factories
+            .iter()
+            .any(|factory| rule_target_matches_call(call, &[], factory))
+            && value
+                .exact_static_call_args
+                .as_ref()
+                .is_some_and(|args| !args.is_empty())
+        {
+            return None;
+        }
+        if !rule_target_matches_call(call, &[], canonicalizer) {
+            return None;
+        }
+        current = assignment_direct_call_argument_place(value, call_argument_values, 0).or_else(|| {
+            assignment
+                .source_call_args
+                .first()
+                .and_then(|argument| clean_overwrite_target_key(argument))
+        })?;
+    }
+    None
 }
 
 pub(super) fn relative_path_containment_guard_sanitizer(
     ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
     sink_func: FuncId,
     sink: &RuleMatch,
     sink_rule: &Rule,
-    sink_tainted_args: &[TaintedArgInfo],
+    _sink_tainted_args: &[TaintedArgInfo],
 ) -> Option<FindingMatch> {
     let semantics = sink_rule.analysis_semantics.as_ref()?;
     if semantics.guard_profile != Some(GuardProfile::RelativePathContainment) {
@@ -1712,18 +2989,38 @@ pub(super) fn relative_path_containment_guard_sanitizer(
     let file_index = ws.exact_decl_index_shared(sink.span.file)?;
     let mut calls = Vec::new();
     collect_structured_calls(&decl.flow_events, &mut calls);
-    let sink_call = calls
-        .iter()
-        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let sink_call = structured_call_at_match(&calls, sink.span, "")?;
     let mut assignments = Vec::new();
     collect_structured_assignments_before(&decl.flow_events, sink.span, &mut assignments);
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "relative_path_start sink={} function={} assignments={}",
+        sink.rule_id,
+        decl.name,
+        assignments.len()
+    );
 
     let (candidate, candidate_assignment) =
         guarded_relative_path_candidate(sink_call, sink, guard, &assignments)?;
-    if !candidate_assignment
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "relative_path_candidate sink={} candidate={} assignment={:?} source_call={:?}",
+        sink.rule_id,
+        candidate,
+        candidate_assignment.span,
+        candidate_assignment.source_call
+    );
+    let candidate_is_canonical = candidate_assignment
         .source_call
-        .is_some_and(|call| rule_target_matches_call(call, &[], &guard.candidate_canonicalizer))
-    {
+        .is_some_and(|call| rule_target_matches_call(call, &[], &guard.candidate_canonicalizer));
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "relative_path_candidate_canonical sink={} exact={} target={:?}",
+        sink.rule_id,
+        candidate_is_canonical,
+        guard.candidate_canonicalizer
+    );
+    if !candidate_is_canonical {
         return None;
     }
 
@@ -1738,19 +3035,19 @@ pub(super) fn relative_path_containment_guard_sanitizer(
                 .as_deref()
                 == Some(candidate.as_str())
     })?;
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "relative_path_rel sink={} call={:?} args={:?}",
+        sink.rule_id,
+        relative_call.span,
+        relative_call.args
+    );
     let base = relative_call
         .args
         .get(guard.relative_base_arg_index)?
         .place
         .as_deref()
         .and_then(clean_overwrite_target_key)?;
-    if sink_tainted_args
-        .iter()
-        .flat_map(tainted_arg_target_keys)
-        .any(|target| target == base)
-    {
-        return None;
-    }
 
     let exact_file_decls: Vec<_> = file_index
         .defs
@@ -1766,15 +3063,34 @@ pub(super) fn relative_path_containment_guard_sanitizer(
         );
     }
     file_assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
-    if !place_has_static_canonical_provenance(
-        &base,
-        &file_assignments,
-        &file_index.assignment_values,
-        &guard.base_canonicalizer,
-        relative_call.span,
-    ) {
+    let base_is_static =
+        place_has_static_canonical_provenance_or_static_callers(StaticCanonicalProvenanceContext {
+            ws,
+            call_graph,
+            decl: &decl,
+            place: &base,
+            assignments: &file_assignments,
+            assignment_values: &file_index.assignment_values,
+            call_argument_values: &file_index.call_argument_values,
+            canonicalizer: &guard.base_canonicalizer,
+            static_base_factories: &[],
+            before: relative_call.span,
+        });
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "relative_path_base sink={} base={} static={}",
+        sink.rule_id,
+        base,
+        base_is_static
+    );
+    if !base_is_static {
         return None;
     }
+    // Exact compiler provenance wins over a conservative closure carrier.
+    // Tuple joins or shared error variables can over-approximate the base as
+    // tainted, but a literal/immutable canonical root proven at every exact
+    // caller cannot contain attacker data. A genuinely dynamic base fails the
+    // provenance proof above and remains reportable.
 
     let relative_result = file_assignments.iter().rev().find_map(|assignment| {
         (assignment.span.file == relative_call.span.file
@@ -1787,6 +3103,12 @@ pub(super) fn relative_path_containment_guard_sanitizer(
         .then(|| clean_overwrite_target_key(assignment.target))
         .flatten()
     })?;
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "relative_path_result sink={} result={}",
+        sink.rule_id,
+        relative_result
+    );
 
     let mut branches = Vec::new();
     if guard.guarded_path_arg_index.is_some() {
@@ -1798,7 +3120,7 @@ pub(super) fn relative_path_containment_guard_sanitizer(
         branch.span.start > relative_call.span.start
             && branch_arm_abruptly_exits(branch.then_events)
             && relative_path_rejection_condition(
-                &file_index.branch_conditions,
+                &file_index,
                 &decl.flow_events,
                 *branch,
                 &relative_result,
@@ -1845,14 +3167,14 @@ fn guarded_relative_path_candidate<'a>(
 }
 
 fn relative_path_rejection_condition(
-    condition_facts: &[BranchConditionFact],
+    file_index: &bonsai_lang_api::DeclIndex,
     events: &[FlowEvent],
     branch: StructuredBranch<'_>,
     relative_result: &str,
     guard: &RelativePathContainmentGuardSemantics,
 ) -> bool {
     let Some(ConditionExpressionFact::Any { operands, .. }) =
-        branch_condition_fact_for_span(condition_facts, branch.span)
+        branch_condition_fact_for_span(&file_index.branch_conditions, branch.span)
             .and_then(|condition| condition.expression.as_ref())
     else {
         return false;
@@ -1879,6 +3201,12 @@ fn relative_path_rejection_condition(
             })
     });
     if !exact_rejection {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "relative_path_rejection missing exact value result={} operands={:?}",
+            relative_result,
+            operands
+        );
         return false;
     }
     operands.iter().any(|operand| {
@@ -1889,6 +3217,7 @@ fn relative_path_rejection_condition(
             condition_span: *span,
             relative_result,
             guard,
+            file_index,
         };
         relative_rejection_call_in_span(events, &query)
     })
@@ -1908,6 +3237,7 @@ struct RelativeRejectionCallQuery<'a> {
     condition_span: Span,
     relative_result: &'a str,
     guard: &'a RelativePathContainmentGuardSemantics,
+    file_index: &'a bonsai_lang_api::DeclIndex,
 }
 
 fn relative_rejection_call_in_span(events: &[FlowEvent], query: &RelativeRejectionCallQuery<'_>) -> bool {
@@ -1919,16 +3249,39 @@ fn relative_rejection_call_in_span(events: &[FlowEvent], query: &RelativeRejecti
                 receiver_types,
                 args,
                 ..
-            } if span_contains(query.condition_span, *span)
-                && rule_target_matches_call(name, receiver_types, &query.guard.rejection_check) =>
-            {
-                if args
+            } if span_contains(query.condition_span, *span) => {
+                let compiler_boundary_rejection = query.file_index.compiler_guards.iter().any(|guard| {
+                    guard.capability == bonsai_lang_api::COMPILER_GUARD_RELATIVE_PATH_BOUNDARY_REJECTION
+                        && spans_overlap(guard.guarded_call_span, *span)
+                });
+                if compiler_boundary_rejection
+                    && matches!(args.as_slice(), [argument]
+                        if argument.place.as_deref()
+                            .and_then(clean_overwrite_target_key)
+                            .as_deref() == Some(query.relative_result))
+                {
+                    return true;
+                }
+                if !rule_target_matches_call(name, receiver_types, &query.guard.rejection_check) {
+                    continue;
+                }
+                let relative_argument_matches = args
                     .get(query.guard.rejection_check_arg_index)
                     .and_then(|argument| argument.place.as_deref())
                     .and_then(clean_overwrite_target_key)
                     .as_deref()
-                    == Some(query.relative_result)
-                {
+                    == Some(query.relative_result);
+                let prefix_is_exact = relative_argument_matches
+                    && relative_rejection_prefix_is_exact(events, *span, args, query);
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "relative_path_rejection call={} relative_match={} prefix_exact={} args={:?}",
+                    name,
+                    relative_argument_matches,
+                    prefix_is_exact,
+                    args
+                );
+                if prefix_is_exact {
                     return true;
                 }
             }
@@ -1967,11 +3320,151 @@ fn relative_rejection_call_in_span(events: &[FlowEvent], query: &RelativeRejecti
     false
 }
 
+fn relative_rejection_prefix_is_exact(
+    events: &[FlowEvent],
+    call_span: Span,
+    args: &[bonsai_lang_api::CallArg],
+    query: &RelativeRejectionCallQuery<'_>,
+) -> bool {
+    let Some(prefix_index) = query.guard.rejection_prefix_arg_index else {
+        return true;
+    };
+    let Some(prefix_arg) = args.get(prefix_index) else {
+        return false;
+    };
+    let Some(composition) = query
+        .file_index
+        .string_compositions
+        .iter()
+        .find(|fact| fact.value_span == prefix_arg.span)
+    else {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "relative_path_prefix missing composition argument_span={:?} available={:?}",
+            prefix_arg.span,
+            query
+                .file_index
+                .string_compositions
+                .iter()
+                .map(|fact| fact.value_span)
+                .collect::<Vec<_>>()
+        );
+        return false;
+    };
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "relative_path_prefix argument_span={:?} parts={:?}",
+        prefix_arg.span,
+        composition.parts
+    );
+    let [bonsai_lang_api::StringCompositionPart::Literal { value }, boundary @ ..] =
+        composition.parts.as_slice()
+    else {
+        return false;
+    };
+    if call_span.file != composition.value_span.file
+        || boundary.is_empty()
+        || !query
+            .guard
+            .rejected_exact_values
+            .iter()
+            .any(|rejected| rejected == value)
+    {
+        return false;
+    }
+    boundary.iter().all(|part| match part {
+        bonsai_lang_api::StringCompositionPart::Place { place } => query
+            .guard
+            .rejection_boundary_places
+            .iter()
+            .any(|accepted| accepted == place),
+        bonsai_lang_api::StringCompositionPart::Call { span } => {
+            relative_boundary_wrapper_call_is_exact(events, *span, query)
+        }
+        _ => false,
+    })
+}
+
+fn relative_boundary_wrapper_call_is_exact(
+    events: &[FlowEvent],
+    wrapper_span: Span,
+    query: &RelativeRejectionCallQuery<'_>,
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver_types,
+                args,
+                ..
+            } if *span == wrapper_span => {
+                let exact = query
+                    .guard
+                    .rejection_boundary_wrappers
+                    .iter()
+                    .any(|target| rule_target_matches_call(name, receiver_types, target))
+                    && matches!(args.as_slice(), [argument] if argument
+                        .place
+                        .as_deref()
+                        .is_some_and(|place| query.guard.rejection_boundary_places.iter().any(|accepted| accepted == place))
+                        || argument.source_names.iter().any(|place| query
+                            .guard
+                            .rejection_boundary_places
+                            .iter()
+                            .any(|accepted| accepted == place)));
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "relative_path_boundary wrapper={} span={:?} exact={} args={:?}",
+                    name,
+                    span,
+                    exact,
+                    args
+                );
+                return exact;
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if relative_boundary_wrapper_call_is_exact(then_events, wrapper_span, query)
+                    || relative_boundary_wrapper_call_is_exact(else_events, wrapper_span, query)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if relative_boundary_wrapper_call_is_exact(body, wrapper_span, query) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if relative_boundary_wrapper_call_is_exact(body, wrapper_span, query)
+                    || relative_boundary_wrapper_call_is_exact(catch_events, wrapper_span, query)
+                    || relative_boundary_wrapper_call_is_exact(finally_events, wrapper_span, query)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn place_has_static_canonical_provenance(
     place: &str,
     assignments: &[StructuredAssignment<'_>],
     assignment_values: &[bonsai_lang_api::AssignmentValueFact],
+    call_argument_values: &[bonsai_lang_api::CallArgumentValueFact],
     canonicalizer: &RuleTarget,
+    static_base_factories: &[RuleTarget],
     before: Span,
 ) -> bool {
     let mut current = place.to_string();
@@ -1984,8 +3477,15 @@ fn place_has_static_canonical_provenance(
                 fact.assignment_span.file == before.file
                     && fact.assignment_span.start < before.start
                     && fact.target.as_deref() == Some(current.as_str())
-                    && fact.direct_call_name.is_none()
-                    && expression_flow_is_literal(&fact.value_flow)
+                    && ((fact.direct_call_name.is_none() && expression_flow_is_literal(&fact.value_flow))
+                        || (fact.direct_call_name.as_deref().is_some_and(|call| {
+                            static_base_factories
+                                .iter()
+                                .any(|factory| rule_target_matches_call(call, &[], factory))
+                        }) && fact
+                            .exact_static_call_args
+                            .as_ref()
+                            .is_some_and(|args| !args.is_empty())))
             });
         };
         let Some(value) = assignment_values
@@ -2000,19 +3500,61 @@ fn place_has_static_canonical_provenance(
         let Some(call) = assignment.source_call else {
             return false;
         };
+        if static_base_factories
+            .iter()
+            .any(|factory| rule_target_matches_call(call, &[], factory))
+            && value
+                .exact_static_call_args
+                .as_ref()
+                .is_some_and(|args| !args.is_empty())
+        {
+            return true;
+        }
         if !rule_target_matches_call(call, &[], canonicalizer) {
             return false;
         }
-        let Some(next) = assignment
-            .source_call_args
-            .first()
-            .and_then(|argument| clean_overwrite_target_key(argument))
-        else {
-            return false;
-        };
+        let next = assignment_direct_call_argument_place(value, call_argument_values, 0)
+            .or_else(|| {
+                assignment
+                    .source_call_args
+                    .first()
+                    .and_then(|argument| clean_overwrite_target_key(argument))
+            })
+            .or_else(|| {
+                assignment
+                    .source_names
+                    .iter()
+                    .filter_map(|source| clean_overwrite_target_key(source))
+                    .find(|source| callee_spelling_tail(source) != callee_spelling_tail(call))
+            });
+        let Some(next) = next else { return false };
         current = next;
     }
     false
+}
+
+fn assignment_direct_call_argument_place(
+    assignment: &bonsai_lang_api::AssignmentValueFact,
+    call_argument_values: &[bonsai_lang_api::CallArgumentValueFact],
+    argument_index: usize,
+) -> Option<String> {
+    let mut candidates = call_argument_values.iter().filter(|argument| {
+        argument.argument_index == argument_index
+            && assignment.call_sites.iter().any(|call_expression| {
+                span_contains(*call_expression, argument.call_span)
+                    || spans_overlap(*call_expression, argument.call_span)
+            })
+    });
+    let argument = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    argument
+        .value_flow
+        .projection
+        .as_ref()
+        .map(bonsai_lang_api::ExpressionProjection::canonical_place)
+        .or_else(|| argument.value_flow.place.clone())
 }
 
 pub(super) fn python_compiled_regex_guard_sanitizer(
@@ -2387,6 +3929,11 @@ fn path_containment_guard_condition(
     boundary_places: &[String],
 ) -> bool {
     let Some(condition) = branch_condition_fact_for_span(condition_facts, branch.span) else {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "path_containment branch={:?} missing_condition_fact",
+            branch.span
+        );
         return false;
     };
     let query = ContainmentCheckQuery {
@@ -2397,14 +3944,31 @@ fn path_containment_guard_condition(
         boundary_places,
     };
     let Some(containment_call) = containment_check_call_before_body(events, &query) else {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "path_containment branch={:?} candidate={} base={} missing_containment_call condition={:?}",
+            branch.span,
+            candidate,
+            base,
+            condition.condition_span
+        );
         return false;
     };
     if condition.polarity == BranchConditionPolarity::Negated {
         return true;
     }
-    condition.expression.as_ref().is_some_and(|expression| {
+    let exact = condition.expression.as_ref().is_some_and(|expression| {
         path_containment_rejection_is_exact(expression, containment_call, candidate, base)
-    })
+    });
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "path_containment branch={:?} containment={:?} polarity={:?} exact={}",
+        branch.span,
+        containment_call,
+        condition.polarity,
+        exact
+    );
+    exact
 }
 
 /// Prove the common boundary-safe rejection form:
@@ -2564,9 +4128,7 @@ pub(super) fn configured_argument_factory_guard_sanitizer(
     let sink_decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let mut sink_calls = Vec::new();
     collect_structured_calls(&sink_decl.flow_events, &mut sink_calls);
-    let sink_call = sink_calls
-        .iter()
-        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let sink_call = structured_call_at_match(&sink_calls, sink.span, "")?;
     let guarded_place = sink_call
         .args
         .get(guard.sink_argument_index)?
@@ -2643,6 +4205,61 @@ pub(super) fn configured_argument_factory_guard_sanitizer(
     )
 }
 
+pub(super) fn configured_argument_receiver_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<FindingMatch> {
+    let guard = sink_rule
+        .analysis_semantics
+        .as_ref()?
+        .configured_argument_receiver_guard
+        .as_ref()?;
+    let sink_decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let mut calls = Vec::new();
+    collect_structured_calls(&sink_decl.flow_events, &mut calls);
+    let sink_call = structured_call_at_match(&calls, sink.span, "")?;
+    let guarded_place = sink_call
+        .args
+        .get(guard.sink_argument_index)?
+        .place
+        .as_deref()
+        .and_then(clean_overwrite_target_key)?;
+    let assignment_span = latest_structured_assignment_to(&sink_decl.flow_events, sink.span, &guarded_place)?;
+    let assignment =
+        bonsai_lang_api::assignment_value_fact_for_span(&file_index.assignment_values, assignment_span)?;
+    if !assignment
+        .direct_call_name
+        .as_deref()
+        .is_some_and(|callee| rule_target_matches_call(callee, &[], &guard.wrapper_factory))
+    {
+        return None;
+    }
+    let wrapper_call = calls.iter().find(|call| {
+        span_contains(assignment.value_span, call.span)
+            && rule_target_matches_call(call.name, call.receiver_types, &guard.wrapper_factory)
+    })?;
+    let provider_argument = wrapper_call.args.get(guard.configured_receiver_argument_index)?;
+    let provider_call = calls.iter().find(|call| {
+        span_contains(provider_argument.span, call.span)
+            && rule_target_matches_call(call.name, call.receiver_types, &guard.provider_factory)
+    })?;
+    let receiver = compiler_call_receiver_place(&file_index, provider_call)?;
+    let prior_calls = guaranteed_calls_before(&sink_decl.flow_events, assignment.assignment_span);
+    let proof =
+        receiver_configuration_proof_span(&file_index, &prior_calls, &receiver, &guard.required_calls)?;
+    finding_for_guard_span_in_workspace(
+        ws,
+        sink,
+        proof,
+        "engine.sanitizer.configured_argument_receiver_guard",
+        sink_rule.tag.as_deref()?,
+        "compiler-proven-configured-receiver-wrapper",
+    )
+}
+
 pub(super) fn configured_call_argument_guard_sanitizer(
     ws: &Workspace,
     sink_func: FuncId,
@@ -2658,9 +4275,7 @@ pub(super) fn configured_call_argument_guard_sanitizer(
     let sink_decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let mut calls = Vec::new();
     collect_structured_calls(&sink_decl.flow_events, &mut calls);
-    let sink_call = calls
-        .iter()
-        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let sink_call = structured_call_at_match(&calls, sink.span, "")?;
     let configuration = sink_call.args.get(guard.configuration_argument_index)?;
     let file_index = ws.exact_decl_index_shared(sink.span.file)?;
     let fact = bonsai_lang_api::call_argument_value_fact(
@@ -2731,9 +4346,7 @@ pub(super) fn url_network_guard_sanitizer(
     }
     let mut calls = Vec::new();
     collect_structured_calls(&decl.flow_events, &mut calls);
-    let sink_call = calls
-        .iter()
-        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let sink_call = structured_call_at_match(&calls, sink.span, "")?;
     let mut assignments = Vec::new();
     collect_structured_assignments_before(
         &decl.flow_events,
@@ -2890,6 +4503,7 @@ pub(super) fn url_network_guard_sanitizer(
 
 pub(super) fn url_reconstruction_guard_sanitizer(
     ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
     sink_func: FuncId,
     sink: &RuleMatch,
     sink_rule: &Rule,
@@ -2903,7 +4517,24 @@ pub(super) fn url_reconstruction_guard_sanitizer(
     if sink_rule.tag.as_deref() != Some("ssrf") {
         return None;
     }
-    let target = url_reconstruction_target_for_sink(ws, sink_func, sink, guard, sink_tainted_args)?;
+    let sink_decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
+    let sink_file_index = ws.exact_decl_index_shared(sink.span.file)?;
+    let mut sink_calls = Vec::new();
+    collect_structured_calls(&sink_decl.flow_events, &mut sink_calls);
+    let sink_call = structured_call_at_match(&sink_calls, sink.span, "")?;
+    if !url_redirect_guard_is_exact(
+        &sink_decl.flow_events,
+        sink_decl.span,
+        sink_call,
+        sink.span,
+        "",
+        guard.redirect.as_ref(),
+        &sink_file_index,
+    ) {
+        return None;
+    }
+    let target =
+        url_reconstruction_target_for_sink(ws, call_graph, sink_func, sink, guard, sink_tainted_args)?;
     let guard_span = compiler_proven_url_reconstruction_guard(ws, target, guard)?;
     let mut finding = finding_for_guard_span_in_workspace(
         ws,
@@ -2931,6 +4562,7 @@ struct UrlReconstructionTarget {
 
 fn url_reconstruction_target_for_sink(
     ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
     sink_func: FuncId,
     sink: &RuleMatch,
     guard: &crate::rule::UrlReconstructionGuardSemantics,
@@ -2940,9 +4572,7 @@ fn url_reconstruction_target_for_sink(
     let sink_file_index = ws.exact_decl_index_shared(sink.span.file)?;
     let mut sink_calls = Vec::new();
     collect_structured_calls(&sink_decl.flow_events, &mut sink_calls);
-    let sink_call = sink_calls
-        .iter()
-        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let sink_call = structured_call_at_match(&sink_calls, sink.span, "")?;
     let sink_argument = sink_call.args.get(guard.sink_argument_index)?;
     if !sink_tainted_args
         .iter()
@@ -2999,7 +4629,6 @@ fn url_reconstruction_target_for_sink(
         return None;
     };
 
-    let call_graph = ws.cached_resolved_call_graph();
     let helper_targets: AHashSet<FuncId> = call_graph
         .callees_of(sink_func)
         .filter(|edge| {
@@ -3188,7 +4817,7 @@ fn url_reconstruction_composition_is_exact(
         parsed,
         &guard.path_component,
         calls,
-        Some(&guard.path_fallback),
+        guard.path_fallback.as_deref(),
     );
     guard
         .scheme
@@ -3753,126 +5382,21 @@ pub(super) fn go_jwt_inline_keyfunc_algorithm_guard_sanitizer(
         return None;
     }
     let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
-    let mut calls = Vec::new();
-    collect_structured_calls(&decl.flow_events, &mut calls);
-    let parse_call = structured_call_at_match(&calls, snk.span, "parse")?;
-    let callback_span = parse_call.args.get(1)?.span;
-    let mut branches = Vec::new();
-    collect_all_structured_branches(&decl.flow_events, &mut branches);
-    let guard = branches.into_iter().find(|branch| {
-        span_contains(callback_span, branch.span)
-            && go_jwt_algorithm_pin_condition(branch.condition)
-            && go_jwt_branch_rejects_mismatch(branch.then_events)
+    let file_index = ws.exact_decl_index_shared(snk.span.file)?;
+    let guard = file_index.compiler_guards.iter().find(|guard| {
+        guard.function_span == decl.span
+            && guard.capability == "callback.algorithm-pinned"
+            && spans_overlap(guard.guarded_call_span, snk.span)
     })?;
-    if !go_jwt_callback_returns_key(&decl.flow_events, callback_span, guard.span) {
-        return None;
-    }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
     finding_for_guard_span(
         snk,
         snapshot.text.as_ref(),
-        guard.span,
+        guard.proof_span,
         "engine.sanitizer.go_jwt_inline_keyfunc_algorithm_guard",
         "jwt-verify",
         "jwt-algorithm-keyfunc-guard",
     )
-}
-
-fn go_jwt_algorithm_pin_condition(condition: &str) -> bool {
-    let compact = compact_guard_text(condition);
-    let lower = compact.to_ascii_lowercase();
-    if !compact.contains(".Method.Alg()") || !compact.contains("!=") {
-        return false;
-    }
-    if lower.contains("signingmethodnone")
-        || lower.contains("unsafeallownonesignaturetype")
-        || lower.contains("\"none\"")
-        || lower.contains("'none'")
-    {
-        return false;
-    }
-    let Some((_, expected)) = compact.split_once("!=") else {
-        return false;
-    };
-    let expected = expected.trim_matches(|ch| ch == '(' || ch == ')');
-    (expected.starts_with('"') && expected.ends_with('"'))
-        || (expected.starts_with('\'') && expected.ends_with('\''))
-        || expected.contains("SigningMethod")
-}
-
-fn go_jwt_branch_rejects_mismatch(events: &[FlowEvent]) -> bool {
-    events.iter().any(|event| match event {
-        FlowEvent::Return {
-            value_name,
-            value_flow,
-            ..
-        } => {
-            value_name.is_none()
-                && value_flow.source_names.iter().any(|source| {
-                    source.ends_with("ErrSignatureInvalid") || source.ends_with("ErrTokenSignatureInvalid")
-                })
-        }
-        FlowEvent::Call { name, .. } => {
-            matches!(clean_overwrite_callee_tail(name).as_str(), "new" | "errorf")
-        }
-        FlowEvent::Branch {
-            then_events,
-            else_events,
-            ..
-        } => go_jwt_branch_rejects_mismatch(then_events) || go_jwt_branch_rejects_mismatch(else_events),
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            go_jwt_branch_rejects_mismatch(body)
-        }
-        FlowEvent::Try {
-            body,
-            catch_events,
-            finally_events,
-            ..
-        } => {
-            go_jwt_branch_rejects_mismatch(body)
-                || go_jwt_branch_rejects_mismatch(catch_events)
-                || go_jwt_branch_rejects_mismatch(finally_events)
-        }
-        _ => false,
-    }) && branch_arm_abruptly_exits(events)
-}
-
-fn go_jwt_callback_returns_key(events: &[FlowEvent], callback_span: Span, reject_span: Span) -> bool {
-    events.iter().any(|event| match event {
-        FlowEvent::Return {
-            span,
-            value_name,
-            value_flow,
-            ..
-        } => {
-            span_contains(callback_span, *span)
-                && !span_contains(reject_span, *span)
-                && value_name.as_deref().is_some_and(|name| name != "nil")
-                && !value_flow.source_names.is_empty()
-        }
-        FlowEvent::Branch {
-            then_events,
-            else_events,
-            ..
-        } => {
-            go_jwt_callback_returns_key(then_events, callback_span, reject_span)
-                || go_jwt_callback_returns_key(else_events, callback_span, reject_span)
-        }
-        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            go_jwt_callback_returns_key(body, callback_span, reject_span)
-        }
-        FlowEvent::Try {
-            body,
-            catch_events,
-            finally_events,
-            ..
-        } => {
-            go_jwt_callback_returns_key(body, callback_span, reject_span)
-                || go_jwt_callback_returns_key(catch_events, callback_span, reject_span)
-                || go_jwt_callback_returns_key(finally_events, callback_span, reject_span)
-        }
-        _ => false,
-    })
 }
 
 pub(super) fn js_ts_local_html_escape_helper_sanitizer(
@@ -4302,72 +5826,25 @@ pub(super) fn go_xml_decoder_hardening_sanitizer(
         .iter()
         .find(|decl| decl.symbol == SymbolId::new(sink_func.raw()))?;
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let decoder_var = assignment_target_for_source_call_at(&decl.flow_events, snk.span, "NewDecoder")?;
-    let mut assignments = Vec::new();
-    collect_structured_assignments_before(
-        &decl.flow_events,
-        Span::empty(snk.span.file, decl.span.end),
-        &mut assignments,
-    );
-    let strict_target = format!("{decoder_var}.Strict");
-    let strict_true = assignments.iter().any(|assignment| {
-        assignment.span.start > snk.span.start
-            && assignment.target == strict_target
-            && assignment.source_name.is_some_and(|source| source == "true")
-    });
-    let charset_target = format!("{decoder_var}.CharsetReader");
-    let charset_assignment = assignments
-        .iter()
-        .find(|assignment| assignment.span.start > snk.span.start && assignment.target == charset_target)?;
-    let callback = file_index.defs.iter().find(|candidate| {
-        candidate.span.start >= charset_assignment.span.start
-            && candidate.span.end <= charset_assignment.span.end
-            && candidate.params.len() >= 2
+    let guard = file_index.compiler_guards.iter().find(|guard| {
+        guard.function_span == decl.span
+            && guard.capability == "decoder.remote-resolution-disabled"
+            && spans_overlap(guard.guarded_call_span, snk.span)
     })?;
-    if !(strict_true && go_charset_reader_callback_is_hardened(callback)) {
-        return None;
-    }
     finding_for_guard_span(
         snk,
         snapshot.text.as_ref(),
-        charset_assignment.span,
+        guard.proof_span,
         "engine.sanitizer.go_xml_decoder_hardening",
         "xxe-sanitizer",
         "go-xml-decoder-hardening",
     )
 }
 
-fn go_charset_reader_callback_is_hardened(callback: &bonsai_lang_api::Decl) -> bool {
-    let charset = callback.params.first().map(String::as_str).unwrap_or_default();
-    let input = callback.params.get(1).map(String::as_str).unwrap_or_default();
-    if charset.is_empty() || input.is_empty() {
-        return false;
-    }
-    let mut branches = Vec::new();
-    collect_all_structured_branches(&callback.flow_events, &mut branches);
-    let mut calls = Vec::new();
-    collect_structured_calls(&callback.flow_events, &mut calls);
-    let rejected = branches.iter().any(|branch| {
-        let condition = compact_guard_text(branch.condition);
-        let negated_lookup = condition.starts_with('!') && condition.contains(&format!("[{charset}]"));
-        let returns_error = branch_arm_abruptly_exits(branch.then_events)
-            && calls.iter().any(|call| {
-                span_contains(branch.span, call.span)
-                    && matches!(clean_overwrite_callee_tail(call.name).as_str(), "new" | "errorf")
-            });
-        negated_lookup && returns_error
-    });
-    let mut returns = Vec::new();
-    collect_return_bindings(&callback.flow_events, &mut returns);
-    let returns_input = returns
-        .iter()
-        .any(|(_, value_name)| value_name.is_some_and(|value| value == input));
-    rejected && returns_input
-}
-
 pub(super) fn nosql_eq_filter_wrapper_sanitizer(
     ws: &Workspace,
     sink_func: FuncId,
+    source: &RuleMatch,
     snk: &RuleMatch,
     sink_rule: &Rule,
     sink_tainted_args: &[TaintedArgInfo],
@@ -4385,19 +5862,23 @@ pub(super) fn nosql_eq_filter_wrapper_sanitizer(
     let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let mut calls = Vec::new();
     collect_structured_calls(&decl.flow_events, &mut calls);
-    let sink_call = calls
-        .iter()
-        .find(|call| call.span == snk.span || spans_overlap(call.span, snk.span))?;
+    let sink_call = structured_call_at_match(&calls, snk.span, "")?;
     let file_index = ws.exact_decl_index_shared(snk.span.file)?;
     let argument = bonsai_lang_api::call_argument_value_fact(
         &file_index.call_argument_values,
         sink_call.span,
         semantics.filter_arg_index,
     )?;
-    if !nosql_filter_uses_only_literal_value_operators(
-        &argument.value_flow,
-        &semantics.literal_value_operators,
-    ) {
+    if !nosql_filter_uses_only_literal_value_operators(NosqlFilterProofContext {
+        filter: &argument.value_flow,
+        literal_value_operators: &semantics.literal_value_operators,
+        safe_scalar_types: &semantics.safe_scalar_compiler_types,
+        type_aliases: &decl.type_aliases,
+        safe_scalar_source_rules: &semantics.safe_scalar_source_rules,
+        source,
+        file_index: &file_index,
+        before: snk.span,
+    }) {
         return None;
     }
     Some(FindingMatch {
@@ -4418,19 +5899,50 @@ pub(super) fn nosql_eq_filter_wrapper_sanitizer(
     })
 }
 
-fn nosql_filter_uses_only_literal_value_operators(
-    filter: &bonsai_lang_api::ExpressionFlow,
-    literal_value_operators: &[String],
-) -> bool {
+struct NosqlFilterProofContext<'a> {
+    filter: &'a bonsai_lang_api::ExpressionFlow,
+    literal_value_operators: &'a [String],
+    safe_scalar_types: &'a [String],
+    type_aliases: &'a [bonsai_lang_api::TypeAliasBinding],
+    safe_scalar_source_rules: &'a [String],
+    source: &'a RuleMatch,
+    file_index: &'a bonsai_lang_api::DeclIndex,
+    before: Span,
+}
+
+fn nosql_filter_uses_only_literal_value_operators(context: NosqlFilterProofContext<'_>) -> bool {
+    let NosqlFilterProofContext {
+        filter,
+        literal_value_operators,
+        safe_scalar_types,
+        type_aliases,
+        safe_scalar_source_rules,
+        source,
+        file_index,
+        before,
+    } = context;
     if filter.aggregate_fields.is_empty() || !filter.spreads.is_empty() || !filter.tuple_items.is_empty() {
         return false;
     }
     let mut saw_literal_operator = false;
+    let mut saw_typed_scalar = false;
     for field in &filter.aggregate_fields {
         if field.name.starts_with('$') {
             return false;
         }
         if expression_flow_is_literal(&field.value) {
+            continue;
+        }
+        if expression_flow_has_only_safe_scalar_places(&field.value, safe_scalar_types, type_aliases)
+            || expression_flow_has_rule_declared_scalar_source(
+                &field.value,
+                safe_scalar_source_rules,
+                source,
+                file_index,
+                before,
+            )
+        {
+            saw_typed_scalar = true;
             continue;
         }
         if field.value.aggregate_fields.len() != 1
@@ -4444,7 +5956,61 @@ fn nosql_filter_uses_only_literal_value_operators(
         }
         saw_literal_operator = true;
     }
-    saw_literal_operator
+    saw_literal_operator || saw_typed_scalar
+}
+
+fn expression_flow_has_rule_declared_scalar_source(
+    flow: &bonsai_lang_api::ExpressionFlow,
+    safe_source_rules: &[String],
+    source: &RuleMatch,
+    file_index: &bonsai_lang_api::DeclIndex,
+    before: Span,
+) -> bool {
+    safe_source_rules.iter().any(|rule_id| rule_id == &source.rule_id)
+        && flow.aggregate_fields.is_empty()
+        && flow.tuple_items.is_empty()
+        && flow.spreads.is_empty()
+        && expression_flow_depends_on_match_span(flow, file_index, before, source.span)
+}
+
+fn expression_flow_has_only_safe_scalar_places(
+    flow: &bonsai_lang_api::ExpressionFlow,
+    safe_types: &[String],
+    type_aliases: &[bonsai_lang_api::TypeAliasBinding],
+) -> bool {
+    if safe_types.is_empty()
+        || !flow.call_sites.is_empty()
+        || !flow.aggregate_fields.is_empty()
+        || !flow.tuple_items.is_empty()
+        || !flow.spreads.is_empty()
+    {
+        return false;
+    }
+    let mut places = flow
+        .place
+        .as_deref()
+        .into_iter()
+        .chain(flow.source_names.iter().map(String::as_str))
+        .filter_map(clean_overwrite_target_key)
+        .collect::<Vec<_>>();
+    places.sort();
+    places.dedup();
+    !places.is_empty()
+        && places.iter().all(|place| {
+            let root = place.split('.').next().unwrap_or(place);
+            type_aliases.iter().any(|alias| {
+                alias.name == root
+                    && safe_types
+                        .iter()
+                        .any(|safe| type_name_matches(&alias.type_name, safe))
+            })
+        })
+}
+
+fn type_name_matches(actual: &str, expected: &str) -> bool {
+    actual == expected
+        || actual.rsplit(['.', ':']).next() == Some(expected)
+        || expected.rsplit(['.', ':']).next() == Some(actual)
 }
 
 #[derive(Copy, Clone)]
@@ -4469,7 +6035,7 @@ fn collect_completed_branches_on_path<'a>(
     target: Span,
     out: &mut Vec<StructuredBranch<'a>>,
 ) {
-    for event in events {
+    for (event_index, event) in events.iter().enumerate() {
         let event_span = event.span();
         if span_contains(event_span, target) {
             match event {
@@ -4500,6 +6066,17 @@ fn collect_completed_branches_on_path<'a>(
                     } else if events_contain_target(finally_events, target) {
                         collect_completed_branches_on_path(finally_events, target, out);
                     }
+                }
+                _ if events[event_index.saturating_add(1)..]
+                    .iter()
+                    .any(|later| span_contains(later.span(), target)) =>
+                {
+                    // Some frontends emit a broad binding event beside the
+                    // structured region it initializes (for example a loop
+                    // target assignment whose span is the complete loop).
+                    // Prefer the later, tighter sibling instead of treating
+                    // this duplicate projection as the target's control path.
+                    continue;
                 }
                 _ => {}
             }
@@ -5323,61 +6900,6 @@ fn python_urlparse_assignment_var(events: &[FlowEvent], before: Span, target: &s
     })
 }
 
-fn assignment_target_for_source_call_at(
-    events: &[bonsai_lang_api::FlowEvent],
-    sink_span: Span,
-    call_tail: &str,
-) -> Option<String> {
-    use bonsai_lang_api::FlowEvent;
-    for event in events {
-        match event {
-            FlowEvent::Assign {
-                span,
-                target,
-                source_call,
-                ..
-            } if span_contains(*span, sink_span)
-                && source_call.as_deref().is_some_and(|call| {
-                    clean_overwrite_callee_tail(call) == clean_overwrite_callee_tail(call_tail)
-                }) =>
-            {
-                return clean_overwrite_target_key(target);
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                if let Some(target) = assignment_target_for_source_call_at(then_events, sink_span, call_tail)
-                    .or_else(|| assignment_target_for_source_call_at(else_events, sink_span, call_tail))
-                {
-                    return Some(target);
-                }
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if let Some(target) = assignment_target_for_source_call_at(body, sink_span, call_tail) {
-                    return Some(target);
-                }
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                if let Some(target) = assignment_target_for_source_call_at(body, sink_span, call_tail)
-                    .or_else(|| assignment_target_for_source_call_at(catch_events, sink_span, call_tail))
-                    .or_else(|| assignment_target_for_source_call_at(finally_events, sink_span, call_tail))
-                {
-                    return Some(target);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 fn python_dev_only_env_guard_condition(condition: &str) -> bool {
     let lower = condition.trim().to_ascii_lowercase();
     let reads_env = lower.contains("os.environ.get")
@@ -5549,9 +7071,7 @@ pub(super) fn parameterized_query_guard_sanitizer(
     let decl = ws.exact_decl(SymbolId::new(sink_func.raw()))?;
     let mut calls = Vec::new();
     collect_structured_calls(&decl.flow_events, &mut calls);
-    let sink_call = calls
-        .iter()
-        .find(|call| call.span == sink.span || spans_overlap(call.span, sink.span))?;
+    let sink_call = structured_call_at_match(&calls, sink.span, "")?;
     let query_arg = sink_call.args.get(semantics.query_arg_index)?;
     let bindings_arg = sink_call.args.get(semantics.bindings_arg_index)?;
     let query_target = query_arg.place.as_deref().and_then(clean_overwrite_target_key)?;
@@ -6089,6 +7609,7 @@ fn python_identifier_path_like(value: &str) -> bool {
 #[cfg(test)]
 mod structured_guard_tests {
     use super::*;
+    use std::sync::Arc;
 
     fn span(start: u64, end: u64) -> Span {
         Span::new(FileId::new(0), start, end)
@@ -6126,6 +7647,129 @@ mod structured_guard_tests {
         assert_eq!(branches.len(), 1);
         assert!(js_dev_only_env_guard_condition(branches[0].condition));
         assert!(branch_arm_abruptly_exits(branches[0].then_events));
+    }
+
+    #[test]
+    fn context_rewrite_requires_a_compiler_proven_non_null_branch() {
+        use bonsai_lang_api::LanguageAdapter;
+
+        for (condition, expected) in [("rid != null", true), ("enabled", false), ("rid == null", false)] {
+            let source = format!(
+                r#"
+class Context {{
+  void handle(String rid, boolean enabled) {{
+    if ({condition}) {{ MDC.put("rid", rid); }}
+    LOG.info("request");
+  }}
+}}
+"#
+            );
+            let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+            let ws = bonsai_testkit::workspace_with(vec![adapter], &[("Context.java", &source)]);
+            let file = ws.db().vfs().all_files()[0];
+            let index = ws.db().decl_index(file).expect("Java declaration index");
+            let decl = index
+                .defs
+                .iter()
+                .find(|decl| decl.name == "handle")
+                .expect("handle declaration");
+            let mut calls = Vec::new();
+            collect_structured_calls(&decl.flow_events, &mut calls);
+            let rewrite_span = calls
+                .iter()
+                .find(|call| callee_spelling_tail(call.name) == "put")
+                .expect("MDC.put")
+                .span;
+            let consumer_span = calls
+                .iter()
+                .find(|call| callee_spelling_tail(call.name) == "info")
+                .expect("LOG.info")
+                .span;
+            let hit = |rule_id: &str, span: Span| RuleMatch {
+                origin: MatchOrigin::Rulepack,
+                rule_id: rule_id.to_string(),
+                language: bonsai_lang_java::LANG_ID.as_str().to_string(),
+                file: "Context.java".to_string(),
+                line: 1,
+                column: 1,
+                span,
+                match_text: rule_id.to_string(),
+                enclosing_fn: Some("handle".to_string()),
+            };
+            assert_eq!(
+                sanitized_context_rewrite_covers_consumer(
+                    &ws,
+                    &hit("java.log_injection.mdc_put", rewrite_span),
+                    &hit("java.log_injection.mdc_context_logger_info", consumer_span),
+                    &["rid".to_string()].into_iter().collect(),
+                ),
+                expected,
+                "condition {condition:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_python_zip_write_uses_typed_boundary_containment() {
+        use bonsai_lang_api::LanguageAdapter;
+
+        let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_python::PythonAdapter::new());
+        let ws = bonsai_testkit::workspace_with(
+            vec![adapter],
+            &[(
+                "extract.py",
+                r#"
+import os
+def unzip_into(blob, base):
+    base_real = os.path.realpath(base)
+    for entry in entries(blob):
+        target = os.path.realpath(os.path.join(base_real, entry))
+        if target != base_real and not target.startswith(base_real + os.sep):
+            raise ValueError("escape")
+        with open(target, "wb") as output:
+            output.write(blob)
+
+def upload(blob):
+    unzip_into(blob, "/var/data/upload")
+"#,
+            )],
+        );
+        let file = ws.db().vfs().all_files()[0];
+        let index = ws.db().decl_index(file).expect("Python declaration index");
+        let decl = index
+            .defs
+            .iter()
+            .find(|decl| decl.name == "unzip_into")
+            .expect("unzip_into declaration");
+        let mut calls = Vec::new();
+        collect_structured_calls(&decl.flow_events, &mut calls);
+        let open = calls
+            .iter()
+            .find(|call| call.args.get(1).is_some_and(|arg| arg.value_text == "\"wb\""))
+            .expect("consumer of the proven target path");
+        let target = |attribute: Option<&[&str]>, name: Option<&str>| RuleTarget {
+            attribute: attribute.map(|parts| parts.iter().map(|part| (*part).to_string()).collect()),
+            name: name.map(str::to_string),
+            ..RuleTarget::default()
+        };
+        let guard = crate::rule::PathConsumerContainmentGuardSemantics {
+            canonicalizer: target(Some(&["os", "path", "realpath"]), None),
+            base_canonicalizer: None,
+            path_constructor: target(Some(&["os", "path", "join"]), None),
+            path_constructor_base_from_receiver: false,
+            containment_check: target(None, Some("startswith")),
+            static_base_factories: Vec::new(),
+            sink_path_arg_index: 0,
+            path_constructor_base_arg_index: 0,
+            containment_check_is_segment_aware: false,
+            boundary_places: vec!["os.sep".to_string()],
+        };
+        let call_graph = ws.cached_resolved_call_graph();
+        assert!(
+            path_consumer_guard_span(&ws, call_graph.as_ref(), decl, open.span, 0, &guard, None,).is_some(),
+            "typed branch facts: {:#?}",
+            index.branch_conditions
+        );
     }
 
     #[test]

@@ -68,11 +68,13 @@ pub use report::{
 };
 pub use rule::{
     AnalysisSemantics, ArgTaintedSpec, CharacterConstraintSemantics, ConfiguredArgumentFactoryGuardSemantics,
-    ConfiguredCallArgumentGuardSemantics, ConstraintKind, ContextFlowRole, ContextFlowSemantics,
-    DynamicKeyDenylistGuardSemantics, FlowClass, GuardProfile, MatchKind, MatchOrigin, MatchSpec,
-    MustAliasSpec, NoSqlFilterSemantics, ParameterizedQuerySemantics, PathConsumerContainmentGuardSemantics,
-    PathContainmentGuardSemantics, PayloadType, PostSinkPolicy, RelativePathContainmentGuardSemantics,
-    RequiredAggregateFieldSemantics, RequiredNamedArgumentSemantics, RequiresStateSpec, Rule, RuleConstraint,
+    ConfiguredArgumentReceiverGuardSemantics, ConfiguredCallArgumentGuardSemantics, ConstraintKind,
+    ContextFlowRole, ContextFlowSemantics, DynamicKeyDenylistGuardSemantics, FlowClass, GuardProfile,
+    MatchKind, MatchOrigin, MatchSpec, MustAliasSpec, NoSqlFilterSemantics, ParameterizedQuerySemantics,
+    PathConsumerContainmentGuardSemantics, PathContainmentGuardSemantics, PayloadType, PostSinkPolicy,
+    ReceiverConfigurationGuardSemantics, ReceiverFactoryGuardSemantics,
+    RelativePathContainmentGuardSemantics, RequiredAggregateFieldSemantics, RequiredCallArgumentSemantics,
+    RequiredNamedArgumentSemantics, RequiredReceiverCallSemantics, RequiresStateSpec, Rule, RuleConstraint,
     RuleKind, RuleTarget, RuntimeTypeSpec, SameOriginPathConstraintSemantics, Severity, TrustClass,
     UrlComponentSemantics, UrlDnsGuardSemantics, UrlGuardRootSemantics, UrlHostAllowlistSemantics,
     UrlNetworkGuardSemantics, UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics,

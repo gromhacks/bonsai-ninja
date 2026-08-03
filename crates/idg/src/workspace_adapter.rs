@@ -5036,7 +5036,11 @@ fn resolve_aggregate_assignments(
                     .tuple_items
                     .drain(..)
                     .zip(fields.iter().cloned())
-                    .map(|(value, name)| bonsai_lang_api::ExpressionField { name, value })
+                    .map(|(value, name)| bonsai_lang_api::ExpressionField {
+                        name,
+                        value_span: None,
+                        value,
+                    })
                     .collect();
                 idg_build_log(format_args!(
                     "aggregate resolved: target={target} type={key} fields={}",

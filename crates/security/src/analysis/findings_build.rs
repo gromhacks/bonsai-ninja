@@ -138,6 +138,10 @@ pub(super) struct FindingBuildContext<'a> {
     /// re-entering the workspace header cache here can recursively acquire
     /// its write lock when a worker steals another source-group job.
     pub(super) global: &'a Arc<GlobalIndex>,
+    /// Exact resolved graph compiled by the serial source/sink planner.
+    /// Guard attribution runs inside Rayon workers and must never reopen the
+    /// workspace-wide lazy callgraph cache from that parallel phase.
+    pub(super) call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
     /// Spans of every call site the engine recorded as carrying
     /// tainted argument flow on this source's graph. A sanitizer
     /// only credits the finding when its match span overlaps one
@@ -198,20 +202,52 @@ pub(super) fn make_finding(
     // helper functions that transformed the tainted value. Combined
     // with the data-flow tainted-call-span gate below, this keeps
     // credit semantically precise.
-    for &hop_func in context.sanitizer_candidate_funcs {
+    let mut sanitizer_candidate_funcs = context.sanitizer_candidate_funcs.to_vec();
+    sanitizer_candidate_funcs.extend(helper_functions_reaching_tainted_sink_args(
+        context.ws,
+        context.call_graph,
+        context.sink_func,
+        snk,
+        &context.sink_tainted_args,
+    ));
+    sanitizer_candidate_funcs.sort_by_key(|function| function.raw());
+    sanitizer_candidate_funcs.dedup();
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "sanitizer_candidates sink={} functions={:?}",
+        snk.rule_id,
+        sanitizer_candidate_funcs
+    );
+    for hop_func in sanitizer_candidate_funcs {
         let Some(sanitizer_hits) = context.san_by_func.get(&hop_func) else {
             continue;
         };
         for sanitizer_match in sanitizer_hits {
             let sanitizer_rule = pack.find_rule_by_id(&sanitizer_match.rule_id);
-            let nested_in_tainted_sink_arg = sanitizer_is_nested_in_tainted_sink_arg(
-                context.ws,
-                context.sink_func,
-                src,
-                sanitizer_match,
-                snk,
-                &context.sink_tainted_args,
-            );
+            let nested_in_tainted_sink_arg =
+                sanitizer_is_nested_in_tainted_sink_arg(
+                    context.ws,
+                    context.sink_func,
+                    src,
+                    sanitizer_match,
+                    snk,
+                    &context.sink_tainted_args,
+                ) || sanitizer_is_sole_nested_value_call_in_return(
+                    context.ws,
+                    context.sink_func,
+                    sanitizer_match,
+                    snk,
+                    skr,
+                ) || sanitizer_is_helper_return_reaching_tainted_sink_arg(HelperSanitizerReturnContext {
+                    ws: context.ws,
+                    call_graph: context.call_graph,
+                    helper_func: hop_func,
+                    sink_func: context.sink_func,
+                    sanitizer: sanitizer_match,
+                    sink: snk,
+                    sink_tainted_args: &context.sink_tainted_args,
+                    tainted_call_spans: context.tainted_call_spans,
+                });
             let dataflow_connected =
                 sanitizer_call_overlaps_tainted_call(sanitizer_match, context.tainted_call_spans)
                     || sanitizer_char_allowlist_guards_tainted_call(
@@ -359,7 +395,7 @@ pub(super) fn make_finding(
         }
     }
     if let Some(path_guard) =
-        path_consumer_containment_guard_sanitizer(context.ws, context.sink_func, snk, skr)
+        path_consumer_containment_guard_sanitizer(context.ws, context.call_graph, context.sink_func, snk, skr)
     {
         let dedup_key = (path_guard.file.clone(), path_guard.line, path_guard.column);
         if seen_keys.insert(dedup_key) {
@@ -376,6 +412,18 @@ pub(super) fn make_finding(
             sanitizers_seen.push(factory_guard);
         }
     }
+    if let Some(configuration_guard) =
+        receiver_configuration_guard_sanitizer(context.ws, context.sink_func, snk, skr)
+    {
+        let dedup_key = (
+            configuration_guard.file.clone(),
+            configuration_guard.line,
+            configuration_guard.column,
+        );
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(configuration_guard);
+        }
+    }
     if let Some(escape) = character_escape_sanitizer(context.ws, context.sink_func, snk, skr) {
         let dedup_key = (escape.file.clone(), escape.line, escape.column);
         if seen_keys.insert(dedup_key) {
@@ -384,6 +432,7 @@ pub(super) fn make_finding(
     }
     let compiler_guard_context = CompilerGuardContext {
         ws: context.ws,
+        call_graph: context.call_graph,
         source: src,
         source_func: context.source_func,
         sink: snk,
@@ -407,6 +456,7 @@ pub(super) fn make_finding(
     }
     if let Some(path_guard) = relative_path_containment_guard_sanitizer(
         context.ws,
+        context.call_graph,
         context.sink_func,
         snk,
         skr,
@@ -441,6 +491,18 @@ pub(super) fn make_finding(
             sanitizers_seen.push(configured_factory_guard);
         }
     }
+    if let Some(configured_receiver_guard) =
+        configured_argument_receiver_guard_sanitizer(context.ws, context.sink_func, snk, skr)
+    {
+        let dedup_key = (
+            configured_receiver_guard.file.clone(),
+            configured_receiver_guard.line,
+            configured_receiver_guard.column,
+        );
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(configured_receiver_guard);
+        }
+    }
     if let Some(configured_call_guard) = configured_call_argument_guard_sanitizer(
         context.ws,
         context.sink_func,
@@ -465,6 +527,7 @@ pub(super) fn make_finding(
     }
     if let Some(reconstruction_guard) = url_reconstruction_guard_sanitizer(
         context.ws,
+        context.call_graph,
         context.sink_func,
         snk,
         skr,
@@ -520,6 +583,7 @@ pub(super) fn make_finding(
     if let Some(eq_guard) = nosql_eq_filter_wrapper_sanitizer(
         context.ws,
         context.sink_func,
+        src,
         snk,
         skr,
         &context.sink_tainted_args,
@@ -591,16 +655,13 @@ pub(super) fn make_finding(
             .iter()
             .any(|step| path_is_test_file_with_root(root.as_deref(), &step.file));
 
-    // Trust-aware severity. Source rules carry a `trust` tag
-    // (`remote`, `local`, `inferred`). Local-trust sources are
-    // CLI args / env vars / files the local user controls — real
-    // attack surface for setuid binaries, but lower priority than
-    // network-derived flows in a typical web app review. Demote
-    // the rule's declared sink severity by one tier when the
-    // source is local-trust so the `severity: high` filter retains
-    // signal for genuinely high-priority (network-derived) flows.
+    // Trust-aware severity. Local CLI/env/file input remains relevant for
+    // privileged or multi-user programs, but it is capped at medium so it
+    // cannot masquerade as a network-grade high/critical finding. Inferred
+    // sources retain the existing one-tier uncertainty demotion.
     let severity = match (skr.severity, src_match.trust.as_deref()) {
-        (Some(sev), Some("local" | "inferred")) => Some(demote_severity_one_tier(sev)),
+        (Some(sev), Some("local")) => Some(cap_local_trust_severity(sev)),
+        (Some(sev), Some("inferred")) => Some(demote_severity_one_tier(sev)),
         (sev, _) => sev,
     };
 

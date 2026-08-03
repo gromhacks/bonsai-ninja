@@ -1,4 +1,4 @@
-//! `bonsai-ninja slice` — exact backwards slice for one symbol at one line.
+//! `bonsai-ninja slice` — exact backwards slice for one symbol.
 
 use anyhow::Result;
 use bonsai_sdk::{SliceFilters, SliceOutcome, SliceRow, SliceStep};
@@ -18,7 +18,7 @@ use super::{
 pub(crate) fn cmd_slice(
     root: &std::path::Path,
     symbol: &str,
-    line: u32,
+    line: Option<u32>,
     file: Option<&str>,
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
@@ -26,14 +26,14 @@ pub(crate) fn cmd_slice(
     let (project, _footer) = open_project(root)?;
     let filters = SliceFilters {
         symbol,
-        line,
+        line: line.unwrap_or(0),
         file,
         max_steps: 0,
     };
     let stage = progress::ScopedSpinner::new("slicing syntax flow");
     let outcome = project.browse().slices(filters);
     stage.finish();
-    let line_s = line.to_string();
+    let line_s = line.map_or_else(|| "auto".to_string(), |line| line.to_string());
     let filters_hash = paging::hash_filters(&[
         ("symbol", symbol),
         ("line", line_s.as_str()),
@@ -50,7 +50,7 @@ pub(crate) fn cmd_slice(
             slice_cost,
             |slices, info, _cfg| {
                 render_slice_text(&outcome, slices);
-                render_paging_footer(info, "bonsai-ninja slice <workspace> --symbol <x> --line <N>");
+                render_paging_footer(info, "bonsai-ninja slice <workspace> --symbol <x> [--line <N>]");
                 Ok(())
             },
         ),
@@ -110,7 +110,11 @@ fn render_slice_text(outcome: &SliceOutcome, slices: &[SliceRow]) {
     cli_println!();
     cli_println!(
         "{}",
-        u.heading(&format!("▸ slice {} @ line {}", outcome.symbol, outcome.line))
+        u.heading(&if outcome.line == 0 {
+            format!("▸ slice {}", outcome.symbol)
+        } else {
+            format!("▸ slice {} @ line {}", outcome.symbol, outcome.line)
+        })
     );
     cli_println!(
         "  {} {}    {} {}    {} {}    {} {}",

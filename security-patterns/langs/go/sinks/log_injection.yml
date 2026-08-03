@@ -79,6 +79,9 @@
   - log
   cwe:
   - CWE-117
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
   match:
     kind: call
     callee:

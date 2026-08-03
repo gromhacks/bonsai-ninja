@@ -11,6 +11,7 @@ use crate::rule::DynamicKeyDenylistGuardSemantics;
 
 pub(super) fn prototype_pollution_sink_is_guarded(
     ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
     sink_rule: &Rule,
     sink: &RuleMatch,
     tainted_call: &TaintedCall,
@@ -22,7 +23,10 @@ pub(super) fn prototype_pollution_sink_is_guarded(
     else {
         return false;
     };
-    if recursive_dynamic_key_filter_is_guarded(ws, sink, tainted_call, semantics) {
+    if filtered_property_path_is_guarded(ws, sink, tainted_call, semantics) {
+        return true;
+    }
+    if recursive_dynamic_key_filter_is_guarded(ws, call_graph, sink, tainted_call, semantics) {
         return true;
     }
     if semantics.require_recursive_filter {
@@ -45,7 +49,7 @@ pub(super) fn prototype_pollution_sink_is_guarded(
     let FlowEvent::Call { span: call_span, .. } = call else {
         return false;
     };
-    let key_variables = dynamic_sink_key_variables(call);
+    let key_variables = dynamic_sink_key_variables(call, semantics);
     if key_variables.is_empty() {
         return false;
     }
@@ -59,8 +63,130 @@ pub(super) fn prototype_pollution_sink_is_guarded(
     flow_guard_state_at_sink(&decl.flow_events, *call_span, &context, &mut guarded) && guarded
 }
 
+fn filtered_property_path_is_guarded(
+    ws: &Workspace,
+    sink: &RuleMatch,
+    tainted_call: &TaintedCall,
+    semantics: &DynamicKeyDenylistGuardSemantics,
+) -> bool {
+    let Some(argument_index) = semantics.sink_key_argument_index else {
+        return false;
+    };
+    if !tainted_call
+        .tainted_args
+        .iter()
+        .any(|argument| argument.index == argument_index)
+    {
+        return false;
+    }
+    let Some(file_index) = ws.exact_decl_index_shared(sink.span.file) else {
+        return false;
+    };
+    let Some(decl) = file_index
+        .defs
+        .iter()
+        .filter(|decl| span_contains(decl.body_span.unwrap_or(decl.span), sink.span))
+        .min_by_key(|decl| decl.span.len())
+    else {
+        return false;
+    };
+    let Some(call) = find_call_event_at(&decl.flow_events, sink.span) else {
+        return false;
+    };
+    let FlowEvent::Call { args, .. } = call else {
+        return false;
+    };
+    let Some(argument) = args.get(argument_index) else {
+        return false;
+    };
+    let output_places = call_arg_target_keys(argument);
+    if output_places.is_empty() {
+        return false;
+    }
+    file_index.dynamic_key_filters.iter().any(|fact| {
+        fact.function_span == decl.span
+            && !fact.recursive
+            && fact.guard_span.end <= sink.span.start
+            && fact
+                .output_place
+                .as_deref()
+                .is_some_and(|output| output_places.iter().any(|place| place == output))
+            && rule_target_matches_call(
+                &fact.collection_constructor,
+                &[],
+                &semantics.collection_constructor,
+            )
+            && rule_target_matches_call(&fact.membership_check, &[], &semantics.membership_check)
+            && exact_string_sets_equal(&fact.rejected_exact_values, &semantics.rejected_exact_values)
+            && branch_then_events_with_span(&decl.flow_events, fact.guard_span)
+                .is_some_and(prototype_guard_arm_abruptly_exits)
+    })
+}
+
+fn branch_then_events_with_span(events: &[FlowEvent], wanted: Span) -> Option<&[FlowEvent]> {
+    for event in events {
+        match event {
+            FlowEvent::Branch {
+                span,
+                condition,
+                then_events,
+                else_events,
+            } => {
+                if *span == wanted {
+                    return condition.as_ref().map(|_| then_events.as_slice());
+                }
+                if let Some(branch) = branch_then_events_with_span(then_events, wanted)
+                    .or_else(|| branch_then_events_with_span(else_events, wanted))
+                {
+                    return Some(branch);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(branch) = branch_then_events_with_span(body, wanted) {
+                    return Some(branch);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(branch) = branch_then_events_with_span(body, wanted)
+                    .or_else(|| branch_then_events_with_span(catch_events, wanted))
+                    .or_else(|| branch_then_events_with_span(finally_events, wanted))
+                {
+                    return Some(branch);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn prototype_guard_arm_abruptly_exits(events: &[FlowEvent]) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Return { .. } | FlowEvent::Throw { .. } => true,
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            !else_events.is_empty()
+                && prototype_guard_arm_abruptly_exits(then_events)
+                && prototype_guard_arm_abruptly_exits(else_events)
+        }
+        FlowEvent::Try {
+            body, finally_events, ..
+        } => prototype_guard_arm_abruptly_exits(body) || prototype_guard_arm_abruptly_exits(finally_events),
+        _ => false,
+    })
+}
+
 fn recursive_dynamic_key_filter_is_guarded(
     ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
     sink: &RuleMatch,
     tainted_call: &TaintedCall,
     semantics: &DynamicKeyDenylistGuardSemantics,
@@ -97,7 +223,6 @@ fn recursive_dynamic_key_filter_is_guarded(
         return false;
     }
 
-    let call_graph = ws.cached_resolved_call_graph();
     let targets: AHashSet<_> = call_graph
         .callees_of(tainted_call.caller)
         .filter(|edge| edge.precision.is_semantic() && edge.span == helper_call_span)
@@ -130,10 +255,20 @@ fn recursive_dynamic_key_filter_is_guarded(
     })
 }
 
-fn dynamic_sink_key_variables(call: &FlowEvent) -> AHashSet<String> {
+fn dynamic_sink_key_variables(
+    call: &FlowEvent,
+    semantics: &DynamicKeyDenylistGuardSemantics,
+) -> AHashSet<String> {
     let FlowEvent::Call { name, args, .. } = call else {
         return AHashSet::new();
     };
+    if let Some(index) = semantics.sink_key_argument_index {
+        return args
+            .get(index)
+            .into_iter()
+            .flat_map(call_arg_target_keys)
+            .collect();
+    }
     if clean_overwrite_callee_tail(name) == "__setitem__" {
         return args
             .first()
@@ -665,6 +800,7 @@ mod tests {
                 .map(bonsai_lang_api::ExpressionFlow::from_place)
                 .unwrap_or_default(),
             static_string: literal.map(str::to_string),
+            static_value: literal.map(|value| bonsai_lang_api::StaticScalarValue::String(value.to_string())),
         }
     }
 
@@ -692,9 +828,23 @@ mod tests {
                 recursive_call_arg("source.key", &["source", "key", "source.key"]),
             ],
         };
+        let semantics = DynamicKeyDenylistGuardSemantics {
+            collection_constructor: Default::default(),
+            membership_check: Default::default(),
+            membership_subject_arg_index: 0,
+            collection_values_arg_index: 0,
+            rejected_exact_values: vec![
+                "__proto__".to_string(),
+                "constructor".to_string(),
+                "prototype".to_string(),
+            ],
+            sink_key_argument_index: None,
+            require_recursive_filter: false,
+            filtered_value_argument_index: None,
+        };
 
         assert_eq!(
-            dynamic_sink_key_variables(&call),
+            dynamic_sink_key_variables(&call, &semantics),
             AHashSet::from_iter(["key".to_string()])
         );
     }

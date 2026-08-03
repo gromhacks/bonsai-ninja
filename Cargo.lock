@@ -770,6 +770,7 @@ dependencies = [
  "bonsai_lang_typescript",
  "bonsai_resolve",
  "bonsai_taint",
+ "bonsai_testkit",
  "bonsai_workspace",
  "lru",
  "parking_lot",

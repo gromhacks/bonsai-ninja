@@ -14,6 +14,13 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    same_origin_path_constraint:
+      require_scheme_rejection: true
+      require_authority_rejection: true
+      require_absolute_path: true
+      require_scheme_relative_rejection: true
+      sink_argument_index: 0
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    HttpServletResponse.sendRedirect(input);\n  }\n}\n"
@@ -142,6 +149,13 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    same_origin_path_constraint:
+      require_scheme_rejection: true
+      require_authority_rejection: true
+      require_absolute_path: true
+      require_scheme_relative_rejection: true
+      sink_argument_index: 0
   match_examples:
   - name: generated shape example
     code: |
@@ -363,6 +377,16 @@
       regex: '(?i)(LOCATION|Location|^"Location"$)'
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    same_origin_path_constraint:
+      require_scheme_rejection: true
+      require_authority_rejection: true
+      require_absolute_path: true
+      require_scheme_relative_rejection: true
+      sink_argument_index: 1
+      static_context_argument:
+        index: 0
+        accepted_renderings: [HttpHeaders.LOCATION, '"Location"']
   match_examples:
   - name: webflux server response location header redirect
     code: |
@@ -449,6 +473,16 @@
       regex: '(?i)(LOCATION|^"Location"$)'
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    same_origin_path_constraint:
+      require_scheme_rejection: true
+      require_authority_rejection: true
+      require_absolute_path: true
+      require_scheme_relative_rejection: true
+      sink_argument_index: 1
+      static_context_argument:
+        index: 0
+        accepted_renderings: [HttpHeaders.LOCATION, '"Location"']
   match_examples:
   - name: webflux server response location redirect
     code: |

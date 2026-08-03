@@ -41,6 +41,26 @@
   severity: high
   packages: [os]
   cwe: [CWE-22]
+  analysis_semantics:
+    guard_profile: relative-path-containment
+    relative_path_containment_guard:
+      candidate_canonicalizer:
+        regex: '^filepath\.(Join|Clean)$'
+      base_canonicalizer:
+        attribute: [filepath, Abs]
+      relative_path:
+        attribute: [filepath, Rel]
+      relative_path_result_index: 0
+      relative_base_arg_index: 0
+      relative_candidate_arg_index: 1
+      guarded_path_arg_index: 0
+      rejection_check:
+        attribute: [strings, HasPrefix]
+      rejection_check_arg_index: 0
+      rejection_prefix_arg_index: 1
+      rejection_boundary_places: [os.PathSeparator]
+      rejection_boundary_wrappers: [{name: string}]
+      rejected_exact_values: [".."]
   match:
     kind: call
     callee:
@@ -79,7 +99,7 @@
     guard_profile: relative-path-containment
     relative_path_containment_guard:
       candidate_canonicalizer:
-        attribute: [filepath, Clean]
+        regex: '^filepath\.(Join|Clean)$'
       base_canonicalizer:
         attribute: [filepath, Abs]
       relative_path:
@@ -89,8 +109,11 @@
       relative_candidate_arg_index: 1
       guarded_path_arg_index: 0
       rejection_check:
-        name: hasDotDotPrefix
+        attribute: [strings, HasPrefix]
       rejection_check_arg_index: 0
+      rejection_prefix_arg_index: 1
+      rejection_boundary_places: [os.PathSeparator]
+      rejection_boundary_wrappers: [{name: string}]
       rejected_exact_values: [".."]
   match:
     kind: call
@@ -126,6 +149,26 @@
   severity: high
   packages: [os]
   cwe: [CWE-22]
+  analysis_semantics:
+    guard_profile: relative-path-containment
+    relative_path_containment_guard:
+      candidate_canonicalizer:
+        regex: '^filepath\.(Join|Clean)$'
+      base_canonicalizer:
+        attribute: [filepath, Abs]
+      relative_path:
+        attribute: [filepath, Rel]
+      relative_path_result_index: 0
+      relative_base_arg_index: 0
+      relative_candidate_arg_index: 1
+      guarded_path_arg_index: 0
+      rejection_check:
+        attribute: [strings, HasPrefix]
+      rejection_check_arg_index: 0
+      rejection_prefix_arg_index: 1
+      rejection_boundary_places: [os.PathSeparator]
+      rejection_boundary_wrappers: [{name: string}]
+      rejected_exact_values: [".."]
   match:
     kind: call
     callee:
@@ -573,7 +616,7 @@
     guard_profile: relative-path-containment
     relative_path_containment_guard:
       candidate_canonicalizer:
-        attribute: [filepath, Clean]
+        regex: '^filepath\.(Join|Clean)$'
       base_canonicalizer:
         attribute: [filepath, Abs]
       relative_path:
@@ -582,8 +625,11 @@
       relative_base_arg_index: 0
       relative_candidate_arg_index: 1
       rejection_check:
-        name: hasDotDotPrefix
+        attribute: [strings, HasPrefix]
       rejection_check_arg_index: 0
+      rejection_prefix_arg_index: 1
+      rejection_boundary_places: [os.PathSeparator]
+      rejection_boundary_wrappers: [{name: string}]
       rejected_exact_values: [".."]
   match:
     kind: call

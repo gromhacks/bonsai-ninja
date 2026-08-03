@@ -23,6 +23,23 @@
       filter_arg_index: 0
       literal_value_operators: ["$eq"]
       safe_scalar_runtime_types: [string]
+    character_escape:
+      value_arg_indices: [0]
+      required_mappings:
+      - {input: '.', output: '\.'}
+      - {input: '*', output: '\*'}
+      - {input: '+', output: '\+'}
+      - {input: '?', output: '\?'}
+      - {input: '^', output: '\^'}
+      - {input: '$', output: '\$'}
+      - {input: '{', output: '\{'}
+      - {input: '}', output: '\}'}
+      - {input: '(', output: '\('}
+      - {input: ')', output: '\)'}
+      - {input: '|', output: '\|'}
+      - {input: '[', output: '\['}
+      - {input: ']', output: '\]'}
+      - {input: '\', output: '\\'}
   match_examples:
   - name: mongo find
     code: |

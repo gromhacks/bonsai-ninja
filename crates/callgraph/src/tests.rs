@@ -103,23 +103,26 @@ fn call_with_args(file: FileId, name: &str, args: &[&str]) -> FlowEvent {
         receiver: None,
         receiver_types: Vec::new(),
         call_kind: CallKind::Function,
-        args: args
-            .iter()
-            .enumerate()
-            .map(|(idx, arg)| CallArg {
-                passing_mode: Default::default(),
-                span: Span::new(
-                    file,
-                    idx as u64,
-                    idx as u64 + u64::try_from(arg.len()).unwrap_or(0),
-                ),
-                name: None,
-                value_text: (*arg).to_string(),
-                place: Some((*arg).to_string()),
-                source_names: vec![(*arg).to_string()],
-            })
-            .collect(),
+        args: call_args(file, args),
     }
+}
+
+fn call_args(file: FileId, args: &[&str]) -> Vec<CallArg> {
+    args.iter()
+        .enumerate()
+        .map(|(idx, arg)| CallArg {
+            passing_mode: Default::default(),
+            span: Span::new(
+                file,
+                idx as u64,
+                idx as u64 + u64::try_from(arg.len()).unwrap_or(0),
+            ),
+            name: None,
+            value_text: (*arg).to_string(),
+            place: Some((*arg).to_string()),
+            source_names: vec![(*arg).to_string()],
+        })
+        .collect()
 }
 
 fn method_call(file: FileId, name: &str, receiver: &str, receiver_types: &[&str]) -> FlowEvent {
@@ -4601,6 +4604,77 @@ fn alias_qualified_call_with_receiver_resolves_as_module_call() {
     assert!(
         edges.iter().any(|edge| edge.to == persist),
         "alias-qualified module call should not be blocked as unresolved instance receiver: {edges:?}"
+    );
+}
+
+#[test]
+fn alias_qualified_module_call_does_not_consume_a_signature_argument() {
+    let caller_file = FileId::new(1);
+    let extract_file = FileId::new(2);
+    let mut global = GlobalIndex::new();
+
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![with_module_path(
+            decl(
+                caller_file,
+                1,
+                "upload",
+                vec![FlowEvent::Call {
+                    span: Span::new(caller_file, 100, 130),
+                    name: "extract.UnpackTar".to_string(),
+                    receiver: Some("extract".to_string()),
+                    receiver_types: Vec::new(),
+                    call_kind: CallKind::Method,
+                    args: call_args(caller_file, &["input", "\"/var/data/uploads\""]),
+                }],
+            ),
+            &["controllers"],
+        )],
+    );
+    insert_file(
+        &mut global,
+        extract_file,
+        vec![with_module_path(
+            with_params(decl(extract_file, 1, "UnpackTar", Vec::new()), &["src", "base"]),
+            &["internal", "extract"],
+        )],
+    );
+    let alias_targets = AHashMap::from_iter([(
+        "extract".to_string(),
+        AliasTarget::Namespace {
+            module: "app/internal/extract".to_string(),
+        },
+    )]);
+
+    let graph = ResolvedCallGraph::build_with_file_info(
+        &global,
+        |_| AHashMap::new(),
+        |file| {
+            if file == caller_file {
+                alias_targets.clone()
+            } else {
+                AHashMap::new()
+            }
+        },
+        |file| {
+            if file == extract_file {
+                Some("internal/extract/tar.go".to_string())
+            } else {
+                Some("controllers/upload.go".to_string())
+            }
+        },
+        |_| &[],
+        |_| Some("go"),
+    );
+    let upload = FuncId::new(global.find_by_name("upload")[0].raw());
+    let unpack = FuncId::new(global.find_by_name("UnpackTar")[0].raw());
+
+    assert_eq!(
+        graph.callees_of(upload).map(|edge| edge.to).collect::<Vec<_>>(),
+        vec![unpack],
+        "the imported namespace qualifies the callee but is not a runtime receiver argument"
     );
 }
 

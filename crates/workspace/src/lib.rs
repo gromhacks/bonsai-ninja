@@ -4347,10 +4347,11 @@ impl Workspace {
 
     /// Return deterministic parser-coverage reasons for an exact file scope.
     ///
-    /// Parsing is a cached compiler query. Parsed-file diagnostics and the
-    /// DB-level adapter/index diagnostic sink are both inspected, with file
-    /// sets preventing duplicate diagnostics from inflating the counts. A
-    /// hard parser, adapter, or VFS failure has no `ParsedFile`, so it is
+    /// Parsing is a cached syntax query. Exact Tree-sitter diagnostics and the
+    /// DB-level compiler diagnostic sink are both inspected, with file sets
+    /// preventing duplicate diagnostics from inflating the counts. The syntax
+    /// query never lowers declarations or flow bodies merely to prove parser
+    /// coverage. A hard parser or VFS failure has no `ParsedFile`, so it is
     /// recorded explicitly instead of allowing a false-complete analysis.
     pub fn parser_incomplete_reasons_for_files(&self, files: &[FileId]) -> Vec<String> {
         let file_set: AHashSet<FileId> = files.iter().copied().collect();
@@ -4382,9 +4383,9 @@ impl Workspace {
             .collect::<Vec<_>>();
         self.inner
             .db
-            .visit_compiler_file_objects_uncached(&unchecked_files, |file, object| match object {
-                Some(object) => {
-                    for diagnostic in &object.diagnostics {
+            .visit_parser_diagnostics_uncached(&unchecked_files, |file, diagnostics| match diagnostics {
+                Some(diagnostics) => {
+                    for diagnostic in diagnostics.iter() {
                         record_diagnostic(diagnostic);
                     }
                 }

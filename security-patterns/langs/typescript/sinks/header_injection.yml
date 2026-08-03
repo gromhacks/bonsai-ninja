@@ -19,6 +19,14 @@
   constraints:
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
+    character_escape:
+      value_arg_indices: [1]
+      required_mappings:
+      - {input: "\r", output: "_"}
+      - {input: "\n", output: "_"}
   match_examples:
   - name: express res set value
     code: |
@@ -392,6 +400,9 @@
   constraints:
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
   match_examples:
   - name: hapi response content disposition
     code: |

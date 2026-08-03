@@ -403,7 +403,15 @@
   match:
     kind: return
     target:
-      regex: '(?is)<\s*(?:!doctype|html|body|script|div|span|p|a|img|svg|iframe|h[1-6]|ul|ol|li|table|form|input|textarea|button|br|hr)\b|&lt;'
+      regex: '(?is)<\s*(?:!doctype|html|body|script|div|span|p|a|img|svg|iframe|h[1-6]|ul|ol|li|table|form|input|textarea|button|br|hr)\b'
+  analysis_semantics:
+    character_escape:
+      required_mappings:
+      - {input: "&", output: "&amp;"}
+      - {input: "<", output: "&lt;"}
+      - {input: ">", output: "&gt;"}
+      - {input: '"', output: "&quot;"}
+      - {input: "'", output: "&#39;"}
   match_examples:
   - name: raw html return with tainted expression
     code: |

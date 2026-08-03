@@ -517,6 +517,8 @@ fn canonical_flow_read_uses_ast_rhs_span_instead_of_assignment_punctuation() {
     let facts = [bonsai_lang_api::AssignmentValueFact {
         assignment_span,
         target: Some("req.query".to_string()),
+        target_is_immutable: false,
+        target_owner: None,
         target_span: Some(Span::new(file, 0, "req.query".len() as u64)),
         value_span,
         call_sites: Vec::new(),
@@ -1723,6 +1725,7 @@ fn prior_call_static_arguments_use_language_decoded_values() {
         value_flow: Default::default(),
         static_value: value,
         exact_static_aggregate_fields: Vec::new(),
+        exact_static_sequence_values: None,
     };
     let facts = vec![
         argument(

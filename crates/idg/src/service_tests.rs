@@ -510,10 +510,12 @@ fn payload_map_flow() -> bonsai_lang_api::ExpressionFlow {
         aggregate_fields: vec![
             bonsai_lang_api::ExpressionField {
                 name: "cmd".to_string(),
+                value_span: None,
                 value: bonsai_lang_api::ExpressionFlow::from_place("payload.cmd"),
             },
             bonsai_lang_api::ExpressionField {
                 name: "user".to_string(),
+                value_span: None,
                 value: bonsai_lang_api::ExpressionFlow::from_place("payload.user"),
             },
         ],

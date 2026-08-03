@@ -4438,6 +4438,8 @@ pub fn extract_assignment_value_facts(
                         assignment_span: span,
                         target: assignment_target_node(node, src)
                             .and_then(|target| argument_place(&target, src)),
+                        target_is_immutable: false,
+                        target_owner: None,
                         target_span,
                         value_span,
                         call_sites,
@@ -4626,6 +4628,7 @@ pub fn extract_call_argument_value_facts(
                 value_flow,
                 static_value: None,
                 exact_static_aggregate_fields: Vec::new(),
+                exact_static_sequence_values: None,
             });
         }
     }
@@ -4723,7 +4726,12 @@ pub fn populate_call_argument_static_values(
         let static_value = decode(value_node, src);
         let exact_static_aggregate_fields =
             expression_flow::exact_static_aggregate_fields(value_node, src, decode).unwrap_or_default();
-        if static_value.is_none() && exact_static_aggregate_fields.is_empty() {
+        let exact_static_sequence_values =
+            expression_flow::exact_static_sequence_values(value_node, src, decode);
+        if static_value.is_none()
+            && exact_static_aggregate_fields.is_empty()
+            && exact_static_sequence_values.is_none()
+        {
             continue;
         }
         if let Some(fact) = index
@@ -4733,6 +4741,7 @@ pub fn populate_call_argument_static_values(
         {
             fact.static_value = static_value;
             fact.exact_static_aggregate_fields = exact_static_aggregate_fields;
+            fact.exact_static_sequence_values = exact_static_sequence_values;
         } else {
             index.call_argument_values.push(crate::CallArgumentValueFact {
                 call_span,
@@ -4746,6 +4755,7 @@ pub fn populate_call_argument_static_values(
                 value_flow: Default::default(),
                 static_value,
                 exact_static_aggregate_fields,
+                exact_static_sequence_values,
             });
         }
     }
@@ -5468,6 +5478,7 @@ pub fn decl_index_with_handler(
         character_substitutions: Vec::new(),
         character_constraints: Vec::new(),
         same_origin_path_constraints: Vec::new(),
+        compiler_guards: Vec::new(),
         dynamic_key_filters: Vec::new(),
         runtime_type_narrowings,
         branch_conditions,

@@ -3596,6 +3596,13 @@ fn walk_call(
             call_kind: bonsai_callgraph::EdgeKind::Direct,
             via_span: span,
         };
+        let is_finite_literal_selection = ctx
+            .finite_literal_selections
+            .iter()
+            .any(|fact| fact.call_span == Some(span) && fact.argument_index == Some(idx));
+        if is_finite_literal_selection {
+            continue;
+        }
         let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
         let source_filter = SemanticSourceFilter::from_sources(
             arg.place.as_deref(),

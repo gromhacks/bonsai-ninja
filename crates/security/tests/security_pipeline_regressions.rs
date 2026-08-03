@@ -13,10 +13,12 @@ use bonsai_security::loader::LanguagePack;
 use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
 use bonsai_security::{
     run_taint_analysis, run_taint_analysis_with_phase_progress, AnalysisSemantics,
-    CharacterConstraintSemantics, ConfiguredCallArgumentGuardSemantics, ConstraintKind,
-    DynamicKeyDenylistGuardSemantics, FindingStatus, FlowClass, GuardProfile, MatchKind, MatchSpec,
-    NoSqlFilterSemantics, PathContainmentGuardSemantics, RelativePathContainmentGuardSemantics,
-    RequiredAggregateFieldSemantics, RequiredNamedArgumentSemantics, Rule, RuleConstraint, RuleKind,
+    CharacterConstraintSemantics, ConfiguredArgumentReceiverGuardSemantics,
+    ConfiguredCallArgumentGuardSemantics, ConstraintKind, DynamicKeyDenylistGuardSemantics, FindingStatus,
+    FlowClass, GuardProfile, MatchKind, MatchSpec, NoSqlFilterSemantics, PathContainmentGuardSemantics,
+    ReceiverConfigurationGuardSemantics, ReceiverFactoryGuardSemantics,
+    RelativePathContainmentGuardSemantics, RequiredAggregateFieldSemantics, RequiredCallArgumentSemantics,
+    RequiredNamedArgumentSemantics, RequiredReceiverCallSemantics, Rule, RuleConstraint, RuleKind,
     RuleTarget, Rulepack, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions, TrustClass,
     UrlComponentSemantics, UrlDnsGuardSemantics, UrlGuardRootSemantics, UrlHostAllowlistSemantics,
     UrlNetworkGuardSemantics, UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics,
@@ -950,6 +952,60 @@ func handle() {
         report.findings.len(),
         1,
         "the parsed tuple binding identifies the aggregate returned by the source call: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn go_dynamic_lookup_key_does_not_taint_trusted_map_value() {
+    let ws = workspace(&[(
+        "/app/main.go",
+        r#"
+package main
+
+var pages = map[string]string{
+    "home": "<h1>home</h1>",
+    "about": "<h1>about</h1>",
+}
+
+func source() string { return "" }
+func sink(value string) {}
+func fail(value string) error { return nil }
+
+func render(name string) (string, error) {
+    value, ok := pages[name]
+    if !ok { return "", fail(name) }
+    return value, nil
+}
+
+func safe() {
+    name := source()
+    value, _ := render(name)
+    sink(value)
+}
+func unsafe() { sink(source()) }
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &rulepack("go", "source", "sink"),
+        TaintAnalysisOptions::default(),
+    )
+    .expect("taint analysis");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.finding.sink.enclosing_fn.as_deref() == Some("unsafe")),
+        "direct source-to-sink control must remain detected: {:#?}",
+        report.findings
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.finding.sink.enclosing_fn.as_deref() != Some("safe")),
+        "a selector key chooses a trusted stored value but does not become that value: {:#?}",
         report.findings
     );
 }
@@ -3396,6 +3452,7 @@ function safe() {
     dtdload: false,
   });
 }
+
 function partial() {
   return parseXml(source(), {
     noent: false,
@@ -3403,6 +3460,7 @@ function partial() {
     nonet: true,
   });
 }
+
 function spread(defaults) {
   return parseXml(source(), {
     ...defaults,
@@ -3438,6 +3496,342 @@ function spread(defaults) {
         .any(|sanitizer| { sanitizer.rule_id == "engine.sanitizer.configured_call_argument_guard" }));
     assert_eq!(finding("partial").status, FindingStatus::Unsanitized);
     assert_eq!(finding("spread").status, FindingStatus::Unsanitized);
+}
+
+#[test]
+fn receiver_configuration_requires_unconditional_complete_constructor_state() {
+    let mut pack = constrained_call_sink_rulepack("java", "source", "fromXML");
+    let sink = pack
+        .packs
+        .get_mut("java")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("Java sink");
+    sink.tag = Some("insecure-deserialization".to_string());
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        receiver_configuration_guard: Some(ReceiverConfigurationGuardSemantics {
+            required_calls: vec![
+                RequiredReceiverCallSemantics {
+                    call: RuleTarget {
+                        name: Some("addPermission".to_string()),
+                        ..RuleTarget::default()
+                    },
+                    identity_argument_indices: vec![0],
+                    required_arguments: vec![RequiredCallArgumentSemantics {
+                        index: 0,
+                        require_static_value: false,
+                        accepted_places: vec!["NoTypePermission.NONE".to_string()],
+                        accepted_static_values: Vec::new(),
+                    }],
+                },
+                RequiredReceiverCallSemantics {
+                    call: RuleTarget {
+                        name: Some("allowTypes".to_string()),
+                        ..RuleTarget::default()
+                    },
+                    identity_argument_indices: Vec::new(),
+                    required_arguments: Vec::new(),
+                },
+            ],
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/Loaders.java",
+        r#"
+class NoTypePermission { static final Object NONE = new Object(); }
+class NullPermission { static final Object NULL = new Object(); }
+class PrimitiveTypePermission { static final Object PRIMITIVES = new Object(); }
+class XStream {
+  void addPermission(Object permission) {}
+  void allowTypes(Object... types) {}
+  Object fromXML(String xml) { return null; }
+}
+class Input { static String source() { return ""; } }
+class SafeLoader {
+  private final XStream xstream = new XStream();
+  SafeLoader() {
+    xstream.addPermission(NoTypePermission.NONE);
+    xstream.addPermission(NullPermission.NULL);
+    xstream.addPermission(PrimitiveTypePermission.PRIMITIVES);
+    xstream.allowTypes(new Class[]{String.class});
+  }
+  Object safe() { return xstream.fromXML(Input.source()); }
+}
+class PartialLoader {
+  private final XStream xstream = new XStream();
+  PartialLoader() { xstream.addPermission(NoTypePermission.NONE); }
+  Object partial() { return xstream.fromXML(Input.source()); }
+}
+class ConditionalLoader {
+  private final XStream xstream = new XStream();
+  ConditionalLoader(boolean enabled) {
+    xstream.addPermission(NoTypePermission.NONE);
+    if (enabled) xstream.allowTypes(new Class[]{String.class});
+  }
+  Object conditional() { return xstream.fromXML(Input.source()); }
+}
+class MutableLoader {
+  private XStream xstream = new XStream();
+  MutableLoader() {
+    xstream.addPermission(NoTypePermission.NONE);
+    xstream.allowTypes(new Class[]{String.class});
+  }
+  Object mutable() { return xstream.fromXML(Input.source()); }
+}
+class ReassignedLoader {
+  Object reassigned() {
+    XStream xstream = new XStream();
+    xstream.addPermission(NoTypePermission.NONE);
+    xstream.allowTypes(new Class[]{String.class});
+    xstream = new XStream();
+    return xstream.fromXML(Input.source());
+  }
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let finding = |function: &str| {
+        &report
+            .findings
+            .iter()
+            .find(|finding| finding.finding.sink.enclosing_fn.as_deref() == Some(function))
+            .unwrap_or_else(|| panic!("missing {function}: {:#?}", report.findings))
+            .finding
+    };
+    assert_eq!(finding("safe").status, FindingStatus::Sanitized);
+    assert!(finding("safe")
+        .sanitizers_seen
+        .iter()
+        .any(|sanitizer| { sanitizer.rule_id == "engine.sanitizer.receiver_configuration_guard" }));
+    assert_eq!(finding("partial").status, FindingStatus::Unsanitized);
+    assert_eq!(finding("conditional").status, FindingStatus::Unsanitized);
+    assert_eq!(finding("mutable").status, FindingStatus::Unsanitized);
+    assert_eq!(finding("reassigned").status, FindingStatus::Unsanitized);
+}
+
+#[test]
+fn receiver_factory_requires_every_declared_nested_factory() {
+    let mut pack = constrained_call_sink_rulepack("java", "source", "load");
+    let sink = pack
+        .packs
+        .get_mut("java")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("Java sink");
+    sink.tag = Some("insecure-deserialization".to_string());
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        receiver_factory_guard: Some(ReceiverFactoryGuardSemantics {
+            factories: vec![RuleTarget {
+                name: Some("Yaml".to_string()),
+                ..RuleTarget::default()
+            }],
+            required_nested_factories: vec![RuleTarget {
+                name: Some("SafeConstructor".to_string()),
+                ..RuleTarget::default()
+            }],
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/YamlLoader.java",
+        r#"
+class SafeConstructor {}
+class UnsafeConstructor {}
+class Yaml {
+  Yaml(Object constructor) {}
+  Object load(String yaml) { return null; }
+}
+class Input { static String source() { return ""; } }
+class YamlLoader {
+  Object safe() {
+    Yaml yaml = new Yaml(new SafeConstructor());
+    return yaml.load(Input.source());
+  }
+  Object unsafe() {
+    Yaml yaml = new Yaml(new UnsafeConstructor());
+    return yaml.load(Input.source());
+  }
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let finding = |function: &str| {
+        &report
+            .findings
+            .iter()
+            .find(|finding| finding.finding.sink.enclosing_fn.as_deref() == Some(function))
+            .unwrap_or_else(|| panic!("missing {function}: {:#?}", report.findings))
+            .finding
+    };
+    assert_eq!(finding("safe").status, FindingStatus::Sanitized);
+    assert!(finding("safe")
+        .sanitizers_seen
+        .iter()
+        .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.receiver_factory_guard"));
+    assert_eq!(finding("unsafe").status, FindingStatus::Unsanitized);
+}
+
+#[test]
+fn configured_receiver_wrapper_requires_complete_prior_state() {
+    let mut pack = constrained_call_sink_rulepack("java", "source", "unmarshal");
+    let sink = pack
+        .packs
+        .get_mut("java")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("Java sink");
+    sink.tag = Some("xxe".to_string());
+    let required_feature = |name: &str, enabled: bool| RequiredReceiverCallSemantics {
+        call: RuleTarget {
+            name: Some("setFeature".to_string()),
+            ..RuleTarget::default()
+        },
+        identity_argument_indices: vec![0],
+        required_arguments: vec![
+            RequiredCallArgumentSemantics {
+                index: 0,
+                require_static_value: false,
+                accepted_places: Vec::new(),
+                accepted_static_values: vec![StaticScalarValue::String(name.to_string())],
+            },
+            RequiredCallArgumentSemantics {
+                index: 1,
+                require_static_value: false,
+                accepted_places: Vec::new(),
+                accepted_static_values: vec![StaticScalarValue::Boolean(enabled)],
+            },
+        ],
+    };
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        configured_argument_receiver_guard: Some(ConfiguredArgumentReceiverGuardSemantics {
+            sink_argument_index: 0,
+            wrapper_factory: RuleTarget {
+                name: Some("SAXSource".to_string()),
+                ..RuleTarget::default()
+            },
+            configured_receiver_argument_index: 0,
+            provider_factory: RuleTarget {
+                name: Some("newSAXParser".to_string()),
+                ..RuleTarget::default()
+            },
+            required_calls: vec![
+                required_feature("secure", true),
+                required_feature("external-general", false),
+            ],
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/XmlLoader.java",
+        r#"
+class ParserFactory {
+  void setFeature(String name, boolean value) {}
+  Parser newSAXParser() { return new Parser(); }
+}
+class Parser { Object getXMLReader() { return null; } }
+class SAXSource { SAXSource(Object reader, String xml) {} }
+class Unmarshaller { Object unmarshal(SAXSource source) { return null; } }
+class Input { static String source() { return ""; } }
+class XmlLoader {
+  Object safe() {
+    ParserFactory factory = new ParserFactory();
+    factory.setFeature("secure", true);
+    factory.setFeature("external-general", false);
+    SAXSource source = new SAXSource(factory.newSAXParser().getXMLReader(), Input.source());
+    return new Unmarshaller().unmarshal(source);
+  }
+  Object partial() {
+    ParserFactory factory = new ParserFactory();
+    factory.setFeature("secure", true);
+    SAXSource source = new SAXSource(factory.newSAXParser().getXMLReader(), Input.source());
+    return new Unmarshaller().unmarshal(source);
+  }
+  Object conditional(boolean harden) {
+    ParserFactory factory = new ParserFactory();
+    factory.setFeature("secure", true);
+    if (harden) factory.setFeature("external-general", false);
+    SAXSource source = new SAXSource(factory.newSAXParser().getXMLReader(), Input.source());
+    return new Unmarshaller().unmarshal(source);
+  }
+  Object overwritten() {
+    ParserFactory factory = new ParserFactory();
+    factory.setFeature("secure", true);
+    factory.setFeature("external-general", false);
+    factory.setFeature("secure", false);
+    SAXSource source = new SAXSource(factory.newSAXParser().getXMLReader(), Input.source());
+    return new Unmarshaller().unmarshal(source);
+  }
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let finding = |function: &str| {
+        &report
+            .findings
+            .iter()
+            .find(|finding| finding.finding.sink.enclosing_fn.as_deref() == Some(function))
+            .unwrap_or_else(|| panic!("missing {function}: {:#?}", report.findings))
+            .finding
+    };
+    assert_eq!(finding("safe").status, FindingStatus::Sanitized);
+    assert!(finding("safe")
+        .sanitizers_seen
+        .iter()
+        .any(|sanitizer| { sanitizer.rule_id == "engine.sanitizer.configured_argument_receiver_guard" }));
+    assert_eq!(finding("partial").status, FindingStatus::Unsanitized);
+    assert_eq!(finding("conditional").status, FindingStatus::Unsanitized);
+    assert_eq!(finding("overwritten").status, FindingStatus::Unsanitized);
+}
+
+#[test]
+fn local_trust_caps_emitted_finding_severity() {
+    let mut pack = rulepack("python", "source", "danger");
+    let language = pack.packs.get_mut("python").expect("Python pack");
+    language.sources[0].trust = Some(TrustClass::Local);
+    language.sinks[0].severity = Some(Severity::Critical);
+    let ws = workspace(&[(
+        "/app/tool.py",
+        r#"
+def source():
+    return "operator argument"
+
+def danger(value):
+    return value
+
+def main():
+    danger(source())
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    assert_eq!(
+        report.findings[0].finding.severity,
+        Some(Severity::Medium),
+        "local operator input must not inherit network-grade severity: {:#?}",
+        report.findings
+    );
 }
 
 #[test]
@@ -3598,6 +3992,84 @@ def unsafe_header():
 }
 
 #[test]
+fn direct_character_constraint_helper_result_sanitizes_sink_argument() {
+    let mut pack = constrained_call_sink_rulepack("go", "source", "sink");
+    let sink = pack
+        .packs
+        .get_mut("go")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("Go sink");
+    sink.tag = Some("log-injection".to_string());
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        character_constraint: Some(CharacterConstraintSemantics {
+            required_excluded_characters: vec!["\r".to_string(), "\n".to_string()],
+            required_enclosing_literal_delimiter: None,
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/audit.go",
+        r#"
+package app
+import "strings"
+func source() string { return "" }
+func sanitize(value string) string {
+    return strings.Map(func(r rune) rune {
+        if r < 0x20 || r == 0x7f { return '_' }
+        return r
+    }, value)
+}
+func safe() { sink(sanitize(source())) }
+func unsafe() { sink(source()) }
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    assert_eq!(
+        report.findings[0].finding.sink.enclosing_fn.as_deref(),
+        Some("unsafe"),
+        "the direct helper result must be discharged while the bypass remains"
+    );
+}
+
+#[test]
+fn library_sanitizer_summary_crosses_first_party_helper_return() {
+    let mut pack = constrained_call_sink_rulepack("go", "source", "sink");
+    let go = pack.packs.get_mut("go").expect("Go pack");
+    go.sinks[0].tag = Some("xss".to_string());
+    let mut sanitizer = rule(
+        "go",
+        RuleKind::Sanitizer,
+        "go.test.html_escape",
+        None,
+        None,
+        "html.EscapeString",
+    );
+    sanitizer.tag = Some("xss".to_string());
+    go.sanitizers.push(sanitizer);
+    let ws = workspace(&[(
+        "/app/render.go",
+        r#"
+package app
+import "html"
+func source() string { return "" }
+func render(value string) string {
+    return "<p>" + html.EscapeString(value) + "</p>"
+}
+func safe() { output := render(source()); sink(output) }
+func unsafe() { sink(source()) }
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    assert_eq!(
+        report.findings[0].finding.sink.enclosing_fn.as_deref(),
+        Some("unsafe"),
+        "the exact helper return summary must discharge only the sanitized path"
+    );
+}
+
+#[test]
 fn same_origin_path_summary_sanitizes_only_direct_helper_result() {
     let mut pack = constrained_call_sink_rulepack("python", "source", "sink");
     let sink = pack
@@ -3612,6 +4084,8 @@ fn same_origin_path_summary_sanitizes_only_direct_helper_result() {
             require_authority_rejection: true,
             require_absolute_path: true,
             require_scheme_relative_rejection: true,
+            sink_argument_index: None,
+            static_context_argument: None,
         }),
         ..AnalysisSemantics::default()
     });
@@ -3680,6 +4154,7 @@ fn recursive_dynamic_key_filter_guards_only_exact_helper_output() {
                 "constructor".to_string(),
                 "prototype".to_string(),
             ],
+            sink_key_argument_index: None,
             require_recursive_filter: true,
             filtered_value_argument_index: Some(1),
         }),
@@ -3736,10 +4211,16 @@ fn relative_path_containment_semantics(guarded_path_arg_index: Option<usize>) ->
             relative_candidate_arg_index: 1,
             guarded_path_arg_index,
             rejection_check: RuleTarget {
-                name: Some("hasDotDotPrefix".to_string()),
+                attribute: Some(vec!["strings".to_string(), "HasPrefix".to_string()]),
                 ..RuleTarget::default()
             },
             rejection_check_arg_index: 0,
+            rejection_prefix_arg_index: Some(1),
+            rejection_boundary_places: vec!["os.PathSeparator".to_string()],
+            rejection_boundary_wrappers: vec![RuleTarget {
+                name: Some("string".to_string()),
+                ..RuleTarget::default()
+            }],
             rejected_exact_values: vec!["..".to_string()],
         }),
         ..AnalysisSemantics::default()
@@ -3756,18 +4237,33 @@ package app
 import (
     "os"
     "path/filepath"
+    "strings"
 )
 
 const baseDir = "/var/data/files"
 
 func source() string { return "user" }
 
-func safeRead() ([]byte, error) {
+func safeRead(baseDir string) ([]byte, error) {
     rootAbs, err := filepath.Abs(baseDir)
     if err != nil { return nil, err }
     candidate := filepath.Clean(filepath.Join(rootAbs, source()))
     rel, err := filepath.Rel(rootAbs, candidate)
-    if err != nil || rel == ".." || hasDotDotPrefix(rel) {
+    if err != nil || rel == ".." || strings.HasPrefix(rel, ".." + string(os.PathSeparator)) {
+        return nil, os.ErrNotExist
+    }
+    return os.ReadFile(candidate)
+}
+
+func entry() { _, _ = safeRead("/var/data/files") }
+
+func guardedDynamicBase() ([]byte, error) {
+    baseDir := source()
+    rootAbs, err := filepath.Abs(baseDir)
+    if err != nil { return nil, err }
+    candidate := filepath.Clean(filepath.Join(rootAbs, source()))
+    rel, err := filepath.Rel(rootAbs, candidate)
+    if err != nil || rel == ".." || strings.HasPrefix(rel, ".." + string(os.PathSeparator)) {
         return nil, os.ErrNotExist
     }
     return os.ReadFile(candidate)
@@ -3779,7 +4275,6 @@ func unsafeRead() ([]byte, error) {
     return os.ReadFile(candidate)
 }
 
-func hasDotDotPrefix(rel string) bool { return len(rel) > 3 }
 "#,
     )]);
 
@@ -3796,11 +4291,21 @@ func hasDotDotPrefix(rel string) bool { return len(rel) > 3 }
 
     let report =
         run_taint_analysis(&ws, &consumer_pack, TaintAnalysisOptions::default()).expect("taint analysis");
-    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
-    assert_eq!(
-        report.findings[0].finding.sink.enclosing_fn.as_deref(),
-        Some("unsafeRead"),
+    assert_eq!(report.findings.len(), 2, "{:#?}", report.findings);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| { finding.finding.sink.enclosing_fn.as_deref() == Some("unsafeRead") }),
         "{:#?}",
+        report.findings
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| { finding.finding.sink.enclosing_fn.as_deref() == Some("guardedDynamicBase") }),
+        "a containment check must not sanitize a caller-supplied dynamic base: {:#?}",
         report.findings
     );
 
@@ -3859,13 +4364,15 @@ func hasDotDotPrefix(rel string) bool { return len(rel) > 3 }
     }]);
     let construction =
         run_taint_analysis(&ws, &construction_pack, TaintAnalysisOptions::default()).expect("taint analysis");
-    assert_eq!(construction.findings.len(), 1, "{:#?}", construction.findings);
-    assert_eq!(
-        construction.findings[0].finding.sink.enclosing_fn.as_deref(),
-        Some("unsafeRead"),
-        "{:#?}",
-        construction.findings
-    );
+    assert_eq!(construction.findings.len(), 2, "{:#?}", construction.findings);
+    assert!(construction
+        .findings
+        .iter()
+        .any(|finding| { finding.finding.sink.enclosing_fn.as_deref() == Some("unsafeRead") }));
+    assert!(construction
+        .findings
+        .iter()
+        .any(|finding| { finding.finding.sink.enclosing_fn.as_deref() == Some("guardedDynamicBase") }));
 }
 
 #[test]
@@ -4514,6 +5021,8 @@ fn javascript_mongo_eq_filter_wrapper_is_sanitized() {
             filter_arg_index: 0,
             literal_value_operators: vec!["$eq".to_string()],
             safe_scalar_runtime_types: Vec::new(),
+            safe_scalar_compiler_types: Vec::new(),
+            safe_scalar_source_rules: Vec::new(),
         }),
         ..AnalysisSemantics::default()
     });
@@ -4932,7 +5441,8 @@ fn python_url_reconstruction_helper_requires_exact_compiler_facts() {
                 field: Some("path".to_string()),
                 accessor: None,
             },
-            path_fallback: "/".to_string(),
+            path_fallback: Some("/".to_string()),
+            redirect: None,
             required_sink_named_arguments: vec![RequiredNamedArgumentSemantics {
                 name: "allow_redirects".to_string(),
                 value: StaticScalarValue::Boolean(false),
@@ -5131,7 +5641,8 @@ fn java_url_reconstruction_assignment_requires_exact_components_and_guards() {
                 field: None,
                 accessor: Some(target("getPath")),
             },
-            path_fallback: "/".to_string(),
+            path_fallback: Some("/".to_string()),
+            redirect: None,
             required_sink_named_arguments: Vec::new(),
         }),
         ..AnalysisSemantics::default()

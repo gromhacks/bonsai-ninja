@@ -8,9 +8,10 @@ use bonsai_lang_api::{
     },
     AdapterContext, AdapterError, AssignmentValueIndex, CallArg, CallKind, CharacterClass,
     CharacterConstraintDomain, CharacterConstraintFact, CharacterConstraintOutput, ConditionEquality,
-    ConditionExpressionFact, ConditionOperandFact, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, SameOriginPathConstraintFact,
-    StaticScalarValue, StringCompositionFact, StringCompositionPart, TypeAliasBinding, Visibility,
+    ConditionExpressionFact, ConditionOperandFact, DeclIndex, DeclKind, FiniteLiteralSelectionFact,
+    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, SameOriginPathConstraintFact, StaticScalarValue, StringCompositionFact,
+    StringCompositionPart, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -208,6 +209,7 @@ impl LanguageAdapter for PythonAdapter {
             let src = snapshot.text.as_bytes();
             populate_python_condition_expressions(&mut idx, &tree, file, src);
             idx.string_compositions = python_string_compositions(&tree, file, src);
+            idx.finite_literal_selections = python_finite_literal_selections(&idx, &tree, file, src);
             idx.character_constraints = python_character_constraints(&idx, &tree, file, src);
             idx.same_origin_path_constraints = python_same_origin_path_constraints(&idx, &tree, file, src);
             // Phase-6 return-type extraction: `def f() -> T:` populates
@@ -486,6 +488,7 @@ fn python_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> Conditi
         span: span_of(file, &node),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node(node, file, src),
         static_string: python_static_string(node, src),
+        static_value: python_static_scalar(node, src),
     }
 }
 
@@ -561,6 +564,241 @@ fn python_character_constraints(
     facts.sort_by_key(|fact| (fact.transform_span.start, fact.transform_span.end));
     facts.dedup_by_key(|fact| fact.transform_span);
     facts
+}
+
+fn python_finite_literal_selections(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<FiniteLiteralSelectionFact> {
+    let assignments = collect_kinds(tree, &["assignment"]);
+    let mut finite_maps = Vec::new();
+    for assignment in &assignments {
+        let (Some(target), Some(value)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if target.kind() != "identifier" || !python_finite_static_map(value, src) {
+            continue;
+        }
+        let name = node_text(&target, src).trim().to_string();
+        let owner = python_lexical_owner(index, span_of(file, assignment));
+        let writes = assignments
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .child_by_field_name("left")
+                    .is_some_and(|left| left.kind() == "identifier" && node_text(&left, src).trim() == name)
+            })
+            .count();
+        let projected_write = assignments.iter().any(|candidate| {
+            candidate.child_by_field_name("left").is_some_and(|left| {
+                left.kind() == "subscript"
+                    && left.child_by_field_name("value").is_some_and(|base| {
+                        base.kind() == "identifier" && node_text(&base, src).trim() == name
+                    })
+            })
+        });
+        let aliases_or_mutations = collect_kinds(tree, &["assignment", "augmented_assignment", "call"])
+            .into_iter()
+            .any(|candidate| python_map_binding_may_escape_or_mutate(candidate, &name, assignment.id(), src))
+            || python_map_binding_has_unsafe_use(tree, &name, assignment.id(), src);
+        if writes == 1 && !projected_write && !aliases_or_mutations {
+            finite_maps.push((name, assignment.end_byte(), owner));
+        }
+    }
+
+    let mut facts = Vec::new();
+    for call in collect_kinds(tree, &["call"]) {
+        let Some((function, _)) = python_call_parts(call) else {
+            continue;
+        };
+        let Some((receiver, method)) = python_attribute_parts(function, src) else {
+            continue;
+        };
+        if method != "get" || receiver.kind() != "identifier" {
+            continue;
+        }
+        let map_name = node_text(&receiver, src).trim();
+        let selection_span = span_of(file, &call);
+        let owner = python_lexical_owner(index, selection_span);
+        let parameter_shadows_module = owner.is_some_and(|owner| {
+            index
+                .defs
+                .iter()
+                .find(|decl| decl.span == owner)
+                .is_some_and(|decl| decl.params.iter().any(|parameter| parameter == map_name))
+        });
+        if !finite_maps.iter().any(|(name, declaration_end, binding_owner)| {
+            name == map_name
+                && *declaration_end <= call.start_byte()
+                && (*binding_owner == owner || (binding_owner.is_none() && !parameter_shadows_module))
+        }) {
+            continue;
+        }
+        let Some(assignment) = index
+            .assignment_values
+            .iter()
+            .filter(|fact| {
+                fact.target.is_some()
+                    && fact.value_span.start <= selection_span.start
+                    && selection_span.end <= fact.value_span.end
+            })
+            .min_by_key(|fact| fact.value_span.len())
+        else {
+            continue;
+        };
+        facts.push(FiniteLiteralSelectionFact {
+            selection_span,
+            assignment_span: Some(assignment.assignment_span),
+            target: assignment.target.clone(),
+            call_span: None,
+            argument_index: None,
+        });
+    }
+    facts.sort_by_key(|fact| {
+        let span = fact.assignment_span.unwrap_or(fact.selection_span);
+        (span.start, span.end, fact.selection_span.start)
+    });
+    facts.dedup();
+    facts
+}
+
+fn python_lexical_owner(index: &DeclIndex, span: bonsai_common::Span) -> Option<bonsai_common::Span> {
+    index
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor | DeclKind::Class
+            ) && decl.span.start <= span.start
+                && span.end <= decl.span.end
+        })
+        .min_by_key(|decl| decl.span.len())
+        .map(|decl| decl.span)
+}
+
+fn python_map_binding_may_escape_or_mutate(
+    node: Node<'_>,
+    map_name: &str,
+    declaration_id: usize,
+    src: &[u8],
+) -> bool {
+    if node.id() == declaration_id {
+        return false;
+    }
+    match node.kind() {
+        "assignment" | "augmented_assignment" => {
+            let left = node.child_by_field_name("left");
+            let right = node.child_by_field_name("right");
+            left.is_some_and(|left| {
+                (left.kind() == "identifier" && node_text(&left, src).trim() == map_name)
+                    || (left.kind() == "subscript"
+                        && left.child_by_field_name("value").is_some_and(|base| {
+                            base.kind() == "identifier" && node_text(&base, src).trim() == map_name
+                        }))
+            }) || right.is_some_and(|right| {
+                right.kind() == "identifier" && node_text(&right, src).trim() == map_name
+            })
+        }
+        "call" => {
+            let Some((function, _)) = python_call_parts(node) else {
+                return false;
+            };
+            python_attribute_parts(function, src).is_some_and(|(receiver, method)| {
+                receiver.kind() == "identifier"
+                    && node_text(&receiver, src).trim() == map_name
+                    && method != "get"
+            })
+        }
+        _ => false,
+    }
+}
+
+fn python_map_binding_has_unsafe_use(tree: &Tree, map_name: &str, declaration_id: usize, src: &[u8]) -> bool {
+    collect_kinds(tree, &["identifier"])
+        .into_iter()
+        .any(|identifier| {
+            if node_text(&identifier, src).trim() != map_name {
+                return false;
+            }
+            if identifier
+                .parent()
+                .is_some_and(|parent| parent.kind() == "assignment" && parent.id() == declaration_id)
+            {
+                return false;
+            }
+            let Some(attribute) = identifier.parent().filter(|parent| parent.kind() == "attribute") else {
+                return true;
+            };
+            if attribute
+                .child_by_field_name("object")
+                .is_none_or(|object| object.id() != identifier.id())
+            {
+                return true;
+            }
+            let Some(call) = attribute.parent().filter(|parent| parent.kind() == "call") else {
+                return true;
+            };
+            call.child_by_field_name("function")
+                .is_none_or(|function| function.id() != attribute.id())
+                || attribute
+                    .child_by_field_name("attribute")
+                    .is_none_or(|method| node_text(&method, src).trim() != "get")
+        })
+}
+
+fn python_finite_static_map(node: Node<'_>, src: &[u8]) -> bool {
+    if node.kind() != "dictionary" || node.named_child_count() == 0 {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let finite = node.named_children(&mut cursor).all(|entry| {
+        entry.kind() == "pair"
+            && entry
+                .child_by_field_name("key")
+                .is_some_and(|key| python_static_string(key, src).is_some())
+            && entry
+                .child_by_field_name("value")
+                .is_some_and(|value| python_statically_constructed_value(value, src))
+    });
+    finite
+}
+
+fn python_statically_constructed_value(node: Node<'_>, src: &[u8]) -> bool {
+    match node.kind() {
+        "string" | "concatenated_string" => python_static_string(node, src).is_some(),
+        "integer" | "float" | "true" | "false" | "none" => true,
+        "list" | "tuple" | "set" | "dictionary" => {
+            let mut cursor = node.walk();
+            let finite = node.named_children(&mut cursor).all(|child| {
+                if child.kind() == "pair" {
+                    child
+                        .child_by_field_name("key")
+                        .is_some_and(|key| python_statically_constructed_value(key, src))
+                        && child
+                            .child_by_field_name("value")
+                            .is_some_and(|value| python_statically_constructed_value(value, src))
+                } else {
+                    python_statically_constructed_value(child, src)
+                }
+            });
+            finite
+        }
+        "call" => {
+            let Some((_, arguments)) = python_call_parts(node) else {
+                return false;
+            };
+            python_argument_nodes(arguments)
+                .into_iter()
+                .all(|argument| python_statically_constructed_value(argument, src))
+        }
+        _ => false,
+    }
 }
 
 fn python_comprehension_character_constraints(

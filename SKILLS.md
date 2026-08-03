@@ -88,7 +88,7 @@ Understand behavior:
 
 ```shell
 ./target/release/bonsai-ninja inspect <workspace> --query <target> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja inspect <workspace> --query <target> --syntax-only --context 16k --no-color --no-progress
+./target/release/bonsai-ninja inspect <workspace> --query <target> --graph-flow --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja inspect <workspace> --query <target> --taint-flow --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja inspect <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja show <workspace> F:<id> --context 16k --no-color --no-progress
@@ -96,13 +96,10 @@ Understand behavior:
 ./target/release/bonsai-ninja read-file <workspace> <path> --lines A:B --context 16k --no-color --no-progress
 ```
 
-`inspect` is rulepack-free by default: targeted queries include bounded
-raw taint paths and source-body flow evidence that contain the query. Use
-`--syntax-only` when you deliberately want indexed facts without flow
-evidence, `--taint-flow` to request bounded raw taint paths for large
-result sets, and `--graph-flow` to request structural source-body
-evidence for large result sets that would otherwise render syntax/index
-facts only. These flags change output scope, not analysis accuracy:
+`inspect` is rulepack-free by default and renders indexed syntax facts. Use
+`--graph-flow` to add structural source-body evidence and `--taint-flow` to
+explicitly add rulepack-free raw taint paths. These flags change output
+scope, not analysis accuracy:
 emitted graph facts still use the exact/narrowed static evidence
 contract. Inspect raw taint paths go through the workspace syntax-flow
 facade: a warmed IDG target cut is used only when already available,

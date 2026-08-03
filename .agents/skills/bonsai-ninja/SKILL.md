@@ -197,7 +197,14 @@ Use focused commands when you need one relation:
   --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja read-file <workspace> <path> --lines A:B \
   --context 16k --no-color --no-progress
+./target/release/bonsai-ninja slice <workspace> --symbol <symbol> \
+  --context 16k --no-color --no-progress
 ```
+
+`slice` resolves an unambiguous compiler syntax-flow site from the symbol.
+Add `--line <N>` and, if needed, `--file <path>` only when the output reports
+multiple candidate sites. A missing or ambiguous site is explicit incomplete
+analysis, never a raw-text fallback.
 
 `read-file --all` disables output paging only. It does not enable security or
 whole-workspace graph work; request overlays explicitly, and use

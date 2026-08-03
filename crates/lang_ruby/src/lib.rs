@@ -332,6 +332,7 @@ impl LanguageAdapter for RubyAdapter {
             dynamic_key_filters: Vec::new(),
             runtime_type_narrowings,
             branch_conditions,
+            compiler_guards: Vec::new(),
             aggregate_layouts: Vec::new(),
             strings,
             comments,

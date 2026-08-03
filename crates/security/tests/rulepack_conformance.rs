@@ -650,21 +650,51 @@ void main(List<String> arguments) {
 }
 
 #[test]
-fn fast_xml_parser_external_entity_rules_stay_disabled() {
+fn fast_xml_parser_entity_expansion_is_precise_without_claiming_external_xxe() {
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
     for rule_id in [
         "javascript.xxe.fast_xml_parser_entities_enabled",
         "typescript.xxe.fast_xml_parser_entities_enabled",
-        "typescript.xxe.fast_xml_parser_parse",
     ] {
         let rule = pack.find_rule_by_id(rule_id).expect("fast-xml-parser rule");
         assert!(
-            !rule.enabled,
-            "{rule_id} must not claim CWE-611: fast-xml-parser rejects external SYSTEM entities"
+            rule.enabled,
+            "{rule_id} must report explicitly enabled internal entity expansion"
         );
         assert!(
-            rule.description.contains("external SYSTEM entities"),
-            "{rule_id} disabled reason must preserve the security-model rationale"
+            rule.cwe.iter().any(|cwe| cwe == "CWE-776") && !rule.cwe.iter().any(|cwe| cwe == "CWE-611"),
+            "{rule_id} must classify entity-expansion exhaustion without claiming external XXE"
+        );
+        assert!(
+            rule.description.contains("not a claim") && rule.description.contains("external SYSTEM entities"),
+            "{rule_id} must preserve the external-entity boundary rationale"
+        );
+    }
+    let parse = pack
+        .find_rule_by_id("typescript.xxe.fast_xml_parser_parse")
+        .expect("fast-xml-parser parse rule");
+    assert!(
+        !parse.enabled,
+        "tainted fast-xml-parser input alone must not claim external XXE"
+    );
+}
+
+#[test]
+fn xssfworkbook_input_stream_is_not_misclassified_as_an_xxe_sink() {
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    for rule_id in [
+        "java.xxe.apache_poi_xssfworkbook_inputstream",
+        "kotlin.xxe.apache_poi_xssfworkbook_inputstream",
+        "scala.xxe.apache_poi_xssfworkbook_inputstream",
+    ] {
+        let rule = pack.find_rule_by_id(rule_id).expect("Apache POI rule");
+        assert!(
+            !rule.enabled,
+            "{rule_id} must remain disabled: XSSFWorkbook(InputStream) is not the vulnerable XSSFExportToXml boundary"
+        );
+        assert!(
+            rule.description.contains("XSSFExportToXml") && rule.description.contains("before 4.1.1"),
+            "{rule_id} must preserve the versioned Apache POI boundary rationale"
         );
     }
 }

@@ -6,11 +6,12 @@ use bonsai_lang_api::{
         collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
         with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
+    AdapterContext, AdapterError, CharacterConstraintDomain, CharacterConstraintFact,
+    CharacterConstraintOutput, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
     ConditionExpressionFact, ConditionOperandFact, DeclIndex, DynamicKeyFilterFact,
     FiniteLiteralSelectionFact, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, StaticScalarValue, StaticStringMapEntry, StaticStringMapFact,
-    TypeAliasBinding, Visibility,
+    LanguageCapabilities, LanguageId, SameOriginPathConstraintFact, StaticScalarValue, StaticStringMapEntry,
+    StaticStringMapFact, StringCompositionFact, StringCompositionPart, TypeAliasBinding, Visibility,
 };
 use bonsai_lang_api::{CallArg, DeclKind, FlowEvent};
 use std::collections::{HashMap, HashSet};
@@ -226,6 +227,10 @@ pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, fi
     index.static_string_maps = ecmascript_static_string_maps(index, tree, file, src);
     index.finite_literal_selections = ecmascript_finite_literal_selections(index, tree, file, src);
     index.character_substitutions = ecmascript_character_substitutions(&index.defs, tree, file, src);
+    index.character_constraints =
+        ecmascript_character_constraints(&index.defs, &index.character_substitutions);
+    index.string_compositions = ecmascript_string_compositions(tree, file, src);
+    index.same_origin_path_constraints = ecmascript_same_origin_path_constraints(index, tree, file, src);
     index.dynamic_key_filters = ecmascript_dynamic_key_filters(index, tree, file, src);
     bonsai_lang_api::kit::populate_call_argument_static_values(
         index,
@@ -234,6 +239,347 @@ pub fn populate_ecmascript_compiler_facts(index: &mut DeclIndex, tree: &Tree, fi
         src,
         ecmascript_static_scalar,
     );
+}
+
+/// Lower complete ECMAScript string concatenations into typed compiler facts.
+/// Unsupported operands reject the whole composition so downstream security
+/// proofs can never mistake a partially understood expression for a safe one.
+fn ecmascript_string_compositions(tree: &Tree, file: FileId, src: &[u8]) -> Vec<StringCompositionFact> {
+    let mut facts = Vec::new();
+    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+        let (Some(name), Some(value)) = (
+            declarator.child_by_field_name("name"),
+            declarator.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        if name.kind() != "identifier" {
+            continue;
+        }
+        let mut parts = Vec::new();
+        if lower_ecmascript_string_composition(value, file, src, &mut parts) && parts.len() > 1 {
+            facts.push(StringCompositionFact {
+                container_span: span_of(file, &declarator),
+                value_span: span_of(file, &value),
+                target: Some(node_text(&name, src).trim().to_string()),
+                parts,
+            });
+        }
+    }
+    for return_node in collect_kinds(tree, &["return_statement"]) {
+        let Some(value) = return_node.named_child(0) else {
+            continue;
+        };
+        let mut parts = Vec::new();
+        if lower_ecmascript_string_composition(value, file, src, &mut parts) && parts.len() > 1 {
+            facts.push(StringCompositionFact {
+                container_span: span_of(file, &return_node),
+                value_span: span_of(file, &value),
+                target: None,
+                parts,
+            });
+        }
+    }
+    // Preserve complete nested concatenations as expression-owned facts too.
+    // Object/map fields and direct call arguments are not declarations or
+    // returns, but their exact value spans are retained by ExpressionField
+    // and CallArgumentValueFact so consumers can join these facts precisely.
+    for value in collect_kinds(tree, &["binary_expression", "template_string"]) {
+        let mut parts = Vec::new();
+        if lower_ecmascript_string_composition(value, file, src, &mut parts) && parts.len() > 1 {
+            let value_span = span_of(file, &value);
+            facts.push(StringCompositionFact {
+                container_span: value_span,
+                value_span,
+                target: None,
+                parts,
+            });
+        }
+    }
+    facts.sort_by_key(|fact| {
+        (
+            fact.container_span.start,
+            fact.container_span.end,
+            fact.value_span.start,
+            fact.value_span.end,
+        )
+    });
+    facts.dedup();
+    facts
+}
+
+fn lower_ecmascript_string_composition(
+    mut node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<StringCompositionPart>,
+) -> bool {
+    node = unwrap_ecmascript_expression(node);
+    if let Some(value) = ecmascript_static_string_literal(node, src) {
+        out.push(StringCompositionPart::Literal { value });
+        return true;
+    }
+    if let Some(place) = ecmascript_exact_place(node, src) {
+        out.push(StringCompositionPart::Place { place });
+        return true;
+    }
+    if node.kind() == "call_expression" {
+        let Some(function) = node.child_by_field_name("function") else {
+            return false;
+        };
+        out.push(StringCompositionPart::Call {
+            span: span_of(file, &function),
+        });
+        return true;
+    }
+    if node.kind() == "template_string" {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            match child.kind() {
+                "string_fragment" => {
+                    let Some(value) = decode_ecmascript_string_contents(node_text(&child, src), '`') else {
+                        return false;
+                    };
+                    out.push(StringCompositionPart::Literal { value });
+                }
+                "template_substitution" => {
+                    let Some(expression) = child.named_child(0) else {
+                        return false;
+                    };
+                    if !lower_ecmascript_string_composition(expression, file, src, out) {
+                        return false;
+                    }
+                }
+                "comment" => {}
+                _ => return false,
+            }
+        }
+        return !out.is_empty();
+    }
+    if node.kind() != "binary_expression" {
+        return false;
+    }
+    let (Some(left), Some(right)) = (
+        node.child_by_field_name("left"),
+        node.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    let operator = src
+        .get(left.end_byte()..right.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim);
+    operator == Some("+")
+        && lower_ecmascript_string_composition(left, file, src, out)
+        && lower_ecmascript_string_composition(right, file, src, out)
+}
+
+fn ecmascript_exact_place(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let node = unwrap_ecmascript_expression(node);
+    match node.kind() {
+        "identifier" | "this" => {
+            let place = node_text(&node, src).trim();
+            (!place.is_empty()).then(|| place.to_string())
+        }
+        "member_expression" => {
+            let object = ecmascript_exact_place(node.child_by_field_name("object")?, src)?;
+            let property = node.child_by_field_name("property")?;
+            if property.kind() == "private_property_identifier" {
+                return None;
+            }
+            let property = node_text(&property, src).trim();
+            (!property.is_empty()).then(|| format!("{object}.{property}"))
+        }
+        _ => None,
+    }
+}
+
+fn ecmascript_same_origin_path_constraints(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<SameOriginPathConstraintFact> {
+    let mut facts = Vec::new();
+    let mut guarded_expressions = collect_kinds(tree, &["return_statement"])
+        .into_iter()
+        .filter_map(|return_node| return_node.named_child(0))
+        .collect::<Vec<_>>();
+    guarded_expressions.extend(
+        collect_kinds(tree, &["arrow_function"])
+            .into_iter()
+            .filter_map(|arrow| arrow.child_by_field_name("body"))
+            .filter(|body| body.kind() != "statement_block"),
+    );
+    for expression in guarded_expressions {
+        let return_span = span_of(file, &expression);
+        let Some(decl) = index
+            .defs
+            .iter()
+            .filter(|decl| {
+                matches!(decl.kind, DeclKind::Function | DeclKind::Method)
+                    && decl.span.start <= return_span.start
+                    && return_span.end <= decl.span.end
+            })
+            .min_by_key(|decl| decl.span.len())
+        else {
+            continue;
+        };
+        let expression = unwrap_ecmascript_expression(expression);
+        if expression.kind() != "ternary_expression" {
+            continue;
+        }
+        let (Some(condition), Some(consequence), Some(alternative)) = (
+            expression.child_by_field_name("condition"),
+            expression.child_by_field_name("consequence"),
+            expression.child_by_field_name("alternative"),
+        ) else {
+            continue;
+        };
+        for (input_param_index, parameter) in decl.params.iter().enumerate() {
+            if !ecmascript_expression_is_exact_place(consequence, parameter, src)
+                || ecmascript_static_string_literal(alternative, src).as_deref() != Some("/")
+            {
+                continue;
+            }
+            let mut terms = Vec::new();
+            ecmascript_collect_logical_terms(condition, "&&", src, &mut terms);
+            let requires_absolute_path = terms
+                .iter()
+                .any(|term| ecmascript_starts_with_literal(*term, parameter, "/", false, src));
+            let rejects_scheme_relative_path = terms
+                .iter()
+                .any(|term| ecmascript_starts_with_literal(*term, parameter, "//", true, src));
+            if requires_absolute_path && rejects_scheme_relative_path {
+                // Exactly one leading slash excludes both a URI scheme and
+                // an authority component. The frontend derives those facts
+                // from the two parsed predicates rather than API-name policy.
+                facts.push(SameOriginPathConstraintFact {
+                    function_span: decl.span,
+                    guard_span: span_of(file, &expression),
+                    input_param_index,
+                    rejects_scheme: true,
+                    rejects_authority: true,
+                    requires_absolute_path,
+                    rejects_scheme_relative_path,
+                });
+            }
+        }
+    }
+    facts.sort_by_key(|fact| (fact.function_span.start, fact.guard_span.start));
+    facts.dedup();
+    facts
+}
+
+fn ecmascript_collect_logical_terms<'tree>(
+    expression: Node<'tree>,
+    operator: &str,
+    src: &[u8],
+    out: &mut Vec<Node<'tree>>,
+) {
+    let expression = unwrap_ecmascript_expression(expression);
+    let operands = (
+        expression.child_by_field_name("left"),
+        expression.child_by_field_name("right"),
+    );
+    if expression.kind() == "binary_expression"
+        && operands.0.zip(operands.1).is_some_and(|(left, right)| {
+            src.get(left.end_byte()..right.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .is_some_and(|value| value.trim() == operator)
+        })
+    {
+        let (Some(left), Some(right)) = operands else {
+            return;
+        };
+        ecmascript_collect_logical_terms(left, operator, src, out);
+        ecmascript_collect_logical_terms(right, operator, src, out);
+    } else {
+        out.push(expression);
+    }
+}
+
+fn ecmascript_expression_is_exact_place(expression: Node<'_>, place: &str, src: &[u8]) -> bool {
+    let expression = unwrap_ecmascript_expression(expression);
+    expression.kind() == "identifier" && node_text(&expression, src).trim() == place
+}
+
+fn ecmascript_starts_with_literal(
+    expression: Node<'_>,
+    receiver: &str,
+    literal: &str,
+    negated: bool,
+    src: &[u8],
+) -> bool {
+    let expression = unwrap_ecmascript_expression(expression);
+    let call = if negated {
+        if expression.kind() != "unary_expression" {
+            return false;
+        }
+        let Some(argument) = expression.child_by_field_name("argument") else {
+            return false;
+        };
+        if src
+            .get(expression.start_byte()..argument.start_byte())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .is_none_or(|prefix| prefix.trim() != "!")
+        {
+            return false;
+        }
+        unwrap_ecmascript_expression(argument)
+    } else {
+        expression
+    };
+    if call.kind() != "call_expression" {
+        return false;
+    }
+    let Some(function) = call.child_by_field_name("function") else {
+        return false;
+    };
+    if function.kind() != "member_expression"
+        || function
+            .child_by_field_name("object")
+            .is_none_or(|object| !ecmascript_expression_is_exact_place(object, receiver, src))
+        || function
+            .child_by_field_name("property")
+            .is_none_or(|property| node_text(&property, src).trim() != "startsWith")
+    {
+        return false;
+    }
+    let arguments = ecmascript_call_arguments(call);
+    let [argument] = arguments.as_slice() else {
+        return false;
+    };
+    ecmascript_static_string_literal(*argument, src).as_deref() == Some(literal)
+}
+
+fn ecmascript_character_constraints(
+    defs: &[bonsai_lang_api::Decl],
+    substitutions: &[CharacterSubstitutionFact],
+) -> Vec<CharacterConstraintFact> {
+    substitutions
+        .iter()
+        .filter_map(|fact| {
+            let decl = defs.iter().find(|decl| decl.span == fact.function_span)?;
+            let input_place = decl.params.get(fact.input_param_index)?.clone();
+            let mut characters = fact
+                .exact_mappings
+                .iter()
+                .filter(|mapping| !mapping.value.contains(&mapping.key))
+                .map(|mapping| mapping.key.clone())
+                .collect::<Vec<_>>();
+            characters.sort();
+            characters.dedup();
+            (!characters.is_empty()).then_some(CharacterConstraintFact {
+                function_span: fact.function_span,
+                transform_span: fact.transform_span,
+                input_place,
+                input_param_index: Some(fact.input_param_index),
+                output: CharacterConstraintOutput::Return,
+                domain: CharacterConstraintDomain::ExcludesExact { characters },
+            })
+        })
+        .collect()
 }
 
 fn ecmascript_dynamic_key_filters(
@@ -251,6 +597,9 @@ fn ecmascript_dynamic_key_filters(
         let Some(body) = function.child_by_field_name("body") else {
             continue;
         };
+        if let Some(fact) = ecmascript_property_path_filter(tree, function, body, decl, file, src) {
+            facts.push(fact);
+        }
         for block in named_descendants_of_kind(body, "statement_block") {
             let Some(fact) =
                 ecmascript_dynamic_key_filter_in_block(tree, function, body, block, decl, file, src)
@@ -380,7 +729,13 @@ fn ecmascript_dynamic_key_filter_in_block(
     // The denylist must be one immutable top-level lexical binding shared by
     // this top-level helper. This gives the adapter a closed lexical proof
     // without teaching shared analysis JavaScript name-resolution rules.
-    if function.parent().is_none_or(|parent| parent.kind() != "program") {
+    if function.parent().is_none_or(|parent| {
+        parent.kind() != "program"
+            && !(parent.kind() == "export_statement"
+                && parent
+                    .parent()
+                    .is_some_and(|grandparent| grandparent.kind() == "program"))
+    }) {
         return None;
     }
     let (collection_constructor, rejected_exact_values) =
@@ -390,11 +745,264 @@ fn ecmascript_dynamic_key_filter_in_block(
         function_span: decl.span,
         guard_span: span_of(file, guard),
         input_param_index,
+        output_place: Some(output_name.to_string()),
         collection_constructor,
         membership_check: membership_check.to_string(),
         rejected_exact_values,
         recursive: true,
     })
+}
+
+fn ecmascript_property_path_filter(
+    tree: &Tree,
+    function: Node<'_>,
+    function_body: Node<'_>,
+    decl: &bonsai_lang_api::Decl,
+    file: FileId,
+    src: &[u8],
+) -> Option<DynamicKeyFilterFact> {
+    if function.parent().is_none_or(|parent| {
+        parent.kind() != "program"
+            && !(parent.kind() == "export_statement"
+                && parent
+                    .parent()
+                    .is_some_and(|grandparent| grandparent.kind() == "program"))
+    }) {
+        return None;
+    }
+    let bindings = ecmascript_bindings(tree, src);
+    let statements = named_children(function_body);
+    for (declaration_index, declaration) in statements.iter().enumerate() {
+        if declaration.kind() != "lexical_declaration"
+            || declaration
+                .child(0)
+                .is_none_or(|keyword| keyword.kind() != "const")
+        {
+            continue;
+        }
+        let Some((segments, initializer)) = single_variable_declaration(*declaration, src) else {
+            continue;
+        };
+        let Some(input_param_index) =
+            ecmascript_property_path_split_input(initializer, &decl.params, &bindings, src)
+        else {
+            continue;
+        };
+        if ecmascript_binding_is_mutated(function_body, segments, declaration.end_byte(), src) {
+            continue;
+        }
+        for guard in statements.iter().skip(declaration_index + 1) {
+            if guard.kind() != "if_statement" || guard.child_by_field_name("alternative").is_some() {
+                continue;
+            }
+            let condition = unwrap_ecmascript_expression(guard.child_by_field_name("condition")?);
+            let Some((collection, membership_check)) =
+                ecmascript_every_segment_is_denylisted(condition, segments, src)
+            else {
+                continue;
+            };
+            let (collection_constructor, rejected_exact_values) =
+                ecmascript_exact_top_level_collection(tree, function, function_body, collection, src)?;
+            return Some(DynamicKeyFilterFact {
+                function_span: decl.span,
+                guard_span: span_of(file, guard),
+                input_param_index,
+                output_place: Some(segments.to_string()),
+                collection_constructor,
+                membership_check: membership_check.to_string(),
+                rejected_exact_values,
+                recursive: false,
+            });
+        }
+    }
+    None
+}
+
+fn ecmascript_property_path_split_input(
+    initializer: Node<'_>,
+    params: &[String],
+    bindings: &EcmascriptBindings<'_>,
+    src: &[u8],
+) -> Option<usize> {
+    let mut split = unwrap_ecmascript_expression(initializer);
+    if split.kind() == "call_expression" {
+        let function = split.child_by_field_name("function")?;
+        if function.kind() == "member_expression"
+            && function
+                .child_by_field_name("property")
+                .is_some_and(|property| node_text(&property, src).trim() == "filter")
+        {
+            let callback = ecmascript_call_arguments(split).first().copied()?;
+            if !ecmascript_nonempty_segment_filter(callback, src) {
+                return None;
+            }
+            split = unwrap_ecmascript_expression(function.child_by_field_name("object")?);
+        }
+    }
+    if split.kind() != "call_expression" {
+        return None;
+    }
+    let function = split.child_by_field_name("function")?;
+    if function.kind() != "member_expression"
+        || function
+            .child_by_field_name("property")
+            .is_none_or(|property| node_text(&property, src).trim() != "split")
+    {
+        return None;
+    }
+    let delimiter = ecmascript_call_arguments(split).first().copied()?;
+    let pattern = delimiter.child_by_field_name("pattern")?;
+    let pattern = node_text(&pattern, src);
+    let character_class = pattern.strip_suffix('+').unwrap_or(pattern);
+    let characters = ecmascript_exact_regex_characters_from_pattern(character_class)?;
+    if ![".", "[", "]"]
+        .iter()
+        .all(|required| characters.iter().any(|character| character == required))
+    {
+        return None;
+    }
+    let input = unwrap_ecmascript_expression(function.child_by_field_name("object")?);
+    let input_name = if input.kind() == "identifier" {
+        node_text(&input, src).trim()
+    } else if input.kind() == "call_expression" {
+        let callee = input.child_by_field_name("function")?;
+        if callee.kind() != "identifier"
+            || node_text(&callee, src).trim() != "String"
+            || bindings.by_name.contains_key("String")
+        {
+            return None;
+        }
+        let arguments = ecmascript_call_arguments(input);
+        let [argument] = arguments.as_slice() else {
+            return None;
+        };
+        if argument.kind() != "identifier" {
+            return None;
+        }
+        node_text(argument, src).trim()
+    } else {
+        return None;
+    };
+    params.iter().position(|param| param == input_name)
+}
+
+fn ecmascript_exact_regex_characters_from_pattern(pattern: &str) -> Option<Vec<String>> {
+    let inner = pattern.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.starts_with('^') || inner.is_empty() {
+        return None;
+    }
+    let mut characters = Vec::new();
+    let mut input = inner.chars();
+    while let Some(character) = input.next() {
+        if character == '-' {
+            return None;
+        }
+        let character = if character == '\\' {
+            match input.next()? {
+                escaped if !escaped.is_ascii_alphanumeric() => escaped,
+                _ => return None,
+            }
+        } else {
+            character
+        };
+        characters.push(character.to_string());
+    }
+    characters.sort();
+    characters.dedup();
+    Some(characters)
+}
+
+fn ecmascript_nonempty_segment_filter(callback: Node<'_>, src: &[u8]) -> bool {
+    let Some((parameter, body)) = ecmascript_arrow_parts(callback, src) else {
+        return false;
+    };
+    let body = unwrap_ecmascript_expression(body);
+    let (Some(left), Some(right)) = (
+        body.child_by_field_name("left"),
+        body.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    let operator = src
+        .get(left.end_byte()..right.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim);
+    let Some(object) = left.child_by_field_name("object") else {
+        return false;
+    };
+    let Some(property) = left.child_by_field_name("property") else {
+        return false;
+    };
+    left.kind() == "member_expression"
+        && node_text(&object, src).trim() == parameter
+        && node_text(&property, src).trim() == "length"
+        && operator == Some(">")
+        && node_text(&right, src).trim() == "0"
+}
+
+fn ecmascript_every_segment_is_denylisted<'a>(
+    condition: Node<'a>,
+    segments: &str,
+    src: &'a [u8],
+) -> Option<(&'a str, &'a str)> {
+    let function = condition.child_by_field_name("function")?;
+    if condition.kind() != "call_expression"
+        || function.kind() != "member_expression"
+        || function
+            .child_by_field_name("object")
+            .is_none_or(|object| node_text(&object, src).trim() != segments)
+        || function
+            .child_by_field_name("property")
+            .is_none_or(|property| node_text(&property, src).trim() != "some")
+    {
+        return None;
+    }
+    let condition_arguments = ecmascript_call_arguments(condition);
+    let callback = condition_arguments.first().copied()?;
+    let (parameter, body) = ecmascript_arrow_parts(callback, src)?;
+    let (collection, membership_check) = ecmascript_member_call(unwrap_ecmascript_expression(body), src)?;
+    let membership_arguments = ecmascript_call_arguments(unwrap_ecmascript_expression(body));
+    let [subject] = membership_arguments.as_slice() else {
+        return None;
+    };
+    (subject.kind() == "identifier" && node_text(subject, src).trim() == parameter)
+        .then_some((collection, membership_check))
+}
+
+fn ecmascript_binding_is_mutated(body: Node<'_>, binding: &str, after: usize, src: &[u8]) -> bool {
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        if node.start_byte() > after {
+            if matches!(
+                node.kind(),
+                "assignment_expression" | "augmented_assignment_expression"
+            ) && node.child_by_field_name("left").is_some_and(|left| {
+                node_text(&left, src).trim() == binding
+                    || left
+                        .child_by_field_name("object")
+                        .is_some_and(|object| node_text(&object, src).trim() == binding)
+            }) {
+                return true;
+            }
+            if node.kind() == "call_expression" {
+                if let Some(function) = node.child_by_field_name("function") {
+                    if function.kind() == "member_expression"
+                        && function
+                            .child_by_field_name("object")
+                            .is_some_and(|object| node_text(&object, src).trim() == binding)
+                        && function
+                            .child_by_field_name("property")
+                            .is_some_and(|property| node_text(&property, src).trim() != "some")
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    false
 }
 
 fn ecmascript_exact_top_level_collection(
@@ -625,7 +1233,7 @@ fn ecmascript_finite_literal_selections(
             continue;
         }
         let selection_span = span_of(file, &node);
-        let Some(assignment) = index
+        let assignment = index
             .assignment_values
             .iter()
             .filter(|fact| {
@@ -634,13 +1242,23 @@ fn ecmascript_finite_literal_selections(
                     && fact.value_span.start <= selection_span.start
                     && selection_span.end <= fact.value_span.end
             })
-            .min_by_key(|fact| fact.value_span.end.saturating_sub(fact.value_span.start))
+            .min_by_key(|fact| fact.value_span.end.saturating_sub(fact.value_span.start));
+        let argument = index
+            .call_argument_values
+            .iter()
+            .filter(|fact| {
+                fact.argument_span.file == selection_span.file
+                    && fact.argument_span.start <= selection_span.start
+                    && selection_span.end <= fact.argument_span.end
+            })
+            .min_by_key(|fact| fact.argument_span.len());
+        let Some(value_span) = assignment
+            .map(|fact| fact.value_span)
+            .or_else(|| argument.map(|fact| fact.argument_span))
         else {
             continue;
         };
-        let Some(value_node) =
-            bonsai_lang_api::kit::node_at_span(tree.root_node(), assignment.value_span, &[])
-        else {
+        let Some(value_node) = bonsai_lang_api::kit::node_at_span(tree.root_node(), value_span, &[]) else {
             continue;
         };
         if !ecmascript_expression_is_finite_selection(value_node, node, src, &bindings) {
@@ -648,14 +1266,22 @@ fn ecmascript_finite_literal_selections(
         }
         selections.push(FiniteLiteralSelectionFact {
             selection_span,
-            assignment_span: assignment.assignment_span,
-            target: assignment.target.clone().expect("checked target"),
+            assignment_span: assignment.map(|fact| fact.assignment_span),
+            target: assignment.and_then(|fact| fact.target.clone()),
+            call_span: argument.map(|fact| fact.call_span),
+            argument_index: argument.map(|fact| fact.argument_index),
         });
     }
     selections.sort_by_key(|fact| {
         (
-            fact.assignment_span.start,
-            fact.assignment_span.end,
+            fact.assignment_span
+                .or(fact.call_span)
+                .unwrap_or(fact.selection_span)
+                .start,
+            fact.assignment_span
+                .or(fact.call_span)
+                .unwrap_or(fact.selection_span)
+                .end,
             fact.selection_span.start,
             fact.selection_span.end,
         )
@@ -1284,6 +1910,7 @@ fn ecmascript_character_substitutions(
     file: FileId,
     src: &[u8],
 ) -> Vec<CharacterSubstitutionFact> {
+    let bindings = ecmascript_bindings(tree, src);
     let mut facts = Vec::new();
     for return_node in collect_kinds(tree, &["return_statement"]) {
         let return_span = span_of(file, &return_node);
@@ -1303,8 +1930,8 @@ fn ecmascript_character_substitutions(
         let Some(expression) = return_node.named_child(0) else {
             continue;
         };
-        let Some((input_param_index, table, domain, transform_span)) =
-            ecmascript_character_substitution(expression, &decl.params, file, src)
+        let Some((input_param_index, table, exact_mappings, domain, transform_span)) =
+            ecmascript_character_substitution(expression, &decl.params, &bindings, file, src)
         else {
             continue;
         };
@@ -1312,6 +1939,42 @@ fn ecmascript_character_substitutions(
             function_span: decl.span,
             transform_span,
             input_param_index,
+            exact_mappings,
+            table,
+            domain,
+        });
+    }
+    // Expression-bodied arrows have no `return_statement`, but their body is
+    // the function's sole return path by language definition.
+    for arrow in collect_kinds(tree, &["arrow_function"]) {
+        let Some(body) = arrow.child_by_field_name("body") else {
+            continue;
+        };
+        if body.kind() == "statement_block" {
+            continue;
+        }
+        let arrow_span = span_of(file, &arrow);
+        let Some(decl) = defs
+            .iter()
+            .filter(|decl| {
+                matches!(decl.kind, DeclKind::Function | DeclKind::Method)
+                    && decl.span.start <= arrow_span.start
+                    && arrow_span.end <= decl.span.end
+            })
+            .min_by_key(|decl| decl.span.len())
+        else {
+            continue;
+        };
+        let Some((input_param_index, table, exact_mappings, domain, transform_span)) =
+            ecmascript_character_substitution(body, &decl.params, &bindings, file, src)
+        else {
+            continue;
+        };
+        facts.push(CharacterSubstitutionFact {
+            function_span: decl.span,
+            transform_span,
+            input_param_index,
+            exact_mappings,
             table,
             domain,
         });
@@ -1324,9 +1987,27 @@ fn ecmascript_character_substitutions(
 fn ecmascript_character_substitution(
     expression: Node<'_>,
     params: &[String],
+    bindings: &EcmascriptBindings<'_>,
     file: FileId,
     src: &[u8],
-) -> Option<(usize, String, CharacterSubstitutionDomain, bonsai_common::Span)> {
+) -> Option<(
+    usize,
+    String,
+    Vec<StaticStringMapEntry>,
+    CharacterSubstitutionDomain,
+    bonsai_common::Span,
+)> {
+    if let Some((input_param_index, mappings, characters, transform_span)) =
+        ecmascript_inline_replace_chain(expression, params, bindings, file, src)
+    {
+        return Some((
+            input_param_index,
+            String::new(),
+            mappings,
+            CharacterSubstitutionDomain::ExactCharacters { characters },
+            transform_span,
+        ));
+    }
     let call = unwrap_ecmascript_expression(expression);
     if call.kind() != "call_expression" {
         return None;
@@ -1341,18 +2022,27 @@ fn ecmascript_character_substitution(
     let arguments = ecmascript_call_arguments(call);
 
     if method == "replace" {
-        let input = node_text(&receiver, src).trim();
-        let input_param_index = params.iter().position(|param| param == input)?;
+        let input_param_index = ecmascript_transform_input_param_index(receiver, params, bindings, src)?;
         let pattern = arguments.first().copied()?;
         let callback = arguments.get(1).copied()?;
         let characters = ecmascript_exact_regex_characters(pattern, src)?;
-        let (table, callback_parameter) = ecmascript_map_lookup_callback(callback, src)?;
-        if callback_parameter.is_empty() {
-            return None;
+        if let Some((table, callback_parameter)) = ecmascript_map_lookup_callback(callback, src) {
+            if callback_parameter.is_empty() {
+                return None;
+            }
+            return Some((
+                input_param_index,
+                table,
+                Vec::new(),
+                CharacterSubstitutionDomain::ExactCharacters { characters },
+                span_of(file, &call),
+            ));
         }
+        let exact_mappings = ecmascript_numeric_hex_escape_mappings(callback, &characters, src)?;
         return Some((
             input_param_index,
-            table,
+            String::new(),
+            exact_mappings,
             CharacterSubstitutionDomain::ExactCharacters { characters },
             span_of(file, &call),
         ));
@@ -1385,9 +2075,203 @@ fn ecmascript_character_substitution(
     Some((
         input_param_index,
         table,
+        Vec::new(),
         CharacterSubstitutionDomain::TableKeysWithIdentityFallback,
         span_of(file, &call),
     ))
+}
+
+fn ecmascript_inline_replace_chain(
+    expression: Node<'_>,
+    params: &[String],
+    bindings: &EcmascriptBindings<'_>,
+    file: FileId,
+    src: &[u8],
+) -> Option<(usize, Vec<StaticStringMapEntry>, Vec<String>, bonsai_common::Span)> {
+    let transform_span = span_of(file, &expression);
+    let mut current = unwrap_ecmascript_expression(expression);
+    let mut mappings = Vec::new();
+    let mut characters = Vec::new();
+    while current.kind() == "call_expression" {
+        let function = current.child_by_field_name("function")?;
+        if function.kind() != "member_expression" {
+            break;
+        }
+        let receiver = function.child_by_field_name("object")?;
+        let method = function.child_by_field_name("property")?;
+        if node_text(&method, src).trim() != "replace" {
+            break;
+        }
+        let args = ecmascript_call_arguments(current);
+        let [pattern, replacement] = args.as_slice() else {
+            return None;
+        };
+        let replaced = ecmascript_global_regex_characters(*pattern, bindings, src)?;
+        let replacement = ecmascript_static_string_literal(*replacement, src)?;
+        for input in replaced {
+            let output = ecmascript_expand_static_replacement(&replacement, &input)?;
+            if mappings
+                .iter()
+                .any(|entry: &StaticStringMapEntry| entry.key == input && entry.value != output)
+            {
+                return None;
+            }
+            if !mappings.iter().any(|entry| entry.key == input) {
+                characters.push(input.clone());
+                mappings.push(StaticStringMapEntry {
+                    key: input,
+                    value: output.clone(),
+                });
+            }
+        }
+        current = unwrap_ecmascript_expression(receiver);
+    }
+    if mappings.is_empty() {
+        return None;
+    }
+    let input = if current.kind() == "identifier" {
+        node_text(&current, src).trim()
+    } else if current.kind() == "call_expression" {
+        let function = current.child_by_field_name("function")?;
+        if function.kind() != "identifier"
+            || node_text(&function, src).trim() != "String"
+            || bindings
+                .resolve("String", function.start_byte(), function.end_byte())
+                .is_some()
+        {
+            return None;
+        }
+        let args = ecmascript_call_arguments(current);
+        let [input] = args.as_slice() else {
+            return None;
+        };
+        if input.kind() != "identifier" {
+            return None;
+        }
+        node_text(input, src).trim()
+    } else {
+        return None;
+    };
+    let input_param_index = params.iter().position(|param| param == input)?;
+    characters.sort();
+    characters.dedup();
+    mappings.sort_by(|left, right| left.key.cmp(&right.key));
+    Some((input_param_index, mappings, characters, transform_span))
+}
+
+fn ecmascript_transform_input_param_index(
+    receiver: Node<'_>,
+    params: &[String],
+    bindings: &EcmascriptBindings<'_>,
+    src: &[u8],
+) -> Option<usize> {
+    let receiver = unwrap_ecmascript_expression(receiver);
+    if receiver.kind() == "identifier" {
+        let input = node_text(&receiver, src).trim();
+        return params.iter().position(|parameter| parameter == input);
+    }
+    if receiver.kind() != "call_expression" {
+        return None;
+    }
+    let function = receiver.child_by_field_name("function")?;
+    if function.kind() != "identifier"
+        || node_text(&function, src).trim() != "String"
+        || bindings
+            .resolve("String", function.start_byte(), function.end_byte())
+            .is_some()
+    {
+        return None;
+    }
+    let args = ecmascript_call_arguments(receiver);
+    let [input] = args.as_slice() else {
+        return None;
+    };
+    if input.kind() != "identifier" {
+        return None;
+    }
+    let input = node_text(input, src).trim();
+    params.iter().position(|parameter| parameter == input)
+}
+
+/// Apply the context-free subset of ECMAScript replacement-string runtime
+/// semantics. `$&` denotes the complete matched scalar and `$$` denotes a
+/// literal dollar. Prefix/suffix and capture substitutions depend on dynamic
+/// match context, so those forms fail closed.
+fn ecmascript_expand_static_replacement(template: &str, matched: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut input = template.chars().peekable();
+    while let Some(character) = input.next() {
+        if character != '$' {
+            out.push(character);
+            continue;
+        }
+        match input.next() {
+            Some('$') => out.push('$'),
+            Some('&') => out.push_str(matched),
+            Some('`' | '\'' | '0'..='9' | '<') => return None,
+            Some(other) => {
+                // ECMAScript preserves an unrecognized `$x` sequence.
+                out.push('$');
+                out.push(other);
+            }
+            None => out.push('$'),
+        }
+    }
+    Some(out)
+}
+
+fn ecmascript_global_regex_characters<'tree>(
+    mut regex: Node<'tree>,
+    bindings: &EcmascriptBindings<'tree>,
+    src: &[u8],
+) -> Option<Vec<String>> {
+    if regex.kind() == "identifier" {
+        let name = node_text(&regex, src).trim();
+        let binding = bindings.resolve(name, regex.start_byte(), regex.end_byte())?;
+        if binding.declaration.kind() != "variable_declarator"
+            || binding
+                .declaration
+                .child_by_field_name("name")
+                .is_none_or(|target| target.kind() != "identifier")
+            || binding
+                .declaration
+                .parent()
+                .filter(|declaration| declaration.kind() == "lexical_declaration")
+                .and_then(|declaration| declaration.child(0))
+                .is_none_or(|keyword| keyword.kind() != "const")
+        {
+            return None;
+        }
+        regex = binding.initializer;
+    }
+    if regex.kind() != "regex" {
+        return None;
+    }
+    let flags = regex
+        .child_by_field_name("flags")
+        .map(|node| node_text(&node, src).trim())
+        .or_else(|| node_text(&regex, src).rsplit_once('/').map(|(_, flags)| flags))?;
+    if !flags.contains('g') {
+        return None;
+    }
+    let pattern = regex.child_by_field_name("pattern")?;
+    let pattern_text = node_text(&pattern, src);
+    if let Some(characters) = ecmascript_exact_regex_characters(regex, src) {
+        return Some(characters);
+    }
+    let mut chars = pattern_text.chars();
+    let character = match chars.next()? {
+        '\\' => match chars.next()? {
+            'r' => '\r',
+            'n' => '\n',
+            't' => '\t',
+            escaped if !escaped.is_ascii_alphanumeric() => escaped,
+            _ => return None,
+        },
+        character if !".^$*+?()[]{}|".contains(character) => character,
+        _ => return None,
+    };
+    chars.next().is_none().then(|| vec![character.to_string()])
 }
 
 fn unwrap_ecmascript_expression(mut node: Node<'_>) -> Node<'_> {
@@ -1432,6 +2316,104 @@ fn ecmascript_map_lookup_callback(callback: Node<'_>, src: &[u8]) -> Option<(Str
     let (parameter, body) = ecmascript_arrow_parts(callback, src)?;
     let (table, key) = ecmascript_subscript_parts(body, src)?;
     (key == parameter).then_some((table.to_string(), parameter.to_string()))
+}
+
+/// Prove an expression-bodied replacement callback of the form
+/// `prefix + c.charCodeAt(0).toString(16).padStart(width, fill)` and evaluate
+/// it for the regex's finite compiler-decoded input alphabet.
+fn ecmascript_numeric_hex_escape_mappings(
+    callback: Node<'_>,
+    characters: &[String],
+    src: &[u8],
+) -> Option<Vec<StaticStringMapEntry>> {
+    let (parameter, body) = ecmascript_arrow_parts(callback, src)?;
+    let body = unwrap_ecmascript_expression(body);
+    if body.kind() != "binary_expression" {
+        return None;
+    }
+    let left = body.child_by_field_name("left")?;
+    let right = body.child_by_field_name("right")?;
+    if src
+        .get(left.end_byte()..right.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim)
+        != Some("+")
+    {
+        return None;
+    }
+    let prefix = ecmascript_static_string_literal(left, src)?;
+    let (pad_receiver, pad_method, pad_args) = ecmascript_nested_member_call(right, src)?;
+    if pad_method != "padStart" || pad_args.len() != 2 {
+        return None;
+    }
+    let width = ecmascript_static_usize(pad_args[0], src)?;
+    let fill = ecmascript_static_string_literal(pad_args[1], src)?;
+    if width == 0 || fill.is_empty() {
+        return None;
+    }
+    let (string_receiver, string_method, string_args) = ecmascript_nested_member_call(pad_receiver, src)?;
+    if string_method != "toString"
+        || string_args.len() != 1
+        || ecmascript_static_usize(string_args[0], src)? != 16
+    {
+        return None;
+    }
+    let (code_receiver, code_method, code_args) = ecmascript_nested_member_call(string_receiver, src)?;
+    if code_method != "charCodeAt"
+        || code_args.len() != 1
+        || ecmascript_static_usize(code_args[0], src)? != 0
+        || code_receiver.kind() != "identifier"
+        || node_text(&code_receiver, src).trim() != parameter
+    {
+        return None;
+    }
+
+    characters
+        .iter()
+        .map(|input| {
+            let mut utf16 = input.encode_utf16();
+            let code = utf16.next()?;
+            if utf16.next().is_some() {
+                return None;
+            }
+            let digits = format!("{code:x}");
+            let padding = width.saturating_sub(digits.chars().count());
+            let mut encoded = String::with_capacity(prefix.len() + padding * fill.len() + digits.len());
+            encoded.push_str(&prefix);
+            for _ in 0..padding {
+                encoded.push_str(&fill);
+            }
+            encoded.push_str(&digits);
+            Some(StaticStringMapEntry {
+                key: input.clone(),
+                value: encoded,
+            })
+        })
+        .collect()
+}
+
+fn ecmascript_nested_member_call<'tree>(
+    call: Node<'tree>,
+    src: &[u8],
+) -> Option<(Node<'tree>, String, Vec<Node<'tree>>)> {
+    let call = unwrap_ecmascript_expression(call);
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let function = call.child_by_field_name("function")?;
+    if function.kind() != "member_expression" {
+        return None;
+    }
+    let object = function.child_by_field_name("object")?;
+    let property = function.child_by_field_name("property")?;
+    let method = node_text(&property, src).trim().to_string();
+    (!method.is_empty()).then(|| (object, method, ecmascript_call_arguments(call)))
+}
+
+fn ecmascript_static_usize(node: Node<'_>, src: &[u8]) -> Option<usize> {
+    (node.kind() == "number")
+        .then(|| node_text(&node, src).trim().parse().ok())
+        .flatten()
 }
 
 fn ecmascript_identity_fallback_map_callback(callback: Node<'_>, src: &[u8]) -> Option<(String, String)> {
@@ -1509,11 +2491,24 @@ fn ecmascript_exact_regex_characters(regex: Node<'_>, src: &[u8]) -> Option<Vec<
             return None;
         }
         let decoded = if character == '\\' {
-            let escaped = chars.next()?;
-            if escaped.is_ascii_alphanumeric() {
-                return None;
+            match chars.next()? {
+                'r' => '\r',
+                'n' => '\n',
+                't' => '\t',
+                '0' => '\0',
+                'x' => {
+                    let digits = [chars.next()?, chars.next()?].into_iter().collect::<String>();
+                    char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?
+                }
+                'u' => {
+                    let digits = [chars.next()?, chars.next()?, chars.next()?, chars.next()?]
+                        .into_iter()
+                        .collect::<String>();
+                    char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?
+                }
+                escaped if !escaped.is_ascii_alphanumeric() => escaped,
+                _ => return None,
             }
-            escaped
         } else {
             character
         };
@@ -1667,6 +2662,7 @@ fn ecmascript_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> Con
         span: span_of(file, &node),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node(node, file, src),
         static_string: ecmascript_static_string_literal(node, src),
+        static_value: ecmascript_static_scalar(node, src),
     }
 }
 
@@ -1711,6 +2707,7 @@ fn decode_ecmascript_string_contents(inner: &str, quote: char) -> Option<String>
             '\\' => output.push('\\'),
             '\'' if quote == '\'' => output.push('\''),
             '"' if quote == '"' => output.push('"'),
+            '`' if quote == '`' => output.push('`'),
             '/' => output.push('/'),
             'b' => output.push('\u{0008}'),
             'f' => output.push('\u{000c}'),

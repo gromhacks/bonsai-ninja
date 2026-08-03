@@ -187,9 +187,7 @@
       - parser
   description: "Disabled - sax has limited entity resolution."
 - id: javascript.xxe.fast_xml_parser_entities_enabled
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: javascript
   tag: xxe
   category: source-independent
@@ -197,11 +195,13 @@
   packages:
   - fast-xml-parser
   cwe:
-  - CWE-611
+  - CWE-776
   match:
     kind: new
     callee:
       name: XMLParser
+  constraints:
+  - any_arg_matches_regex: "(?i)(processEntities|htmlEntities)\\s*[:=]\\s*true"
   match_examples:
   - name: fast xml parser process entities
     code: "const { XMLParser } = require(\"fast-xml-parser\");\nfunction parser() {\n  return new XMLParser({ processEntities: true });\n}\n"
@@ -215,7 +215,14 @@
       }
     expect_match_text:
     - XMLParser
-  description: "Disabled - fast-xml-parser expands supported internal/named entities but rejects external SYSTEM entities; these options do not establish an XXE file/network access boundary."
+  - name: fast xml parser entities disabled negative
+    code: |
+      const { XMLParser } = require("fast-xml-parser");
+      function parser() {
+        return new XMLParser({ processEntities: false });
+      }
+    expect_no_match: true
+  description: "fast-xml-parser internal/named entity expansion is explicitly enabled. This is an entity-expansion resource-exhaustion hazard (CWE-776), not a claim that the parser resolves external SYSTEM entities."
 - id: javascript.xxe.libxmljs_loadxml
   enabled: true
   language: javascript

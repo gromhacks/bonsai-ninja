@@ -93,6 +93,17 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    receiver_configuration_guard:
+      required_calls:
+      - call:
+          name: addPermission
+        identity_argument_indices: [0]
+        required_arguments:
+        - index: 0
+          accepted_places: [NoTypePermission.NONE]
+      - call:
+          name: allowTypes
   match_examples:
   - name: generated shape example
     code: |
@@ -203,6 +214,12 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    receiver_factory_guard:
+      factories:
+      - name: Yaml
+      required_nested_factories:
+      - name: SafeConstructor
   match_examples:
   - name: generated shape example
     code: |
@@ -392,8 +409,7 @@
 - id: java.deser.apache_poi_xssfworkbook_inputstream
   enabled: false
   disabled_reason:
-    code: subsumed
-    subsumed_by: java.xxe.apache_poi_xssfworkbook_inputstream
+    code: over-broad
   language: java
   tag: insecure-deserialization
   severity: high
@@ -417,7 +433,7 @@
         XSSFWorkbook(Object... args) {}
       }
     expect_match_text: [XSSFWorkbook]
-  description: "Disabled - Apache POI XSSFWorkbook is classified as XXE (CWE-611) in xxe.yml, not generic deserialization, to avoid duplicate/wrong-CWE findings."
+  description: "Disabled - XSSFWorkbook(InputStream) is not a generic object-deserialization boundary; archive resource exhaustion requires a separate version/config-aware rule."
 
   imports:
   - org

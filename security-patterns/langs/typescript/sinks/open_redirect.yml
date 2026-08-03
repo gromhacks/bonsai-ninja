@@ -134,6 +134,13 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    same_origin_path_constraint:
+      require_scheme_rejection: true
+      require_authority_rejection: true
+      require_absolute_path: true
+      require_scheme_relative_rejection: true
+      sink_argument_index: 0
   match_examples:
   - name: hapi redirect
     code: "const _u = require(\"@hapi/hapi\");\nfunction demo(input, req, obj) {\n  return h.redirect(input);\n}\n"

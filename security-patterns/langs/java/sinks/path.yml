@@ -248,6 +248,21 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {name: normalize}
+      base_canonicalizer: {name: normalize}
+      path_constructor: {name: resolve}
+      path_constructor_base_from_receiver: true
+      containment_check: {name: startsWith}
+      static_base_factories:
+      - {attribute: [Path, of]}
+      - {attribute: [Paths, get]}
+      containment_check_is_segment_aware: true
+      sink_path_arg_index: 0
+      path_constructor_base_arg_index: 0
+      boundary_places: []
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    Files.readAllBytes(input);\n\
@@ -373,6 +388,21 @@
   constraints:
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    guard_profile: path-consumer-containment
+    path_consumer_containment_guard:
+      canonicalizer: {name: normalize}
+      base_canonicalizer: {name: normalize}
+      path_constructor: {name: resolve}
+      path_constructor_base_from_receiver: true
+      containment_check: {name: startsWith}
+      static_base_factories:
+      - {attribute: [Path, of]}
+      - {attribute: [Paths, get]}
+      containment_check_is_segment_aware: true
+      sink_path_arg_index: 1
+      path_constructor_base_arg_index: 0
+      boundary_places: []
   match_examples:
   - name: tainted destination
     code: "class App {\n  void handle(String input) throws Exception {\n    Files.copy(\"\
@@ -383,7 +413,9 @@
     expect_no_match: true
   description: "java.nio.file.Files.copy(source, tainted_dest) - attacker-controlled destination path."
 - id: java.path.path_resolve
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: java
   tag: path-traversal
   severity: high
@@ -407,8 +439,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    resolve(\"\
       safe\");\n  }\n}\n"
     expect_no_match: true
-  description: "Path.resolve(tainted child) - attacker-controlled path segment\
-    \ joined under a base path before file read/copy APIs."
+  description: "Disabled as a finding: Path.resolve constructs a value but does not access the filesystem. Exact flow continues into real file consumers, where containment guards are evaluated."
 - id: java.path.files_move
   enabled: true
   language: java

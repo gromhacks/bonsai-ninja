@@ -6,7 +6,10 @@
 //! lifecycle boundary so semantic type declarations stay focused on wire and
 //! API shape.
 
-use crate::{Decl, DeclIndex, ExpressionFlow, FlowEvent};
+use crate::{
+    CharacterConstraintDomain, CharacterConstraintOutput, ConditionExpressionFact, Decl, DeclIndex,
+    ExpressionFlow, FlowEvent, StaticScalarValue,
+};
 
 impl DeclIndex {
     /// Pack completed file-local compiler IR into its steady-state allocation
@@ -22,14 +25,34 @@ impl DeclIndex {
             compact_optional_string(&mut fact.target);
             fact.call_sites.shrink_to_fit();
             compact_expression_flow_storage(&mut fact.value_flow);
+            if let Some(flow) = &mut fact.exact_callable_return {
+                compact_expression_flow_storage(flow);
+            }
+            if let Some(arguments) = &mut fact.exact_static_call_args {
+                for argument in arguments.iter_mut() {
+                    compact_static_scalar(argument);
+                }
+                arguments.shrink_to_fit();
+            }
             compact_optional_string(&mut fact.direct_call_name);
             compact_optional_string(&mut fact.direct_call_receiver);
         }
         for fact in &mut self.call_receivers {
             compact_expression_flow_storage(&mut fact.value_flow);
+            if let Some(value) = &mut fact.static_value {
+                compact_static_scalar(value);
+            }
         }
         for fact in &mut self.call_argument_values {
             compact_expression_flow_storage(&mut fact.value_flow);
+            if let Some(value) = &mut fact.static_value {
+                compact_static_scalar(value);
+            }
+            for field in &mut fact.exact_static_aggregate_fields {
+                compact_strings(&mut field.path);
+                compact_static_scalar(&mut field.value);
+            }
+            fact.exact_static_aggregate_fields.shrink_to_fit();
         }
         for fact in &mut self.static_string_maps {
             fact.target.shrink_to_fit();
@@ -57,13 +80,45 @@ impl DeclIndex {
             fact.parts.shrink_to_fit();
         }
         for fact in &mut self.finite_literal_selections {
-            fact.target.shrink_to_fit();
+            if let Some(target) = &mut fact.target {
+                target.shrink_to_fit();
+            }
         }
         for fact in &mut self.character_substitutions {
             fact.table.shrink_to_fit();
+            for entry in &mut fact.exact_mappings {
+                entry.key.shrink_to_fit();
+                entry.value.shrink_to_fit();
+            }
+            fact.exact_mappings.shrink_to_fit();
             if let crate::CharacterSubstitutionDomain::ExactCharacters { characters } = &mut fact.domain {
                 compact_strings(characters);
             }
+        }
+        for fact in &mut self.character_constraints {
+            fact.input_place.shrink_to_fit();
+            if let CharacterConstraintOutput::Assignment { target } = &mut fact.output {
+                target.shrink_to_fit();
+            }
+            match &mut fact.domain {
+                CharacterConstraintDomain::AllowOnly {
+                    classes,
+                    exact_characters,
+                } => {
+                    classes.shrink_to_fit();
+                    compact_strings(exact_characters);
+                }
+                CharacterConstraintDomain::ExcludesExact { characters } => compact_strings(characters),
+            }
+        }
+        for fact in &mut self.dynamic_key_filters {
+            compact_optional_string(&mut fact.output_place);
+            fact.collection_constructor.shrink_to_fit();
+            fact.membership_check.shrink_to_fit();
+            compact_strings(&mut fact.rejected_exact_values);
+        }
+        for fact in &mut self.compiler_guards {
+            fact.capability.shrink_to_fit();
         }
         for fact in &mut self.runtime_type_narrowings {
             fact.subject.shrink_to_fit();
@@ -77,6 +132,15 @@ impl DeclIndex {
             literal.text.shrink_to_fit();
             compact_optional_string(&mut literal.static_value);
         }
+        for fact in &mut self.branch_conditions {
+            if let Some(membership) = &mut fact.membership {
+                membership.subject.shrink_to_fit();
+                membership.collection.shrink_to_fit();
+            }
+            if let Some(expression) = &mut fact.expression {
+                compact_condition_expression(expression);
+            }
+        }
         for comment in &mut self.comments {
             comment.text.shrink_to_fit();
         }
@@ -89,11 +153,58 @@ impl DeclIndex {
         self.string_compositions.shrink_to_fit();
         self.finite_literal_selections.shrink_to_fit();
         self.character_substitutions.shrink_to_fit();
+        self.character_constraints.shrink_to_fit();
+        self.same_origin_path_constraints.shrink_to_fit();
+        self.compiler_guards.shrink_to_fit();
+        self.dynamic_key_filters.shrink_to_fit();
         self.runtime_type_narrowings.shrink_to_fit();
         self.branch_conditions.shrink_to_fit();
         self.aggregate_layouts.shrink_to_fit();
         self.strings.shrink_to_fit();
         self.comments.shrink_to_fit();
+    }
+}
+
+fn compact_static_scalar(value: &mut StaticScalarValue) {
+    if let StaticScalarValue::String(value) = value {
+        value.shrink_to_fit();
+    }
+}
+
+fn compact_condition_expression(expression: &mut ConditionExpressionFact) {
+    match expression {
+        ConditionExpressionFact::Atom { .. } => {}
+        ConditionExpressionFact::Not { operand, .. } => compact_condition_expression(operand),
+        ConditionExpressionFact::All { operands, .. } | ConditionExpressionFact::Any { operands, .. } => {
+            for operand in operands.iter_mut() {
+                compact_condition_expression(operand);
+            }
+            operands.shrink_to_fit();
+        }
+        ConditionExpressionFact::Equality { left, right, .. } => {
+            compact_condition_operand(left);
+            compact_condition_operand(right);
+        }
+        ConditionExpressionFact::TypeTest {
+            subject, type_name, ..
+        } => {
+            compact_condition_operand(subject);
+            type_name.shrink_to_fit();
+        }
+        ConditionExpressionFact::Membership {
+            subject, collection, ..
+        } => {
+            compact_condition_operand(subject);
+            compact_condition_operand(collection);
+        }
+    }
+}
+
+fn compact_condition_operand(operand: &mut crate::ConditionOperandFact) {
+    compact_expression_flow_storage(&mut operand.value_flow);
+    compact_optional_string(&mut operand.static_string);
+    if let Some(value) = operand.static_value.as_mut() {
+        compact_static_scalar(value);
     }
 }
 
