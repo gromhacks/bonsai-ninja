@@ -161,37 +161,30 @@
   packages:
   - mako
   imports:
-  - mako
+  - mako.template
   cwe:
   - CWE-94
   - CWE-1336
   match:
-    kind: new
+    kind: call
     callee:
-      attribute:
-      - mako
-      - Template
+      name: Template
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: template mako template
     code: |
-      import mako
-      class Template:
-          pass
+      from mako.template import Template
 
       def example(user_input):
-          return mako.Template(user_input, "{{ user }}")
+          return Template(user_input)
   - name: mako template literal negative
     code: |
-      import mako
-
-      class Template:
-          pass
+      from mako.template import Template
 
       def example(user_input):
-          return mako.Template('safe', '{{ user }}')
+          return Template('safe')
     expect_no_match: true
   description: "mako.template.Template(tainted) - RCE via Python evaluation blocks."
 - id: python.template.mako_template_lookup
@@ -233,7 +226,9 @@
     expect_no_match: true
   description: mako.lookup.TemplateLookup with tainted directories.
 - id: python.template.mako_template_render
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: python
   tag: xss
   category: source-independent
@@ -264,7 +259,7 @@
       def example(template):
           return template.render(name="safe")
     expect_no_match: true
-  description: "Mako Template.render(...user_value...) on a local receiver - unescaped context values can reach rendered HTML."
+  description: "Disabled - Template.render receives context data, not template source. Re-enable only with exact receiver typing plus template-output escape facts; the enabled Template constructor rule reports SSTI at compilation."
 - id: python.template.chameleon_pagetemplate
   enabled: true
   language: python

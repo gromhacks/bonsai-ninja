@@ -151,15 +151,21 @@ Security analysis progress includes scope and cache notes: file/rule
 counts, source/sink match counts, taint-graph cache hit/miss state, and
 whether a sidecar write-through finished.
 
-Broad security planning is staged on cold workspaces. Raw anchors and exact
-file-local syntax targets run before global inheritance; the global receiver
-table is opened only for a typed call whose verdict can change through a base
-class. Compiler diagnostic coverage is remembered for every exact source
-snapshot, including clean files, so the final `analysis_complete` audit checks
-only files not already lowered during planning. The 2026-07-31 Elasticsearch
-fresh-cache production profile completed in 29.58 seconds at 708 MB peak RSS
-under `BONSAI_MEMORY_BUDGET_MB=3072`; the large-repository gate protects both
-fresh planning and warm semantic reuse without terminating or capping work.
+Broad security planning is staged on cold workspaces. Raw anchors are tested in
+the bounded worker pool, then exact import/package and file-local syntax
+targets run before global inheritance; the global receiver table is opened
+only for a typed call whose verdict can change through a base class. Parser
+coverage is remembered for every exact source snapshot, including clean files,
+so the final `analysis_complete` audit parses only unchecked files and never
+materializes declaration/flow bodies just for diagnostics.
+
+The 2026-08-02 release gate completed a fresh-cache exact Elasticsearch taint
+scan in 16.09 seconds under `BONSAI_MEMORY_BUDGET_MB=3072`; semantic generation
+and warm validation completed in 5.37 seconds and 2.43 seconds. An exhaustive
+8,125-row high-severity sink inventory completed in 21.90 seconds with
+byte-identical serial/parallel planner output. The integration gate protects
+cold planning, warm production taint, navigation, inspect, and security
+inventories without terminating, skipping, or capping semantic work.
 
 ## Human-First And LLM-First
 
@@ -310,8 +316,8 @@ source build path for that platform. See
 # Find ranked semantic call paths between two callables
 ./target/release/bonsai-ninja path ./my-app --from handle_request --to run_admin_command
 
-# Slice one symbol backwards from a source line
-./target/release/bonsai-ninja slice ./my-app --symbol result --line 15 --file gateway.py
+# Slice one unambiguous symbol backwards; add --line/--file only to disambiguate
+./target/release/bonsai-ninja slice ./my-app --symbol result
 
 # Inspect syntax facts for a target
 ./target/release/bonsai-ninja inspect ./my-app os.system

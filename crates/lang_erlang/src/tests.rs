@@ -51,6 +51,8 @@ fn fun_ref_assignment_emits_clean_callable_alias() {
     let facts = [bonsai_lang_api::AssignmentValueFact {
         assignment_span: span,
         target: Some("Cb".to_string()),
+        target_is_immutable: false,
+        target_owner: None,
         target_span: Some(bonsai_common::Span::new(FileId::new(0), 0, 2)),
         value_span: bonsai_common::Span::new(FileId::new(0), value_start, span.end),
         call_sites: Vec::new(),
@@ -239,6 +241,8 @@ fn list_comprehension_assignment_exposes_generator_sources() {
     let facts = [bonsai_lang_api::AssignmentValueFact {
         assignment_span: span,
         target: Some("RawTokens".to_string()),
+        target_is_immutable: false,
+        target_owner: None,
         target_span: Some(bonsai_common::Span::new(
             FileId::new(0),
             0,

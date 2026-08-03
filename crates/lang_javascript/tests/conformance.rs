@@ -70,6 +70,227 @@ fn arrow_expression_records_implicit_return() {
 }
 
 #[test]
+fn chained_global_replacements_emit_exact_escape_summary() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "escape.js",
+            r#"
+function escapeHtml(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+}
+function incomplete(value) {
+  return value.replace(/</, "&lt;");
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    let [summary] = index.character_substitutions.as_slice() else {
+        panic!(
+            "expected only the global replacement summary: {:#?}",
+            index.character_substitutions
+        );
+    };
+    assert_eq!(summary.exact_mappings.len(), 2);
+    assert!(summary
+        .exact_mappings
+        .iter()
+        .any(|entry| entry.key == "<" && entry.value == "&lt;"));
+}
+
+#[test]
+fn named_regex_escape_resolves_the_lexical_const_binding() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "scope.js",
+            r#"
+const CONTROL = /[\r\n]/g;
+function safe(value) {
+  return value.replace(CONTROL, "_");
+}
+function shadowed(value, CONTROL) {
+  return value.replace(CONTROL, "_");
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    assert_eq!(
+        index.character_substitutions.len(),
+        1,
+        "a parameter shadow must block the outer regex proof: {:#?}",
+        index.character_substitutions
+    );
+    let safe = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "safe")
+        .expect("safe function");
+    assert_eq!(index.character_substitutions[0].function_span, safe.span);
+}
+
+#[test]
+fn replacement_runtime_and_string_composition_are_exact_compiler_facts() {
+    use bonsai_lang_api::{LanguageAdapter, StringCompositionPart};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "escapes.js",
+            r#"
+function regex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function ldap(value) {
+  return String(value).replace(/[\\*()\u0000]/g, (c) =>
+    "\\" + c.charCodeAt(0).toString(16).padStart(2, "0"));
+}
+function header(value) {
+  const rendered = "attachment=\"" + regex(value) + "\"";
+  return rendered;
+}
+function templateHeader(value) {
+  const templated = `attachment="${regex(value)}"`;
+  return templated;
+}
+function query(value) {
+  return products.find({ name: { $regex: ".*" + regex(value) + ".*", $options: "i" } });
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    let regex = index
+        .character_substitutions
+        .iter()
+        .find(|fact| {
+            index
+                .defs
+                .iter()
+                .any(|decl| decl.name == "regex" && decl.span == fact.function_span)
+        })
+        .expect("regex replacement summary");
+    for character in [
+        ".", "*", "+", "?", "^", "$", "{", "}", "(", ")", "|", "[", "]", "\\",
+    ] {
+        assert!(
+            regex
+                .exact_mappings
+                .iter()
+                .any(|entry| entry.key == character && entry.value == format!("\\{character}")),
+            "missing exact regex escape for {character:?}: {:#?}",
+            regex.exact_mappings
+        );
+    }
+    let ldap = index
+        .character_substitutions
+        .iter()
+        .find(|fact| {
+            index
+                .defs
+                .iter()
+                .any(|decl| decl.name == "ldap" && decl.span == fact.function_span)
+        })
+        .expect("numeric hex replacement summary");
+    assert!(ldap
+        .exact_mappings
+        .iter()
+        .any(|entry| entry.key == "\0" && entry.value == "\\00"));
+    assert!(index.string_compositions.iter().any(|fact| {
+        fact.target.as_deref() == Some("rendered")
+            && matches!(
+                fact.parts.as_slice(),
+                [
+                    StringCompositionPart::Literal { .. },
+                    StringCompositionPart::Call { .. },
+                    StringCompositionPart::Literal { .. }
+                ]
+            )
+    }));
+    assert!(index.string_compositions.iter().any(|fact| {
+        fact.target.as_deref() == Some("templated")
+            && matches!(
+                fact.parts.as_slice(),
+                [
+                    StringCompositionPart::Literal { .. },
+                    StringCompositionPart::Call { .. },
+                    StringCompositionPart::Literal { .. }
+                ]
+            )
+    }));
+    let query = index
+        .call_argument_values
+        .iter()
+        .find(|fact| {
+            fact.value_flow
+                .aggregate_fields
+                .iter()
+                .any(|field| field.name == "name")
+        })
+        .expect("nested object argument flow");
+    let regex_value_span = query.value_flow.aggregate_fields[0].value.aggregate_fields[0]
+        .value_span
+        .expect("nested field value span");
+    assert!(index
+        .string_compositions
+        .iter()
+        .any(|fact| fact.value_span == regex_value_span));
+}
+
+#[test]
+fn same_origin_helper_requires_single_slash_and_static_fallback() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    for (body, expected) in [
+        (
+            r#"return typeof target === "string" && target.startsWith("/") && !target.startsWith("//") ? target : "/";"#,
+            true,
+        ),
+        (r#"return target.startsWith("/") ? target : "/";"#, false),
+        (
+            r#"return target.startsWith("/") && !target.startsWith("//") ? target : target;"#,
+            false,
+        ),
+    ] {
+        let source = format!("function sameSite(target) {{ {body} }}\n");
+        let ws = bonsai_testkit::workspace_with(vec![Arc::clone(&adapter)], &[("redirect.js", &source)]);
+        let file = ws.db().vfs().all_files()[0];
+        let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+        assert_eq!(
+            !index.same_origin_path_constraints.is_empty(),
+            expected,
+            "{body}: {:#?}",
+            index.same_origin_path_constraints
+        );
+    }
+
+    let source =
+        r#"const sameSite = (target) => target.startsWith("/") && !target.startsWith("//") ? target : "/";"#;
+    let ws = bonsai_testkit::workspace_with(vec![adapter], &[("redirect.js", source)]);
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    assert_eq!(
+        index.same_origin_path_constraints.len(),
+        1,
+        "expression-bodied arrows must lower the same exact guard fact: {:#?}",
+        index.same_origin_path_constraints
+    );
+}
+
+#[test]
 fn denylist_constructor_and_condition_emit_exact_compiler_facts() {
     use bonsai_lang_api::LanguageAdapter;
 
@@ -165,9 +386,51 @@ function shallow(value) {
     assert_eq!(fact.collection_constructor, "Set");
     assert_eq!(fact.membership_check, "has");
     assert_eq!(fact.input_param_index, 0);
+    assert_eq!(fact.output_place.as_deref(), Some("out"));
     assert!(fact.recursive);
     assert_eq!(
         fact.rejected_exact_values,
+        ["__proto__", "constructor", "prototype"]
+    );
+}
+
+#[test]
+fn property_path_segment_denylist_is_a_typed_summary() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "paths.js",
+            r#"
+const BLOCKED = new Set(["__proto__", "constructor", "prototype"]);
+function apply(path, value) {
+  const segments = String(path).split(/[.[\]]+/).filter((part) => part.length > 0);
+  if (segments.some((part) => BLOCKED.has(part))) throw new Error("unsafe");
+  set({}, segments, value);
+}
+function weak(path, value) {
+  const segments = path.split(".");
+  if (segments.some((part) => BLOCKED.has(part))) throw new Error("unsafe");
+  segments.push("constructor");
+  set({}, segments, value);
+}
+"#,
+        )],
+    );
+    let file = *ws.db().vfs().all_files().first().expect("fixture file");
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    let facts = index
+        .dynamic_key_filters
+        .iter()
+        .filter(|fact| !fact.recursive)
+        .collect::<Vec<_>>();
+    assert_eq!(facts.len(), 1, "{:#?}", index.dynamic_key_filters);
+    assert_eq!(facts[0].output_place.as_deref(), Some("segments"));
+    assert_eq!(facts[0].membership_check, "has");
+    assert_eq!(
+        facts[0].rejected_exact_values,
         ["__proto__", "constructor", "prototype"]
     );
 }
@@ -306,7 +569,7 @@ function mutateFromElsewhere(value) {
         index
             .finite_literal_selections
             .iter()
-            .map(|fact| fact.target.as_str())
+            .filter_map(|fact| fact.target.as_deref())
             .collect::<Vec<_>>(),
         ["column"]
     );

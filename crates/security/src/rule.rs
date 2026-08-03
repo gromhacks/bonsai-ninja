@@ -463,9 +463,21 @@ pub struct PathConsumerContainmentGuardSemantics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_canonicalizer: Option<RuleTarget>,
     pub path_constructor: RuleTarget,
+    /// Some runtimes model the trusted base as the path-constructor receiver
+    /// (`base.resolve(child)`) rather than as a positional argument.
+    #[serde(default)]
+    pub path_constructor_base_from_receiver: bool,
     pub containment_check: RuleTarget,
+    /// Factories whose result is a trusted base only when every argument is
+    /// an exact compiler-decoded scalar. Runtime/API names stay in rule data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_base_factories: Vec<RuleTarget>,
     pub sink_path_arg_index: usize,
     pub path_constructor_base_arg_index: usize,
+    /// The containment predicate is path-segment aware by runtime contract
+    /// and therefore needs no textual separator operand.
+    #[serde(default)]
+    pub containment_check_is_segment_aware: bool,
     pub boundary_places: Vec<String>,
 }
 
@@ -491,6 +503,20 @@ pub struct RelativePathContainmentGuardSemantics {
     pub guarded_path_arg_index: Option<usize>,
     pub rejection_check: RuleTarget,
     pub rejection_check_arg_index: usize,
+    /// Argument containing the rejected relative-path prefix, when the
+    /// runtime exposes the boundary test as a separate call. The compiler
+    /// must prove a complete string composition beginning with one of
+    /// `rejected_exact_values` and ending in an allowed boundary wrapper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection_prefix_arg_index: Option<usize>,
+    /// Exact path-separator places accepted in the prefix composition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejection_boundary_places: Vec<String>,
+    /// Runtime conversions allowed to wrap a boundary place in the prefix
+    /// composition. Names remain rulepack data; the engine only joins typed
+    /// call and composition facts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejection_boundary_wrappers: Vec<RuleTarget>,
     pub rejected_exact_values: Vec<String>,
 }
 
@@ -522,6 +548,17 @@ pub struct NoSqlFilterSemantics {
     /// dominating terminal-rejection proof for every dynamic value.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub safe_scalar_runtime_types: Vec<String>,
+    /// Exact frontend-owned static types that cannot carry document
+    /// operators when used as values in a compiler-proven literal-key
+    /// filter. Unlike `safe_scalar_runtime_types`, these need no dynamic
+    /// rejection branch because the language type system enforces them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_scalar_compiler_types: Vec<String>,
+    /// Source rules whose matched call contract guarantees a scalar return.
+    /// The engine still proves that the exact filter value derives from the
+    /// matched source span; API identities remain rulepack data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_scalar_source_rules: Vec<String>,
 }
 
 /// Rulepack-owned roles for proving that a dynamic-key sink is protected by
@@ -541,6 +578,10 @@ pub struct DynamicKeyDenylistGuardSemantics {
     pub collection_values_arg_index: usize,
     /// Every value that must be rejected before a sink is safe.
     pub rejected_exact_values: Vec<String>,
+    /// Sink argument containing a filtered dynamic property key/path. Omit
+    /// for recursive write rules whose key is inherent in the matched write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sink_key_argument_index: Option<usize>,
     /// Require a helper summary proving nested values pass through the same
     /// filter before a recursive object-merge sink.
     #[serde(default)]
@@ -561,6 +602,70 @@ pub struct DynamicKeyDenylistGuardSemantics {
 #[serde(deny_unknown_fields)]
 pub struct ReceiverFactoryGuardSemantics {
     pub factories: Vec<RuleTarget>,
+    /// Calls that must occur inside the selected factory expression. This
+    /// models safe constructor composition without teaching the shared
+    /// engine any constructor or API spellings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_nested_factories: Vec<RuleTarget>,
+}
+
+/// One exact argument-place requirement on a receiver configuration call.
+///
+/// The adapter supplies an addressable projection for the argument expression
+/// (for example a constant member). The rulepack owns the accepted symbolic
+/// places; shared analysis never parses the rendered argument.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredCallArgumentSemantics {
+    pub index: usize,
+    /// Accept any exact adapter-decoded scalar at this position. This is
+    /// useful when safety comes from keeping an executable/configuration
+    /// selector static rather than from one enumerated literal.
+    #[serde(default)]
+    pub require_static_value: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_places: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_static_values: Vec<StaticScalarValue>,
+}
+
+/// One required, unconditional call that configures a sink receiver.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredReceiverCallSemantics {
+    pub call: RuleTarget,
+    /// Arguments that identify the configured facet when several calls share
+    /// one method (for example `setFeature(name, enabled)`). The latest call
+    /// with the same exact identity wins; later writes to other facets do not
+    /// erase this state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identity_argument_indices: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_arguments: Vec<RequiredCallArgumentSemantics>,
+}
+
+/// Rulepack-owned safe state required on a sink receiver.
+///
+/// Shared analysis proves that all required calls unconditionally configure
+/// the exact receiver either before the sink in the same declaration or in
+/// every constructor of the receiver's containing type. Runtime/API names
+/// and symbolic configuration values remain rulepack data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiverConfigurationGuardSemantics {
+    pub required_calls: Vec<RequiredReceiverCallSemantics>,
+}
+
+/// Rulepack-owned safe state for a receiver that is materialized into one
+/// configured wrapper and then passed to a sink.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredArgumentReceiverGuardSemantics {
+    pub sink_argument_index: usize,
+    pub wrapper_factory: RuleTarget,
+    pub configured_receiver_argument_index: usize,
+    pub provider_factory: RuleTarget,
+    pub required_calls: Vec<RequiredReceiverCallSemantics>,
 }
 
 /// One exact named argument required on a configured factory call.
@@ -655,6 +760,22 @@ pub struct SameOriginPathConstraintSemantics {
     pub require_authority_rejection: bool,
     pub require_absolute_path: bool,
     pub require_scheme_relative_rejection: bool,
+    /// Exact tainted sink argument that must receive the constrained path.
+    /// Header-style APIs use argument one while direct redirect APIs use zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sink_argument_index: Option<usize>,
+    /// Optional exact, rulepack-owned context argument. This lets a generic
+    /// header API credit same-origin proof only for a Location header without
+    /// changing the semantics of unrelated headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_context_argument: Option<StaticContextArgumentSemantics>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticContextArgumentSemantics {
+    pub index: usize,
+    pub accepted_renderings: Vec<String>,
 }
 
 /// Where the guarded parsed URL value appears at the matched sink.
@@ -756,7 +877,15 @@ pub struct UrlReconstructionGuardSemantics {
     pub scheme: UrlSchemeGuardSemantics,
     pub host_allowlist: UrlHostAllowlistSemantics,
     pub path_component: UrlComponentSemantics,
-    pub path_fallback: String,
+    /// Required fallback for a nullable/falsey path component. Omit when the
+    /// runtime accessor itself always returns a string and the exact
+    /// composition consumes it directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_fallback: Option<String>,
+    /// Optional redirect policy required by clients that follow redirects by
+    /// default. The same compiler proof used by URL-network guards applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<UrlRedirectGuardSemantics>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_sink_named_arguments: Vec<RequiredNamedArgumentSemantics>,
 }
@@ -782,6 +911,14 @@ pub struct ContextFlowSemantics {
     pub value_label: String,
     /// Synthetic parameter name used in the continuation edge.
     pub parameter_name: String,
+    /// A sanitizer-cleared write from one of these source rules replaces the
+    /// current channel value before a later consumer in the same control-flow
+    /// scope. IDs remain rulepack data; the engine proves ordering and the
+    /// compiler-lowered non-null branch relationship.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rewrite_source_rule_ids: Vec<String>,
+    #[serde(default)]
+    pub sanitized_rewrite_clears_channel: bool,
 }
 
 /// Explicit exceptions to the normal source-before-sanitizer-before-sink
@@ -835,7 +972,11 @@ pub struct AnalysisSemantics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receiver_factory_guard: Option<ReceiverFactoryGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_configuration_guard: Option<ReceiverConfigurationGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configured_argument_factory_guard: Option<ConfiguredArgumentFactoryGuardSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured_argument_receiver_guard: Option<ConfiguredArgumentReceiverGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configured_call_argument_guard: Option<ConfiguredCallArgumentGuardSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -967,6 +1108,11 @@ pub enum ConstraintKind {
     ArgValueNotAggregate {
         arg_value_not_aggregate: u32,
     },
+    /// Require exact adapter-decoded scalar values at selected positions in
+    /// one complete positional aggregate argument.
+    ArgSequenceItemsEqual {
+        arg_sequence_items_equal: ArgSequenceItemsSpec,
+    },
     SameReceiverCallCountAtLeast {
         same_receiver_call_count_at_least: u32,
     },
@@ -1057,6 +1203,7 @@ impl ConstraintKind {
             Self::ArgNotMatchesRegex { .. } => "arg_not_matches_regex",
             Self::AnyArgMatchesRegex { .. } => "any_arg_matches_regex",
             Self::ArgValueNotAggregate { .. } => "arg_value_not_aggregate",
+            Self::ArgSequenceItemsEqual { .. } => "arg_sequence_items_equal",
             Self::SameReceiverCallCountAtLeast { .. } => "same_receiver_call_count_at_least",
             Self::ArgLt { .. } => "arg_lt",
             Self::ArgLe { .. } => "arg_le",
@@ -1092,6 +1239,7 @@ impl ConstraintKind {
                 | Self::ArgNotMatchesRegex { .. }
                 | Self::AnyArgMatchesRegex { .. }
                 | Self::ArgValueNotAggregate { .. }
+                | Self::ArgSequenceItemsEqual { .. }
                 | Self::FormatArgIndex { .. }
                 | Self::ArgLt { .. }
                 | Self::ArgLe { .. }
@@ -1279,6 +1427,20 @@ pub struct KeywordArgEqualsSpec {
 pub struct ArgRegexSpec {
     pub index: u32,
     pub regex: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredSequenceItemSpec {
+    pub index: usize,
+    pub accepted_values: Vec<StaticScalarValue>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArgSequenceItemsSpec {
+    pub argument_index: usize,
+    pub items: Vec<RequiredSequenceItemSpec>,
 }
 
 /// Convenience: a rule's `constraints:` block is a list of keyed maps, each

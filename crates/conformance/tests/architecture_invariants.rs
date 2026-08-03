@@ -71,6 +71,10 @@ fn security_analysis_source(root: &Path) -> String {
     source
 }
 
+fn production_source(source: &str) -> &str {
+    source.split("#[cfg(test)]").next().unwrap_or(source)
+}
+
 fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
     let needle = format!("fn {name}");
     let start = source
@@ -1420,6 +1424,43 @@ fn cli_tree_is_filesystem_only() {
         violations.is_empty(),
         "CLI tree must remain a direct filesystem view with no compiler or security path:\n  {}",
         violations.join("\n  ")
+    );
+}
+
+#[test]
+fn security_finding_workers_reuse_the_planners_resolved_callgraph() {
+    let root = repo_root();
+    let analysis = root.join("crates/security/src/analysis");
+    let worker_files = [
+        "chain_executor.rs",
+        "execution.rs",
+        "findings_build.rs",
+        "guard_sanitizers.rs",
+        "prototype_guard.rs",
+    ];
+    let mut violations = Vec::new();
+    for file in worker_files {
+        let source = read(&analysis.join(file));
+        for (line, text) in production_source(&source).lines().enumerate() {
+            if text.contains("cached_resolved_call_graph()") {
+                violations.push(format!("{file}:{}: {}", line + 1, text.trim()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "security finding workers must receive the serial planner's immutable resolved callgraph instead of initializing a workspace-wide lazy cache from Rayon:\n  {}",
+        violations.join("\n  ")
+    );
+
+    let findings = read(&analysis.join("findings_build.rs"));
+    let guards = read(&analysis.join("guard_sanitizers.rs"));
+    let execution = read(&analysis.join("execution.rs"));
+    assert!(
+        findings.contains("call_graph: &'a bonsai_callgraph::ResolvedCallGraph")
+            && guards.contains("call_graph: &'a bonsai_callgraph::ResolvedCallGraph")
+            && execution.contains("call_graph: chain_call_graph.as_ref()"),
+        "the serial source/sink planner must thread one exact resolved callgraph through finding and compiler-guard attribution"
     );
 }
 
@@ -3594,6 +3635,10 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
                 .zip(broad_matcher.find("prepare_compiler_object_session_for_body_scan"))
                 .is_some_and(|(raw, compiler)| raw < compiler)
             && broad_matcher
+                .split_once("let raw_scan_files")
+                .and_then(|(_, tail)| tail.split_once("let imports_started"))
+                .is_some_and(|(raw_plan, _)| raw_plan.contains(".par_iter()"))
+            && broad_matcher
                 .find("let mut scan_plan")
                 .zip(broad_matcher.find("prepare_compiler_object_session_for_body_scan"))
                 .is_some_and(|(headers, compiler)| headers < compiler)
@@ -3606,12 +3651,14 @@ fn memory_budget_changes_compiler_scheduling_not_semantic_scope() {
     );
     assert!(
         function_body(&workspace, "parser_incomplete_reasons_for_files")
-            .contains("visit_compiler_file_objects_uncached")
+            .contains("visit_parser_diagnostics_uncached")
             && function_body(&workspace, "parser_incomplete_reasons_for_files")
                 .contains("compiler_diagnostics_are_current")
+            && !function_body(&workspace, "parser_incomplete_reasons_for_files")
+                .contains("visit_compiler_file_objects_uncached")
             && function_body(&workspace, "diagnostics")
                 .contains("visit_compiler_file_objects_uncached"),
-        "whole-workspace diagnostics and completeness checks must reuse exact per-snapshot coverage before scheduling unchecked compiler objects"
+        "parser completeness must use exact syntax diagnostics without lowering semantic bodies; explicit whole-workspace diagnostics may stream compiler objects"
     );
     assert!(
         function_body(&security_execution, "build_findings_chain_aware")
@@ -4511,16 +4558,17 @@ fn broad_security_scans_stream_exact_ast_bodies_beside_the_idg() {
             && broad_matcher
                 .find("syntax_target_possible_in_text")
                 .zip(broad_matcher.find("filtered_rule_refs_for_text"))
+                .zip(broad_matcher.find("if rules.is_empty()"))
                 .zip(broad_matcher.find("filtered_rule_refs_for_syntax_header"))
                 .zip(broad_matcher.find("compiler_file_object_uncached(file)"))
-                .is_some_and(|(((text, packages), syntax), body)| {
-                    text < packages && packages < syntax && syntax < body
+                .is_some_and(|((((text, packages), empty), syntax), body)| {
+                    text < packages && packages < empty && empty < syntax && syntax < body
                 })
             && broad_matcher.contains("compiler_receiver_ancestry()")
             && broad_matcher.contains("ancestry.apply_to_syntax_header")
             && broad_matcher.contains("ancestry.apply_to_decl_index")
             && !broad_matcher.contains("scan_decl_index"),
-        "broad matcher scans must filter exact text/import/call-target headers before body decode, preserve receiver ancestry for file-local inventory, and stream one compiler body per surviving file"
+        "broad matcher scans must stop after an empty import/package result, filter exact text/import/call-target headers before body decode, preserve receiver ancestry for file-local inventory, and stream one compiler body per surviving file"
     );
 
     let inferred = function_body(&matcher, "infer_entry_point_sources_for_files_with_progress");
@@ -5192,6 +5240,10 @@ fn structured_security_guards_are_rulepack_driven() {
     let root = repo_root();
     let analysis = security_analysis_source(&root);
     let guards = read(&root.join("crates/security/src/analysis/guard_sanitizers.rs"));
+    // Adapter/rulepack integration fixtures intentionally contain concrete API
+    // spellings. The architecture invariant applies to production analysis,
+    // not to test source that proves the generic machinery against real syntax.
+    let guards_runtime = guards.split("#[cfg(test)]").next().unwrap_or(&guards);
     let rules = read(&root.join("crates/security/src/rule.rs"));
     let path_pack = read(&root.join("security-patterns/langs/python/sinks/path.yml"));
     let xxe_pack = read(&root.join("security-patterns/langs/python/sinks/xxe.yml"));
@@ -5202,7 +5254,7 @@ fn structured_security_guards_are_rulepack_driven() {
 
     for spelling in ["os.path.join", "realpath", "setLocation"] {
         assert!(
-            !analysis.contains(spelling) && !guards.contains(spelling),
+            !analysis.contains(spelling) && !guards_runtime.contains(spelling),
             "security analysis must obtain `{spelling}` roles from rulepack semantics"
         );
     }
@@ -5213,7 +5265,7 @@ fn structured_security_guards_are_rulepack_driven() {
             && receiver_flow.contains("rule_target_matches_call"),
         "receiver mutation proofs must consume taint_receiver_from_args rule targets"
     );
-    let path_guard = function_body(&guards, "path_containment_guard_sanitizer");
+    let path_guard = function_body(guards_runtime, "path_containment_guard_sanitizer");
     assert!(
         path_guard.contains("GuardProfile::PythonPathContainment")
             && path_guard.contains("path_containment_guard"),
@@ -5225,7 +5277,7 @@ fn structured_security_guards_are_rulepack_driven() {
             && path_pack.contains("path_containment_guard:"),
         "callable roles for path containment must be declared in the rule schema and rulepack"
     );
-    let condition_proof = function_body(&guards, "path_containment_guard_condition");
+    let condition_proof = function_body(guards_runtime, "path_containment_guard_condition");
     assert!(
         condition_proof.contains("branch_condition_fact_for_span")
             && condition_proof.contains("BranchConditionPolarity::Negated")

@@ -140,6 +140,113 @@ function htmlEscape(v: string): string {
 }
 
 #[test]
+fn expression_arrow_replacement_chain_emits_exact_escape_summary() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "escape.ts",
+            r#"
+const escapeHtml = (value: string): string => value
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;")
+  .replace(/'/g, "&#39;");
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("TypeScript declaration index");
+    let [summary] = index.character_substitutions.as_slice() else {
+        panic!("expected one arrow summary: {:#?}", index.character_substitutions);
+    };
+    assert_eq!(summary.exact_mappings.len(), 5);
+}
+
+#[test]
+fn immutable_regex_binding_emits_character_constraint_summary() {
+    use bonsai_lang_api::{CharacterConstraintDomain, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "header.ts",
+            r#"
+const UNSAFE = /[\r\n"\\]/g;
+const safeFilename = (name: string): string => name.replace(UNSAFE, "_");
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("TypeScript declaration index");
+    let [summary] = index.character_constraints.as_slice() else {
+        panic!(
+            "expected one character constraint: {:#?}",
+            index.character_constraints
+        );
+    };
+    let helper = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "safeFilename")
+        .expect("safeFilename declaration");
+    assert_eq!(summary.function_span, helper.span);
+    assert!(matches!(
+        &summary.domain,
+        CharacterConstraintDomain::ExcludesExact { characters }
+            if characters.contains(&"\r".to_string()) && characters.contains(&"\n".to_string())
+    ));
+}
+
+#[test]
+fn exported_property_path_guard_and_readonly_field_are_exact_facts() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "service.ts",
+            r#"
+const BLOCKED = new Set(["__proto__", "constructor", "prototype"]);
+export function apply(path: string, value: unknown): void {
+  const segments = path.split(/[.[\]]+/).filter((part) => part.length > 0);
+  if (segments.some((part) => BLOCKED.has(part))) throw new Error("unsafe");
+  set({}, segments, value);
+}
+class Store {
+  private readonly BASE = "/srv/data";
+  private mutable = "/tmp";
+  read(name: string): string {
+    return resolve(this.BASE, name);
+  }
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("TypeScript declaration index");
+
+    assert!(index.dynamic_key_filters.iter().any(|fact| {
+        !fact.recursive
+            && fact.output_place.as_deref() == Some("segments")
+            && fact.rejected_exact_values == ["__proto__", "constructor", "prototype"]
+    }));
+    assert!(index
+        .assignment_values
+        .iter()
+        .any(|fact| { fact.target.as_deref() == Some("this.BASE") && fact.value_flow.is_empty() }));
+    assert!(!index
+        .assignment_values
+        .iter()
+        .any(|fact| fact.target.as_deref() == Some("this.mutable")));
+}
+
+#[test]
 fn finite_object_selection_uses_typed_ast_shape_and_static_branches() {
     use bonsai_lang_api::LanguageAdapter;
 
@@ -159,6 +266,9 @@ function command(name: string): string[] {
     : undefined;
   if (argv === undefined) throw new Error("unknown command");
   return argv;
+}
+function inline(name: string): unknown {
+  return run(COMMANDS[name] ?? ["uptime"]);
 }
 function dynamic(name: string, fallback: string[]): string[] {
   const argv = Object.hasOwn(COMMANDS, name) ? COMMANDS[name] : fallback;
@@ -182,10 +292,17 @@ const shadowed = (COMMANDS: Map<string, string[]>) => {
         index
             .finite_literal_selections
             .iter()
-            .map(|fact| fact.target.as_str())
+            .filter_map(|fact| fact.target.as_deref())
             .collect::<Vec<_>>(),
         ["argv"]
     );
+    let inline = index
+        .finite_literal_selections
+        .iter()
+        .find(|fact| fact.call_span.is_some())
+        .expect("inline finite-map selection call argument");
+    assert_eq!(inline.argument_index, Some(0));
+    assert!(inline.assignment_span.is_none());
 }
 
 #[test]

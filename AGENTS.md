@@ -117,13 +117,17 @@ Security endpoint planning is also staged. Apply raw/import/syntax-target
 filters before global receiver ancestry. Open ancestry only when a typed
 adapter-emitted call has a matching method whose verdict can change through a
 base class, or an explicit receiver-type constraint can change. Rerun those
-candidates with the exact base map before body matching. Treat clean compiler
-diagnostic coverage as real per-snapshot state: completion audits compile only
-unchecked files, and edits invalidate both coverage and diagnostic rows.
+candidates with the exact base map before body matching. Treat parser coverage
+as real per-snapshot state: completion audits run an exact Tree-sitter
+syntax-diagnostic pass only for unchecked files; they must not lower
+declarations or flow bodies merely to compute `analysis_complete`. Edits
+invalidate both parser coverage and compiler diagnostic rows.
 Retain exact syntax/import headers for ancestry-deferred candidates and recheck
 those headers after enrichment; do not reopen their compiler objects or rerun
 already-proven non-deferred plans. Raw workspace reads may overlap in
 memory-weighted windows, but VFS publication remains in canonical path order.
+Raw-anchor candidate tests run on that bounded pool as read-only planning;
+never rescan every file/rule pair serially while the worker pool is idle.
 Broad matcher bodies run in one continuous pool sized against the largest
 actual source units that may overlap; do not reintroduce per-CPU-batch
 barriers.
@@ -178,8 +182,13 @@ Understand behavior:
 ./target/release/bonsai-ninja inspect <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja show <workspace> F:<id> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja trace <workspace> <entry-function> --context 16k --no-color --no-progress
+./target/release/bonsai-ninja slice <workspace> --symbol <symbol> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja read-file <workspace> <path> --lines A:B --context 16k --no-color --no-progress
 ```
+
+For `slice`, omit `--line` when the symbol has one compiler syntax-flow site.
+If the result reports ambiguity, add the printed `--line` and optionally
+`--file`; the command never falls back to raw-text matching.
 
 `inspect` is rulepack-free by default and renders indexed syntax facts. Use
 `--graph-flow` to add structural source-body evidence and `--taint-flow` to

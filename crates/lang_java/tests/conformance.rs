@@ -189,7 +189,7 @@ class Selections {
         index
             .finite_literal_selections
             .iter()
-            .map(|fact| fact.target.as_str())
+            .filter_map(|fact| fact.target.as_deref())
             .collect::<Vec<_>>(),
         ["column"]
     );
@@ -351,4 +351,255 @@ class Box<T extends Payload> {
         "{:#?}",
         read.flow_events
     );
+}
+
+#[test]
+fn replacement_helpers_emit_exact_escape_and_constraint_summaries() {
+    use bonsai_lang_api::{CharacterConstraintDomain, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Escapes.java",
+            r#"
+class Escapes {
+  static String html(String value) {
+    return value.replace("&", "&amp;").replace("<", "&lt;");
+  }
+  static String header(String value) {
+    return value.replaceAll("[\\r\\n]", "_");
+  }
+  static String incomplete(String value) {
+    return value.replaceAll("[\\r\\n]", value);
+  }
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+    assert_eq!(
+        index.character_substitutions.len(),
+        2,
+        "{:#?}",
+        index.character_substitutions
+    );
+    assert!(index.character_constraints.iter().any(|fact| matches!(
+        &fact.domain,
+        CharacterConstraintDomain::ExcludesExact { characters }
+            if characters.contains(&"\r".to_string()) && characters.contains(&"\n".to_string())
+    )));
+}
+
+#[test]
+fn switch_character_transform_requires_total_identity_default() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Escaper.java",
+            r#"
+class Escaper {
+  static String safe(String value) {
+    StringBuilder out = new StringBuilder(value.length());
+    for (char c : value.toCharArray()) {
+      switch (c) {
+        case '*': out.append("\\2a"); break;
+        case '(': out.append("\\28"); break;
+        default: out.append(c);
+      }
+    }
+    return out.toString();
+  }
+  static String partial(String value) {
+    StringBuilder out = new StringBuilder(value.length());
+    for (char c : value.toCharArray()) {
+      switch (c) {
+        case '*': out.append("\\2a"); break;
+        default: out.append("x");
+      }
+    }
+    return out.toString();
+  }
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+    assert_eq!(
+        index
+            .character_substitutions
+            .iter()
+            .filter(|fact| !fact.exact_mappings.is_empty())
+            .count(),
+        1,
+        "partial switch must not produce a transform summary: {:#?}",
+        index.character_substitutions
+    );
+    assert!(index.character_substitutions[0]
+        .exact_mappings
+        .iter()
+        .any(|entry| entry.key == "*" && entry.value == "\\2a"));
+}
+
+#[test]
+fn array_call_arguments_preserve_exact_positional_scalar_facts() {
+    use bonsai_lang_api::{LanguageAdapter, StaticScalarValue};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Command.java",
+            r#"
+class Command {
+  void run(String host) throws Exception {
+    Runtime.getRuntime().exec(new String[] { "sh", "-c", "ping " + host });
+  }
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+    let sequence = index
+        .call_argument_values
+        .iter()
+        .find_map(|fact| fact.exact_static_sequence_values.as_ref())
+        .expect("exact Java array initializer");
+    assert_eq!(
+        sequence,
+        &vec![
+            Some(StaticScalarValue::String("sh".to_string())),
+            Some(StaticScalarValue::String("-c".to_string())),
+            None,
+        ]
+    );
+}
+
+#[test]
+fn compiled_pattern_constraints_resolve_the_exact_immutable_binding() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Patterns.java",
+            r#"
+class Pattern {
+  static Pattern compile(String value) { return new Pattern(); }
+  PatternMatcher matcher(String value) { return new PatternMatcher(); }
+}
+class PatternMatcher { String replaceAll(String value) { return ""; } }
+class Patterns {
+  private static final Pattern CONTROL = Pattern.compile("\\p{Cntrl}");
+  static String safe(String value) {
+    return CONTROL.matcher(value).replaceAll("_");
+  }
+  static String shadowed(String value) {
+    Pattern CONTROL = Pattern.compile(".*");
+    return CONTROL.matcher(value).replaceAll("_");
+  }
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+    assert_eq!(
+        index.character_constraints.len(),
+        1,
+        "a shadowing mutable binding must not inherit the field's proof: {:#?}",
+        index.character_constraints
+    );
+    let safe = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "safe")
+        .expect("safe method");
+    assert_eq!(index.character_constraints[0].function_span, safe.span);
+}
+
+#[test]
+fn final_field_assignment_carries_exact_immutable_owner() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "Config.java",
+            r#"
+class Client {}
+class Config {
+  private final Client stable = new Client();
+  private Client mutable = new Client();
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Java declaration index");
+    let owner = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Config")
+        .expect("Config class")
+        .symbol;
+    let stable = index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("stable"))
+        .expect("stable field assignment");
+    let mutable = index
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("mutable"))
+        .expect("mutable field assignment");
+    assert!(stable.target_is_immutable);
+    assert_eq!(stable.target_owner, Some(owner));
+    assert!(!mutable.target_is_immutable);
+    assert_eq!(mutable.target_owner, None);
+}
+
+#[test]
+fn same_origin_helper_requires_single_slash_and_static_fallback() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_java::JavaAdapter::new());
+    for (condition, fallback, expected) in [
+        (
+            r#"target == null || !target.startsWith("/") || target.startsWith("//")"#,
+            r#"return "/";"#,
+            true,
+        ),
+        (
+            r#"target == null || !target.startsWith("/")"#,
+            r#"return "/";"#,
+            false,
+        ),
+        (
+            r#"target == null || !target.startsWith("/") || target.startsWith("//")"#,
+            "return target;",
+            false,
+        ),
+    ] {
+        let source = format!(
+            "class Redirect {{ static String sameSite(String target) {{ if ({condition}) {{ {fallback} }} return target; }} }}"
+        );
+        let ws = bonsai_testkit::workspace_with(vec![Arc::clone(&adapter)], &[("Redirect.java", &source)]);
+        let file = ws.db().vfs().all_files()[0];
+        let index = ws.db().decl_index(file).expect("Java declaration index");
+        assert_eq!(
+            !index.same_origin_path_constraints.is_empty(),
+            expected,
+            "{condition}: {:#?}",
+            index.same_origin_path_constraints
+        );
+    }
 }

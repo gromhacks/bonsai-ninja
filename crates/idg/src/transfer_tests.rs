@@ -768,6 +768,7 @@ fn returned_container_spread_copies_known_fields_without_root_promotion() {
             value_flow: bonsai_lang_api::ExpressionFlow {
                 aggregate_fields: vec![bonsai_lang_api::ExpressionField {
                     name: "cmd".to_string(),
+                    value_span: None,
                     value: bonsai_lang_api::ExpressionFlow::from_place("clean"),
                 }],
                 spreads: vec![bonsai_lang_api::ExpressionFlow::from_place("rest")],
@@ -1578,6 +1579,8 @@ fn compound_assignment_binds_ast_indexed_rhs_call_result() {
     let facts = [AssignmentValueFact {
         assignment_span: assign_span,
         target: Some("buf".to_string()),
+        target_is_immutable: false,
+        target_owner: None,
         target_span: Some(span(50, 53)),
         value_span: span(55, 88),
         call_sites: vec![call_expression_span],
@@ -1623,6 +1626,8 @@ fn finite_literal_selection_keeps_lookup_call_but_cleans_result_write() {
     let assignment_values = [AssignmentValueFact {
         assignment_span: assign_span,
         target: Some("column".to_string()),
+        target_is_immutable: false,
+        target_owner: None,
         target_span: Some(span(30, 36)),
         value_span: span(39, 68),
         call_sites: vec![selection_span],
@@ -1634,8 +1639,10 @@ fn finite_literal_selection_keeps_lookup_call_but_cleans_result_write() {
     }];
     let selections = [FiniteLiteralSelectionFact {
         selection_span,
-        assignment_span: assign_span,
-        target: "column".to_string(),
+        assignment_span: Some(assign_span),
+        target: Some("column".to_string()),
+        call_span: None,
+        argument_index: None,
     }];
 
     let out = transfer_function_for_with_options_and_compiler_facts(
@@ -1681,6 +1688,63 @@ fn finite_literal_selection_keeps_lookup_call_but_cleans_result_write() {
 }
 
 #[test]
+fn finite_literal_selection_used_inline_does_not_taint_the_sink_argument() {
+    let mut decl = empty_decl(1, "execute");
+    decl.params = vec!["key".to_string()];
+    let call_span = span(30, 70);
+    let selection_span = span(40, 56);
+    decl.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "run".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: span(38, 62),
+            passing_mode: Default::default(),
+            name: None,
+            value_text: "COMMANDS[key] ?? ['uptime']".to_string(),
+            place: None,
+            source_names: vec!["COMMANDS".to_string(), "key".to_string()],
+        }],
+    }];
+    let selections = [FiniteLiteralSelectionFact {
+        selection_span,
+        assignment_span: None,
+        target: None,
+        call_span: Some(call_span),
+        argument_index: Some(0),
+    }];
+
+    let out = transfer_function_for_with_options_and_compiler_facts(
+        &decl,
+        &TransferOptions::default(),
+        &[],
+        &[],
+        &selections,
+    );
+    let call_arg = out
+        .nodes
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| {
+            matches!(
+                out.places.get(node.place),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == call_span
+            )
+            .then_some(NodeId(u32::try_from(index).expect("node id")))
+        })
+        .expect("sink argument node");
+
+    assert!(
+        out.edges.iter().all(|edge| edge.to != call_arg),
+        "the dynamic selector controls a finite literal choice but must not flow into the sink argument: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
 fn indexed_object_initializer_is_field_precise_without_duplicate_flow_event() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["userInput".to_string()];
@@ -1702,6 +1766,8 @@ fn indexed_object_initializer_is_field_precise_without_duplicate_flow_event() {
     let facts = [AssignmentValueFact {
         assignment_span: assign_span,
         target: Some("cmd".to_string()),
+        target_is_immutable: false,
+        target_owner: None,
         target_span: Some(span(20, 23)),
         value_span: span(26, 60),
         call_sites: Vec::new(),
@@ -1709,10 +1775,12 @@ fn indexed_object_initializer_is_field_precise_without_duplicate_flow_event() {
             aggregate_fields: vec![
                 bonsai_lang_api::ExpressionField {
                     name: "command".to_string(),
+                    value_span: None,
                     value: ExpressionFlow::from_place("userInput"),
                 },
                 bonsai_lang_api::ExpressionField {
                     name: "label".to_string(),
+                    value_span: None,
                     value: ExpressionFlow::default(),
                 },
             ],

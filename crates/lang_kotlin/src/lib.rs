@@ -326,6 +326,7 @@ fn synthesize_kotlin_data_copy_fields(events: &mut Vec<FlowEvent>, type_aliases:
                 );
                 fields.push(bonsai_lang_api::ExpressionField {
                     name: name.clone(),
+                    value_span: Some(arg.span),
                     value,
                 });
             }

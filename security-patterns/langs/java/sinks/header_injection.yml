@@ -17,6 +17,16 @@
   constraints:
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    same_origin_path_constraint:
+      require_scheme_rejection: true
+      require_authority_rejection: true
+      require_absolute_path: true
+      require_scheme_relative_rejection: true
+      sink_argument_index: 1
+      static_context_argument:
+        index: 0
+        accepted_renderings: [HttpHeaders.LOCATION, '"Location"']
   match_examples:
   - name: servlet response header tainted value
     code: |
@@ -174,6 +184,9 @@
   constraints:
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
   match_examples:
   - name: spring httpheaders set tainted value
     code: |
@@ -295,6 +308,16 @@
   constraints:
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    same_origin_path_constraint:
+      require_scheme_rejection: true
+      require_authority_rejection: true
+      require_absolute_path: true
+      require_scheme_relative_rejection: true
+      sink_argument_index: 1
+      static_context_argument:
+        index: 0
+        accepted_renderings: [HttpHeaders.LOCATION, '"Location"']
   match_examples:
   - name: webflux server response tainted header value
     code: |
@@ -343,6 +366,9 @@
   constraints:
   - arg_tainted:
       index: 1
+  analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
   match_examples:
   - name: vertx response tainted header value
     code: |

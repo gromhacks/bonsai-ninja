@@ -11,7 +11,7 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_abstract_interp::{run_entry, RawTrace, TraceLimits};
 use bonsai_cfg::{build_cfg_from_flow, Cfg};
 use bonsai_common::{FileId, FuncId, SymbolId};
-use bonsai_diagnostics::DiagnosticSink;
+use bonsai_diagnostics::{Diagnostic, DiagnosticSink};
 use bonsai_idg::IdgQueryService;
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{AdapterContext, DeclIndex, DynAdapter, ImportIndex, ImportSpec, LanguageRegistry};
@@ -33,6 +33,8 @@ pub use compiler_object::{
     validate_compiler_object_sidecar_metadata_with_source_fingerprints, CompiledFileObject,
     COMPILER_OBJECT_CACHE_VERSION,
 };
+
+type ParserDiagnosticCache = AHashMap<(FileId, u64), Arc<[Diagnostic]>>;
 
 /// Immutable handle shared across threads. Cheap to clone.
 #[derive(Clone)]
@@ -95,6 +97,10 @@ struct DbInner {
     /// lowering inside one generation remains memory-aware and parallel; only
     /// publication of the immutable generation is single-flight.
     compiler_object_generation_build: Mutex<()>,
+    /// Exact parser diagnostics cached by the current VFS snapshot. Parser
+    /// completeness is a syntax concern: it must not force declaration and
+    /// flow lowering for every file after a narrowly planned analysis.
+    parser_diagnostics: RwLock<ParserDiagnosticCache>,
     /// Snapshots whose exact compiler diagnostics have already been checked
     /// and, when non-empty, published into the process sink. Successful files
     /// with zero diagnostics remain in this coverage set so a completion audit
@@ -180,6 +186,7 @@ impl AnalyzerDb {
                 compiler_object_store: RwLock::new(None),
                 compiler_object_store_requires_repair: AtomicBool::new(false),
                 compiler_object_generation_build: Mutex::new(()),
+                parser_diagnostics: RwLock::new(AHashMap::new()),
                 compiler_diagnostics_published: RwLock::new(AHashSet::new()),
                 compiler_diagnostics_gate: Mutex::new(()),
                 idg_service: RwLock::new(None),
@@ -1071,6 +1078,10 @@ impl AnalyzerDb {
         cache.decl_index.retain(|(f, _), _| *f != file);
         cache.import_index.retain(|(f, _), _| *f != file);
         cache.adapter_languages.retain(|(f, _), _| *f != file);
+        self.inner
+            .parser_diagnostics
+            .write()
+            .retain(|(diagnostic_file, _), _| *diagnostic_file != file);
         let _diagnostics_gate = self.inner.compiler_diagnostics_gate.lock();
         self.inner
             .compiler_diagnostics_published

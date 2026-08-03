@@ -17,6 +17,11 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    # Template-source compilation is the semantic boundary. If the exact same
+    # flow is subsequently emitted as raw HTML, retain this SSTI finding and
+    # expose the transport sink as a related location.
+    sink_terminal_priority: 200
   match_examples:
   - name: generated direct match
     code: |

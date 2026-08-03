@@ -1,0 +1,28 @@
+# Non-finding Go framework return types. These rules enrich compiler receiver
+# and value facts; they never emit findings.
+- id: go.typing.http_context_param_string
+  enabled: true
+  language: go
+  returns_type: string
+  packages:
+  - github.com/gin-gonic/gin
+  - github.com/labstack/echo
+  - github.com/kataras/iris/v12
+  - github.com/gobuffalo/buffalo
+  match:
+    kind: call
+    callee:
+      regex: '\.Param$'
+  constraints:
+  - receiver_type_in: [Context, Ctx]
+  match_examples:
+  - name: Gin path parameter returns a string
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context) {
+        id := c.Param("id")
+        _ = id
+      }
+    expect_match_text: [c.Param]
+  description: "Go framework path-parameter accessors return a typed string. Typing-only; never a finding."

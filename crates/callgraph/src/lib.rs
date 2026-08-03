@@ -2332,7 +2332,14 @@ fn resolve_and_emit_call_site(
         );
     }
     if !candidates.is_empty() {
+        // A namespace/package qualifier is syntax ownership, not an instance
+        // argument. Go `extract.UnpackTar(src, base)`, Rust
+        // `store::persist(value)`, and equivalent module calls may be lowered
+        // with a receiver-shaped qualifier by their grammar, but the imported
+        // module does not consume parameter zero. Alias-target evidence is the
+        // compiler distinction; spelling/capitalisation is deliberately not.
         let receiver_supplied = !candidates_from_callable_binding
+            && !alias_qualified_call
             && (semantic_receiver.is_some() || call_kind == CallKind::Method);
         retain_signature_compatible_candidates(
             global,

@@ -257,3 +257,67 @@ def inverted(target):
         );
     }
 }
+
+#[test]
+fn finite_constructor_map_selection_is_a_clean_assignment_fact() {
+    use bonsai_lang_api::LanguageAdapter;
+    use std::sync::Arc;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_python::PythonAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "templates.py",
+            r#"
+TEMPLATES = {"welcome": Template("Hello"), "receipt": Template("Receipt")}
+def choose(name):
+    selected = TEMPLATES.get(name)
+    return selected
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("Python declaration index");
+    let [fact] = index.finite_literal_selections.as_slice() else {
+        panic!(
+            "expected one finite selection: {:#?}",
+            index.finite_literal_selections
+        );
+    };
+    assert_eq!(fact.target.as_deref(), Some("selected"));
+    assert!(fact.assignment_span.is_some());
+}
+
+#[test]
+fn finite_map_selection_respects_scope_shadowing_and_mutation() {
+    for source in [
+        r#"
+def define():
+    choices = {"safe": "literal"}
+    return choices
+def use(name):
+    selected = choices.get(name)
+    return selected
+"#,
+        r#"
+CHOICES = {"safe": "literal"}
+def use(name, CHOICES):
+    selected = CHOICES.get(name)
+    return selected
+"#,
+        r#"
+CHOICES = {"safe": "literal"}
+CHOICES.update(load_dynamic_values())
+def use(name):
+    selected = CHOICES.get(name)
+    return selected
+"#,
+    ] {
+        let lowered = index(source);
+        assert!(
+            lowered.finite_literal_selections.is_empty(),
+            "out-of-scope, shadowed, or mutated maps must not produce clean-selection facts: {:#?}",
+            lowered.finite_literal_selections
+        );
+    }
+}

@@ -115,6 +115,14 @@
     kind: return
     target:
       regex: (?is)^\s*(?:`|'|").*(<!doctype|<html\b|<[a-z][a-z0-9:-]*\b[^>]*>)
+  analysis_semantics:
+    character_escape:
+      required_mappings:
+      - {input: "&", output: "&amp;"}
+      - {input: "<", output: "&lt;"}
+      - {input: ">", output: "&gt;"}
+      - {input: '"', output: "&quot;"}
+      - {input: "'", output: "&#39;"}
   match_examples:
   - name: raw html template return
     code: "function page(q) {\n  return `<!doctype html><h1>${q}</h1>`;\n}\n"

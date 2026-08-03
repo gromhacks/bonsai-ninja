@@ -494,8 +494,12 @@ pub const LANGS: &[LangExp] = &[
         // concrete finding (plus one new decorator chain in
         // advanced_patterns). 59 -> 54 after the same dedup pass removed
         // additional inferred-entry fanout while keeping the represented
-        // sink families unchanged.
-        min_findings_complex: 54,
+        // sink families unchanged. 54 -> 50 after constructor-only path
+        // joins stopped reporting as filesystem sinks and untyped Mako
+        // render calls stopped reporting as template-source execution. The
+        // real downstream path consumers and Mako Template constructor stay
+        // covered by dedicated positive/negative regression tests.
+        min_findings_complex: 50,
         min_complex_decls: 190,
         refs_populated: true,
         has_classes: false,

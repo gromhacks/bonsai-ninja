@@ -15,13 +15,14 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_value_not_aggregate: 0
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    Runtime.getRuntime.exec(input);\n  }\n}\n"
   - name: arg tainted literal negative
     code: "class App {\n  void handle(String input) throws Exception {\n    Runtime.getRuntime.exec(\"safe\");\n  }\n}\n"
     expect_no_match: true
-  description: "Runtime.getRuntime().exec(tainted) - shell-parsed on Unix for String form."
+  description: "Runtime.getRuntime().exec(tainted String) - Java tokenizes the command string without invoking a shell, but attacker control can still replace the executable or argument vector."
 
 - id: java.cmdi.runtime_exec_local
   enabled: true
@@ -41,6 +42,7 @@
     - Runtime
   - arg_tainted:
       index: 0
+  - arg_value_not_aggregate: 0
   match_examples:
   - name: stored Runtime exec
     code: |
@@ -58,7 +60,50 @@
         }
       }
     expect_no_match: true
-  description: "Runtime.exec(tainted) through a typed Runtime receiver - attacker-controlled command execution."
+  description: "Runtime.exec(tainted String) through a typed Runtime receiver - attacker control can replace the executable or whitespace-tokenized arguments; shell metacharacters are interpreted only when the command explicitly launches a shell."
+
+- id: java.cmdi.runtime_exec_array_shell_wrapper
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Runtime, getRuntime, exec]
+  constraints:
+  - arg_tainted: {index: 0}
+  - arg_sequence_items_equal:
+      argument_index: 0
+      items:
+      - index: 0
+        accepted_values:
+        - {kind: string, value: sh}
+        - {kind: string, value: /bin/sh}
+        - {kind: string, value: bash}
+        - {kind: string, value: /bin/bash}
+      - index: 1
+        accepted_values:
+        - {kind: string, value: -c}
+  match_examples:
+  - name: runtime exec array shell wrapper
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Runtime.getRuntime().exec(new String[]{"sh", "-c", input});
+        }
+      }
+    expect_match_text: [Runtime.getRuntime().exec]
+  - name: runtime exec argv without shell negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Runtime.getRuntime().exec(new String[]{"ping", "-c1", input});
+        }
+      }
+    expect_no_match: true
+  description: "Runtime.exec(String[]) with an explicit shell -c prefix interprets the tainted array payload as shell code."
 
 - id: java.cmdi.runtime_exec_string
   enabled: false
@@ -79,7 +124,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    Runtime.exec(input);\n  }\n}\n"
-  description: "Runtime.exec(String) via a stored Runtime reference - shell-parsed."
+  description: "Runtime.exec(String) via a stored Runtime reference; the string is tokenized into an executable and arguments without an implicit shell."
 - id: java.cmdi.processbuilder_ctor
   enabled: true
   language: java
@@ -148,6 +193,13 @@
       - start
   constraints:
   - receiver_tainted: true
+  analysis_semantics:
+    receiver_configuration_guard:
+      required_calls:
+      - call: {name: command}
+        required_arguments:
+        - index: 0
+          require_static_value: true
   match_examples:
   - name: processbuilder command then start
     code: |
@@ -193,6 +245,40 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    ProcessBuilder.command(\"/bin/echo\");\n  }\n}\n"
     expect_no_match: true
   description: "ProcessBuilder.command(tainted) - replaces the command list with attacker-controlled executable tokens."
+- id: java.cmdi.processbuilder_command_shell_wrapper
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [ProcessBuilder, command]
+  constraints:
+  - arg_matches_regex: {index: 0, regex: '^"(?:/bin/)?(?:sh|bash)"$'}
+  - arg_equals: {index: 1, value: '"-c"'}
+  - arg_tainted: {index: 2}
+  taint_semantics:
+    taint_receiver_from_args: true
+  match_examples:
+  - name: process builder command shell wrapper
+    code: |
+      class App {
+        void handle(ProcessBuilder pb, String input) {
+          pb.command("sh", "-c", input);
+        }
+      }
+    expect_match_text: [pb.command]
+  - name: process builder argv without shell negative
+    code: |
+      class App {
+        void handle(ProcessBuilder pb, String input) {
+          pb.command("ping", "-c1", input);
+        }
+      }
+    expect_no_match: true
+  description: "ProcessBuilder.command with a shell -c prefix interprets its tainted third argument as shell code."
 - id: java.cmdi.processbuilder_command_local
   enabled: false
   disabled_reason:

@@ -51,6 +51,19 @@
   cwe:
   - CWE-918
   analysis_semantics:
+    url_reconstruction_guard:
+      sink_argument_index: 0
+      parser: {attribute: [url, Parse]}
+      scheme:
+        component: {field: Scheme}
+        allowed_values: [https]
+      host_allowlist:
+        component: {accessor: {name: Hostname}}
+      path_component: {accessor: {name: EscapedPath}}
+      redirect:
+        kind: receiver-field-exact-callback
+        field: CheckRedirect
+        required_return_place: http.ErrUseLastResponse
     url_network_guard:
       root:
         kind: sink-argument-accessor

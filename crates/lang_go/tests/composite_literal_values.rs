@@ -41,6 +41,37 @@ func login(email string, password string) {
 }
 
 #[test]
+fn static_call_argument_is_preserved_without_expression_flow() {
+    let db = db_with(
+        r#"
+package main
+
+func unpack(src any, base string) error { return nil }
+
+func upload(input any) {
+    if err := unpack(input, "/var/data/uploads"); err != nil {
+        return
+    }
+}
+"#,
+    );
+    let file = *db.vfs().all_files().first().expect("fixture file");
+    let index = db.decl_index(file).expect("Go declaration index");
+    let argument = index
+        .call_argument_values
+        .iter()
+        .find(|fact| fact.argument_index == 1)
+        .expect("literal argument compiler fact");
+
+    assert_eq!(
+        argument.static_value,
+        Some(bonsai_lang_api::StaticScalarValue::String(
+            "/var/data/uploads".to_string()
+        ))
+    );
+}
+
+#[test]
 fn url_guard_syntax_emits_membership_static_map_and_exact_callback_return() {
     use bonsai_lang_api::ConditionExpressionFact;
 

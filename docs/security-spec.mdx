@@ -147,6 +147,22 @@ API calls. Keep those as local pattern findings; source-to-sink rules for
 injection, path, command, queue, header, XSS, and prototype-pollution data
 sinks should name the vulnerable tainted operand explicitly.
 
+Classify the actual parser boundary. For example, explicitly enabling
+`fast-xml-parser` internal/named entity processing is a medium CWE-776
+entity-expansion configuration hazard. It is not CWE-611 evidence that the
+library resolves external `SYSTEM` entities, and a tainted `.parse(...)` call
+alone must remain negative. The JavaScript and TypeScript rules therefore
+require compiler-decoded constructor arguments containing
+`processEntities: true` or `htmlEntities: true`, with explicit `false`
+configurations covered by negative examples.
+
+Do not classify `new XSSFWorkbook(InputStream)` as an Apache POI XXE sink.
+Apache POI's historical CVE-2019-12415 boundary was the versioned
+`XSSFExportToXml` conversion path before 4.1.1, not ordinary workbook
+construction. Java, Kotlin, and Scala keep the legacy constructor-shaped rule
+disabled with this rationale. Archive bombs and duplicate ZIP entries require
+separate version/configuration-aware rules; neither is evidence of CWE-611.
+
 Use `receiver_tainted: true` for receiver-state sinks where the security
 operand is left of the call operator, such as `cmd.!` or
 `target.delegatecall("")`. Use `any_arg_tainted: true` only when every
@@ -320,15 +336,23 @@ adapter IR without hardcoding an API or a language in the engine:
 | Field | Exact proof consumed |
 |---|---|
 | `configured_call_argument_guard` | A complete spread-free aggregate argument whose frontend-decoded scalar fields equal the rule's required values. |
+| `receiver_configuration_guard` / `configured_argument_receiver_guard` | Unconditional calls configure the exact receiver. `identity_argument_indices` selects the configuration facet, so the latest write to that facet wins without confusing another call to the same setter. |
 | `character_constraint` | A constrained alphabet reaches the selected sink value; SQL rules may also require that value to be enclosed by a particular literal delimiter. |
 | `same_origin_path_constraint` | A unique helper rejects URL schemes and authorities, requires `/`, and rejects `//` before returning the path. |
 | `dynamic_key_denylist_guard` | A unique helper drops the rule-owned static key set and, when required, recursively rebuilds nested values. |
 | `url_reconstruction_guard` | A unique helper parses a URL, restricts scheme and host against static facts, and rebuilds the outbound URL from the declared components. |
+| `context_flow.sanitized_rewrite_clears_channel` | A sanitized producer rewrites an implicit channel before its consumer. Straight-line order or a typed non-null branch must prove the replacement, and a later unsanitized write cancels it. |
 | `sink_terminal_priority` | Presentation-only collapse of a lower-priority downstream transport sink in the same vulnerability class when an exact resolved call/assignment chain proves both sites belong to one flow. |
 
 The adapter owns Tree-sitter syntax recognition; the rulepack owns API roles
 and security values; shared analysis only joins those typed facts. Missing,
 ambiguous, mutable, or partially decoded evidence never grants credit.
+
+Call constraints can also require exact positional aggregate values with
+`arg_sequence_items_equal`. The adapter decodes array/list initializer
+elements into `StaticScalarValue` entries; dynamic elements remain explicit
+`None`. This distinguishes direct argv execution from an explicit `sh -c`
+wrapper without parsing source tokens in the matcher.
 
 ## Output formats
 

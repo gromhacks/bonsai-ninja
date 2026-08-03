@@ -1,7 +1,10 @@
-# Go XXE. encoding/xml does NOT resolve external entities by default, so
-# both rules are low-confidence - flag tainted inputs only.
+# Go's encoding/xml decoder does not resolve external entities by default.
+# A decoder becomes security-relevant only when application code installs a
+# CharsetReader that performs remote resolution.
 - id: go.xxe.xml_newdecoder
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: go
   tag: xxe
   severity: medium

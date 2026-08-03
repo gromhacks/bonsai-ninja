@@ -323,8 +323,7 @@
 - id: scala.deser.poi_xssfworkbook_stream
   enabled: false
   disabled_reason:
-    code: subsumed
-    subsumed_by: scala.xxe.apache_poi_xssfworkbook_inputstream
+    code: over-broad
   language: scala
   tag: insecure-deserialization
   severity: high
@@ -345,6 +344,6 @@
       }
       class XSSFWorkbook(args: Any*)
     expect_match_text: [XSSFWorkbook]
-  description: "Disabled - Apache POI XSSFWorkbook is classified as XXE (CWE-611) in xxe.yml, not generic deserialization, to avoid duplicate/wrong-CWE findings."
+  description: "Disabled - XSSFWorkbook(InputStream) is not a generic object-deserialization boundary; archive resource exhaustion requires a separate version/config-aware rule."
   imports:
   - org

@@ -253,7 +253,9 @@
   description: "JAXB Unmarshaller.unmarshal - wraps SAX parser; same XXE rules apply."
 
 - id: scala.xxe.apache_poi_xssfworkbook_inputstream
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: scala
   tag: xxe
   severity: high
@@ -289,4 +291,4 @@
       class InputStream
       class XSSFWorkbook(args: Any*)
     expect_no_match: true
-  description: "Apache POI XSSFWorkbook(InputStream) - parses attacker-controlled Office XML archives through XML parsers; keep XXE and zip-bomb protections enabled."
+  description: "Disabled - XSSFWorkbook(InputStream) is not itself an external-entity boundary. Apache POI's historical XXE affected XSSFExportToXml before 4.1.1; archive resource exhaustion requires a separate, version/config-aware rule."

@@ -122,6 +122,14 @@
   - min_args: 3
   - top_level: true
   - any_arg_tainted: true
+  analysis_semantics:
+    dynamic_key_denylist_guard:
+      collection_constructor: {name: Set}
+      membership_check: {name: has}
+      membership_subject_arg_index: 0
+      collection_values_arg_index: 0
+      rejected_exact_values: ["__proto__", "constructor", "prototype"]
+      sink_key_argument_index: 1
   match_examples:
   - name: lodash named set path
     code: |
@@ -400,6 +408,15 @@
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$"
   constraints:
   - any_arg_tainted: true
+  analysis_semantics:
+    dynamic_key_denylist_guard:
+      collection_constructor: {name: Set}
+      membership_check: {name: has}
+      membership_subject_arg_index: 0
+      collection_values_arg_index: 0
+      rejected_exact_values: ["__proto__", "constructor", "prototype"]
+      require_recursive_filter: true
+      filtered_value_argument_index: 1
   match_examples:
   - name: lodash namespace merge
     code: |

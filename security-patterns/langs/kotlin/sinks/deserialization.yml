@@ -430,8 +430,7 @@
 - id: kotlin.deser.poi_xssfworkbook_stream
   enabled: false
   disabled_reason:
-    code: subsumed
-    subsumed_by: kotlin.xxe.apache_poi_xssfworkbook_inputstream
+    code: over-broad
   language: kotlin
   tag: insecure-deserialization
   severity: high
@@ -452,6 +451,6 @@
       }
       class XSSFWorkbook(vararg args: Any?)
     expect_match_text: [XSSFWorkbook]
-  description: "Disabled - Apache POI XSSFWorkbook is classified as XXE (CWE-611) in xxe.yml, not generic deserialization, to avoid duplicate/wrong-CWE findings."
+  description: "Disabled - XSSFWorkbook(InputStream) is not a generic object-deserialization boundary; archive resource exhaustion requires a separate version/config-aware rule."
   imports:
   - org

@@ -31,7 +31,9 @@
   description: "SAXParser.parse - disable external entities."
 
 - id: java.xxe.saxparserfactory_newinstance
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: java
   tag: xxe
   category: source-independent
@@ -49,7 +51,7 @@
           SAXParserFactory.newInstance(input);
         }
       }
-  description: "SAXParserFactory.newInstance - flag if XMLConstants.FEATURE_SECURE_PROCESSING off."
+  description: "Disabled - SAXParserFactory.newInstance only allocates a factory. Report the tainted parse/unmarshal boundary unless compiler facts prove the complete hardened configuration."
 
 - id: java.xxe.documentbuilder_parse
   enabled: true
@@ -311,6 +313,55 @@
   constraints:
   - arg_tainted:
       index: 0
+  analysis_semantics:
+    configured_argument_receiver_guard:
+      sink_argument_index: 0
+      wrapper_factory:
+        name: SAXSource
+      configured_receiver_argument_index: 0
+      provider_factory:
+        name: newSAXParser
+      required_calls:
+      - call:
+          name: setFeature
+        identity_argument_indices: [0]
+        required_arguments:
+        - index: 0
+          accepted_places: [XMLConstants.FEATURE_SECURE_PROCESSING]
+        - index: 1
+          accepted_static_values: [{kind: boolean, value: true}]
+      - call:
+          name: setFeature
+        identity_argument_indices: [0]
+        required_arguments:
+        - index: 0
+          accepted_static_values:
+          - {kind: string, value: "http://apache.org/xml/features/disallow-doctype-decl"}
+        - index: 1
+          accepted_static_values: [{kind: boolean, value: true}]
+      - call:
+          name: setFeature
+        identity_argument_indices: [0]
+        required_arguments:
+        - index: 0
+          accepted_static_values:
+          - {kind: string, value: "http://xml.org/sax/features/external-general-entities"}
+        - index: 1
+          accepted_static_values: [{kind: boolean, value: false}]
+      - call:
+          name: setFeature
+        identity_argument_indices: [0]
+        required_arguments:
+        - index: 0
+          accepted_static_values:
+          - {kind: string, value: "http://xml.org/sax/features/external-parameter-entities"}
+        - index: 1
+          accepted_static_values: [{kind: boolean, value: false}]
+      - call:
+          name: setXIncludeAware
+        required_arguments:
+        - index: 0
+          accepted_static_values: [{kind: boolean, value: false}]
   match_examples:
   - name: generated shape example
     code: |
@@ -398,7 +449,9 @@
   description: "JDOM2 SAXBuilder.build."
 
 - id: java.xxe.apache_poi_xssfworkbook_inputstream
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: java
   tag: xxe
   severity: high
@@ -434,4 +487,4 @@
         }
       }
     expect_no_match: true
-  description: "Apache POI XSSFWorkbook(InputStream) - parses attacker-controlled Office XML archives through XML parsers; keep XXE and zip-bomb protections enabled."
+  description: "Disabled - XSSFWorkbook(InputStream) is not itself an external-entity boundary. Apache POI's historical XXE affected XSSFExportToXml before 4.1.1; archive resource exhaustion requires a separate, version/config-aware rule."

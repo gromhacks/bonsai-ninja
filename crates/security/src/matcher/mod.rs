@@ -1257,8 +1257,9 @@ where
     // cheap raw anchors before opening import/syntax headers or lowering any
     // body. This is candidate planning only; every surviving rule still goes
     // through exact adapter IR and matcher constraints below.
+    use rayon::prelude::*;
     let raw_scan_files = files
-        .iter()
+        .par_iter()
         .copied()
         .filter(|file| {
             let Some(adapter) = ws.db().adapter_for(*file) else {
@@ -1387,6 +1388,13 @@ where
                     prewarmed_import_contexts: import_contexts,
                     compiler_imports,
                 });
+                // Import/package filtering is monotone: the syntax header can
+                // only reject more rules, never restore one. Do not hash,
+                // decompress, decode, and integrity-check a compiler syntax
+                // payload when no rule survived the cheaper exact header.
+                if rules.is_empty() {
+                    return Some((file, rules, None));
+                }
                 let Some(mut syntax) = ws.db().compiler_syntax_header_uncached(file) else {
                     return Some((file, rules, None));
                 };
@@ -7748,6 +7756,7 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
             | ConstraintKind::MinArgs { .. }
             | ConstraintKind::MaxArgs { .. }
             | ConstraintKind::ArgValueNotAggregate { .. }
+            | ConstraintKind::ArgSequenceItemsEqual { .. }
             | ConstraintKind::SameReceiverCallCountAtLeast { .. }
             | ConstraintKind::ArgLt { .. }
             | ConstraintKind::ArgLe { .. }
@@ -8253,8 +8262,36 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                     *arg_value_not_aggregate as usize,
                 )
                 .is_some_and(|fact| {
-                    !fact.value_flow.aggregate_fields.is_empty() || !fact.value_flow.spreads.is_empty()
+                    !fact.value_flow.aggregate_fields.is_empty()
+                        || !fact.value_flow.tuple_items.is_empty()
+                        || !fact.value_flow.spreads.is_empty()
+                        || fact.exact_static_sequence_values.is_some()
                 }) {
+                    return false;
+                }
+            }
+            ConstraintKind::ArgSequenceItemsEqual {
+                arg_sequence_items_equal,
+            } => {
+                let Some(structural) = ctx.structural_context else {
+                    return false;
+                };
+                let Some(values) = bonsai_lang_api::call_argument_value_fact(
+                    structural.call_argument_values,
+                    ctx.span,
+                    arg_sequence_items_equal.argument_index,
+                )
+                .and_then(|fact| fact.exact_static_sequence_values.as_ref()) else {
+                    return false;
+                };
+                if arg_sequence_items_equal.items.is_empty()
+                    || !arg_sequence_items_equal.items.iter().all(|required| {
+                        values
+                            .get(required.index)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|actual| required.accepted_values.contains(actual))
+                    })
+                {
                     return false;
                 }
             }

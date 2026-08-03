@@ -33,6 +33,7 @@ rayon = { workspace = true }
 lru = { workspace = true }
 
 [dev-dependencies]
+bonsai_testkit = { workspace = true }
 bonsai_lang_python = { workspace = true }
 bonsai_lang_c = { workspace = true }
 bonsai_lang_cpp = { workspace = true }

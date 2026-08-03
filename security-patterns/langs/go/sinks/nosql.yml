@@ -21,6 +21,8 @@
     nosql_filter:
       filter_arg_index: 1
       literal_value_operators: ["$eq"]
+      safe_scalar_compiler_types: [string]
+      safe_scalar_source_rules: [go.gin.context_param]
   match_examples:
   - name: mongo find with bson filter
     code: |

@@ -135,7 +135,8 @@ enum SemanticSliceResult {
     NoTargetNode,
 }
 
-/// Query local backwards slices for `symbol` at `line`.
+/// Query local backwards slices for `symbol`. A zero line requests exact
+/// compiler-fact disambiguation across all matching sites.
 pub fn slices(ws: &Workspace, filters: &SliceFilters<'_>) -> SliceOutcome {
     let mut outcome = SliceOutcome {
         symbol: filters.symbol.to_string(),
@@ -151,14 +152,6 @@ pub fn slices(ws: &Workspace, filters: &SliceFilters<'_>) -> SliceOutcome {
         finalize_outcome(&mut outcome);
         return outcome;
     }
-    if filters.line == 0 {
-        outcome
-            .analysis_incomplete_reasons
-            .push("slice line must be one-based".to_string());
-        finalize_outcome(&mut outcome);
-        return outcome;
-    }
-
     let global = ws.compiler_linkage_index();
     let mut rows = Vec::new();
     for file in global.all_files() {
@@ -176,10 +169,19 @@ pub fn slices(ws: &Workspace, filters: &SliceFilters<'_>) -> SliceOutcome {
             continue;
         };
         for decl in &index.defs {
-            if !is_callable_decl(decl.kind) || !decl_contains_line(ws, decl, filters.line) {
+            if !is_callable_decl(decl.kind) {
                 continue;
             }
-            rows.push(slice_decl(ws, decl, &file_path, filters));
+            if filters.line != 0 {
+                if decl_contains_line(ws, decl, filters.line) {
+                    rows.push(slice_decl(ws, decl, &file_path, filters));
+                }
+                continue;
+            }
+            for line in slice_symbol_candidate_lines(ws, decl, filters.symbol) {
+                let resolved = SliceFilters { line, ..*filters };
+                rows.push(slice_decl(ws, decl, &file_path, &resolved));
+            }
         }
     }
     let matched_candidate_count = rows.len();
@@ -193,7 +195,19 @@ pub fn slices(ws: &Workspace, filters: &SliceFilters<'_>) -> SliceOutcome {
     outcome.candidate_count = matched_candidate_count;
     outcome.slices = rows;
     outcome.slice_count = outcome.slices.len();
-    if outcome.candidate_count == 0 {
+    if filters.line == 0 && outcome.candidate_count == 1 {
+        outcome.line = outcome.slices.first().map_or(0, |slice| slice.target_line);
+    }
+    if outcome.candidate_count == 0 && filters.line == 0 {
+        outcome.analysis_incomplete_reasons.push(format!(
+            "no compiler syntax-flow site matched `{}`{}",
+            filters.symbol,
+            filters
+                .file
+                .map(|file| format!(" in files matching `{file}`"))
+                .unwrap_or_default()
+        ));
+    } else if outcome.candidate_count == 0 {
         outcome.analysis_incomplete_reasons.push(format!(
             "no callable contains line {}{}",
             filters.line,
@@ -201,6 +215,11 @@ pub fn slices(ws: &Workspace, filters: &SliceFilters<'_>) -> SliceOutcome {
                 .file
                 .map(|file| format!(" in files matching `{file}`"))
                 .unwrap_or_default()
+        ));
+    } else if filters.line == 0 && outcome.candidate_count > 1 {
+        outcome.analysis_incomplete_reasons.push(format!(
+            "`{}` matched {} syntax-flow sites; pass --line and optionally --file to narrow",
+            filters.symbol, outcome.candidate_count
         ));
     } else if outcome.candidate_count > 1 && filters.file.is_none() {
         outcome.analysis_incomplete_reasons.push(format!(
@@ -210,6 +229,36 @@ pub fn slices(ws: &Workspace, filters: &SliceFilters<'_>) -> SliceOutcome {
     }
     finalize_outcome(&mut outcome);
     outcome
+}
+
+fn slice_symbol_candidate_lines(ws: &Workspace, decl: &Decl, symbol: &str) -> Vec<u32> {
+    let mut facts = Vec::new();
+    flatten_events(&decl.flow_events, &decl.name, ws, &mut Vec::new(), &mut facts);
+    let mut lines = BTreeSet::new();
+    for fact in facts {
+        if fact.line > 0
+            && (symbol_matches(symbol, &fact.symbol)
+                || fact
+                    .defines
+                    .as_deref()
+                    .is_some_and(|defined| symbol_matches(symbol, defined))
+                || fact.sources.iter().any(|source| symbol_matches(symbol, source)))
+        {
+            lines.insert(fact.line);
+        }
+    }
+    if lines.is_empty()
+        && decl
+            .params
+            .iter()
+            .any(|parameter| symbol_matches(symbol, parameter))
+    {
+        let (_, line, _) = format_span(&decl.name_span, ws);
+        if line > 0 {
+            lines.insert(line);
+        }
+    }
+    lines.into_iter().collect()
 }
 
 fn retain_non_empty_slices_if_any(rows: &mut Vec<SliceRow>) {

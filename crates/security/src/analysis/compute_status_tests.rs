@@ -1358,14 +1358,18 @@ description: Downstream transport.
         },
     );
 
-    let preferred = combined_terminal_finding(
+    let mut preferred = combined_terminal_finding(
         "python.cmdi.project_boundary",
         vec![FuncId::new(1), FuncId::new(2)],
     );
-    let downstream = combined_terminal_finding(
+    preferred.finding.tag = Some("template-injection".to_string());
+    preferred.finding.cwe = vec!["CWE-1336".to_string()];
+    let mut downstream = combined_terminal_finding(
         "python.cmdi.transport",
         vec![FuncId::new(1), FuncId::new(2), FuncId::new(3)],
     );
+    downstream.finding.tag = Some("xss".to_string());
+    downstream.finding.cwe = vec!["CWE-79".to_string()];
     let sibling = combined_terminal_finding("python.cmdi.transport", vec![FuncId::new(1), FuncId::new(4)]);
     let mut findings = vec![preferred, downstream, sibling];
 
@@ -1375,6 +1379,13 @@ description: Downstream transport.
     assert!(findings
         .iter()
         .any(|item| item.finding.sink.rule_id == "python.cmdi.project_boundary"));
+    assert!(findings
+        .iter()
+        .find(|item| item.finding.sink.rule_id == "python.cmdi.project_boundary")
+        .is_some_and(|item| item
+            .additional_sinks
+            .iter()
+            .any(|sink| sink.rule_id == "python.cmdi.transport")));
     assert!(findings.iter().any(|item| {
         item.finding.sink.rule_id == "python.cmdi.transport"
             && item.chain_funcs == vec![FuncId::new(1), FuncId::new(4)]
@@ -1668,6 +1679,15 @@ fn parameter_and_same_origin_sanitizers_credit_contextual_sinks() {
         compute_status(&xpath_chain, Some("xpath-injection")),
         FindingStatus::Sanitized
     );
+}
+
+#[test]
+fn local_trust_severity_is_capped_at_medium() {
+    assert_eq!(cap_local_trust_severity(Severity::Critical), Severity::Medium);
+    assert_eq!(cap_local_trust_severity(Severity::High), Severity::Medium);
+    assert_eq!(cap_local_trust_severity(Severity::Medium), Severity::Medium);
+    assert_eq!(cap_local_trust_severity(Severity::Low), Severity::Low);
+    assert_eq!(cap_local_trust_severity(Severity::Info), Severity::Info);
 }
 
 #[test]

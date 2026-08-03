@@ -6,9 +6,11 @@ use bonsai_lang_api::{
         call_arg_from_node, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
         parse_with, span_of,
     },
-    AdapterContext, AdapterError, ConditionEquality, ConditionExpressionFact, ConditionOperandFact,
-    DeclIndex, ExpressionField, ExpressionFlow, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, CharacterConstraintDomain, CharacterConstraintFact,
+    CharacterConstraintOutput, CompilerGuardFact, ConditionEquality, ConditionExpressionFact,
+    ConditionOperandFact, DeclIndex, ExpressionField, ExpressionFlow, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, StaticScalarValue,
+    StringCompositionFact, StringCompositionPart, TypeAliasBinding, Visibility,
 };
 use tree_sitter::Node;
 use tree_sitter::{Language, Tree};
@@ -65,6 +67,8 @@ type GoRangeLoopAssignments = Vec<(Span, GoRangeAssignments)>;
 type GoRangeAssignmentsByDecl = Vec<(Span, GoRangeLoopAssignments)>;
 type GoIfInitAssignments = Vec<FlowEvent>;
 type GoIfInitAssignmentsByDecl = Vec<(Span, Vec<(Span, GoIfInitAssignments)>)>;
+type GoIndexAssignments = Vec<FlowEvent>;
+type GoIndexAssignmentsByDecl = Vec<(Span, Vec<(Span, GoIndexAssignments)>)>;
 
 fn apply_go_type_declaration_kinds(index: &mut DeclIndex, tree: &Tree, file: FileId) {
     for type_spec in collect_kinds(tree, &["type_spec"]) {
@@ -170,8 +174,12 @@ impl LanguageAdapter for GoAdapter {
             let src = snapshot.text.as_bytes();
             apply_go_type_declaration_kinds(&mut idx, &tree, file);
             populate_go_condition_expressions(&mut idx.branch_conditions, &tree, file, src);
-            populate_go_call_argument_values(&mut idx, &tree, file, src);
+            let index_argument_flows = populate_go_call_argument_values(&mut idx, &tree, file, src);
             populate_go_assignment_values(&mut idx, &tree, file, src);
+            idx.string_compositions = go_string_compositions(&idx, &tree, file, src);
+            idx.character_constraints = go_character_constraints(&idx, &tree, file, src);
+            idx.compiler_guards = go_compiler_guards(&tree, file, src);
+            let return_value_flows = collect_go_return_value_flows(&tree, file, src);
             populate_go_exact_callable_assignments(&mut idx, &tree, file, src);
             // Phase-6 return-type extraction: `func f() T {}` populates
             // `Decl.return_type` for `apply_assign_call_result_types`.
@@ -182,6 +190,7 @@ impl LanguageAdapter for GoAdapter {
             let bases_by_span = collect_go_class_bases(&tree, file, src);
             let range_assignments_by_span = collect_go_range_assignments_by_decl(&tree, file, src);
             let if_init_assignments_by_span = collect_go_if_init_assignments_by_decl(&tree, file, src);
+            let index_assignments_by_span = collect_go_index_assignments_by_decl(&tree, file, src);
             let class_symbols: Vec<(String, SymbolId)> = idx
                 .defs
                 .iter()
@@ -196,6 +205,8 @@ impl LanguageAdapter for GoAdapter {
                 .map(|decl| (decl.name.clone(), decl.symbol))
                 .collect();
             for decl in &mut idx.defs {
+                rewrite_go_index_selection_call_args(&mut decl.flow_events, &index_argument_flows);
+                rewrite_go_return_values(&mut decl.flow_events, &return_value_flows);
                 if let Some(aliases) = aliases_by_span
                     .iter()
                     .find_map(|(span, aliases)| (*span == decl.span).then_some(aliases))
@@ -235,7 +246,28 @@ impl LanguageAdapter for GoAdapter {
                         &decl.type_aliases,
                     );
                 }
+                if let Some(index_assignments) = index_assignments_by_span
+                    .iter()
+                    .find_map(|(span, assignments)| (*span == decl.span).then_some(assignments.as_slice()))
+                {
+                    replace_go_index_selection_assignments(&mut decl.flow_events, index_assignments);
+                }
             }
+            // Go `if init; condition` and range/index rewrites above add exact
+            // call events that the generic first lowering pass cannot see.
+            // Rejoin argument syntax only after those adapter-owned FlowEvents
+            // are final, then attach Go-decoded literals/aggregates. This is a
+            // compiler pass-order dependency, not a source-text fallback.
+            idx.call_argument_values =
+                bonsai_lang_api::kit::extract_call_argument_value_facts(&tree, file, &idx.defs, src);
+            let _ = populate_go_call_argument_values(&mut idx, &tree, file, src);
+            bonsai_lang_api::kit::populate_call_argument_static_values(
+                &mut idx,
+                &tree,
+                file,
+                src,
+                go_static_scalar,
+            );
         }
         // Append `FlowEvent::Lifecycle` for recognised Go
         // resource transitions (`f.Close()`, `mu.Unlock()`,
@@ -269,39 +301,84 @@ impl LanguageAdapter for GoAdapter {
 /// deliberately does not assign semantics to Go's `literal_value` wrapper, so
 /// this adapter pass replaces only those argument facts whose exact CST node
 /// is a Go composite literal.
-fn populate_go_call_argument_values(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
-    let mut composite_literals = std::collections::HashMap::new();
+fn populate_go_call_argument_values(
+    index: &mut DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<Span, ExpressionFlow> {
+    let mut value_nodes = std::collections::HashMap::new();
+    let mut index_flows = std::collections::HashMap::new();
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
-        if node.kind() == "composite_literal" {
+        if matches!(node.kind(), "composite_literal" | "index_expression") {
             let span = span_of(file, &node);
-            composite_literals.insert((span.start, span.end), node);
+            value_nodes.insert((span.start, span.end), node);
+            if let Some(flow) = go_index_selection_value_flow(node, file, src) {
+                index_flows.insert(span, flow);
+            }
         }
         let mut cursor = node.walk();
         stack.extend(node.named_children(&mut cursor));
     }
     for fact in &mut index.call_argument_values {
-        let Some(node) = composite_literals.get(&(fact.argument_span.start, fact.argument_span.end)) else {
+        let Some(node) = value_nodes.get(&(fact.argument_span.start, fact.argument_span.end)) else {
+            continue;
+        };
+        fact.value_flow = lower_go_value_expression(*node, file, src);
+    }
+    index_flows
+}
+
+fn populate_go_assignment_values(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    let value_nodes: std::collections::HashMap<_, _> =
+        collect_kinds(tree, &["composite_literal", "index_expression"])
+            .into_iter()
+            .map(|node| {
+                let span = span_of(file, &node);
+                ((span.start, span.end), node)
+            })
+            .collect();
+    for fact in &mut index.assignment_values {
+        let Some(node) = value_nodes.get(&(fact.value_span.start, fact.value_span.end)) else {
             continue;
         };
         fact.value_flow = lower_go_value_expression(*node, file, src);
     }
 }
 
-fn populate_go_assignment_values(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
-    let composite_literals: std::collections::HashMap<_, _> = collect_kinds(tree, &["composite_literal"])
-        .into_iter()
-        .map(|node| {
-            let span = span_of(file, &node);
-            ((span.start, span.end), node)
-        })
-        .collect();
-    for fact in &mut index.assignment_values {
-        let Some(node) = composite_literals.get(&(fact.value_span.start, fact.value_span.end)) else {
+fn collect_go_return_value_flows(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<Span, ExpressionFlow> {
+    let mut flows = std::collections::HashMap::new();
+    for return_node in collect_kinds(tree, &["return_statement"]) {
+        let Some(values) = return_node.named_child(0) else {
             continue;
         };
-        fact.value_flow = lower_go_value_expression(*node, file, src);
+        let value_flow = if values.kind() == "expression_list" && values.named_child_count() > 1 {
+            let mut tuple_items = Vec::with_capacity(values.named_child_count());
+            let mut cursor = values.walk();
+            for value in values.named_children(&mut cursor) {
+                tuple_items.push(lower_go_value_expression(value, file, src));
+            }
+            ExpressionFlow {
+                tuple_items,
+                ..ExpressionFlow::default()
+            }
+        } else if values.kind() == "expression_list" {
+            values
+                .named_child(0)
+                .map_or_else(ExpressionFlow::default, |value| {
+                    lower_go_value_expression(value, file, src)
+                })
+        } else {
+            lower_go_value_expression(values, file, src)
+        };
+        flows.insert(span_of(file, &return_node), value_flow);
     }
+    flows
 }
 
 /// Lower a keyed Go composite-literal field whose value is an exact
@@ -350,6 +427,8 @@ fn populate_go_exact_callable_assignments(index: &mut DeclIndex, tree: &Tree, fi
         additions.push(bonsai_lang_api::AssignmentValueFact {
             assignment_span: span_of(file, &keyed),
             target: Some(format!("{base}.{field}")),
+            target_is_immutable: false,
+            target_owner: None,
             target_span: Some(span_of(file, &key)),
             value_span: callable_span,
             call_sites: Vec::new(),
@@ -411,7 +490,136 @@ fn lower_go_value_expression(mut node: Node<'_>, file: FileId, src: &[u8]) -> Ex
             lower_go_literal_value(body, file, src)
         });
     }
+    if let Some(flow) = go_index_selection_value_flow(node, file, src) {
+        return flow;
+    }
     bonsai_lang_api::kit::expression_flow_from_node(node, file, src)
+}
+
+/// A dynamic map/array key chooses which stored value is read; the key does
+/// not become the value. Go's comma-ok result is likewise a clean boolean
+/// membership fact. Treating the index operand as scalar value flow invents
+/// an implicit-flow edge and makes static lookup tables appear attacker
+/// controlled.
+fn go_index_selection_value_flow(node: Node<'_>, file: FileId, src: &[u8]) -> Option<ExpressionFlow> {
+    if node.kind() != "index_expression" {
+        return None;
+    }
+    let collection = node
+        .child_by_field_name("operand")
+        .or_else(|| node.named_child(0))?;
+    Some(lower_go_value_expression(collection, file, src))
+}
+
+fn go_expression_flow_source_names(flow: &ExpressionFlow) -> Vec<String> {
+    fn collect(flow: &ExpressionFlow, out: &mut Vec<String>) {
+        if let Some(place) = flow.place.as_ref().filter(|place| !place.trim().is_empty()) {
+            push_unique_string(out, place.clone());
+        }
+        for source in &flow.source_names {
+            push_unique_string(out, source.clone());
+        }
+        for field in &flow.aggregate_fields {
+            collect(&field.value, out);
+        }
+        for item in &flow.tuple_items {
+            collect(item, out);
+        }
+        for spread in &flow.spreads {
+            collect(spread, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    collect(flow, &mut out);
+    out
+}
+
+fn rewrite_go_index_selection_call_args(
+    events: &mut [FlowEvent],
+    flows: &std::collections::HashMap<Span, ExpressionFlow>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call { args, .. } => {
+                for arg in args {
+                    let Some(flow) = flows.get(&arg.span) else {
+                        continue;
+                    };
+                    arg.place = flow.place.clone();
+                    arg.source_names = go_expression_flow_source_names(flow);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_go_index_selection_call_args(then_events, flows);
+                rewrite_go_index_selection_call_args(else_events, flows);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_go_index_selection_call_args(body, flows);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_go_index_selection_call_args(body, flows);
+                rewrite_go_index_selection_call_args(catch_events, flows);
+                rewrite_go_index_selection_call_args(finally_events, flows);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rewrite_go_return_values(
+    events: &mut [FlowEvent],
+    flows: &std::collections::HashMap<Span, ExpressionFlow>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                span,
+                value_name,
+                value_flow,
+                ..
+            } => {
+                let Some(exact) = flows.get(span) else {
+                    continue;
+                };
+                *value_flow = exact.clone();
+                if !exact.tuple_items.is_empty() {
+                    *value_name = None;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_go_return_values(then_events, flows);
+                rewrite_go_return_values(else_events, flows);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_go_return_values(body, flows);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_go_return_values(body, flows);
+                rewrite_go_return_values(catch_events, flows);
+                rewrite_go_return_values(finally_events, flows);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn lower_go_literal_value(node: Node<'_>, file: FileId, src: &[u8]) -> ExpressionFlow {
@@ -432,6 +640,7 @@ fn lower_go_literal_value(node: Node<'_>, file: FileId, src: &[u8]) -> Expressio
             };
             fields.push(ExpressionField {
                 name,
+                value_span: Some(span_of(file, &value)),
                 value: lower_go_value_expression(value, file, src),
             });
         } else {
@@ -590,6 +799,19 @@ fn go_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> ConditionOp
         span: span_of(file, &node),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node(node, file, src),
         static_string: go_static_string_literal(node, src),
+        static_value: go_static_scalar(node, src),
+    }
+}
+
+fn go_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
+    match node.kind() {
+        "true" => Some(StaticScalarValue::Boolean(true)),
+        "false" => Some(StaticScalarValue::Boolean(false)),
+        "nil" => Some(StaticScalarValue::Null),
+        "interpreted_string_literal" | "raw_string_literal" => {
+            Some(StaticScalarValue::String(go_static_string_literal(node, src)?))
+        }
+        _ => None,
     }
 }
 
@@ -609,6 +831,926 @@ fn go_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
             .map(str::to_string),
         _ => None,
     }
+}
+
+/// Lower complete Go string concatenations from Tree-sitter expressions.
+/// Facts are expression-owned so consumers can join both assignment values
+/// and nested call arguments without parsing rendered source.
+fn go_string_compositions(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<StringCompositionFact> {
+    let mut facts = Vec::new();
+    for expression in collect_kinds(tree, &["binary_expression"]) {
+        let mut parts = Vec::new();
+        if !lower_go_string_composition(expression, file, src, &mut parts) || parts.len() < 2 {
+            continue;
+        }
+        let value_span = span_of(file, &expression);
+        let target = index
+            .assignment_values
+            .iter()
+            .find(|assignment| assignment.value_span == value_span)
+            .and_then(|assignment| assignment.target.clone());
+        facts.push(StringCompositionFact {
+            container_span: index
+                .assignment_values
+                .iter()
+                .find(|assignment| assignment.value_span == value_span)
+                .map_or(value_span, |assignment| assignment.assignment_span),
+            value_span,
+            target,
+            parts,
+        });
+    }
+    facts.sort_by_key(|fact| {
+        (
+            fact.container_span.start,
+            fact.container_span.end,
+            fact.value_span.start,
+            fact.value_span.end,
+        )
+    });
+    facts.dedup();
+    facts
+}
+
+fn lower_go_string_composition(
+    mut node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<StringCompositionPart>,
+) -> bool {
+    while matches!(node.kind(), "parenthesized_expression" | "expression_list")
+        && node.named_child_count() == 1
+    {
+        let Some(inner) = node.named_child(0) else {
+            return false;
+        };
+        node = inner;
+    }
+    if let Some(value) = go_static_string_literal(node, src) {
+        out.push(StringCompositionPart::Literal { value });
+        return true;
+    }
+    if node.kind() == "call_expression" {
+        let Some(function) = node.child_by_field_name("function") else {
+            return false;
+        };
+        out.push(StringCompositionPart::Call {
+            span: span_of(file, &function),
+        });
+        return true;
+    }
+    if node.kind() != "binary_expression" {
+        let flow = bonsai_lang_api::kit::expression_flow_from_node(node, file, src);
+        if let Some(place) = flow.place {
+            out.push(StringCompositionPart::Place { place });
+            return true;
+        }
+        return false;
+    }
+    let (Some(left), Some(right)) = (
+        node.child_by_field_name("left"),
+        node.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    go_binary_operator(node, left, right, src) == Some("+")
+        && lower_go_string_composition(left, file, src, out)
+        && lower_go_string_composition(right, file, src, out)
+}
+
+/// Prove the exact `strings.Map` callback shape that replaces every C0/DEL
+/// control character and otherwise preserves its input rune. This is a Go
+/// runtime semantic fact owned by the Go frontend; shared security analysis
+/// sees only the resulting excluded-character domain.
+fn go_character_constraints(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<CharacterConstraintFact> {
+    let imported_strings = parse_imports(tree, src, file)
+        .iter()
+        .any(|import| import.module == "strings" && import.alias.as_deref() == Some("strings"));
+    if !imported_strings {
+        return Vec::new();
+    }
+    let mut facts = Vec::new();
+    for function in collect_kinds(tree, &["function_declaration", "method_declaration"]) {
+        let function_span = span_of(file, &function);
+        let Some(decl) = index.defs.iter().find(|decl| decl.span == function_span) else {
+            continue;
+        };
+        if go_binding_shadows_name(function, "strings", src) {
+            continue;
+        }
+        let Some(body) = function.child_by_field_name("body") else {
+            continue;
+        };
+        let statements = go_block_statements(body);
+        let [return_statement] = statements.as_slice() else {
+            continue;
+        };
+        let Some(call) = go_single_expression(*return_statement) else {
+            continue;
+        };
+        if call.kind() != "call_expression" {
+            continue;
+        }
+        let (Some(callee), Some(arguments)) = (
+            call.child_by_field_name("function"),
+            call.child_by_field_name("arguments"),
+        ) else {
+            continue;
+        };
+        if !go_selector_is(callee, "strings", "Map", src) {
+            continue;
+        }
+        let mut cursor = arguments.walk();
+        let argument_nodes: Vec<_> = arguments.named_children(&mut cursor).collect();
+        let [callback, input] = argument_nodes.as_slice() else {
+            continue;
+        };
+        if input.kind() != "identifier" {
+            continue;
+        }
+        let input_name = node_text(input, src).trim();
+        let Some(input_param_index) = decl.params.iter().position(|parameter| parameter == input_name) else {
+            continue;
+        };
+        if !go_map_callback_replaces_controls(*callback, src) {
+            continue;
+        }
+        facts.push(CharacterConstraintFact {
+            function_span,
+            transform_span: span_of(file, &callee),
+            input_place: input_name.to_string(),
+            input_param_index: Some(input_param_index),
+            output: CharacterConstraintOutput::Return,
+            domain: CharacterConstraintDomain::ExcludesExact {
+                characters: vec!["\r".to_string(), "\n".to_string()],
+            },
+        });
+    }
+    facts.sort_by_key(|fact| (fact.function_span.start, fact.transform_span.start));
+    facts.dedup();
+    facts
+}
+
+const GO_GUARD_JWT_ALGORITHM_PINNED: &str = "callback.algorithm-pinned";
+const GO_GUARD_XML_REMOTE_RESOLUTION_DISABLED: &str = "decoder.remote-resolution-disabled";
+
+fn go_compiler_guards(tree: &Tree, file: FileId, src: &[u8]) -> Vec<CompilerGuardFact> {
+    let imports = parse_imports(tree, src, file);
+    let jwt_aliases = imports
+        .iter()
+        .filter(|import| {
+            import.module == "github.com/golang-jwt/jwt/v5" || import.module == "github.com/golang-jwt/jwt"
+        })
+        .filter_map(|import| import.alias.as_deref())
+        .collect::<Vec<_>>();
+    let xml_aliases = imports
+        .iter()
+        .filter(|import| import.module == "encoding/xml")
+        .filter_map(|import| import.alias.as_deref())
+        .collect::<Vec<_>>();
+    let filepath_aliases = imports
+        .iter()
+        .filter(|import| import.module == "path/filepath")
+        .filter_map(|import| import.alias.as_deref())
+        .collect::<Vec<_>>();
+    let relative_boundary_helpers = go_relative_path_boundary_helpers(tree, file, src, &filepath_aliases);
+    let mut facts = Vec::new();
+    for call in collect_kinds(tree, &["call_expression"]) {
+        let Some(callee) = call.child_by_field_name("function") else {
+            continue;
+        };
+        let guarded_call_span = span_of(file, &callee);
+        if let Some(proof_span) = go_jwt_algorithm_guard(call, &jwt_aliases, file, src) {
+            if let Some(function_span) = go_enclosing_function_span(call, file) {
+                facts.push(CompilerGuardFact {
+                    function_span,
+                    guarded_call_span,
+                    proof_span,
+                    capability: GO_GUARD_JWT_ALGORITHM_PINNED.to_string(),
+                });
+            }
+        }
+        if let Some(proof_span) = go_xml_decoder_guard(tree, call, &xml_aliases, file, src) {
+            if let Some(function_span) = go_enclosing_function_span(call, file) {
+                facts.push(CompilerGuardFact {
+                    function_span,
+                    guarded_call_span,
+                    proof_span,
+                    capability: GO_GUARD_XML_REMOTE_RESOLUTION_DISABLED.to_string(),
+                });
+            }
+        }
+        if let Some(proof_span) = go_relative_path_boundary_helper_call(call, &relative_boundary_helpers, src)
+        {
+            if let Some(function_span) = go_enclosing_function_span(call, file) {
+                facts.push(CompilerGuardFact {
+                    function_span,
+                    guarded_call_span,
+                    proof_span,
+                    capability: bonsai_lang_api::COMPILER_GUARD_RELATIVE_PATH_BOUNDARY_REJECTION.to_string(),
+                });
+            }
+        }
+    }
+    facts.sort_by_key(|fact| {
+        (
+            fact.function_span.start,
+            fact.guarded_call_span.start,
+            fact.capability.clone(),
+        )
+    });
+    facts.dedup();
+    facts
+}
+
+fn go_relative_path_boundary_helpers(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+    filepath_aliases: &[&str],
+) -> Vec<(String, Span)> {
+    let mut helpers = Vec::new();
+    for function in collect_kinds(tree, &["function_declaration"]) {
+        let (Some(name), Some(parameters), Some(result), Some(body)) = (
+            function.child_by_field_name("name"),
+            function.child_by_field_name("parameters"),
+            function.child_by_field_name("result"),
+            function.child_by_field_name("body"),
+        ) else {
+            continue;
+        };
+        if node_text(&result, src).trim() != "bool" {
+            continue;
+        }
+        let parameter_declarations = collect_kinds_under(&parameters, &["parameter_declaration"]);
+        let [parameter] = parameter_declarations.as_slice() else {
+            continue;
+        };
+        let Some(parameter_name) = parameter.child_by_field_name("name") else {
+            continue;
+        };
+        let parameter_name = node_text(&parameter_name, src).trim();
+        let statements = go_block_statements(body);
+        let [statement] = statements.as_slice() else {
+            continue;
+        };
+        let Some(expression) = go_single_expression(*statement) else {
+            continue;
+        };
+        if go_relative_path_boundary_expression(expression, parameter_name, filepath_aliases, src) {
+            helpers.push((node_text(&name, src).trim().to_string(), span_of(file, &function)));
+        }
+    }
+    helpers.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.start.cmp(&right.1.start)));
+    helpers.dedup();
+    helpers
+}
+
+fn go_relative_path_boundary_expression(
+    expression: Node<'_>,
+    parameter: &str,
+    filepath_aliases: &[&str],
+    src: &[u8],
+) -> bool {
+    let (Some(left), Some(right)) = (
+        expression.child_by_field_name("left"),
+        expression.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    if expression.kind() != "binary_expression"
+        || go_binary_operator(expression, left, right, src) != Some("&&")
+    {
+        return false;
+    }
+    (go_relative_path_length_guard(left, parameter, src)
+        && go_relative_path_prefix_equality(right, parameter, filepath_aliases, src))
+        || (go_relative_path_length_guard(right, parameter, src)
+            && go_relative_path_prefix_equality(left, parameter, filepath_aliases, src))
+}
+
+fn go_relative_path_length_guard(expression: Node<'_>, parameter: &str, src: &[u8]) -> bool {
+    let (Some(left), Some(right)) = (
+        expression.child_by_field_name("left"),
+        expression.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    if expression.kind() != "binary_expression"
+        || go_binary_operator(expression, left, right, src) != Some(">=")
+        || node_text(&right, src).trim() != "3"
+        || left.kind() != "call_expression"
+    {
+        return false;
+    }
+    let (Some(function), Some(arguments)) = (
+        left.child_by_field_name("function"),
+        left.child_by_field_name("arguments"),
+    ) else {
+        return false;
+    };
+    let mut cursor = arguments.walk();
+    let args = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+    function.kind() == "identifier"
+        && node_text(&function, src).trim() == "len"
+        && matches!(args.as_slice(), [argument] if argument.kind() == "identifier" && node_text(argument, src).trim() == parameter)
+}
+
+fn go_relative_path_prefix_equality(
+    expression: Node<'_>,
+    parameter: &str,
+    filepath_aliases: &[&str],
+    src: &[u8],
+) -> bool {
+    let (Some(left), Some(right)) = (
+        expression.child_by_field_name("left"),
+        expression.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    if expression.kind() != "binary_expression"
+        || go_binary_operator(expression, left, right, src) != Some("==")
+    {
+        return false;
+    }
+    (go_relative_path_slice_prefix(left, parameter, src)
+        && go_relative_path_boundary_value(right, filepath_aliases, src))
+        || (go_relative_path_slice_prefix(right, parameter, src)
+            && go_relative_path_boundary_value(left, filepath_aliases, src))
+}
+
+fn go_relative_path_slice_prefix(expression: Node<'_>, parameter: &str, src: &[u8]) -> bool {
+    expression.kind() == "slice_expression"
+        && expression
+            .child_by_field_name("operand")
+            .is_some_and(|operand| node_text(&operand, src).trim() == parameter)
+        && expression.child_by_field_name("start").is_none()
+        && expression
+            .child_by_field_name("end")
+            .is_some_and(|end| node_text(&end, src).trim() == "3")
+}
+
+fn go_relative_path_boundary_value(expression: Node<'_>, filepath_aliases: &[&str], src: &[u8]) -> bool {
+    let (Some(left), Some(right)) = (
+        expression.child_by_field_name("left"),
+        expression.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    if expression.kind() != "binary_expression"
+        || go_binary_operator(expression, left, right, src) != Some("+")
+        || go_static_string_literal(left, src).as_deref() != Some("..")
+        || right.kind() != "call_expression"
+    {
+        return false;
+    }
+    let (Some(function), Some(arguments)) = (
+        right.child_by_field_name("function"),
+        right.child_by_field_name("arguments"),
+    ) else {
+        return false;
+    };
+    let mut cursor = arguments.walk();
+    let args = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+    function.kind() == "identifier"
+        && node_text(&function, src).trim() == "string"
+        && matches!(args.as_slice(), [argument] if filepath_aliases.iter().any(|alias| go_selector_is(*argument, alias, "Separator", src)))
+}
+
+fn go_relative_path_boundary_helper_call(
+    call: Node<'_>,
+    helpers: &[(String, Span)],
+    src: &[u8],
+) -> Option<Span> {
+    let (Some(function), Some(arguments)) = (
+        call.child_by_field_name("function"),
+        call.child_by_field_name("arguments"),
+    ) else {
+        return None;
+    };
+    if function.kind() != "identifier" {
+        return None;
+    }
+    let mut cursor = arguments.walk();
+    let args = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+    if !matches!(args.as_slice(), [argument] if argument.kind() == "identifier") {
+        return None;
+    }
+    let name = node_text(&function, src).trim();
+    helpers
+        .iter()
+        .find_map(|(helper, proof_span)| (helper == name).then_some(*proof_span))
+}
+
+fn go_jwt_algorithm_guard(call: Node<'_>, aliases: &[&str], file: FileId, src: &[u8]) -> Option<Span> {
+    let (function, arguments) = (
+        call.child_by_field_name("function")?,
+        call.child_by_field_name("arguments")?,
+    );
+    if !aliases
+        .iter()
+        .any(|alias| go_selector_is(function, alias, "Parse", src))
+    {
+        return None;
+    }
+    let mut cursor = arguments.walk();
+    let args: Vec<_> = arguments.named_children(&mut cursor).collect();
+    let callback = *args.get(1)?;
+    if callback.kind() != "func_literal" {
+        return None;
+    }
+    let params = callback.child_by_field_name("parameters")?;
+    let parameter = collect_kinds_under(&params, &["parameter_declaration"])
+        .into_iter()
+        .next()?
+        .child_by_field_name("name")?;
+    let token = node_text(&parameter, src).trim();
+    let statements = go_block_statements(callback.child_by_field_name("body")?);
+    let [guard, success] = statements.as_slice() else {
+        return None;
+    };
+    if guard.kind() != "if_statement" || guard.child_by_field_name("alternative").is_some() {
+        return None;
+    }
+    let condition = guard.child_by_field_name("condition")?;
+    let (left, right) = (
+        condition.child_by_field_name("left")?,
+        condition.child_by_field_name("right")?,
+    );
+    if condition.kind() != "binary_expression"
+        || go_binary_operator(condition, left, right, src) != Some("!=")
+        || !go_call_is_exact_selector_chain(left, &[token, "Method", "Alg"], src)
+    {
+        return None;
+    }
+    let expected = go_static_string_literal(right, src)?;
+    if expected.is_empty() || expected.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let rejection = go_block_statements(guard.child_by_field_name("consequence")?);
+    let [rejection] = rejection.as_slice() else {
+        return None;
+    };
+    let rejected_values = go_return_values(*rejection)?;
+    if rejected_values.len() < 2 || rejected_values[0].kind() != "nil" || rejected_values[1].kind() == "nil" {
+        return None;
+    }
+    let success_values = go_return_values(*success)?;
+    if success_values.len() < 2 || success_values[0].kind() == "nil" || success_values[1].kind() != "nil" {
+        return None;
+    }
+    Some(span_of(file, guard))
+}
+
+fn go_xml_decoder_guard(
+    tree: &Tree,
+    call: Node<'_>,
+    aliases: &[&str],
+    file: FileId,
+    src: &[u8],
+) -> Option<Span> {
+    let function = call.child_by_field_name("function")?;
+    if !aliases
+        .iter()
+        .any(|alias| go_selector_is(function, alias, "NewDecoder", src))
+    {
+        return None;
+    }
+    let decoder = go_assignment_target_for_expression(call, src)?;
+    let owner = go_enclosing_function_node(call)?;
+    let mut strict_span = None;
+    let mut charset = None;
+    for assignment in collect_kinds_under(&owner, &["assignment_statement"]) {
+        if assignment.start_byte() <= call.end_byte() {
+            continue;
+        }
+        let (Some(left), Some(right)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        let Some(target) = go_single_list_child(left) else {
+            continue;
+        };
+        let Some(value) = go_single_list_child(right) else {
+            continue;
+        };
+        let target_flow = bonsai_lang_api::kit::expression_flow_from_node(target, file, src);
+        match target_flow.place.as_deref() {
+            Some(place) if place == format!("{decoder}.Strict") && value.kind() == "true" => {
+                strict_span = Some(span_of(file, &assignment));
+            }
+            Some(place) if place == format!("{decoder}.CharsetReader") && value.kind() == "func_literal" => {
+                charset = Some((span_of(file, &assignment), value));
+            }
+            _ => {}
+        }
+    }
+    let strict_span = strict_span?;
+    let (charset_span, callback) = charset?;
+    if strict_span.start > charset_span.start
+        || go_charset_callback_is_allowlisted(tree, callback, file, src) != Some(true)
+    {
+        return None;
+    }
+    Some(charset_span)
+}
+
+fn go_charset_callback_is_allowlisted(
+    tree: &Tree,
+    callback: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) -> Option<bool> {
+    let params = callback.child_by_field_name("parameters")?;
+    let names = collect_kinds_under(&params, &["parameter_declaration"])
+        .into_iter()
+        .filter_map(|param| param.child_by_field_name("name"))
+        .map(|name| node_text(&name, src).trim().to_string())
+        .collect::<Vec<_>>();
+    let [charset, input, ..] = names.as_slice() else {
+        return None;
+    };
+    let statements = go_block_statements(callback.child_by_field_name("body")?);
+    let [guard, success] = statements.as_slice() else {
+        return None;
+    };
+    let condition = guard.child_by_field_name("condition")?;
+    let lookup = if condition.kind() == "unary_expression" {
+        let operand = condition
+            .child_by_field_name("operand")
+            .or_else(|| condition.named_child(0))?;
+        let prefix = src
+            .get(condition.start_byte()..operand.start_byte())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::trim);
+        (prefix == Some("!")).then_some(operand)?
+    } else {
+        return None;
+    };
+    if lookup.kind() != "index_expression" {
+        return None;
+    }
+    let collection = lookup.child_by_field_name("operand")?;
+    let key = lookup.child_by_field_name("index")?;
+    if collection.kind() != "identifier"
+        || key.kind() != "identifier"
+        || node_text(&key, src).trim() != charset
+    {
+        return None;
+    }
+    let collection_name = node_text(&collection, src).trim();
+    if !go_static_true_map(tree, collection_name, src) {
+        return None;
+    }
+    let rejection = go_block_statements(guard.child_by_field_name("consequence")?);
+    let [rejection] = rejection.as_slice() else {
+        return None;
+    };
+    let rejected = go_return_values(*rejection)?;
+    if rejected.len() < 2 || rejected[0].kind() != "nil" || rejected[1].kind() == "nil" {
+        return None;
+    }
+    let returned = go_return_values(*success)?;
+    Some(
+        returned.len() >= 2
+            && returned[0].kind() == "identifier"
+            && node_text(&returned[0], src).trim() == input
+            && returned[1].kind() == "nil"
+            && span_of(file, guard).end <= span_of(file, success).start,
+    )
+}
+
+fn go_static_true_map(tree: &Tree, name: &str, src: &[u8]) -> bool {
+    for spec in collect_kinds(tree, &["var_spec"]) {
+        let Some(spec_name) = spec.child_by_field_name("name") else {
+            continue;
+        };
+        if node_text(&spec_name, src).trim() != name {
+            continue;
+        }
+        let Some(value) = spec.child_by_field_name("value").and_then(go_single_list_child) else {
+            continue;
+        };
+        if value.kind() != "composite_literal" {
+            continue;
+        }
+        let entries = collect_kinds_under(&value, &["keyed_element"]);
+        if !entries.is_empty()
+            && entries.iter().all(|entry| {
+                let (Some(key), Some(value)) = (
+                    entry.child_by_field_name("key"),
+                    entry.child_by_field_name("value"),
+                ) else {
+                    return false;
+                };
+                let key = go_unwrap_literal_element(key);
+                let value = go_unwrap_literal_element(value);
+                go_static_string_literal(key, src).is_some() && value.kind() == "true"
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn go_unwrap_literal_element(mut node: Node<'_>) -> Node<'_> {
+    while node.kind() == "literal_element" && node.named_child_count() == 1 {
+        let Some(child) = node.named_child(0) else {
+            break;
+        };
+        node = child;
+    }
+    node
+}
+
+fn go_call_is_exact_selector_chain(call: Node<'_>, expected: &[&str], src: &[u8]) -> bool {
+    let Some(function) = (call.kind() == "call_expression")
+        .then(|| call.child_by_field_name("function"))
+        .flatten()
+    else {
+        return false;
+    };
+    let mut actual = Vec::new();
+    if !go_collect_selector_chain(function, src, &mut actual) {
+        return false;
+    }
+    actual.iter().map(String::as_str).eq(expected.iter().copied())
+}
+
+fn go_collect_selector_chain(node: Node<'_>, src: &[u8], out: &mut Vec<String>) -> bool {
+    match node.kind() {
+        "identifier" => {
+            out.push(node_text(&node, src).trim().to_string());
+            true
+        }
+        "selector_expression" => {
+            let (Some(operand), Some(field)) = (
+                node.child_by_field_name("operand"),
+                node.child_by_field_name("field"),
+            ) else {
+                return false;
+            };
+            if !go_collect_selector_chain(operand, src, out) || field.kind() != "field_identifier" {
+                return false;
+            }
+            out.push(node_text(&field, src).trim().to_string());
+            true
+        }
+        _ => false,
+    }
+}
+
+fn go_enclosing_function_node(mut node: Node<'_>) -> Option<Node<'_>> {
+    while let Some(parent) = node.parent() {
+        if matches!(
+            parent.kind(),
+            "function_declaration" | "method_declaration" | "func_literal"
+        ) {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
+}
+
+fn go_enclosing_function_span(node: Node<'_>, file: FileId) -> Option<Span> {
+    Some(span_of(file, &go_enclosing_function_node(node)?))
+}
+
+fn go_assignment_target_for_expression(mut node: Node<'_>, src: &[u8]) -> Option<String> {
+    while let Some(parent) = node.parent() {
+        if matches!(parent.kind(), "short_var_declaration" | "assignment_statement") {
+            let left = parent.child_by_field_name("left")?;
+            let target = go_single_list_child(left)?;
+            return (target.kind() == "identifier").then(|| node_text(&target, src).trim().to_string());
+        }
+        if matches!(
+            parent.kind(),
+            "function_declaration" | "method_declaration" | "func_literal"
+        ) {
+            return None;
+        }
+        node = parent;
+    }
+    None
+}
+
+fn go_single_list_child(node: Node<'_>) -> Option<Node<'_>> {
+    if matches!(node.kind(), "expression_list" | "identifier_list") {
+        (node.named_child_count() == 1)
+            .then(|| node.named_child(0))
+            .flatten()
+    } else {
+        Some(node)
+    }
+}
+
+fn go_return_values(statement: Node<'_>) -> Option<Vec<Node<'_>>> {
+    if statement.kind() != "return_statement" {
+        return None;
+    }
+    let expression = statement.named_child(0)?;
+    if expression.kind() == "expression_list" {
+        let mut cursor = expression.walk();
+        Some(expression.named_children(&mut cursor).collect())
+    } else {
+        Some(vec![expression])
+    }
+}
+
+fn go_map_callback_replaces_controls(callback: Node<'_>, src: &[u8]) -> bool {
+    if callback.kind() != "func_literal" {
+        return false;
+    }
+    let (Some(parameters), Some(body)) = (
+        callback.child_by_field_name("parameters"),
+        callback.child_by_field_name("body"),
+    ) else {
+        return false;
+    };
+    let parameter_declarations = collect_kinds_under(&parameters, &["parameter_declaration"]);
+    let [parameter] = parameter_declarations.as_slice() else {
+        return false;
+    };
+    let Some(name) = parameter.child_by_field_name("name") else {
+        return false;
+    };
+    let rune = node_text(&name, src).trim();
+    let statements = go_block_statements(body);
+    let [guard, fallback] = statements.as_slice() else {
+        return false;
+    };
+    if guard.kind() != "if_statement" || guard.child_by_field_name("alternative").is_some() {
+        return false;
+    }
+    let (Some(condition), Some(consequence)) = (
+        guard.child_by_field_name("condition"),
+        guard.child_by_field_name("consequence"),
+    ) else {
+        return false;
+    };
+    if !go_eval_rune_predicate(condition, rune, 10, src) || !go_eval_rune_predicate(condition, rune, 13, src)
+    {
+        return false;
+    }
+    let replacement_statements = go_block_statements(consequence);
+    let [replacement_return] = replacement_statements.as_slice() else {
+        return false;
+    };
+    let Some(replacement) = go_single_expression(*replacement_return) else {
+        return false;
+    };
+    let Some(replacement_value) = go_static_rune(replacement, src) else {
+        return false;
+    };
+    replacement_value != '\r'
+        && replacement_value != '\n'
+        && go_single_expression(*fallback)
+            .is_some_and(|value| value.kind() == "identifier" && node_text(&value, src).trim() == rune)
+}
+
+fn go_block_statements(block: Node<'_>) -> Vec<Node<'_>> {
+    let list = if block.kind() == "statement_list" {
+        block
+    } else {
+        let mut cursor = block.walk();
+        let Some(list) = block
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "statement_list")
+        else {
+            return Vec::new();
+        };
+        list
+    };
+    let mut cursor = list.walk();
+    list.named_children(&mut cursor).collect()
+}
+
+fn go_single_expression(statement: Node<'_>) -> Option<Node<'_>> {
+    if statement.kind() != "return_statement" {
+        return None;
+    }
+    let mut expression = statement.named_child(0)?;
+    while expression.kind() == "expression_list" && expression.named_child_count() == 1 {
+        expression = expression.named_child(0)?;
+    }
+    Some(expression)
+}
+
+fn go_selector_is(node: Node<'_>, receiver: &str, field: &str, src: &[u8]) -> bool {
+    node.kind() == "selector_expression"
+        && node
+            .child_by_field_name("operand")
+            .is_some_and(|operand| node_text(&operand, src).trim() == receiver)
+        && node
+            .child_by_field_name("field")
+            .is_some_and(|name| node_text(&name, src).trim() == field)
+}
+
+fn go_binding_shadows_name(function: Node<'_>, expected: &str, src: &[u8]) -> bool {
+    collect_kinds_under(
+        &function,
+        &["parameter_declaration", "short_var_declaration", "var_spec"],
+    )
+    .into_iter()
+    .any(|binding| {
+        binding
+            .child_by_field_name("name")
+            .is_some_and(|name| node_text(&name, src).trim() == expected)
+            || binding.kind() == "short_var_declaration"
+                && binding.named_child(0).is_some_and(|left| {
+                    collect_kinds_under(&left, &["identifier"])
+                        .iter()
+                        .any(|name| node_text(name, src).trim() == expected)
+                })
+    })
+}
+
+fn go_eval_rune_predicate(node: Node<'_>, rune: &str, value: i64, src: &[u8]) -> bool {
+    if node.kind() == "parenthesized_expression" && node.named_child_count() == 1 {
+        return node
+            .named_child(0)
+            .is_some_and(|inner| go_eval_rune_predicate(inner, rune, value, src));
+    }
+    if node.kind() != "binary_expression" {
+        return false;
+    }
+    let (Some(left), Some(right)) = (
+        node.child_by_field_name("left"),
+        node.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    match go_binary_operator(node, left, right, src) {
+        Some("||") => {
+            go_eval_rune_predicate(left, rune, value, src) || go_eval_rune_predicate(right, rune, value, src)
+        }
+        Some("&&") => {
+            go_eval_rune_predicate(left, rune, value, src) && go_eval_rune_predicate(right, rune, value, src)
+        }
+        Some(operator @ ("<" | "<=" | ">" | ">=" | "==" | "!=")) => {
+            let Some(left) = go_rune_operand(left, rune, value, src) else {
+                return false;
+            };
+            let Some(right) = go_rune_operand(right, rune, value, src) else {
+                return false;
+            };
+            match operator {
+                "<" => left < right,
+                "<=" => left <= right,
+                ">" => left > right,
+                ">=" => left >= right,
+                "==" => left == right,
+                "!=" => left != right,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn go_binary_operator<'a>(
+    _node: Node<'_>,
+    left: Node<'_>,
+    right: Node<'_>,
+    src: &'a [u8],
+) -> Option<&'a str> {
+    src.get(left.end_byte()..right.start_byte())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim)
+}
+
+fn go_rune_operand(node: Node<'_>, rune: &str, value: i64, src: &[u8]) -> Option<i64> {
+    if node.kind() == "identifier" && node_text(&node, src).trim() == rune {
+        return Some(value);
+    }
+    let text = node_text(&node, src).trim().replace('_', "");
+    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        i64::from_str_radix(hex, 16).ok()
+    } else {
+        text.parse().ok()
+    }
+}
+
+fn go_static_rune(node: Node<'_>, src: &[u8]) -> Option<char> {
+    let text = node_text(&node, src).trim();
+    let inner = text.strip_prefix('\'')?.strip_suffix('\'')?;
+    let mut chars = inner.chars();
+    let value = chars.next()?;
+    chars.next().is_none().then_some(value)
 }
 
 /// Parse `import` declarations into `ImportSpec` records.
@@ -670,11 +1812,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             } else {
                 // Unaliased: synthesize the Go-implicit binding from
                 // the path tail.
-                module
-                    .rsplit('/')
-                    .next()
-                    .filter(|path_tail| !path_tail.is_empty())
-                    .map(str::to_string)
+                go_default_import_binding(&module)
             };
             imports.push(ImportSpec {
                 span: span_of(file, &spec),
@@ -687,6 +1825,30 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         }
     }
     imports
+}
+
+fn go_default_import_binding(module: &str) -> Option<String> {
+    let mut components = module.rsplit('/');
+    let tail = components.next()?.trim();
+    if tail.is_empty() {
+        return None;
+    }
+    // Semantic import versioning appends `/vN` (N >= 2) without changing
+    // the package declaration's default identifier. `…/jwt/v5` therefore
+    // binds `jwt`, not `v5`, unless the source supplies an explicit alias.
+    let version_suffix = tail
+        .strip_prefix('v')
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|digits| digits.parse::<u64>().ok())
+        .is_some_and(|version| version >= 2);
+    if version_suffix {
+        components
+            .next()
+            .filter(|component| !component.is_empty())
+            .map(str::to_string)
+    } else {
+        Some(tail.to_string())
+    }
 }
 
 /// Walk the subtree rooted at `root` and return every named descendant
@@ -839,6 +2001,42 @@ fn collect_go_if_init_assignments_by_decl(
         }
         if !init_assignments.is_empty() {
             out.push((span_of(file, &fn_node), init_assignments));
+        }
+    }
+    out
+}
+
+/// Collect assignments whose exact Go CST reads through an index expression.
+///
+/// The generic expression walker conservatively sees both `table` and `key` in
+/// `table[key]`. Go's runtime semantics are sharper: the key selects a stored
+/// value but is not part of that value. Replace the generic events from these
+/// exact syntax nodes so the shared engine receives the compiler fact instead
+/// of trying to recover language semantics from tokens.
+fn collect_go_index_assignments_by_decl(tree: &Tree, file: FileId, src: &[u8]) -> GoIndexAssignmentsByDecl {
+    let mut out = Vec::new();
+    for fn_node in collect_kinds(
+        tree,
+        &["function_declaration", "method_declaration", "func_literal"],
+    ) {
+        let mut assignments = Vec::new();
+        for assignment in collect_kinds_under(&fn_node, &["short_var_declaration", "assignment_statement"]) {
+            let Some(right) = assignment.child_by_field_name("right") else {
+                continue;
+            };
+            if !go_expression_list_values(right)
+                .iter()
+                .any(|value| go_index_selection_value_flow(*value, file, src).is_some())
+            {
+                continue;
+            }
+            let events = go_initializer_assignment_events(assignment, file, src);
+            if !events.is_empty() {
+                assignments.push((span_of(file, &assignment), events));
+            }
+        }
+        if !assignments.is_empty() {
+            out.push((span_of(file, &fn_node), assignments));
         }
     }
     out
@@ -1025,7 +2223,23 @@ fn go_initializer_assignment_events(init: Node<'_>, file: FileId, src: &[u8]) ->
         };
         let call = go_call_expression_parts(rhs, src);
         let (source_name, source_call, source_call_args, source_names, value_kind) =
-            if let Some((callee, args)) = call.clone() {
+            if let Some(flow) = go_index_selection_value_flow(rhs, file, src) {
+                // `value, ok := table[key]`: only the selected value inherits
+                // the table's stored-value provenance. `ok` is a membership
+                // boolean and neither result inherits the selector key.
+                let source_names = if idx == 0 {
+                    go_expression_flow_source_names(&flow)
+                } else {
+                    Vec::new()
+                };
+                (
+                    None,
+                    None,
+                    Vec::new(),
+                    source_names,
+                    Some(bonsai_lang_api::AssignValueKind::Compound),
+                )
+            } else if let Some((callee, args)) = call.clone() {
                 (
                     None,
                     Some(callee),
@@ -1217,6 +2431,61 @@ fn augment_go_if_init_assignments(
                     event
                 }));
             }
+        }
+        rewritten.push(event);
+    }
+    *events = rewritten;
+}
+
+fn replace_go_index_selection_assignments(
+    events: &mut Vec<FlowEvent>,
+    index_assignments: &[(Span, GoIndexAssignments)],
+) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                replace_go_index_selection_assignments(then_events, index_assignments);
+                replace_go_index_selection_assignments(else_events, index_assignments);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                replace_go_index_selection_assignments(body, index_assignments);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                replace_go_index_selection_assignments(body, index_assignments);
+                replace_go_index_selection_assignments(catch_events, index_assignments);
+                replace_go_index_selection_assignments(finally_events, index_assignments);
+            }
+            _ => {}
+        }
+    }
+
+    let mut replaced = std::collections::HashSet::new();
+    let mut rewritten = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        let replacement = match &event {
+            FlowEvent::Assign { span, .. } => index_assignments
+                .iter()
+                .find_map(|(assignment_span, exact)| (assignment_span == span).then_some(exact)),
+            _ => None,
+        };
+        if let Some(exact) = replacement {
+            let span = match &event {
+                FlowEvent::Assign { span, .. } => *span,
+                _ => unreachable!("replacement is only selected for assignments"),
+            };
+            if replaced.insert(span) {
+                rewritten.extend(exact.iter().cloned());
+            }
+            continue;
         }
         rewritten.push(event);
     }

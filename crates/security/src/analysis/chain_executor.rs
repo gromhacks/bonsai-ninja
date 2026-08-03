@@ -373,7 +373,8 @@ impl SourceGroupExecutor<'_> {
             );
             return false;
         }
-        if prototype_pollution_sink_is_guarded(self.ws, sink_rule, sink, call) {
+        if prototype_pollution_sink_is_guarded(self.ws, self.chain_call_graph.as_ref(), sink_rule, sink, call)
+        {
             bonsai_diagnostics::debug_log!(
                 "security-taint",
                 "sink_match_guarded source_rule={} sink_rule={} caller={} call={} span={:?}",
@@ -641,6 +642,7 @@ impl SourceGroupExecutor<'_> {
                             san_by_func,
                             ws,
                             global: self.global,
+                            call_graph: self.chain_call_graph.as_ref(),
                             tainted_call_spans: &tainted_call_spans,
                             sink_tainted_args: evidence.sink_tainted_args.clone(),
                             taint_path,

@@ -343,11 +343,15 @@
   - CWE-943
   - CWE-94
   analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
     context_flow:
       channel: logging.mdc
       role: producer
       value_label: MDC context
       parameter_name: mdc
+      rewrite_source_rule_ids: [java.source.slf4j_mdc_get]
+      sanitized_rewrite_clears_channel: true
   match:
     kind: call
     callee:
@@ -404,6 +408,8 @@
   - org.slf4j
   - org.apache.logging.log4j
   analysis_semantics:
+    character_constraint:
+      required_excluded_characters: ["\r", "\n"]
     context_flow:
       channel: logging.mdc
       role: consumer

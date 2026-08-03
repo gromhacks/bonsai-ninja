@@ -240,21 +240,23 @@ class and verify each box.
       scheduling budget; it never times out or truncates analysis.
 - [ ] **Broad matcher scheduling has no artificial barriers.** Raw source
       ingestion uses memory-weighted parallel read windows but publishes VFS
-      entries in canonical order. Body matching sizes one continuous worker
-      pool against the largest actual source units that can overlap. Memory
-      changes concurrency and window size only, never files, rules, or facts.
+      entries in canonical order. Raw rule-anchor planning uses the bounded
+      worker pool and preserves that order; it must not rescan every file/rule
+      pair on one thread. Body matching sizes one continuous worker pool
+      against the largest actual source units that can overlap. Memory changes
+      concurrency and window size only, never files, rules, or facts.
 - [ ] **Cold security planning stays staged.** A fresh-cache production scan
       applies raw/import/syntax-target filters before receiver ancestry,
       requests ancestry only for typed method candidates it can change, and
-      reuses exact zero-or-more diagnostic coverage in the completion audit.
-      On the reference Elasticsearch checkout, compare against the recorded
-      2026-07-31 baseline (29.58 s, 708 MB peak RSS, 3 GiB scheduling budget)
-      and investigate material regressions rather than loosening the gate.
-      The same checkout's warm `security sinks --severity high --context 4k`
-      baseline is about 26.8 s command time / 27.0 s process wall time, 1.55 GiB
-      maximum RSS, 11,209 exact results, under the same 3 GiB budget. Its
-      emitted JSON SHA-256 is
-      `e41c820a82bfe0b60e6473e3680755a319567ad42272e416c06f238082d8b04c`.
+      reuses exact parser coverage in the completion audit. Unchecked files
+      receive a Tree-sitter diagnostic pass only; declarations and flow bodies
+      are not lowered for `analysis_complete`. On the reference Elasticsearch
+      checkout, compare against the recorded 2026-08-02 fresh-cache baseline
+      (16.09 s, 3 GiB scheduling budget) and investigate material regressions
+      rather than loosening the gate. The same checkout's exhaustive
+      `security sinks --severity high --context 4k` baseline is 20.81 s command
+      time / 21.90 s process wall time, 2.29 GB maximum RSS, and 8,125 exact
+      results under the same budget.
 - [ ] **Large native export gate passes when relevant.** Export the complete
       sibling Elasticsearch checkout under a recorded scheduling budget,
       validate with `jq --stream`, and record bytes, wall time, physical

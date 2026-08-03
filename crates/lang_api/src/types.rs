@@ -363,6 +363,11 @@ impl ExpressionProjection {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpressionField {
     pub name: String,
+    /// Exact parsed value-expression for this field. Frontends preserve this
+    /// span so consumers can join nested aggregate flow to other typed facts
+    /// without recovering field boundaries from rendered source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_span: Option<Span>,
     pub value: ExpressionFlow,
 }
 
@@ -404,10 +409,10 @@ pub enum FlowEvent {
     },
     Branch {
         span: Span,
-        /// Normalized source text of the branch condition when the
-        /// adapter can identify one. This is intentionally textual:
-        /// consumers only use it for small, language-neutral facts
-        /// such as `flag`, `!flag`, `flag == 0`, or literal booleans.
+        /// Normalized source text retained for diagnostics and rendering.
+        /// Semantic consumers use the adapter-lowered
+        /// [`BranchConditionFact`] for this span and must not parse this
+        /// string to recover language operators or runtime meaning.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2075,6 +2080,15 @@ pub struct AssignmentValueFact {
     /// unset; their individual flow bindings remain in [`FlowEvent::Assign`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// The owning language frontend proved that this assignment initializes
+    /// an immutable binding/field. Consumers may use this to carry exact
+    /// constructor state across declarations without guessing modifiers.
+    #[serde(default)]
+    pub target_is_immutable: bool,
+    /// Declaration that owns an immutable target when the frontend can bind
+    /// it exactly (for example the containing class of a final field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_owner: Option<SymbolId>,
     /// Exact parsed target/pattern node, when the grammar exposes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_span: Option<Span>,
@@ -2175,18 +2189,24 @@ pub struct StringCompositionFact {
     pub parts: Vec<StringCompositionPart>,
 }
 
-/// An assignment whose result is selected exclusively from a finite,
-/// compiler-proven literal map.
+/// A value selected exclusively from a finite, compiler-proven literal map.
 ///
 /// The dynamic key controls *which* literal is chosen but never becomes part
 /// of the selected value. Language frontends prove their own map declaration
 /// and lookup syntax; shared flow/security code consumes only this semantic
-/// fact.
+/// fact. A selection is attached either to its owning assignment or to the
+/// exact call argument that consumes it directly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FiniteLiteralSelectionFact {
     pub selection_span: Span,
-    pub assignment_span: Span,
-    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_span: Option<Span>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_span: Option<Span>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_index: Option<usize>,
 }
 
 /// Domain on which a character-substitution helper applies its static map.
@@ -2208,6 +2228,14 @@ pub struct CharacterSubstitutionFact {
     pub function_span: Span,
     pub transform_span: Span,
     pub input_param_index: usize,
+    /// Exact substitutions decoded directly from the transform expression.
+    /// This is used for chained language-native replacements where no
+    /// separately named lookup table exists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exact_mappings: Vec<StaticStringMapEntry>,
+    /// Optional name of a complete static lookup table. Older adapter shapes
+    /// use this instead of `exact_mappings`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub table: String,
     pub domain: CharacterSubstitutionDomain,
 }
@@ -2239,8 +2267,14 @@ pub enum CharacterConstraintDomain {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CharacterConstraintOutput {
-    Assignment { target: String },
+    Assignment {
+        target: String,
+    },
     Return,
+    /// One exact transform expression used directly as a call argument.
+    Expression {
+        span: Span,
+    },
 }
 
 /// A complete Tree-sitter/runtime proof that one value has a constrained
@@ -2270,6 +2304,20 @@ pub struct SameOriginPathConstraintFact {
     pub rejects_scheme_relative_path: bool,
 }
 
+/// One complete language/runtime guard proven by an adapter from its parsed
+/// syntax. The capability is semantic (for example an algorithm-pinned
+/// callback), never an API spelling. Rule-selected consumers may attach the
+/// proof only to the exact guarded call in the owning function.
+pub const COMPILER_GUARD_RELATIVE_PATH_BOUNDARY_REJECTION: &str = "path.relative-boundary-rejection";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerGuardFact {
+    pub function_span: Span,
+    pub guarded_call_span: Span,
+    pub proof_span: Span,
+    pub capability: String,
+}
+
 /// Exact summary of a local helper that drops a finite set of dynamic keys
 /// before reconstructing an object. The adapter proves loop/control/write
 /// ordering and whether nested values pass through the same helper.
@@ -2278,6 +2326,11 @@ pub struct DynamicKeyFilterFact {
     pub function_span: Span,
     pub guard_span: Span,
     pub input_param_index: usize,
+    /// Exact filtered value produced by the helper. Recursive object filters
+    /// name their reconstructed object; property-path filters name the
+    /// segment array proven safe by the dominating guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_place: Option<String>,
     /// Constructor that owns the exact static denylist. The adapter records
     /// syntax identity only; the rulepack decides whether that constructor is
     /// meaningful for a particular sink.
@@ -2338,7 +2391,7 @@ pub enum ConditionEquality {
 
 /// One operand in a compiler-lowered branch expression.
 ///
-/// `static_string` is populated only when the language adapter can decode the
+/// Static values are populated only when the language adapter can decode the
 /// complete literal without approximation. Dynamic/interpolated/escaped
 /// forms remain `None`, preserving soundness for exact guard proofs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2348,6 +2401,8 @@ pub struct ConditionOperandFact {
     pub value_flow: ExpressionFlow,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_string: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_value: Option<StaticScalarValue>,
 }
 
 /// Typed boolean expression for one parsed branch condition.
@@ -2509,6 +2564,12 @@ pub struct CallArgumentValueFact {
     /// come from Tree-sitter nodes; consumers must not parse `value_text`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exact_static_aggregate_fields: Vec<StaticAggregateFieldValue>,
+    /// Complete positional aggregate lowered by the owning grammar. Each
+    /// element is `Some` only when the adapter decoded an exact scalar;
+    /// dynamic elements remain `None`. The outer option distinguishes a
+    /// proven sequence from an expression that is not a sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_static_sequence_values: Option<Vec<Option<StaticScalarValue>>>,
 }
 
 /// One exact field in a compiler-lowered aggregate call argument.
@@ -2570,9 +2631,9 @@ pub fn assignment_value_fact_for_span(
 
 /// Locate a compiler-proven finite-literal selection for one assignment.
 ///
-/// Frontends sort these facts by assignment span, so graph lowering can
-/// preserve linear transfer complexity without scanning every selection for
-/// every assignment in a large function.
+/// Frontends sort these facts by their owning assignment/call span, so graph
+/// lowering can preserve linear transfer complexity without scanning every
+/// selection for every assignment in a large function.
 #[must_use]
 pub fn finite_literal_selection_for_assignment(
     facts: &[FiniteLiteralSelectionFact],
@@ -2580,10 +2641,16 @@ pub fn finite_literal_selection_for_assignment(
 ) -> Option<&FiniteLiteralSelectionFact> {
     let key = |span: Span| (span.file.raw(), span.start, span.end);
     let wanted = key(assignment_span);
-    let index = facts.partition_point(|fact| key(fact.assignment_span) < wanted);
+    let index = facts.partition_point(|fact| {
+        key(fact
+            .assignment_span
+            .or(fact.call_span)
+            .unwrap_or(fact.selection_span))
+            < wanted
+    });
     facts
         .get(index)
-        .filter(|fact| fact.assignment_span == assignment_span)
+        .filter(|fact| fact.assignment_span == Some(assignment_span))
 }
 
 /// Render the exact RHS expression for one assignment from a sorted syntax
@@ -2709,6 +2776,9 @@ pub struct DeclIndex {
     /// Exact same-origin path summaries lowered by the owning frontend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub same_origin_path_constraints: Vec<SameOriginPathConstraintFact>,
+    /// Complete runtime guard capabilities lowered by the owning frontend.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compiler_guards: Vec<CompilerGuardFact>,
     /// Exact local dynamic-key filter summaries lowered by the frontend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dynamic_key_filters: Vec<DynamicKeyFilterFact>,
@@ -3330,6 +3400,7 @@ mod compiler_attribution_tests {
                     source_names: vec!["repo".to_string()],
                     aggregate_fields: vec![ExpressionField {
                         name: "nested".to_string(),
+                        value_span: None,
                         value: ExpressionFlow::from_place("nested.value"),
                     }],
                     ..ExpressionFlow::default()

@@ -127,12 +127,20 @@ remains the canonical source when a surviving file needs matching, transfer,
 or rendered evidence; this is one compiler IR with staged decoding, not a
 second parser.
 
-Compiler diagnostics also carry per-source-snapshot coverage. A successful
-file with zero diagnostics is recorded just as deliberately as a file with an
-ERROR/MISSING node. A later completeness audit compiles only unchecked source
-snapshots, while an edit invalidates both the marker and that file's diagnostic
-rows. This prevents a broad command from repeating the same Tree-sitter and
-adapter pass merely to prove that an already-lowered file was clean.
+Parser diagnostics carry per-source-snapshot coverage. A successful file with
+zero diagnostics is recorded just as deliberately as a file with an
+ERROR/MISSING node. A later completeness audit runs Tree-sitter only for
+unchecked snapshots and retains just their syntax diagnostics; it never lowers
+declarations, imports, or flow bodies merely to compute `analysis_complete`.
+An edit invalidates that parser coverage and the file's compiler diagnostic
+rows. A deliberately requested full `diagnostics` inventory may still stream
+compiler objects because it reports adapter/lowering diagnostics as well.
+
+Raw-anchor rule planning is also parallel but bounded by the shared compiler
+worker schedule. Each worker reads one immutable VFS snapshot and the compiled
+rule plan; candidate collection preserves canonical file order. This is a
+planning optimization only: import/package headers, exact syntax targets, and
+canonical body matching still decide the result set.
 
 Object identity is the workspace-relative path/module context, selected
 adapter, explicit frontend ABI, and SHA-256 of the complete source. A
@@ -255,8 +263,13 @@ Commands request the lowest compiler product that can answer their contract:
 A lazy workspace-wide cache must be initialized before entering a Rayon
 file loop or outside that loop entirely. Constructing it from a worker can
 deadlock a saturated pool and makes every worker wait for work that requires
-the same pool. `syntax_inventory_commands_never_materialize_workspace_bodies`,
+the same pool. Security's serial source/sink planner therefore builds one
+exact resolved callgraph and passes an immutable reference through every
+finding, guard-summary, and recursive helper-attribution worker. Those workers
+must never call `cached_resolved_call_graph()` themselves.
+`syntax_inventory_commands_never_materialize_workspace_bodies`,
 `inspect_taint_flow_uses_workspace_syntax_flow_query_facade`, and
+`security_finding_workers_reuse_the_planners_resolved_callgraph`, and
 `idg_taint_queries_reuse_canonical_linkage_without_global_body_materialization`
 in the architecture conformance suite enforce these boundaries.
 
@@ -485,12 +498,14 @@ evidence for the call site. It never fabricates a callee node for the
 external API.
 
 `slice` is the backwards-slice counterpart for "what influences this
-symbol at this line?" It consumes the shared value-flow/IDG graph when a
+symbol?" It identifies exact adapter-emitted symbol sites first and infers the
+line when one site survives; ambiguous sites require explicit `--line` and
+optionally `--file`. It consumes the shared value-flow/IDG graph when a
 semantic sidecar has been hydrated, then merges adapter-emitted
 `FlowEvent` facts for local syntax detail: assignments, call arguments,
 returns, structured branches/loops, and lifecycle/use-site events. It does
 not parse raw source or invent missing edges; unavailable semantic graphs,
-parameter boundaries, and caller caps are reported through
+parameter boundaries, and unresolved caller boundaries are reported through
 `analysis_incomplete_reasons`, and rows expose their `backends` so users
 can see whether evidence came from `value-flow`, `flow-events`, or both.
 
@@ -505,6 +520,11 @@ syntax-derived operation vocabulary instead of re-parsing source text.
 Exact branch-condition boundaries and negation polarity live beside those
 events as `BranchConditionFact` compiler IR and are included in native export;
 semantic guard proofs consume that fact rather than branch rendering.
+Condition operands additionally carry adapter-decoded `StaticScalarValue`
+facts, including null and booleans, so control-dependent proofs never infer
+literal meaning from rendered condition text. Broad duplicate projections
+(such as a loop-binding assignment that shares the complete loop span) cannot
+terminate a control-path walk before the tighter structured sibling.
 
 `dump-resolution` audits the same layer without adding a second resolver:
 it compares adapter-emitted `FlowEvent::Call` sites with the canonical

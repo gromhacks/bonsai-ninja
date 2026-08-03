@@ -44,16 +44,16 @@ Call {
   receiver: Option<String>,   // explicit `obj.foo()` receiver text
   receiver_types: Vec<String>,// static types of `receiver`, post-kit pass
   call_kind: CallKind,        // Function | Method | Constructor | Macro | Operator | Indirect | ChannelSend
-  args: Vec<CallArg>,         // positional arguments, `text` always set
+  args: Vec<CallArg>,         // parsed positional/named argument facts
 }
 ```
 
 Adapter obligations:
 
-- `name` is the **callee short name** (`run`, not `self.run` and not
-  `app.Repo.run`). Method dispatch is recoverable from
-  `(receiver, receiver_types, name)`; mixing qualified syntax into
-  `name` breaks cross-language symbol resolution.
+- `name` is the adapter-normalized callee spelling. Adapters may retain a
+  qualified grammar spelling when it carries real module or receiver syntax;
+  the resolver derives its canonical short-name variants centrally without
+  reparsing source text.
 - `receiver` is set for `obj.foo()` / `obj->foo()` / `obj:foo()` /
   `obj::foo()` / `obj#foo()`. Implicit-receiver bare calls
   (`self.foo()` written as `foo()`) leave `receiver` as `None`; the
@@ -67,17 +67,18 @@ Adapter obligations:
   `new Foo(...)` / `Foo::new(...)` / `Foo()` (Python `__init__` is
   matched by `effective_constructor_method_names()`, not by name in
   the engine).
-- `args[i].text` is the verbatim caller-side source for that positional
-  argument. Keyword / named arguments are flattened to text and not
-  retained as a separate map; analyses that need keyword semantics
-  read the source text via `Span`.
+- `args[i].value_text` is retained for rendering only. `name` preserves an
+  adapter-decoded keyword name, while `place`, `source_names`,
+  `passing_mode`, and the file's `CallArgumentValueFact` table carry semantic
+  value shape. Shared analysis must never recover argument semantics by
+  tokenizing `value_text` or slicing the source with `Span`.
 
 ### `Branch`
 
 ```text
 Branch {
   span,
-  condition: Option<String>,   // condition source text, language-neutral form
+  condition: Option<String>,   // diagnostic rendering only
   then_events: Vec<FlowEvent>,
   else_events: Vec<FlowEvent>, // empty when source has no else arm
 }
@@ -85,10 +86,10 @@ Branch {
 
 Adapter obligations:
 
-- `condition` is the **adapter-normalized** condition text. The engine
-  uses it for path-sensitive narrowing of dead arms
-  (`if False: sink(tainted)` → drop the body). It is not a parsed
-  AST node — `!x` and `not x` are both acceptable surface forms.
+- `condition` is adapter-normalized diagnostic text. Engines must not parse
+  it. The adapter's sibling `BranchConditionFact` owns semantic polarity and
+  its optional typed `ConditionExpressionFact` tree owns boolean, equality,
+  membership, type-test, and exact scalar facts derived from Tree-sitter.
 - `then_events` / `else_events` must be **non-overlapping** even when
   the grammar emits a single flat block. The kit helper
   `repair_branch_events_by_else_keyword` partitions on the literal
@@ -111,7 +112,8 @@ Loop {
 Adapter obligations:
 
 - `body` contains the loop-body events. A bare `for x in xs: F(x)`
-  produces `Loop { body: [Call { name: "F", args: [{ text: "x" }] }] }`
+  produces `Loop { body: [Call { name: "F", args: [{ value_text: "x",
+  place: Some("x"), source_names: ["x"] }] }] }`
   with no Assign for the iteration binding — the engine resolves `x`
   through the function's parameter list / scope chain (the loop
   binding is part of the surrounding `Decl::params` for some grammars,
@@ -140,7 +142,8 @@ Adapter obligations:
 - For a **simple rename** (`y = x`): set `source_name`, leave
   `source_call` and `source_names` empty.
 - For a **direct call**  (`y = f(x)` / `y = obj.f(x)`): set
-  `source_call` to the callee short name and `source_call_args` to the
+  `source_call` to the adapter-normalized callee spelling and
+  `source_call_args` to the
   per-positional arg texts; `source_name` and `source_names` stay
   empty. Identifier sigils retained by the concrete grammar (`$x`,
   `@x`, `%x`) are canonicalized before argument-carrier pruning, so a
@@ -401,7 +404,7 @@ Assign {
 ```text
 Branch {
   condition: Some("x"),
-  then_events: [Call { name: "F", args: [{ text: "t" }] }],
+  then_events: [Call { name: "F", args: [{ value_text: "t", place: Some("t"), source_names: ["t"] }] }],
   else_events: [],
 }
 ```
@@ -410,7 +413,7 @@ Branch {
 
 ```text
 Try {
-  body: [Call { name: "F", args: [{ text: "t" }] }],
+  body: [Call { name: "F", args: [{ value_text: "t", place: Some("t"), source_names: ["t"] }] }],
   catch_events: [...],
   finally_events: [],
   catch_param: Some("e"),
@@ -425,8 +428,9 @@ These are universal — every adapter, every language, every variant.
 1. **Spans are byte-offset, source-relative.** A span pointing into a
    re-written buffer or a macro-expansion buffer breaks trace
    rendering and call-site reporting.
-2. **Names are short, not qualified.** `Decl::qualified_name` exists
-   precisely so `FlowEvent::Call.name` doesn't need to.
+2. **Names preserve adapter-normalized syntax.** Canonical short-name and
+   qualified-name variants are a resolver concern; shared consumers do not
+   tokenize the rendered call spelling.
 3. **Empty fields use empty collections, not synthetic placeholders.**
    `Branch { else_events: [] }` is the right shape for a no-else
    branch; `Branch { else_events: [Call { name: "<noop>", ... }] }` is

@@ -8,11 +8,13 @@ use bonsai_lang_api::{
         collect_kinds, language_from_pack, node_text, package_module_segments_with_workspace_prefix,
         parse_with, span_of, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, AssignValueKind, ConditionEquality, ConditionExpressionFact,
-    ConditionOperandFact, DeclIndex, DeclKind, FileSnapshot, FiniteLiteralSelectionFact, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ParseRecoveryEdit, StaticScalarValue, StringCompositionFact, StringCompositionPart, SyntaxTree,
-    TypeAliasBinding, Vfs, Visibility,
+    AdapterContext, AdapterError, AssignValueKind, CharacterConstraintDomain, CharacterConstraintFact,
+    CharacterConstraintOutput, CharacterSubstitutionDomain, CharacterSubstitutionFact, ConditionEquality,
+    ConditionExpressionFact, ConditionOperandFact, DeclIndex, DeclKind, FileSnapshot,
+    FiniteLiteralSelectionFact, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
+    LanguageAdapter, LanguageCapabilities, LanguageId, ParseRecoveryEdit, SameOriginPathConstraintFact,
+    StaticScalarValue, StringCompositionFact, StringCompositionPart, SyntaxTree, TypeAliasBinding, Vfs,
+    Visibility,
 };
 use parse_recovery::java_parse_recovery_edits;
 use tree_sitter::{Language, Node, Tree};
@@ -160,8 +162,21 @@ impl LanguageAdapter for JavaAdapter {
         let src = snapshot.text.as_bytes();
         populate_java_condition_expressions(&mut index.branch_conditions, &tree, file, src);
         populate_java_static_scalar_facts(&mut index, &tree, file, src);
+        populate_java_immutable_assignment_facts(&mut index, &tree, file, src);
         index.string_compositions = java_string_compositions(&tree, file, src);
         index.finite_literal_selections = java_finite_literal_selections(&index, &tree, file, src);
+        index.character_substitutions = java_character_substitutions(&index.defs, &tree, file, src);
+        index.character_constraints = java_character_constraints(&index.defs, &index.character_substitutions);
+        index.same_origin_path_constraints = java_same_origin_path_constraints(&index, &tree, file, src);
+        index
+            .character_constraints
+            .extend(java_compiled_pattern_constraints(&index, &tree, file, src));
+        index
+            .character_constraints
+            .sort_by_key(|fact| (fact.transform_span.start, fact.transform_span.end));
+        index
+            .character_constraints
+            .dedup_by_key(|fact| fact.transform_span);
         // Phase-6 return-type extraction: `T method() {}` populates
         // `Decl.return_type` for `apply_assign_call_result_types`.
         bonsai_lang_api::populate_decl_return_types(&mut index, &tree, src, &HANDLER);
@@ -288,6 +303,733 @@ impl LanguageAdapter for JavaAdapter {
     }
 }
 
+fn populate_java_immutable_assignment_facts(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    for field in collect_kinds(tree, &["field_declaration"]) {
+        if !java_declaration_has_final_modifier(field) {
+            continue;
+        }
+        let field_span = span_of(file, &field);
+        let owner = index
+            .defs
+            .iter()
+            .filter(|decl| {
+                is_class_like(decl.kind)
+                    && decl.span.start <= field_span.start
+                    && field_span.end <= decl.span.end
+            })
+            .min_by_key(|decl| decl.span.len())
+            .map(|decl| decl.symbol);
+        for declarator in java_collect_kinds_below(field, &["variable_declarator"]) {
+            let (Some(name), Some(value)) = (
+                declarator.child_by_field_name("name"),
+                declarator.child_by_field_name("value"),
+            ) else {
+                continue;
+            };
+            let name_span = span_of(file, &name);
+            let name_text = node_text(&name, src);
+            let value_span = span_of(file, &value);
+            if let Some(fact) = index.assignment_values.iter_mut().find(|fact| {
+                fact.target_span == Some(name_span)
+                    || (fact.value_span == value_span && fact.target.as_deref() == Some(name_text.trim()))
+            }) {
+                fact.target_is_immutable = true;
+                fact.target_owner = owner;
+            }
+        }
+    }
+}
+
+fn java_same_origin_path_constraints(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<SameOriginPathConstraintFact> {
+    let mut facts = Vec::new();
+    for method in collect_kinds(tree, &["method_declaration"]) {
+        let method_span = span_of(file, &method);
+        let Some(decl) = index.defs.iter().find(|decl| decl.span == method_span) else {
+            continue;
+        };
+        let Some(body) = method.child_by_field_name("body") else {
+            continue;
+        };
+        let mut cursor = body.walk();
+        let statements = body.named_children(&mut cursor).collect::<Vec<_>>();
+        let [guard, final_return] = statements.as_slice() else {
+            continue;
+        };
+        if guard.kind() != "if_statement"
+            || guard.child_by_field_name("alternative").is_some()
+            || final_return.kind() != "return_statement"
+        {
+            continue;
+        }
+        let (Some(condition), Some(consequence), Some(return_value)) = (
+            guard.child_by_field_name("condition"),
+            guard.child_by_field_name("consequence"),
+            final_return.named_child(0),
+        ) else {
+            continue;
+        };
+        let fallback_returns = java_collect_kinds_below(consequence, &["return_statement"]);
+        let [fallback_return] = fallback_returns.as_slice() else {
+            continue;
+        };
+        if fallback_return
+            .named_child(0)
+            .and_then(|value| java_static_string_literal(value, src))
+            .as_deref()
+            != Some("/")
+        {
+            continue;
+        }
+        for (input_param_index, parameter) in decl.params.iter().enumerate() {
+            if return_value.kind() != "identifier" || node_text(&return_value, src).trim() != parameter {
+                continue;
+            }
+            let mut terms = Vec::new();
+            java_collect_logical_terms(condition, "||", src, &mut terms);
+            let requires_absolute_path = terms
+                .iter()
+                .any(|term| java_starts_with_literal(*term, parameter, "/", true, src));
+            let rejects_scheme_relative_path = terms
+                .iter()
+                .any(|term| java_starts_with_literal(*term, parameter, "//", false, src));
+            if requires_absolute_path && rejects_scheme_relative_path {
+                facts.push(SameOriginPathConstraintFact {
+                    function_span: decl.span,
+                    guard_span: span_of(file, guard),
+                    input_param_index,
+                    rejects_scheme: true,
+                    rejects_authority: true,
+                    requires_absolute_path,
+                    rejects_scheme_relative_path,
+                });
+            }
+        }
+    }
+    facts.sort_by_key(|fact| (fact.function_span.start, fact.guard_span.start));
+    facts.dedup();
+    facts
+}
+
+fn java_collect_kinds_below<'tree>(root: Node<'tree>, kinds: &[&str]) -> Vec<Node<'tree>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if kinds.contains(&node.kind()) {
+            out.push(node);
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    out
+}
+
+fn java_collect_logical_terms<'tree>(
+    expression: Node<'tree>,
+    operator: &str,
+    src: &[u8],
+    out: &mut Vec<Node<'tree>>,
+) {
+    let expression = java_unwrap_parenthesized(expression);
+    let operands = (
+        expression.child_by_field_name("left"),
+        expression.child_by_field_name("right"),
+    );
+    if expression.kind() == "binary_expression"
+        && operands.0.zip(operands.1).is_some_and(|(left, right)| {
+            src.get(left.end_byte()..right.start_byte())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .is_some_and(|value| value.trim() == operator)
+        })
+    {
+        let (Some(left), Some(right)) = operands else {
+            return;
+        };
+        java_collect_logical_terms(left, operator, src, out);
+        java_collect_logical_terms(right, operator, src, out);
+    } else {
+        out.push(expression);
+    }
+}
+
+fn java_unwrap_parenthesized(mut expression: Node<'_>) -> Node<'_> {
+    while expression.kind() == "parenthesized_expression" && expression.named_child_count() == 1 {
+        let Some(inner) = expression.named_child(0) else {
+            break;
+        };
+        expression = inner;
+    }
+    expression
+}
+
+fn java_starts_with_literal(
+    expression: Node<'_>,
+    receiver: &str,
+    literal: &str,
+    negated: bool,
+    src: &[u8],
+) -> bool {
+    let expression = java_unwrap_parenthesized(expression);
+    let call = if negated {
+        if expression.kind() != "unary_expression" {
+            return false;
+        }
+        let Some(operand) = expression
+            .child_by_field_name("operand")
+            .or_else(|| expression.named_child(0))
+        else {
+            return false;
+        };
+        if src
+            .get(expression.start_byte()..operand.start_byte())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .is_none_or(|prefix| prefix.trim() != "!")
+        {
+            return false;
+        }
+        java_unwrap_parenthesized(operand)
+    } else {
+        expression
+    };
+    if call.kind() != "method_invocation"
+        || call
+            .child_by_field_name("object")
+            .is_none_or(|object| object.kind() != "identifier" || node_text(&object, src).trim() != receiver)
+        || call
+            .child_by_field_name("name")
+            .is_none_or(|name| node_text(&name, src).trim() != "startsWith")
+    {
+        return false;
+    }
+    let Some(arguments) = call.child_by_field_name("arguments") else {
+        return false;
+    };
+    let mut cursor = arguments.walk();
+    let values = arguments.named_children(&mut cursor).collect::<Vec<_>>();
+    let [value] = values.as_slice() else {
+        return false;
+    };
+    java_static_string_literal(*value, src).as_deref() == Some(literal)
+}
+
+fn java_character_substitutions(
+    defs: &[bonsai_lang_api::Decl],
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<CharacterSubstitutionFact> {
+    let mut facts = Vec::new();
+    for return_node in collect_kinds(tree, &["return_statement"]) {
+        let return_span = span_of(file, &return_node);
+        let Some(decl) = defs
+            .iter()
+            .filter(|decl| {
+                matches!(decl.kind, DeclKind::Method | DeclKind::Constructor)
+                    && decl.span.start <= return_span.start
+                    && return_span.end <= decl.span.end
+            })
+            .min_by_key(|decl| decl.span.len())
+        else {
+            continue;
+        };
+        let Some(expression) = return_node.named_child(0) else {
+            continue;
+        };
+        let Some((input_param_index, exact_mappings, characters)) =
+            java_inline_replace_chain(expression, &decl.params, src)
+        else {
+            continue;
+        };
+        facts.push(CharacterSubstitutionFact {
+            function_span: decl.span,
+            transform_span: return_span,
+            input_param_index,
+            exact_mappings,
+            table: String::new(),
+            domain: CharacterSubstitutionDomain::ExactCharacters { characters },
+        });
+    }
+    for method in collect_kinds(tree, &["method_declaration"]) {
+        let method_span = span_of(file, &method);
+        let Some(decl) = defs.iter().find(|decl| decl.span == method_span) else {
+            continue;
+        };
+        let Some((input_param_index, transform_span, exact_mappings)) =
+            java_switch_character_substitution(method, decl, file, src)
+        else {
+            continue;
+        };
+        facts.push(CharacterSubstitutionFact {
+            function_span: decl.span,
+            transform_span,
+            input_param_index,
+            exact_mappings,
+            table: String::new(),
+            domain: CharacterSubstitutionDomain::TableKeysWithIdentityFallback,
+        });
+    }
+    facts.sort_by_key(|fact| (fact.function_span.start, fact.transform_span.start));
+    facts.dedup();
+    facts
+}
+
+/// Prove a total character-wise `StringBuilder` transform implemented as an
+/// enhanced-for loop and switch. Every explicit case must append one static
+/// replacement and terminate; the default must append the original loop
+/// variable. The exact AST contract prevents partial switch bodies or hidden
+/// side effects from being summarized as sanitizers.
+fn java_switch_character_substitution(
+    method: Node<'_>,
+    decl: &bonsai_lang_api::Decl,
+    file: FileId,
+    src: &[u8],
+) -> Option<(
+    usize,
+    bonsai_common::Span,
+    Vec<bonsai_lang_api::StaticStringMapEntry>,
+)> {
+    let body = method.child_by_field_name("body")?;
+    let statements = body.named_children(&mut body.walk()).collect::<Vec<_>>();
+    let [builder_decl, loop_node, return_node] = statements.as_slice() else {
+        return None;
+    };
+    if builder_decl.kind() != "local_variable_declaration"
+        || loop_node.kind() != "enhanced_for_statement"
+        || return_node.kind() != "return_statement"
+    {
+        return None;
+    }
+    let declarators = builder_decl
+        .named_children(&mut builder_decl.walk())
+        .filter(|node| node.kind() == "variable_declarator")
+        .collect::<Vec<_>>();
+    let [declarator] = declarators.as_slice() else {
+        return None;
+    };
+    let builder = declarator.child_by_field_name("name")?;
+    let initializer = declarator.child_by_field_name("value")?;
+    if builder.kind() != "identifier" || initializer.kind() != "object_creation_expression" {
+        return None;
+    }
+    let builder = node_text(&builder, src).trim();
+    let builder_type = initializer.child_by_field_name("type")?;
+    if node_text(&builder_type, src).trim() != "StringBuilder" {
+        return None;
+    }
+
+    let loop_variable = loop_node.child_by_field_name("name")?;
+    let iterated = loop_node.child_by_field_name("value")?;
+    let loop_body = loop_node.child_by_field_name("body")?;
+    if loop_variable.kind() != "identifier" || iterated.kind() != "method_invocation" {
+        return None;
+    }
+    let loop_variable = node_text(&loop_variable, src).trim();
+    let iterated_object = iterated.child_by_field_name("object")?;
+    let iterated_method = iterated.child_by_field_name("name")?;
+    let input = node_text(&iterated_object, src).trim();
+    if iterated_object.kind() != "identifier"
+        || node_text(&iterated_method, src).trim() != "toCharArray"
+        || iterated
+            .child_by_field_name("arguments")
+            .is_none_or(|args| args.named_child_count() != 0)
+    {
+        return None;
+    }
+    let input_param_index = decl.params.iter().position(|parameter| parameter == input)?;
+    let switches = java_collect_kinds_below(loop_body, &["switch_expression"]);
+    let [switch_node] = switches.as_slice() else {
+        return None;
+    };
+    let condition = switch_node.child_by_field_name("condition")?;
+    if node_text(&condition, src)
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim()
+        != loop_variable
+    {
+        return None;
+    }
+    let switch_body = switch_node.child_by_field_name("body")?;
+    let groups = switch_body
+        .named_children(&mut switch_body.walk())
+        .collect::<Vec<_>>();
+    if groups.is_empty() {
+        return None;
+    }
+    let mut mappings = Vec::new();
+    let mut saw_identity_default = false;
+    for group in groups {
+        if group.kind() != "switch_block_statement_group" {
+            return None;
+        }
+        let children = group.named_children(&mut group.walk()).collect::<Vec<_>>();
+        let label = children
+            .first()
+            .copied()
+            .filter(|node| node.kind() == "switch_label")?;
+        let invocations = java_collect_kinds_below(group, &["method_invocation"]);
+        let [append] = invocations.as_slice() else {
+            return None;
+        };
+        let append_object = append.child_by_field_name("object")?;
+        let append_name = append.child_by_field_name("name")?;
+        let append_args = append.child_by_field_name("arguments")?;
+        let values = append_args
+            .named_children(&mut append_args.walk())
+            .collect::<Vec<_>>();
+        let [value] = values.as_slice() else {
+            return None;
+        };
+        if node_text(&append_object, src).trim() != builder || node_text(&append_name, src).trim() != "append"
+        {
+            return None;
+        }
+        let label_values = label.named_children(&mut label.walk()).collect::<Vec<_>>();
+        if label_values.is_empty() {
+            if saw_identity_default
+                || value.kind() != "identifier"
+                || node_text(value, src).trim() != loop_variable
+                || children.len() != 2
+            {
+                return None;
+            }
+            saw_identity_default = true;
+            continue;
+        }
+        let [label_value] = label_values.as_slice() else {
+            return None;
+        };
+        let input = java_static_string_or_character(*label_value, src)?;
+        let output = java_static_string_literal(*value, src)?;
+        if input.chars().count() != 1
+            || children.len() != 3
+            || children
+                .last()
+                .is_none_or(|node| node.kind() != "break_statement")
+            || mappings
+                .iter()
+                .any(|entry: &bonsai_lang_api::StaticStringMapEntry| entry.key == input)
+        {
+            return None;
+        }
+        mappings.push(bonsai_lang_api::StaticStringMapEntry {
+            key: input,
+            value: output,
+        });
+    }
+    if !saw_identity_default || mappings.is_empty() {
+        return None;
+    }
+    let returned = return_node.named_child(0)?;
+    if returned.kind() != "method_invocation"
+        || returned
+            .child_by_field_name("object")
+            .is_none_or(|object| node_text(&object, src).trim() != builder)
+        || returned
+            .child_by_field_name("name")
+            .is_none_or(|name| node_text(&name, src).trim() != "toString")
+        || returned
+            .child_by_field_name("arguments")
+            .is_none_or(|args| args.named_child_count() != 0)
+    {
+        return None;
+    }
+    mappings.sort_by(|left, right| left.key.cmp(&right.key));
+    Some((input_param_index, span_of(file, switch_node), mappings))
+}
+
+fn java_character_constraints(
+    defs: &[bonsai_lang_api::Decl],
+    substitutions: &[CharacterSubstitutionFact],
+) -> Vec<CharacterConstraintFact> {
+    substitutions
+        .iter()
+        .filter_map(|fact| {
+            let decl = defs.iter().find(|decl| decl.span == fact.function_span)?;
+            let input_place = decl.params.get(fact.input_param_index)?.clone();
+            let mut characters = fact
+                .exact_mappings
+                .iter()
+                .filter(|mapping| !mapping.value.contains(&mapping.key))
+                .map(|mapping| mapping.key.clone())
+                .collect::<Vec<_>>();
+            characters.sort();
+            characters.dedup();
+            (!characters.is_empty()).then_some(CharacterConstraintFact {
+                function_span: fact.function_span,
+                transform_span: fact.transform_span,
+                input_place,
+                input_param_index: Some(fact.input_param_index),
+                output: CharacterConstraintOutput::Return,
+                domain: CharacterConstraintDomain::ExcludesExact { characters },
+            })
+        })
+        .collect()
+}
+
+fn java_inline_replace_chain(
+    expression: Node<'_>,
+    params: &[String],
+    src: &[u8],
+) -> Option<(usize, Vec<bonsai_lang_api::StaticStringMapEntry>, Vec<String>)> {
+    let mut current = expression;
+    let mut mappings = Vec::new();
+    let mut characters = Vec::new();
+    while current.kind() == "method_invocation" {
+        let method = current.child_by_field_name("name")?;
+        let method = node_text(&method, src).trim();
+        if !matches!(method, "replace" | "replaceAll") {
+            break;
+        }
+        let arguments = current.child_by_field_name("arguments")?;
+        let args = arguments
+            .named_children(&mut arguments.walk())
+            .collect::<Vec<_>>();
+        let [pattern, replacement] = args.as_slice() else {
+            return None;
+        };
+        let output = java_static_string_or_character(*replacement, src)?;
+        let replaced = if method == "replace" {
+            let value = java_static_string_or_character(*pattern, src)?;
+            (value.chars().count() == 1).then(|| vec![value])?
+        } else {
+            java_exact_regex_character_class(&java_static_string_literal(*pattern, src)?)?
+        };
+        for input in replaced {
+            if mappings
+                .iter()
+                .any(|entry: &bonsai_lang_api::StaticStringMapEntry| {
+                    entry.key == input && entry.value != output
+                })
+            {
+                return None;
+            }
+            if !mappings.iter().any(|entry| entry.key == input) {
+                characters.push(input.clone());
+                mappings.push(bonsai_lang_api::StaticStringMapEntry {
+                    key: input,
+                    value: output.clone(),
+                });
+            }
+        }
+        current = current.child_by_field_name("object")?;
+    }
+    if mappings.is_empty() || current.kind() != "identifier" {
+        return None;
+    }
+    let input = node_text(&current, src).trim();
+    let input_param_index = params.iter().position(|param| param == input)?;
+    characters.sort();
+    characters.dedup();
+    mappings.sort_by(|left, right| left.key.cmp(&right.key));
+    Some((input_param_index, mappings, characters))
+}
+
+fn java_static_string_or_character(node: Node<'_>, src: &[u8]) -> Option<String> {
+    java_static_string_literal(node, src).or_else(|| {
+        if node.kind() != "character_literal" {
+            return None;
+        }
+        let raw = node_text(&node, src);
+        let inner = raw.strip_prefix('\'')?.strip_suffix('\'')?;
+        match inner {
+            "\\r" => Some("\r".to_string()),
+            "\\n" => Some("\n".to_string()),
+            "\\t" => Some("\t".to_string()),
+            "\\0" => Some("\0".to_string()),
+            "\\\\" => Some("\\".to_string()),
+            "\\\"" => Some("\"".to_string()),
+            _ if inner.chars().count() == 1 => Some(inner.to_string()),
+            _ => None,
+        }
+    })
+}
+
+fn java_exact_regex_character_class(pattern: &str) -> Option<Vec<String>> {
+    let inner = pattern.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.starts_with('^') || inner.is_empty() {
+        return None;
+    }
+    let mut characters = Vec::new();
+    let mut chars = inner.chars();
+    while let Some(character) = chars.next() {
+        if character == '-' {
+            return None;
+        }
+        let decoded = if character == '\\' {
+            match chars.next()? {
+                'r' => '\r',
+                'n' => '\n',
+                't' => '\t',
+                '\\' => '\\',
+                '"' => '"',
+                '\'' => '\'',
+                _ => return None,
+            }
+        } else {
+            character
+        };
+        characters.push(decoded.to_string());
+    }
+    characters.sort();
+    characters.dedup();
+    Some(characters)
+}
+
+fn java_compiled_pattern_constraints(
+    index: &DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<CharacterConstraintFact> {
+    let bindings = java_bindings(tree, src);
+    let mut patterns = Vec::new();
+    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+        let (Some(name), Some(value)) = (
+            declarator.child_by_field_name("name"),
+            declarator.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        if name.kind() != "identifier" || value.kind() != "method_invocation" {
+            continue;
+        }
+        let (Some(object), Some(method), Some(arguments)) = (
+            value.child_by_field_name("object"),
+            value.child_by_field_name("name"),
+            value.child_by_field_name("arguments"),
+        ) else {
+            continue;
+        };
+        if node_text(&object, src).trim() != "Pattern" || node_text(&method, src).trim() != "compile" {
+            continue;
+        }
+        let args = arguments
+            .named_children(&mut arguments.walk())
+            .collect::<Vec<_>>();
+        let [pattern] = args.as_slice() else {
+            continue;
+        };
+        let Some(pattern) = java_static_string_literal(*pattern, src) else {
+            continue;
+        };
+        let Some((_, declaration, _)) = java_binding_scope_and_declaration(declarator) else {
+            continue;
+        };
+        if !java_declaration_has_final_modifier(declaration) {
+            continue;
+        }
+        let characters = if pattern == "\\p{Cntrl}" {
+            vec!["\r".to_string(), "\n".to_string()]
+        } else if let Some(characters) = java_exact_regex_character_class(&pattern) {
+            characters
+        } else {
+            continue;
+        };
+        let name = node_text(&name, src).trim().to_string();
+        patterns.push((name, span_of(file, &value), characters));
+    }
+
+    let mut facts = Vec::new();
+    for call in collect_kinds(tree, &["method_invocation"]) {
+        let (Some(method), Some(receiver), Some(arguments)) = (
+            call.child_by_field_name("name"),
+            call.child_by_field_name("object"),
+            call.child_by_field_name("arguments"),
+        ) else {
+            continue;
+        };
+        if node_text(&method, src).trim() != "replaceAll" || receiver.kind() != "method_invocation" {
+            continue;
+        }
+        let (Some(matcher_name), Some(pattern_receiver), Some(matcher_args)) = (
+            receiver.child_by_field_name("name"),
+            receiver.child_by_field_name("object"),
+            receiver.child_by_field_name("arguments"),
+        ) else {
+            continue;
+        };
+        if node_text(&matcher_name, src).trim() != "matcher" || pattern_receiver.kind() != "identifier" {
+            continue;
+        }
+        let pattern_name = node_text(&pattern_receiver, src).trim();
+        let Some(binding) = bindings.resolve(
+            pattern_name,
+            pattern_receiver.start_byte(),
+            pattern_receiver.end_byte(),
+        ) else {
+            continue;
+        };
+        let binding_value_span = span_of(file, &binding.initializer);
+        let Some((_, _, mut characters)) = patterns
+            .iter()
+            .find(|(name, value_span, _)| name == pattern_name && *value_span == binding_value_span)
+            .cloned()
+        else {
+            continue;
+        };
+        let matcher_args = matcher_args
+            .named_children(&mut matcher_args.walk())
+            .collect::<Vec<_>>();
+        let replace_args = arguments
+            .named_children(&mut arguments.walk())
+            .collect::<Vec<_>>();
+        let ([input], [replacement]) = (matcher_args.as_slice(), replace_args.as_slice()) else {
+            continue;
+        };
+        if input.kind() != "identifier" {
+            continue;
+        }
+        let Some(replacement) = java_static_string_literal(*replacement, src) else {
+            continue;
+        };
+        characters.retain(|character| !replacement.contains(character));
+        if characters.is_empty() {
+            continue;
+        }
+        let transform_span = span_of(file, &call);
+        let Some(decl) = index
+            .defs
+            .iter()
+            .filter(|decl| decl.span.start <= transform_span.start && transform_span.end <= decl.span.end)
+            .min_by_key(|decl| decl.span.len())
+        else {
+            continue;
+        };
+        let input_place = node_text(input, src).trim().to_string();
+        let input_param_index = decl.params.iter().position(|param| param == &input_place);
+        let output = index
+            .assignment_values
+            .iter()
+            .filter(|assignment| {
+                assignment.target.is_some()
+                    && assignment.value_span.start <= transform_span.start
+                    && transform_span.end <= assignment.value_span.end
+            })
+            .min_by_key(|assignment| assignment.value_span.len())
+            .and_then(|assignment| assignment.target.clone())
+            .map_or(
+                CharacterConstraintOutput::Expression { span: transform_span },
+                |target| CharacterConstraintOutput::Assignment { target },
+            );
+        facts.push(CharacterConstraintFact {
+            function_span: decl.span,
+            transform_span,
+            input_place,
+            input_param_index,
+            output,
+            domain: CharacterConstraintDomain::ExcludesExact { characters },
+        });
+    }
+    facts
+}
+
 fn java_finite_literal_selections(
     index: &DeclIndex,
     tree: &Tree,
@@ -323,7 +1065,7 @@ fn java_finite_literal_selections(
             continue;
         }
         let selection_span = span_of(file, &call);
-        let Some(assignment) = index
+        let assignment = index
             .assignment_values
             .iter()
             .filter(|fact| {
@@ -332,13 +1074,23 @@ fn java_finite_literal_selections(
                     && fact.value_span.start <= selection_span.start
                     && selection_span.end <= fact.value_span.end
             })
-            .min_by_key(|fact| fact.value_span.end.saturating_sub(fact.value_span.start))
+            .min_by_key(|fact| fact.value_span.end.saturating_sub(fact.value_span.start));
+        let argument = index
+            .call_argument_values
+            .iter()
+            .filter(|fact| {
+                fact.argument_span.file == selection_span.file
+                    && fact.argument_span.start <= selection_span.start
+                    && selection_span.end <= fact.argument_span.end
+            })
+            .min_by_key(|fact| fact.argument_span.len());
+        let Some(value_span) = assignment
+            .map(|fact| fact.value_span)
+            .or_else(|| argument.map(|fact| fact.argument_span))
         else {
             continue;
         };
-        let Some(value_node) =
-            bonsai_lang_api::kit::node_at_span(tree.root_node(), assignment.value_span, &[])
-        else {
+        let Some(value_node) = bonsai_lang_api::kit::node_at_span(tree.root_node(), value_span, &[]) else {
             continue;
         };
         if !java_expression_is_finite_selection(value_node, call) {
@@ -346,14 +1098,22 @@ fn java_finite_literal_selections(
         }
         selections.push(FiniteLiteralSelectionFact {
             selection_span,
-            assignment_span: assignment.assignment_span,
-            target: assignment.target.clone().expect("checked target"),
+            assignment_span: assignment.map(|fact| fact.assignment_span),
+            target: assignment.and_then(|fact| fact.target.clone()),
+            call_span: argument.map(|fact| fact.call_span),
+            argument_index: argument.map(|fact| fact.argument_index),
         });
     }
     selections.sort_by_key(|fact| {
         (
-            fact.assignment_span.start,
-            fact.assignment_span.end,
+            fact.assignment_span
+                .or(fact.call_span)
+                .unwrap_or(fact.selection_span)
+                .start,
+            fact.assignment_span
+                .or(fact.call_span)
+                .unwrap_or(fact.selection_span)
+                .end,
             fact.selection_span.start,
             fact.selection_span.end,
         )
@@ -823,6 +1583,7 @@ fn java_condition_operand(node: Node<'_>, file: FileId, src: &[u8]) -> Condition
         span: span_of(file, &node),
         value_flow: bonsai_lang_api::kit::expression_flow_from_node(node, file, src),
         static_string: java_static_string_literal(node, src),
+        static_value: java_static_scalar(node, src),
     }
 }
 
@@ -832,7 +1593,75 @@ fn java_static_string_literal(node: Node<'_>, src: &[u8]) -> Option<String> {
     }
     let text = node_text(&node, src);
     let inner = text.strip_prefix('"')?.strip_suffix('"')?;
-    (!inner.contains('\\')).then(|| inner.to_string())
+    decode_java_string_literal(inner)
+}
+
+/// Decode the Java runtime value of a regular string literal.
+///
+/// Regex and replacement semantics operate on decoded strings, not source
+/// spellings. Keeping this in the Java frontend prevents shared analyses from
+/// interpreting Java escapes and lets exact compiler facts represent values
+/// such as `"[\\\\r\\\\n]"` correctly.
+fn decode_java_string_literal(inner: &str) -> Option<String> {
+    let mut input = inner.chars().peekable();
+    let mut decoded = String::with_capacity(inner.len());
+    while let Some(character) = input.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        let escape = input.next()?;
+        match escape {
+            'b' => decoded.push('\u{0008}'),
+            't' => decoded.push('\t'),
+            'n' => decoded.push('\n'),
+            'f' => decoded.push('\u{000c}'),
+            'r' => decoded.push('\r'),
+            's' => decoded.push(' '),
+            '"' => decoded.push('"'),
+            '\'' => decoded.push('\''),
+            '\\' => decoded.push('\\'),
+            'u' => {
+                while input.peek() == Some(&'u') {
+                    input.next();
+                }
+                let mut value = 0_u32;
+                for _ in 0..4 {
+                    value = value.checked_mul(16)? + input.next()?.to_digit(16)?;
+                }
+                let scalar = char::from_u32(value)?;
+                // A Unicode escape which produces a lexical delimiter or a
+                // second escape prefix requires Java's pre-tokenization
+                // Unicode translation. Refuse that uncommon shape rather
+                // than claim an inexact runtime value.
+                if matches!(scalar, '\\' | '"' | '\r' | '\n') {
+                    return None;
+                }
+                decoded.push(scalar);
+            }
+            first @ '0'..='7' => {
+                let mut value = first.to_digit(8)?;
+                let mut digits = 1;
+                while digits < 3 {
+                    let Some(next) = input.peek().copied() else {
+                        break;
+                    };
+                    let Some(digit) = next.to_digit(8) else {
+                        break;
+                    };
+                    if digits == 2 && first > '3' {
+                        break;
+                    }
+                    input.next();
+                    value = value.checked_mul(8)? + digit;
+                    digits += 1;
+                }
+                decoded.push(char::from_u32(value)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(decoded)
 }
 
 fn java_static_scalar(node: Node<'_>, src: &[u8]) -> Option<StaticScalarValue> {
@@ -1033,6 +1862,42 @@ fn populate_java_static_scalar_facts(index: &mut DeclIndex, tree: &Tree, file: F
             .cloned();
     }
     bonsai_lang_api::kit::populate_call_argument_static_values(index, tree, file, src, java_static_scalar);
+    populate_java_array_argument_sequences(index, tree, file, src);
+}
+
+/// Lower Java's `new T[] { ... }` wrapper into the shared ordered-sequence
+/// fact. The wrapper and `array_initializer` field are Java grammar details;
+/// downstream matching sees only exact scalar values (and `None` for dynamic
+/// elements).
+fn populate_java_array_argument_sequences(index: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    let arrays: std::collections::HashMap<_, _> = collect_kinds(tree, &["array_creation_expression"])
+        .into_iter()
+        .map(|node| {
+            let span = span_of(file, &node);
+            ((span.start, span.end), node)
+        })
+        .collect();
+    for fact in &mut index.call_argument_values {
+        let Some(array) = arrays.get(&(fact.argument_span.start, fact.argument_span.end)) else {
+            continue;
+        };
+        let mut array_cursor = array.walk();
+        let Some(initializer) = array.child_by_field_name("value").or_else(|| {
+            array
+                .named_children(&mut array_cursor)
+                .find(|child| child.kind() == "array_initializer")
+        }) else {
+            continue;
+        };
+        let mut cursor = initializer.walk();
+        let values = initializer
+            .named_children(&mut cursor)
+            .map(|value| java_static_scalar(value, src))
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            fact.exact_static_sequence_values = Some(values);
+        }
+    }
 }
 
 /// Build per-method type-alias bindings (`Foo bar` → `bar : Foo`) by

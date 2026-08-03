@@ -391,18 +391,20 @@ or otherwise undeclared target call sites.
 
 ## slice
 
-`slice` builds an exact backwards slice for one normalized symbol at a
-source line. It consumes the shared value-flow/IDG graph when a semantic
+`slice` builds an exact backwards slice for one normalized symbol. When the
+symbol has one compiler syntax-flow site, the line is inferred; otherwise the
+result reports every candidate and asks for `--line`/`--file` disambiguation.
+It consumes the shared value-flow/IDG graph when a semantic
 sidecar was hydrated by `index`, then merges adapter-emitted
 syntax-flow facts for local detail: assignments, call arguments, returns,
 throws, awaits, lifecycle transitions, and structured branch/loop bodies.
 It does not search raw text or invent missing edges. When a slice reaches
 a function parameter, unavailable semantic graph, missing operands,
-multiple candidate callables, the output marks analysis
+multiple candidate sites, the output marks analysis
 incomplete and explains why.
 
 ```bash
-bonsai-ninja slice ./src --symbol result --line 15
+bonsai-ninja slice ./src --symbol result
 bonsai-ninja slice ./src --symbol action --line 15 --file gateway.py
 bonsai-ninja slice ./src --symbol cmd --line 47 --file ml_pipeline.py --format json
 ```
@@ -410,8 +412,8 @@ bonsai-ninja slice ./src --symbol cmd --line 47 --file ml_pipeline.py --format j
 | Flag | Default | Description |
 |---|---:|---|
 | `--symbol <NAME>` | Required | Variable, place, or adapter-normalized symbol to slice backwards from. |
-| `--line <N>` | Required | One-based source line where the symbol is inspected. |
-| `--file <TEXT>` | None | Optional workspace-relative file path filter to disambiguate same-line callables. Explicit absolute paths are also accepted. |
+| `--line <N>` | Inferred | Optional one-based source line. Supply it only to disambiguate multiple compiler syntax-flow sites. |
+| `--file <TEXT>` | None | Optional workspace-relative file filter used before symbol-site disambiguation. Explicit absolute paths are also accepted. |
 | `--context`, `--page`, `--all` | 32k / 1 / false | Standard paging controls. |
 | `--format <FORMAT>` | text | `text` or `json`. |
 | `--output-path <PATH>` | stdout | Write the selected format to a file. |

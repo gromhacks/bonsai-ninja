@@ -30,6 +30,9 @@ use std::sync::Arc;
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v36: Go final-pass call arguments include adapter-added if-init/range/index
+// calls plus adapter-decoded static values, and exact adapter guard facts
+// include proven relative-path boundary helpers.
 // v20: imported namespace/type qualifiers are classified in receiver facts,
 // preventing call resolution syntax from becoming a runtime data receiver.
 // v19: exact browse/search candidate terms became an independently decodable
@@ -51,7 +54,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 22;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 36;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;
@@ -735,6 +738,79 @@ impl AnalyzerDb {
             .compiler_diagnostics_published
             .read()
             .contains(&(file, descriptor.source_digest))
+    }
+
+    /// Parse one exact source snapshot and retain only its syntax diagnostics.
+    ///
+    /// This deliberately does not build a declaration index, import index, or
+    /// flow body. Broad analyses use it for their final completeness audit so
+    /// files rejected by exact rule planning still receive Tree-sitter parser
+    /// coverage without materializing unrelated semantic IR.
+    #[must_use]
+    pub fn parser_diagnostics_uncached(&self, file: FileId) -> Option<Arc<[Diagnostic]>> {
+        let snapshot = self.inner.vfs.snapshot(file).ok()?;
+        let key = (file, snapshot.version);
+        if let Some(diagnostics) = self.inner.parser_diagnostics.read().get(&key).cloned() {
+            return Some(diagnostics);
+        }
+
+        let diagnostics = if self.adapter_for(file).is_none() {
+            Vec::new()
+        } else {
+            match self.parse(file) {
+                Ok(parsed) => parsed.diagnostics.clone(),
+                Err(error) => vec![Diagnostic::new(
+                    Span::new(file, 0, u64::try_from(snapshot.text.len()).unwrap_or(u64::MAX)),
+                    Severity::Error,
+                    format!("source parsing failed: {error}"),
+                )
+                .with_code("parse-failed")],
+            }
+        };
+        self.release_syntax(file);
+        let diagnostics: Arc<[Diagnostic]> = diagnostics.into();
+        let mut cached = self.inner.parser_diagnostics.write();
+        Some(
+            cached
+                .entry(key)
+                .or_insert_with(|| Arc::clone(&diagnostics))
+                .clone(),
+        )
+    }
+
+    /// Visit parser diagnostics for a deterministic file sequence in
+    /// memory-aware parallel batches. Parsing is exact and exhaustive; batch
+    /// width changes storage pressure only, never the audited file set.
+    pub fn visit_parser_diagnostics_uncached(
+        &self,
+        files: &[FileId],
+        mut visit: impl FnMut(FileId, Option<Arc<[Diagnostic]>>),
+    ) {
+        let source_bytes = files
+            .iter()
+            .map(|file| {
+                self.inner
+                    .vfs
+                    .snapshot(*file)
+                    .ok()
+                    .and_then(|snapshot| u64::try_from(snapshot.text.len()).ok())
+                    .unwrap_or(0)
+            })
+            .collect::<Vec<_>>();
+        let batches = bonsai_common::compiler_weighted_batches(&source_bytes, compiler_object_cpu_workers());
+        let mut visited = 0usize;
+        for range in batches {
+            use rayon::prelude::*;
+            let batch = files[range]
+                .par_iter()
+                .map(|file| (*file, self.parser_diagnostics_uncached(*file)))
+                .collect::<Vec<_>>();
+            for (file, diagnostics) in batch {
+                visit(file, diagnostics);
+                visited = visited.saturating_add(1);
+            }
+        }
+        debug_assert_eq!(visited, files.len());
     }
 
     /// Load the independently decodable import header for one exact source

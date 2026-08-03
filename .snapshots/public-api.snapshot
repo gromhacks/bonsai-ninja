@@ -19,7 +19,7 @@ pub fn all_languages_registry() -> Arc<LanguageRegistry> {
 pub mod refs;
 pub mod strings;
 pub use args::{args, ArgOut, ArgsFilters};
-pub use ast::{compute_node_id, dump_ast, AstFileDump, AstFilters, AstNode, AstOutcome};
+pub use ast::{
 pub use bonsai_workspace::decl_decorator_names;
 pub use calls::{calls, CallOut, CallsFilters};
 pub use classes::{classes, ClassOut, ClassesFilters};
@@ -62,9 +62,12 @@ pub struct BuildTargetIndex {
 pub struct CallEdge {
 pub struct CallGraph {
 pub struct CallGraphFileSemantics<F, T, P, G, C> {
+pub struct CallGraphLocalBinding {
+pub struct CallGraphNode {
 pub struct EdgeProvenance {
 pub struct ResolvedCallGraph {
 pub struct ResolvedCallGraphBuildContext {
+pub struct UnresolvedWorkspaceCallSite {
 pub use chains::{
 
 === cfg ===
@@ -90,12 +93,19 @@ pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, Ty
 pub use names::{
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;
+pub use resources::callgraph_worker_count;
+pub use resources::candidate_index_worker_count;
 pub use resources::compiler_weighted_batches;
 pub use resources::compiler_worker_count;
+pub use resources::current_process_resident_bytes;
 pub use resources::effective_memory_limit_bytes;
 pub use resources::memory_bounded_worker_count;
+pub use resources::rooted_semantic_query_worker_count;
+pub use resources::semantic_query_worker_count;
+pub use resources::source_ingestion_batches;
 pub use resources::syntax_weighted_batches;
 pub use resources::syntax_worker_count;
+pub use resources::syntax_worker_count_for_sources;
 pub use span::{LineCol, Span, SpanMap};
 pub use span_cache::{cached_span_map, cached_span_map_arc};
 
@@ -187,7 +197,7 @@ pub use chain_cache::{find_enclosing_func, ChainCache};
 pub use chains::{downstream_funcs_set, enumerate_chains_resolved, ChainTruncation, ResolvedChain};
 pub use filter::{
 pub use flow_id::{
-pub use query::{matching_decls, matching_func_ids, Matcher};
+pub use query::{matching_decls, matching_func_ids, matching_func_ids_in_headers, Matcher};
 
 === lang_api ===
 pub enum AdapterError {
@@ -313,6 +323,7 @@ pub fn alias_map_for_file(imports: &[ImportSpec]) -> AHashMap<String, String> {
 pub fn build_shared_peer_class_index(global: &GlobalIndex) -> Arc<PeerClassIndex> {
 pub fn callee_without_call_args(callee: &str) -> &str {
 pub fn canonical_dispatch_type_name(name: &str) -> String {
+pub fn class_symbols_share_semantic_identity(global: &GlobalIndex, left: SymbolId, right: SymbolId) -> bool {
 pub fn collect_method_candidates_for_class(
 pub fn collect_method_candidates_for_class_cached(
 pub fn collect_transitive_base_type_names(
@@ -323,6 +334,7 @@ pub fn is_super_receiver(receiver: &str) -> bool {
 pub fn is_super_receiver_with_tokens(receiver: &str, tokens: &[&str]) -> bool {
 pub fn module_import_parts(text: &str) -> Vec<String> {
 pub fn module_path_parts(text: &str) -> Vec<String> {
+pub fn module_target_exactly_matches_decl_module_path_with_syntax(
 pub fn module_target_matches_decl_module_path(
 pub fn module_target_matches_decl_module_path_with_syntax(
 pub fn module_target_matches_path(alias_target: &str, file_path: &str) -> bool {
@@ -349,7 +361,7 @@ pub struct ResolveContext<'a> {
 pub type PeerClassIndex = AHashMap<(String, ModulePath), Vec<SymbolId>>;
 
 === retrieval ===
-pub const RETRIEVAL_SCHEMA_VERSION: u32 = 10;
+pub const RETRIEVAL_SCHEMA_VERSION: u32 = 16;
 pub const RETRIEVAL_TABLE_ID: u32 = 0x5254_5631;
 pub enum RetrievalSidecarStatus {
 pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
@@ -379,6 +391,7 @@ pub trait CandidateRanker {
 pub enum CacheFreshnessStatus {
 pub enum CacheManifestSidecarStatus {
 pub enum ShowOutcome {
+pub fn workspace_source_fingerprint_for_cache_validation(root: &Path) -> Result<WorkspaceContentFingerprint> {
 pub fn workspace_source_fingerprint_from_disk(root: &Path) -> Result<WorkspaceContentFingerprint> {
 pub mod cache {
 pub mod read_file;
@@ -392,6 +405,9 @@ pub struct Browse<'a> {
 pub struct Cache<'a> {
 pub struct CacheManifest {
 pub struct CacheManifestCoverage {
+pub struct CacheManifestGitControlState {
+pub struct CacheManifestGitPathState {
+pub struct CacheManifestGitSourceState {
 pub struct CacheManifestSidecar {
 pub struct CacheManifestSourceFile {
 pub struct CacheSidecarValidation {
@@ -425,7 +441,8 @@ pub use bonsai_browse::decl_decorator_names;
 pub use bonsai_browse::{
 pub use bonsai_inspect::{
 pub use bonsai_security::{
-pub use bonsai_trace::{PathSummary, TraceResult, TraceStep, TraceStepKind};
+pub use bonsai_trace::{
+pub use bonsai_workspace::flow_ids::compute_structural_flow_id;
 pub use bonsai_workspace::value_flow::{
 pub use bonsai_workspace::{
 pub use bonsai_workspace::{WorkspaceCacheStatus, WorkspaceOpenEvent};
@@ -467,6 +484,7 @@ pub enum TraceEdgeKind {
 pub enum TraceQueryKind {
 pub enum TraceStepKind {
 pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
+pub fn summarize_incomplete_reasons(reasons: &[String], sample_limit: usize) -> String {
 pub fn truncate_after_step(result: &mut TraceResult, step_index: usize) {
 pub mod render;
 pub struct AnalysisLimits {
@@ -499,9 +517,11 @@ pub enum WorkspaceOpenEvent {
 pub fn analyzer_build_fingerprint() -> &'static str {
 pub fn extend_func_set_with_semantic_callback_dispatchers(
 pub fn idg_sidecar_path(workspace_root: &Path) -> std::path::PathBuf {
+pub fn maintain_persisted_sidecars(workspace_root: &Path) -> std::io::Result<()> {
 pub fn summarize_precision(trace: &TraceResult) -> PrecisionReport {
 pub fn validate_idg_sidecar_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
 pub fn validate_idg_sidecar_layout_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
+pub fn validate_idg_sidecar_layout_with_source_fingerprints<I, P, J, S>(
 pub mod callgraph_sidecar;
 pub mod class_index;
 pub mod dataflow;

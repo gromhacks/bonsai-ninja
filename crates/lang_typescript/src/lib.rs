@@ -123,6 +123,7 @@ impl LanguageAdapter for TypeScriptAdapter {
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
             populate_ecmascript_compiler_facts(&mut decl_index, &tree, file, src);
+            populate_typescript_readonly_instance_literals(&mut decl_index, &tree, file, src);
             apply_js_ts_commonjs_named_export_aliases(&mut decl_index, &tree, src, file);
         }
         // TS/JS module = workspace-relative file path with `.ts`/`.tsx` (etc.) stripped.
@@ -255,6 +256,75 @@ impl LanguageAdapter for TypeScriptAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+/// Lower immutable instance-field literals into the same exact assignment IR
+/// used for local bindings. TypeScript spells a field read as `this.name`,
+/// while the declaration node contains only `name`; recording the canonical
+/// receiver projection here keeps shared analyses language-agnostic.
+fn populate_typescript_readonly_instance_literals(
+    index: &mut DeclIndex,
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) {
+    for field in collect_kinds(tree, &["public_field_definition"]) {
+        let has_modifier = |wanted: &str| {
+            let mut cursor = field.walk();
+            let found = field.children(&mut cursor).any(|child| child.kind() == wanted);
+            found
+        };
+        if !has_modifier("readonly") || has_modifier("static") {
+            continue;
+        }
+        let (Some(name_node), Some(value)) = (
+            field.child_by_field_name("name"),
+            field.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        if name_node.kind() != "property_identifier"
+            || !matches!(value.kind(), "string" | "number" | "true" | "false" | "null")
+        {
+            continue;
+        }
+        let name = node_text(&name_node, src).trim();
+        let canonical = format!("this.{name}");
+        let field_span = span_of(file, &field);
+        if index.assignment_values.iter().any(|fact| {
+            fact.assignment_span.start > field_span.start
+                && fact.target.as_deref() == Some(canonical.as_str())
+        }) {
+            continue;
+        }
+        index
+            .assignment_values
+            .push(bonsai_lang_api::AssignmentValueFact {
+                assignment_span: field_span,
+                target: Some(canonical),
+                target_is_immutable: true,
+                target_owner: None,
+                target_span: Some(span_of(file, &name_node)),
+                value_span: span_of(file, &value),
+                call_sites: Vec::new(),
+                value_flow: bonsai_lang_api::ExpressionFlow::default(),
+                exact_callable_return: None,
+                exact_static_call_args: None,
+                direct_call_name: None,
+                direct_call_receiver: None,
+            });
+    }
+    index.assignment_values.sort_by_key(|fact| {
+        (
+            fact.assignment_span.start,
+            fact.assignment_span.end,
+            fact.target_span.map_or(0, |span| span.start),
+            fact.target_span.map_or(0, |span| span.end),
+            fact.value_span.start,
+            fact.value_span.end,
+        )
+    });
+    index.assignment_values.dedup();
 }
 
 #[derive(Clone, Debug)]

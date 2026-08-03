@@ -252,6 +252,15 @@ qualified RHS reads (`obj.field`, `obj['field']`, `obj->field`) as
 value-bearing operands, including grammars that split selectors into
 multiple nodes.
 
+Call-site value shape is likewise compiler-owned. Each adapter lowers exact
+scalar literals, complete named aggregate fields, complete positional
+sequences, addressable places, and nested expression carriers into
+`CallArgumentValueFact`. Unknown sequence elements remain explicit `None`
+slots, so a rule can prove `['sh', '-c', dynamic]` without guessing the
+dynamic value. Match constraints such as `arg_sequence_items_equal` compare
+those typed facts and fail closed when the adapter did not prove the shape;
+they never parse `CallArg::value_text`.
+
 Value-preserving call results are explicit rulepack models, not text
 fallbacks or engine API tables. When a sanitizer/passthrough rule declares
 `taint_semantics.call_result_passthrough_args` or
@@ -306,6 +315,12 @@ The adapter contract requires both arms to be present. The kit's
 `branch_repair` recovers the partition for grammars that lump both arms
 together. That repair runs before taint analysis, so inspect, trace,
 export, and security all see the same branch shape.
+
+Branch proofs consume adapter-lowered `ConditionExpressionFact` trees and
+typed `ConditionOperandFact` scalar values. The owning adapter maps its
+grammar's boolean, equality, membership, and type-test nodes; shared analysis
+does not maintain a language-token/operator inventory. A rendered condition
+string remains diagnostic context only.
 
 **Pattern arms.** Languages where `match`/`switch` parses as a flat
 `Branch` with arms concatenated into `then_events` (Scala, Swift, Rust)
@@ -414,7 +429,10 @@ lookup instead of a fresh propagation pass.
   `dump callgraph`, the `DataFlowCache`, and the `FlowIdCache`. The
   data caches receive it via `seed_call_graph(arc)` when a query or
   explicit prewarm path has built it so they don't rebuild identical
-  content.
+  content. Security's serial planner passes its exact graph by immutable
+  reference into parallel finding and compiler-guard attribution. A Rayon
+  worker must not initialize this lazy workspace cache: doing so can
+  recursively acquire compiler-header state and deadlock the worker pool.
 
 All caches are `parking_lot::RwLock`-backed and safe to share
 across rayon worker threads. `Workspace::ingest_dir` clears or
@@ -565,17 +583,13 @@ closure so sibling and recursive fields are not invented.
 
 ## Branch conditions and constant facts
 
-`FlowEvent::Branch` optionally carries condition text for rendering and the
-narrow constant evaluator. That evaluator recognises only a small set of
-language-neutral patterns (literal booleans, `flag`, `!flag`, `flag == 0`) so
-guarded code does not generate spurious flows.
-
-Semantic consumers do not reparse that rendering. The shared Tree-sitter
-frontend emits `BranchConditionFact { branch_span, condition_span, polarity }`;
-security and future control-flow proofs relate call facts to the exact
-condition span and consume the AST-derived polarity. Native export includes
-the same facts. The textual constant list grows conservatively only when a
-fact is language-neutral and trivially safe to reason about.
+`FlowEvent::Branch` optionally carries condition text for diagnostics and
+rendering only. Semantic consumers do not reparse that string. Each owning
+language adapter emits `BranchConditionFact` with an AST-derived polarity and,
+where supported, a typed `ConditionExpressionFact` tree containing exact
+boolean, equality, membership, type-test, and scalar-literal facts. Security
+and control-flow proofs relate calls to the exact condition span and consume
+that compiler IR. Native export includes the same facts.
 
 Tainted conditions are not dataflow. A tainted branch guard may choose
 which clean/dynamic container is returned, but it does not make every

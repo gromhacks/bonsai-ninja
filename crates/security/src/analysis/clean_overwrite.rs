@@ -1849,6 +1849,8 @@ mod numeric_constant_tests {
         AssignmentValueFact {
             assignment_span,
             target: None,
+            target_is_immutable: false,
+            target_owner: None,
             target_span: Some(target_span),
             value_span,
             call_sites: Vec::new(),

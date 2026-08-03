@@ -81,7 +81,8 @@ use findings_build::{
 #[cfg(test)]
 use guard_sanitizers::header_char_allowlist_condition;
 use guard_sanitizers::{
-    character_constraint_sanitizer, character_escape_sanitizer, configured_argument_factory_guard_sanitizer,
+    character_constraint_sanitizer, character_escape_sanitizer, collect_compiler_call_sites_reaching_value,
+    configured_argument_factory_guard_sanitizer, configured_argument_receiver_guard_sanitizer,
     configured_call_argument_guard_sanitizer, dev_only_environment_guard_sanitizer,
     finite_literal_map_lookup_allowlist_sanitizer, finite_literal_selection_sanitizer,
     go_jwt_inline_keyfunc_algorithm_guard_sanitizer, go_same_origin_redirect_helper_guard_sanitizer,
@@ -90,9 +91,10 @@ use guard_sanitizers::{
     local_ldap_escape_helper_sanitizer, nosql_eq_filter_wrapper_sanitizer,
     parameterized_query_guard_sanitizer, path_consumer_containment_guard_sanitizer,
     path_containment_guard_sanitizer, place_is_assigned_between, python_compiled_regex_guard_sanitizer,
-    python_url_ssrf_guard_sanitizer, receiver_factory_guard_sanitizer,
-    relative_path_containment_guard_sanitizer, runtime_type_rejection_guard_sanitizer,
-    same_origin_path_constraint_sanitizer, source_sink_pair_is_low_signal,
+    python_url_ssrf_guard_sanitizer, receiver_configuration_guard_sanitizer,
+    receiver_factory_guard_sanitizer, relative_path_containment_guard_sanitizer,
+    runtime_type_rejection_guard_sanitizer, same_origin_path_constraint_sanitizer,
+    sanitized_context_rewrite_covers_consumer, source_sink_pair_is_low_signal,
     terminal_rejection_predicate_guard_span, url_network_guard_sanitizer, url_reconstruction_guard_sanitizer,
     CompilerGuardContext,
 };
@@ -4672,6 +4674,52 @@ fn extend_implicit_context_findings(
         return;
     }
 
+    struct SanitizedContextRewrite {
+        channel: String,
+        language: String,
+        sink: RuleMatch,
+        targets: AHashSet<String>,
+    }
+
+    let sanitized_context_rewrites: Vec<SanitizedContextRewrite> = findings
+        .iter()
+        .filter_map(|item| {
+            if item.finding.status != FindingStatus::Sanitized {
+                return None;
+            }
+            let rule = pack.find_rule_by_id(&item.finding.sink.rule_id)?;
+            let context = rule.analysis_semantics.as_ref()?.context_flow.as_ref()?;
+            if context.role != ContextFlowRole::Producer
+                || !context.sanitized_rewrite_clears_channel
+                || !context
+                    .rewrite_source_rule_ids
+                    .iter()
+                    .any(|rule_id| rule_id == &item.finding.source.rule_id)
+            {
+                return None;
+            }
+            let sink = sink_hits.iter().find(|hit| {
+                hit.rule_id == item.finding.sink.rule_id
+                    && hit.file == item.finding.sink.file
+                    && hit.line == item.finding.sink.line
+                    && hit.column == item.finding.sink.column
+            })?;
+            let targets = item
+                .finding
+                .sink
+                .tainted_args
+                .iter()
+                .flat_map(tainted_arg_target_keys)
+                .collect();
+            Some(SanitizedContextRewrite {
+                channel: context.channel.clone(),
+                language: item.finding.language.clone(),
+                sink: sink.clone(),
+                targets,
+            })
+        })
+        .collect();
+
     let producer_flows: Vec<FindingWithChain> = findings
         .iter()
         .filter(|item| {
@@ -4693,7 +4741,7 @@ fn extend_implicit_context_findings(
         .map(|item| item.finding.finding_id.clone())
         .collect();
     let mut consumed_producer_finding_ids: AHashSet<String> = AHashSet::new();
-    for producer_flow in producer_flows {
+    for producer_flow in &producer_flows {
         let Some(producer_context) = pack
             .find_rule_by_id(&producer_flow.finding.sink.rule_id)
             .and_then(|rule| rule.analysis_semantics.as_ref())
@@ -4713,6 +4761,55 @@ fn extend_implicit_context_findings(
             if consumer_context.channel != producer_context.channel
                 || consumer_sink.language != producer_flow.finding.language
             {
+                continue;
+            }
+            let rewritten_before_consumer = sanitized_context_rewrites.iter().any(|rewrite| {
+                rewrite.channel == consumer_context.channel
+                    && rewrite.language == consumer_sink.language
+                    && sanitized_context_rewrite_covers_consumer(
+                        ws,
+                        &rewrite.sink,
+                        consumer_sink,
+                        &rewrite.targets,
+                    )
+                    && !producer_flows.iter().any(|later| {
+                        if later.finding.finding_id == producer_flow.finding.finding_id
+                            || later.finding.status != FindingStatus::Unsanitized
+                        {
+                            return false;
+                        }
+                        let Some(later_rule) = pack.find_rule_by_id(&later.finding.sink.rule_id) else {
+                            return false;
+                        };
+                        let Some(later_context) = later_rule
+                            .analysis_semantics
+                            .as_ref()
+                            .and_then(|semantics| semantics.context_flow.as_ref())
+                        else {
+                            return false;
+                        };
+                        if later_context.role != ContextFlowRole::Producer
+                            || later_context.channel != consumer_context.channel
+                        {
+                            return false;
+                        }
+                        sink_hits.iter().any(|hit| {
+                            hit.rule_id == later.finding.sink.rule_id
+                                && hit.file == consumer_sink.file
+                                && hit.line == later.finding.sink.line
+                                && hit.column == later.finding.sink.column
+                                && hit.span.start > rewrite.sink.span.end
+                                && hit.span.end <= consumer_sink.span.start
+                        })
+                    })
+            });
+            if rewritten_before_consumer {
+                // The context continuation has been proven clean at this
+                // consumer. Consume the earlier producer just as we do when
+                // emitting an unsanitized continuation; otherwise the
+                // intermediate channel write would remain as a standalone
+                // vulnerability even though its value is replaced before use.
+                emitted_for_producer = true;
                 continue;
             }
             let mut sink_match = FindingMatch::from_rule_match(consumer_sink, sink_rule);
@@ -4803,7 +4900,7 @@ fn extend_implicit_context_findings(
             emitted_for_producer = true;
         }
         if emitted_for_producer {
-            consumed_producer_finding_ids.insert(producer_flow.finding.finding_id);
+            consumed_producer_finding_ids.insert(producer_flow.finding.finding_id.clone());
         }
     }
     if !consumed_producer_finding_ids.is_empty() {
@@ -5131,11 +5228,10 @@ fn tainted_arg_infos_are_subset(subset: &[TaintedArgInfo], superset: &[TaintedAr
 /// Keep the rulepack-designated security boundary when the exact same source
 /// flow continues into a lower-priority transport sink.
 ///
-/// This is deliberately stricter than tag-based deduplication: the preferred
-/// finding must have a higher declared terminal priority and its compiler
-/// function chain must be a proper prefix of the downstream finding's chain.
-/// Sibling sinks, equal-length paths, and unrelated flows therefore remain
-/// independently reportable.
+/// The rulepack opts a semantic boundary into this behavior with an explicit
+/// terminal priority. The compiler chain must still prove strict downstream
+/// continuation, so sibling sinks, equal-length paths, and unrelated flows
+/// remain independently reportable even across weakness families.
 fn drop_rulepack_terminal_dominated_findings(
     findings: &mut Vec<CombinedFindingWithChain>,
     pack: &Rulepack,
@@ -5144,20 +5240,56 @@ fn drop_rulepack_terminal_dominated_findings(
     if findings.len() < 2 {
         return;
     }
-    let mut dominated = AHashSet::new();
+    let mut dominated_by = AHashMap::new();
     for (idx, downstream) in findings.iter().enumerate() {
-        if findings.iter().enumerate().any(|(other_idx, preferred)| {
-            other_idx != idx && terminal_finding_dominates(preferred, downstream, pack, ws)
-        }) {
-            dominated.insert(idx);
+        if let Some((preferred_idx, _)) = findings
+            .iter()
+            .enumerate()
+            .filter(|(other_idx, preferred)| {
+                *other_idx != idx && terminal_finding_dominates(preferred, downstream, pack, ws)
+            })
+            .max_by_key(|(_, preferred)| sink_terminal_priority(pack, preferred))
+        {
+            dominated_by.insert(idx, preferred_idx);
         }
     }
-    if dominated.is_empty() {
+    if dominated_by.is_empty() {
         return;
+    }
+    let related = dominated_by
+        .iter()
+        .map(|(&downstream_idx, &preferred_idx)| {
+            (
+                preferred_idx,
+                findings[downstream_idx].finding.sink.clone(),
+                findings[downstream_idx].additional_sinks.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (preferred_idx, sink, additional) in related {
+        let preferred = &mut findings[preferred_idx].additional_sinks;
+        if !preferred.iter().any(|candidate| {
+            candidate.rule_id == sink.rule_id
+                && candidate.file == sink.file
+                && candidate.line == sink.line
+                && candidate.column == sink.column
+        }) {
+            preferred.push(sink);
+        }
+        for sink in additional {
+            if !preferred.iter().any(|candidate| {
+                candidate.rule_id == sink.rule_id
+                    && candidate.file == sink.file
+                    && candidate.line == sink.line
+                    && candidate.column == sink.column
+            }) {
+                preferred.push(sink);
+            }
+        }
     }
     let mut next_idx = 0usize;
     findings.retain(|_| {
-        let keep = !dominated.contains(&next_idx);
+        let keep = !dominated_by.contains_key(&next_idx);
         next_idx = next_idx.saturating_add(1);
         keep
     });
@@ -5177,10 +5309,8 @@ fn terminal_finding_dominates(
     preferred_priority > downstream_priority
         && preferred_priority > 0
         && preferred_finding.language == downstream_finding.language
-        && preferred_finding.tag == downstream_finding.tag
         && preferred_finding.status == downstream_finding.status
         && same_source_site(&preferred_finding.source, &downstream_finding.source)
-        && cwe_sets_overlap_or_unknown(&preferred_finding.cwe, &downstream_finding.cwe)
         && (function_chain_is_strict_prefix(&preferred.chain_funcs, &downstream.chain_funcs)
             || ws.is_some_and(|ws| preferred_helper_return_feeds_transport(preferred, downstream, ws)))
 }
@@ -5719,6 +5849,352 @@ fn sanitizer_is_nested_in_tainted_sink_arg(
             .is_some_and(|carrier| sanitizer_values.contains(carrier));
         wraps_original_carrier || (!sink_values.is_empty() && sink_values.is_subset(&sanitizer_values))
     })
+}
+
+/// A return-shaped sink can carry a tainted parameter solely through one
+/// nested call result (`return "prefix" + escape(value)`). Return rules have
+/// no positional `sink_tainted_args`, so the ordinary nested-argument proof
+/// cannot attach the sanitizer. The frontend's `ExpressionFlow` makes this
+/// exact: no direct source names or aggregate branches may bypass the call,
+/// and the one contributing call site must be the matched sanitizer with a
+/// dynamic compiler-owned input.
+fn sanitizer_is_sole_nested_value_call_in_return(
+    ws: &Workspace,
+    sink_func: FuncId,
+    san: &RuleMatch,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+) -> bool {
+    if sink_rule.match_spec.kind != crate::rule::MatchKind::Return || san.span.file != snk.span.file {
+        return false;
+    }
+    let Some(decl) = ws.exact_decl(SymbolId::new(sink_func.raw())) else {
+        return false;
+    };
+    let Some(FlowEvent::Call {
+        span: sanitizer_span,
+        receiver,
+        args,
+        ..
+    }) = find_call_event_at(&decl.flow_events, san.span)
+    else {
+        return false;
+    };
+    let mut dynamic_inputs = call_arg_value_keys(args);
+    dynamic_inputs.extend(receiver.as_deref().and_then(clean_overwrite_target_key));
+    if dynamic_inputs.is_empty() {
+        return false;
+    }
+    let Some(value_flow) = return_value_flow_containing_span(&decl.flow_events, snk.span) else {
+        return false;
+    };
+    value_flow.source_names.is_empty()
+        && value_flow.aggregate_fields.is_empty()
+        && value_flow.tuple_items.is_empty()
+        && value_flow.spreads.is_empty()
+        && matches!(value_flow.call_sites.as_slice(), [call_site] if spans_overlap(*call_site, *sanitizer_span))
+}
+
+/// Credit a library sanitizer inside a first-party helper only when the
+/// compiler proves that the helper has one return, that return derives solely
+/// from the sanitizer call, and the exact helper result reaches a tainted sink
+/// argument. This is a call/return summary proof, not a helper-name guess.
+struct HelperSanitizerReturnContext<'a> {
+    ws: &'a Workspace,
+    call_graph: &'a bonsai_callgraph::ResolvedCallGraph,
+    helper_func: FuncId,
+    sink_func: FuncId,
+    sanitizer: &'a RuleMatch,
+    sink: &'a RuleMatch,
+    sink_tainted_args: &'a [TaintedArgInfo],
+    tainted_call_spans: &'a AHashSet<Span>,
+}
+
+fn sanitizer_is_helper_return_reaching_tainted_sink_arg(context: HelperSanitizerReturnContext<'_>) -> bool {
+    let HelperSanitizerReturnContext {
+        ws,
+        call_graph,
+        helper_func,
+        sink_func,
+        sanitizer,
+        sink,
+        sink_tainted_args,
+        tainted_call_spans,
+    } = context;
+    if helper_func == sink_func
+        || sanitizer.span.file == sink.span.file && spans_overlap(sanitizer.span, sink.span)
+    {
+        return false;
+    }
+    let Some(helper) = ws.exact_decl(SymbolId::new(helper_func.raw())) else {
+        return false;
+    };
+    let Some(FlowEvent::Call {
+        span: sanitizer_span,
+        receiver,
+        args,
+        ..
+    }) = find_call_event_at(&helper.flow_events, sanitizer.span)
+    else {
+        return false;
+    };
+    let mut sanitizer_inputs = call_arg_value_keys(args);
+    sanitizer_inputs.extend(receiver.as_deref().and_then(clean_overwrite_target_key));
+    let input_indices = helper
+        .params
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parameter)| sanitizer_inputs.contains(parameter).then_some(index))
+        .collect::<Vec<_>>();
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "helper_sanitizer_candidate helper={} sanitizer={} input_indices={:?} params={:?}",
+        helper.name,
+        sanitizer.rule_id,
+        input_indices,
+        helper.params
+    );
+    if input_indices.is_empty() || input_indices.len() != helper.params.len() {
+        return false;
+    }
+    let mut returns = Vec::new();
+    collect_return_value_flows(&helper.flow_events, &mut returns);
+    let [(_, return_flow)] = returns.as_slice() else {
+        return false;
+    };
+    if !return_flow.source_names.is_empty()
+        || !return_flow.aggregate_fields.is_empty()
+        || !return_flow.tuple_items.is_empty()
+        || !return_flow.spreads.is_empty()
+        || !matches!(return_flow.call_sites.as_slice(), [call_site] if spans_overlap(*call_site, *sanitizer_span))
+    {
+        bonsai_diagnostics::debug_log!(
+            "security-taint",
+            "helper_sanitizer_return_rejected helper={} flow={:?}",
+            helper.name,
+            return_flow
+        );
+        return false;
+    }
+
+    let Some(sink_decl) = ws.exact_decl(SymbolId::new(sink_func.raw())) else {
+        return false;
+    };
+    let Some(sink_index) = ws.exact_decl_index_shared(sink.span.file) else {
+        return false;
+    };
+    let Some(FlowEvent::Call {
+        span: sink_call_span, ..
+    }) = find_call_event_at(&sink_decl.flow_events, sink.span)
+    else {
+        return false;
+    };
+    for sink_argument_index in sink_tainted_args.iter().map(|argument| argument.index) {
+        let Some(sink_argument) = bonsai_lang_api::call_argument_value_fact(
+            &sink_index.call_argument_values,
+            *sink_call_span,
+            sink_argument_index,
+        ) else {
+            continue;
+        };
+        let mut reaching_calls = Vec::new();
+        if let Some(span) = sink_argument.direct_call_span {
+            reaching_calls.push(span);
+        }
+        collect_compiler_call_sites_reaching_value(
+            &sink_index,
+            &sink_argument.value_flow,
+            *sink_call_span,
+            &mut reaching_calls,
+            &mut AHashSet::new(),
+        );
+        reaching_calls = reaching_calls
+            .into_iter()
+            .filter_map(|site| match find_call_event_at(&sink_decl.flow_events, site) {
+                Some(FlowEvent::Call { span, .. }) => Some(*span),
+                _ => None,
+            })
+            .collect();
+        reaching_calls.sort_by_key(|span| (span.start, span.end));
+        reaching_calls.dedup();
+        for helper_call_span in reaching_calls.into_iter().filter(|call_span| {
+            tainted_call_spans.iter().any(|tainted| {
+                spans_overlap(*tainted, *call_span)
+                    || span_contains(*tainted, *call_span)
+                    || span_contains(*call_span, *tainted)
+            })
+        }) {
+            let targets = call_graph
+                .callees_of(sink_func)
+                .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, helper_call_span))
+                .map(|edge| edge.to)
+                .collect::<AHashSet<_>>();
+            if targets.len() != 1 || !targets.contains(&helper_func) {
+                continue;
+            }
+            if input_indices.iter().all(|input_index| {
+                bonsai_lang_api::call_argument_value_fact(
+                    &sink_index.call_argument_values,
+                    helper_call_span,
+                    *input_index,
+                )
+                .is_some_and(|argument| !argument.value_flow.is_empty())
+            }) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn helper_functions_reaching_tainted_sink_args(
+    ws: &Workspace,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Vec<FuncId> {
+    let Some(sink_decl) = ws.exact_decl(SymbolId::new(sink_func.raw())) else {
+        return Vec::new();
+    };
+    let Some(sink_index) = ws.exact_decl_index_shared(sink.span.file) else {
+        return Vec::new();
+    };
+    let Some(FlowEvent::Call {
+        span: sink_call_span, ..
+    }) = find_call_event_at(&sink_decl.flow_events, sink.span)
+    else {
+        return Vec::new();
+    };
+    let mut call_sites = Vec::new();
+    for argument_index in sink_tainted_args.iter().map(|argument| argument.index) {
+        let Some(argument) = bonsai_lang_api::call_argument_value_fact(
+            &sink_index.call_argument_values,
+            *sink_call_span,
+            argument_index,
+        ) else {
+            continue;
+        };
+        if let Some(span) = argument.direct_call_span {
+            call_sites.push(span);
+        }
+        collect_compiler_call_sites_reaching_value(
+            &sink_index,
+            &argument.value_flow,
+            *sink_call_span,
+            &mut call_sites,
+            &mut AHashSet::new(),
+        );
+    }
+    call_sites = call_sites
+        .into_iter()
+        .filter_map(|site| match find_call_event_at(&sink_decl.flow_events, site) {
+            Some(FlowEvent::Call { span, .. }) => Some(*span),
+            _ => None,
+        })
+        .collect();
+    call_sites.sort_by_key(|span| (span.file.raw(), span.start, span.end));
+    call_sites.dedup();
+    let mut helpers = call_graph
+        .callees_of(sink_func)
+        .filter(|edge| {
+            edge.precision.is_semantic()
+                && call_sites
+                    .iter()
+                    .any(|call_site| spans_overlap(edge.span, *call_site))
+        })
+        .map(|edge| edge.to)
+        .collect::<Vec<_>>();
+    helpers.sort_by_key(|function| function.raw());
+    helpers.dedup();
+    bonsai_diagnostics::debug_log!(
+        "security-taint",
+        "sink_argument_helpers sink={} call_sites={:?} helpers={:?}",
+        sink.rule_id,
+        call_sites,
+        helpers
+    );
+    helpers
+}
+
+fn collect_return_value_flows<'a>(
+    events: &'a [FlowEvent],
+    out: &mut Vec<(Span, &'a bonsai_lang_api::ExpressionFlow)>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Return { span, value_flow, .. } => out.push((*span, value_flow)),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_return_value_flows(then_events, out);
+                collect_return_value_flows(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_return_value_flows(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_return_value_flows(body, out);
+                collect_return_value_flows(catch_events, out);
+                collect_return_value_flows(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn return_value_flow_containing_span(
+    events: &[FlowEvent],
+    target: Span,
+) -> Option<&bonsai_lang_api::ExpressionFlow> {
+    for event in events {
+        match event {
+            FlowEvent::Return { span, value_flow, .. }
+                if span.file == target.file
+                    && (spans_overlap(*span, target) || span_contains(*span, target)) =>
+            {
+                return Some(value_flow);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(flow) = return_value_flow_containing_span(then_events, target)
+                    .or_else(|| return_value_flow_containing_span(else_events, target))
+                {
+                    return Some(flow);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(flow) = return_value_flow_containing_span(body, target) {
+                    return Some(flow);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(flow) = return_value_flow_containing_span(body, target)
+                    .or_else(|| return_value_flow_containing_span(catch_events, target))
+                    .or_else(|| return_value_flow_containing_span(finally_events, target))
+                {
+                    return Some(flow);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn call_arg_value_keys(args: &[bonsai_lang_api::CallArg]) -> AHashSet<String> {
@@ -6820,16 +7296,25 @@ fn spans_overlap(a: Span, b: Span) -> bool {
     a.file == b.file && a.start < b.end && b.start < a.end
 }
 
-/// One-tier demotion. `Critical → High`, `High → Medium`,
-/// `Medium → Low`, `Low → Low`. Used by trust-aware severity
-/// adjustment so local-trust sources don't keep network-grade
-/// `high` severity.
+/// One-tier demotion used for inferred sources whose boundary is not yet
+/// proven by a rulepack source.
 fn demote_severity_one_tier(sev: Severity) -> Severity {
     match sev {
         Severity::Critical => Severity::High,
         Severity::High => Severity::Medium,
         Severity::Medium => Severity::Low,
         Severity::Low | Severity::Info => Severity::Info,
+    }
+}
+
+/// Local operator-controlled input is still security relevant for privileged
+/// or multi-user processes, but it must not inherit network-grade priority.
+/// Cap it at medium regardless of the sink's standalone severity.
+fn cap_local_trust_severity(sev: Severity) -> Severity {
+    match sev {
+        Severity::Critical | Severity::High | Severity::Medium => Severity::Medium,
+        Severity::Low => Severity::Low,
+        Severity::Info => Severity::Info,
     }
 }
 

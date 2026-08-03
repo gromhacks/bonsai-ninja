@@ -666,6 +666,28 @@ fn slice_result_at_update_user_call_reports_local_influences() {
     );
 }
 
+#[test]
+fn slice_resolves_an_unambiguous_symbol_without_line() {
+    let Some(out) = run(&[
+        "slice",
+        ws().to_str().unwrap(),
+        "--symbol",
+        "result",
+        "--file",
+        "gateway.py",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let value: serde_json::Value = serde_json::from_str(&out).expect("slice JSON");
+    assert!(value["candidate_count"].as_u64().unwrap_or(0) >= 1, "{out}");
+    assert!(
+        value["slices"].as_array().is_some_and(|rows| !rows.is_empty()),
+        "{out}"
+    );
+}
+
 // -------- inspect --------
 
 #[test]
