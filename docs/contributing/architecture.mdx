@@ -78,6 +78,16 @@ Under pressure the OS can reclaim those clean pages while Bonsai serializes,
 spills, or exactly recomputes compiler bodies. Resource accounting changes
 throughput and representation only.
 
+Entry-rooted semantic closures use a distinct resource profile. Their shared
+IDG relations are persisted, file-backed, and reclaimable, so live RSS is an
+unstable concurrency input: it changes with page-cache history even when the
+committed working set is identical. The scheduler instead reserves the
+measured non-reclaimable linkage/output state and charges 128 MiB for each
+independent sparse closure frontier. Subject to CPU availability, the current
+profile permits up to ten workers at 3 GiB, two at 2 GiB, and one at 1 GiB.
+This is concurrency control, not a semantic budget; every entry still reaches
+the same least fixed point.
+
 Raw workspace ingestion has a lighter schedule than parsing. Independent
 source reads run concurrently in byte-weighted windows derived from the live
 memory budget; each completed window is published to the VFS in canonical path
@@ -108,6 +118,36 @@ from per-language pools, so same-language files parse concurrently without a
 global parser lock. It walks every ERROR/MISSING node; parsing is
 uncapped by default, with `BONSAI_PARSE_TIMEOUT_MS` available for explicitly
 bounded diagnostic runs.
+
+## Knowledge ownership
+
+The compiler boundary is enforced by what each layer is allowed to know:
+
+- `crates/lang_*` owns Tree-sitter node/field names, grammar recovery,
+  language syntax, and lowering that syntax into typed facts. An adapter may
+  model a runtime construct only as a generic capability fact; it must not
+  assign source, sink, sanitizer, severity, CWE, trust, or framework meaning.
+- `security-patterns/langs/<language>` owns library/package/framework API
+  identities and every security-sensitive inventory: call targets, argument
+  roles, safe/unsafe scalar values, denied keys, character mappings, source
+  trust, sink severity, CWE, and sanitizer requirements.
+- `security-patterns/metadata.yml` owns pack-wide taxonomy aliases,
+  dependency-manifest patterns, package aliases, security-model exceptions,
+  sanitizer-credit relationships, named review profiles, test-path patterns,
+  adapter-visible package normalization/binding, and tag-level finding/guard
+  semantic defaults.
+- Shared resolver, callgraph, IDG, taint, browse, and security algorithms own
+  only language-neutral IR and fixed-point logic. They must not branch on a
+  language id, parse rendered source, or maintain a union of API names.
+- CLI option names, persisted schema labels, canonical IR operation names,
+  and workspace/cache filenames are protocol or product constants, not
+  language knowledge. Keep them centralized and typed; do not move them into
+  security rules.
+
+Moving a package or API spelling from shared analysis into one adapter still
+leaves security policy compiled into Rust. The normal design is
+adapter-emitted syntax facts plus a rulepack-declared semantic role consumed
+by one generic proof.
 
 ## Immutable compiler objects and generations
 
@@ -148,6 +188,18 @@ factstore generation contains exact per-object payload digests and a strong
 generation digest. Publication is atomic. A stale generation may still supply
 an unchanged content-addressed object; generation refresh copies its validated
 compressed payload directly and recompiles only misses.
+
+Every derived semantic sidecar includes the compiler-object frontend ABI in
+its pipeline identity. A lowering or compiler-object schema change therefore
+invalidates the callgraph/IDG products built from older facts even when the
+workspace source and dependency bytes have not changed. Root-only validators
+reconstruct the same ABI-bound identity as a fully opened workspace; a cheap
+validation path must never accept a graph the compiler path would reject.
+
+The selected adapter also owns per-path grammar variants. Parser pools and
+tree-cache entries include that exact grammar identity (for example
+TypeScript versus TSX), and every direct adapter parse requests the same pack.
+There is no CLI/parser extension switch outside the adapter registry.
 
 `FileId` is a deterministic full-workspace source ordinal, not the insertion
 position of a scoped query. Filtered and literal-prefiltered opens retain that
@@ -251,6 +303,10 @@ Commands request the lowest compiler product that can answer their contract:
   rulepack, or cross-file-body options select workspace semantics.
 - `inspect` matches compact headers, streams exact occurrence bodies per
   candidate file, and hydrates exact bodies only for selected rendered chains.
+  Raw taint rows carry a worker-precomputed conservative presentation cost;
+  pagination reuses it without serializing or rescanning the complete result
+  set. Only the requested raw-taint page is formatted and cached. Stable
+  page/cursor navigation still covers every row.
 - Security and export retain compact linkage beside the sparse IDG and stream
   exact compiler bodies through the byte-weighted cache.
 - Every IDG query reuses `IdgQueryService::global_linkage_index()`. Calling
@@ -294,15 +350,16 @@ tests can omit it.
 
 The kit is split across several files:
 
-- `kit/mod.rs` — `GrammarHandler`, the generic walker, decl-index pipeline,
-  flow-event extraction, RHS-token scanning, branch repair entry point.
+- `kit/mod.rs` — `GrammarHandler`, the shared walker, decl-index pipeline,
+  typed expression-flow extraction, and branch repair entry point.
 - `kit/branch_repair.rs` — span-based then/else partition recovery for
   grammars that lump both arms together.
 - `kit/bindings.rs` — pattern and foreach lowering from tree-sitter fields.
 - `kit/identifiers.rs` — identifier-shape predicates.
 - `kit/param_extraction.rs` — parameter names + annotations.
-- `kit/pseudo_call.rs` — JSX, Go channel sends, C++ delete, PHP echo,
-  Ruby backticks, Scala infix concat — all lowered to `FlowEvent::Call`.
+- `kit/pseudo_call.rs` — the adapter callback dispatch for non-call CST nodes.
+  Concrete JSX, channel-send, delete, echo, subshell, eval, and operator
+  grammar vocabulary remains in the owning `lang_*` crate.
 - `kit/qualified.rs` — canonicalises `obj['k']`, `obj.k`, and `obj->k`
   to the same dotted form.
 - `kit/return_extraction.rs` — return / throw / catch value extraction.
@@ -318,8 +375,10 @@ carry a union of source-language tokens.
 **`crates/lang_*`** — 21 adapters, one per supported language. Adapters
 range from a few hundred to a few thousand lines: they declare the
 `GrammarHandler`, run `decl_index_with_handler`, post-process to fill in
-language-specific facts. The internal capability matrix tracks what each
-adapter handles precisely versus partially.
+language-specific facts. `call_kinds`, `call_ref_kinds`, pseudo-call
+callbacks, nested-call component kinds, and argument passing-mode
+classification are explicit adapter-owned contracts. The internal capability
+matrix tracks what each adapter handles precisely versus partially.
 
 ## Analysis core
 
@@ -377,6 +436,23 @@ negative union is a proof that each member is negative, while positive unions
 are still checked per parameter. This removes redundant work without changing
 the least fixed point.
 
+Field admission is sparse and AST-demanded. The persisted symbolic runtime
+records exact projected fact keys plus a grouped relation for compiler-proven
+whole-aggregate consumers. The latter comes only from the non-traversable
+`IntraAggregateConsume` marker emitted during transfer lowering; ordinary
+reads and unresolved name similarity do not create wildcard demand. Demand is
+propagated backwards through symbolic transforms with lazy spill-backed sets.
+This preserves real aggregate consumers without allocating a workspace-wide
+base-by-field relation or letting one projected field taint its siblings.
+
+Targeted queries may compile a sparse backward relevance relation before the
+forward closure. That relation is only a pruning proof and records whether its
+symbolic inversion is complete. If a requested projection has no invertible
+persisted fact, the proof is incomplete and therefore admits unproven nodes
+and facts instead of removing them. The exact forward IDG fixed point remains
+the semantic authority. This fail-open optimization contract preserves paths
+through scalar call boundaries without inventing sibling-field propagation.
+
 Closure reached sets use sorted external runs, while pending LIFO frontiers
 store all spilled chunks in one append-only temporary file and truncate
 consumed tails. Memory scheduling therefore remains exact without making file
@@ -402,7 +478,9 @@ Memory-bounded export may unload the resident IDG between compiler and
 presentation phases. The workspace retains only the validated pipeline hash
 for the current immutable source generation, so reloading the same sidecar
 does not rescan the source and dependency trees. Any source edit clears that
-token together with the IDG and other semantic caches.
+token together with the IDG and other semantic caches. A frontend ABI or
+transfer-semantic version change produces a different pipeline hash and cannot
+reuse the prior graph.
 
 Native export has one exact call-relation representation: the resolved
 callgraph. It never enumerates simple paths or exposes a capped/BFS prefix
@@ -640,7 +718,9 @@ candidate indexes before they can narrow a query.
   match spans and releases syntax-body/callgraph ownership before opening a
   persisted IDG. The facade batch-resolves those spans to typed IDG target
   nodes, keeps function fallbacks only for unrepresented spans, and reuses one
-  sparse backward target-relevance proof across exact per-entry closures. A
+  sparse backward target-relevance proof across exact per-entry closures. An
+  incomplete symbolic inverse makes that proof non-pruning; it never narrows
+  semantic work without a completeness proof. A
   warmed IDG answers the target cut; a cache miss builds one exact
   query-scoped source/target IDG, with `DataFlowCache` retained only as the
   compatibility fallback. Each result carries a `SyntaxFlowPlan` with the
@@ -700,11 +780,13 @@ Every cache is interior-mutable (`parking_lot::RwLock` /
 `Workspace::ingest_dir` clears or invalidates each cache when a
 file edit lands so subsequent queries observe current state. Exact-body
 single-flight cells prevent concurrent consumers from lowering the same
-retained file snapshot more than once. A security analysis also owns one
-immutable dependency-manifest package snapshot because manifests such as
-`requirements.txt` are not necessarily VFS compiler inputs. Broad matching
-and later point constraint rechecks share that snapshot, so a concurrent save
-cannot mix old endpoint evidence with new package facts.
+retained file snapshot more than once. Every public security operation that
+can consult package evidence—source, sink, and sanitizer inventory plus
+source/taint analysis—owns one immutable dependency-manifest package snapshot
+because manifests such as `requirements.txt` are not necessarily VFS compiler
+inputs. Broad matching and later point constraint rechecks share that
+snapshot, so a concurrent save cannot mix old endpoint evidence with new
+package facts.
 
 ## Security
 
@@ -721,7 +803,8 @@ IDG over only the files/functions needed for the rendered lineage. Neither
   evidence. The broader workspace dataflow sidecar remains a compatibility
   cache for navigation and older SDK/query surfaces; native export reads the
   canonical IDG. The output formats (text / JSON / SARIF) live in
-  `report.rs`. Sanitizer-credit calculation has its own module.
+  `report.rs`. Sanitizer-credit calculation has its own generic module; the
+  credit taxonomy lives in `security-patterns/metadata.yml`.
 
 ## Query / browse / trace
 

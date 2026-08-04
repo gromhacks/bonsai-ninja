@@ -12,9 +12,9 @@ use tree_sitter::{Language, Node, Tree};
 pub const LANG_ID: LanguageId = LanguageId::new("erlang");
 const PACK_NAME: &str = "erlang";
 
-// Erlang's tree-sitter grammar (WhatsApp) uses language-specific kind
-// names for control flow that the generic handler doesn't cover. Layer
-// them on top so flow events surface for case / if / try / receive.
+// Erlang's tree-sitter grammar (WhatsApp) uses its own construct nodes.
+// This adapter declares the complete production inventory so shared lowering
+// can emit case / if / try / receive flow without a cross-language fallback.
 const HANDLER: GrammarHandler = GrammarHandler {
     nested_type_ownership: true,
     // Erlang functions: `fun_decl` is the umbrella; clauses are
@@ -39,6 +39,9 @@ const HANDLER: GrammarHandler = GrammarHandler {
     do_kinds: &[],
     loop_kinds: &[],
     call_kinds: &["call", "remote"],
+    argument_passing_mode_extractor: None,
+    nested_call_component_kinds: &["remote"],
+    call_ref_kinds: &["call", "remote"],
     assignment_kinds: &["match_expr"],
     return_kinds: &[],
     throw_kinds: &[],
@@ -55,12 +58,16 @@ const HANDLER: GrammarHandler = GrammarHandler {
     await_kinds: &[],
     defer_kinds: &[],
     using_kinds: &["receive_expr"],
-    special_forms: &[SyntaxSpecialForm::FunctionalLoopCall],
+    special_forms: &[
+        SyntaxSpecialForm::FunctionalLoopCall,
+        SyntaxSpecialForm::RemoteCallExpression,
+    ],
     method_receiver_param_index: None,
     implicit_receiver_names: &[],
     implicit_receiver_prefixes: &[],
     tail_expression_returns: false,
     void_return_type_names: &[],
+    ..bonsai_lang_api::EMPTY_HANDLER
 };
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -96,6 +103,12 @@ impl LanguageAdapter for ErlangAdapter {
             super_receiver_tokens: &[],
             implicit_receiver_tokens: &[],
             callable_declaration_family: bonsai_lang_api::CallableDeclarationFamily::FunctionClauses,
+            callable_reference_syntax: bonsai_lang_api::CallableReferenceSyntax {
+                prefixes: &["fun "],
+                numeric_arity_suffix: true,
+                symbol_wrapper: None,
+                trailing_invocation_punctuation: false,
+            },
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -940,7 +953,14 @@ fn augment_erlang_tail_return_event(
         // range begins or ends on trivia, which would incorrectly pull calls
         // from earlier expressions into a literal tail return.
         .and_then(|(start, end)| tree.root_node().named_descendant_for_byte_range(start, end))
-        .map(|value| bonsai_lang_api::kit::expression_flow_from_node(value, value_span.file, src.as_bytes()))
+        .map(|value| {
+            bonsai_lang_api::kit::expression_flow_from_node_with_handler(
+                value,
+                value_span.file,
+                src.as_bytes(),
+                &HANDLER,
+            )
+        })
         .unwrap_or_default();
     events.push(FlowEvent::Return {
         span: value_span,

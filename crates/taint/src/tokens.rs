@@ -2,7 +2,7 @@ use crate::{reachable::TokenSet, text::is_quoted_literal};
 
 pub(crate) fn canonical_bare_name(text: &str) -> String {
     crate::text::normalise_qualified_text(text)
-        .trim_start_matches(&['$', '@', '%'][..])
+        .trim_start_matches(bonsai_common::is_name_punctuation)
         .trim()
         .to_string()
 }
@@ -48,7 +48,7 @@ pub(crate) fn receiver_method_projection_is_tainted(
     if !normalize_scoped_names {
         return false;
     }
-    let normalised = crate::text::normalise_qualified_text(&text.replace("::", "."));
+    let normalised = bonsai_common::normalize_qualified_name(&crate::text::normalise_qualified_text(text));
     normalised != text && receiver_method_projection_in_text_is_tainted(&normalised, state)
 }
 

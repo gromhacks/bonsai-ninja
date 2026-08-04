@@ -299,22 +299,6 @@
         return await fs.promises.readFile(path, "utf8");
       }
     expect_match_text: [fs.promises.readFile]
-  description: "fs.promises.readFile(path[, options]) - promise resolving to local file bytes/text."
-
-- id: typescript.source.fs_promises_alias_readfile
-  enabled: true
-  language: typescript
-  trust: local
-  tag: file-input
-  payload_types: [text, binary]
-  packages: [fs/promises]
-  match:
-    kind: call
-    callee:
-      attribute: [fsp, readFile]
-  constraints:
-  - min_args: 1
-  match_examples:
   - name: fs promises alias readFile
     code: |
       const fsp = require("fs/promises");
@@ -322,7 +306,7 @@
         return await fsp.readFile(path, "utf8");
       }
     expect_match_text: [fsp.readFile]
-  description: "fs/promises readFile imported as the conventional `fsp` alias - promise resolving to local file bytes/text."
+  description: "fs.promises.readFile(path[, options]) - promise resolving to local file bytes/text."
 
 - id: typescript.source.fs_readfile_callback
   enabled: true

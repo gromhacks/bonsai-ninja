@@ -68,6 +68,25 @@ or call-depth cap. Context-sensitive queries retain sparse sorted call/return
 rows and stream ordinary local edges into CSR instead of duplicating the full
 workspace relation.
 
+Projected symbolic facts are admitted by compiler demand, not by guessing
+fields from a carrier name. The runtime persists the exact access-path keys
+that occur in adapter-lowered projections and computes their backwards demand
+through symbolic transforms. A bare aggregate read becomes wildcard demand
+only when lowering emitted the non-traversable
+`IntraAggregateConsume` marker for a real whole-value consumer. This marker is
+metadata for demand compilation, never a scalar taint edge. Resolver-proven
+local call arguments are excluded from wildcard consumption because the
+callee's exact parameter projections provide the demand instead. Demand sets
+and wildcard bases use the same lazy sparse/spill representations as closure;
+no base-by-field matrix is materialized and no sibling projection is invented.
+
+Backward target relevance is an optimization proof, not an alternate semantic
+engine. Its result carries an explicit completeness bit. If an exact target
+projection cannot be inverted through the persisted symbolic facts, relevance
+becomes non-pruning for facts and nodes outside the proven set; the canonical
+forward fixed point still decides reachability. An incomplete inverse may cost
+work, but it may never reject a scalar seed, call boundary, or valid path.
+
 Rulepack-free inspect taint rows use `Workspace::syntax_flow_graph` from
 `crates/workspace/src/flow_query.rs`. That workspace facade is the only
 command-facing switch between a warmed IDG target cut and the canonical
@@ -318,9 +337,11 @@ export, and security all see the same branch shape.
 
 Branch proofs consume adapter-lowered `ConditionExpressionFact` trees and
 typed `ConditionOperandFact` scalar values. The owning adapter maps its
-grammar's boolean, equality, membership, and type-test nodes; shared analysis
-does not maintain a language-token/operator inventory. A rendered condition
-string remains diagnostic context only.
+grammar's boolean, equality, membership, type-test, and runtime-truth nodes;
+`ConditionExpressionFact::Truthy` preserves the tested operand rather than a
+rendered token. Falsey fallbacks retain their dynamic projection. Shared
+analysis does not maintain a language-token/operator inventory. A rendered
+condition string remains diagnostic context only.
 
 **Pattern arms.** Languages where `match`/`switch` parses as a flat
 `Branch` with arms concatenated into `then_events` (Scala, Swift, Rust)
@@ -574,6 +595,24 @@ not invent a read that the adapter failed to emit. This is what keeps
 `data.other` from inheriting `data.value` while still allowing an explicit
 whole-aggregate destructuring edge.
 
+At resolved call boundaries, a projected caller argument maps to the matching
+callee projection. For a method whose grammar has no explicit receiver
+parameter, `carrier.field` maps to `this.field`; the scalar `carrier` maps only
+to `this`. Constructor or method stitching must never collapse the scalar
+carrier into a projected field merely because that field is demanded later.
+Expression-bodied properties and other accessor sugar follow the same rule:
+the owning adapter emits the exact projection place and call-site fact, and
+shared IDG code joins those facts by span.
+
+Some Tree-sitter grammars represent `container.value.field` as a receiver
+place (`container.value`) plus a resolved selector accessor (`this.field`).
+The sparse IDG demand planner composes those two typed facts into the finite
+suffix `value.field` before field forwarding. This is not token guessing: both
+halves must exist in adapter-lowered IR and the selector call must resolve.
+The composed demand lets exact state survive constructor, inheritance, and
+computed-property hops without admitting an unobserved sibling or recursive
+field.
+
 A root binding that receives a complete call result may feed a later,
 adapter-emitted projection of that value (`header = reader.Next()` followed by
 `header.Name`). An exact writer for the projected field wins, including a clean
@@ -587,7 +626,8 @@ closure so sibling and recursive fields are not invented.
 rendering only. Semantic consumers do not reparse that string. Each owning
 language adapter emits `BranchConditionFact` with an AST-derived polarity and,
 where supported, a typed `ConditionExpressionFact` tree containing exact
-boolean, equality, membership, type-test, and scalar-literal facts. Security
+boolean, equality, membership, type-test, runtime-truth, and scalar-literal
+facts. Security
 and control-flow proofs relate calls to the exact condition span and consume
 that compiler IR. Native export includes the same facts.
 

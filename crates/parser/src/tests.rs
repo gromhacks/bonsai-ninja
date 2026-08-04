@@ -68,7 +68,12 @@ impl LanguageAdapter for TestCAdapter {
         vfs: &Vfs,
         tree: &Tree,
     ) -> Vec<bonsai_lang_api::ParseRecoveryEdit> {
-        bonsai_lang_api::c_family_declaration_macro_recovery_edits(snapshot, vfs, tree)
+        bonsai_lang_api::c_family_declaration_macro_recovery_edits(
+            snapshot,
+            vfs,
+            tree,
+            &["va_arg", "__builtin_va_arg"],
+        )
     }
 
     fn capabilities(&self) -> LanguageCapabilities {
@@ -251,7 +256,7 @@ fn same_language_worker_checkouts_are_not_globally_serialized() {
         let release = Arc::clone(&release);
         let entered_tx = entered_tx.clone();
         workers.push(std::thread::spawn(move || {
-            let _parser = cache.checkout_parser(LanguageId::new("python"));
+            let _parser = cache.checkout_parser("python");
             entered_tx.send(()).expect("announce parser checkout");
             let (lock, wake) = &*release;
             let mut released = lock.lock().expect("release lock");

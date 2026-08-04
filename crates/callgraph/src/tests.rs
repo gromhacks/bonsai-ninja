@@ -3150,7 +3150,10 @@ fn receiver_projected_callable_binding_resolves_receiver_form_invocation() {
         &AHashMap::new(),
         &alias_index,
         Some(&callable_index),
-        bonsai_lang_api::ModulePathSyntax::none(),
+        bonsai_lang_api::LanguageCapabilities {
+            module_path_syntax: bonsai_lang_api::ModulePathSyntax::none(),
+            ..bonsai_lang_api::LanguageCapabilities::partial_baseline()
+        },
     );
     assert_eq!(
         indexed_bindings.get("service.execute"),
@@ -3382,12 +3385,12 @@ fn quoted_runtime_callable_variable_resolves_to_workspace_function() {
                     FlowEvent::Assign {
                         span: Span::new(file, 10, 24),
                         target: "$cb".to_string(),
-                        source_name: Some("'helper'".to_string()),
+                        source_name: Some("helper".to_string()),
                         source_call: None,
                         source_call_args: Vec::new(),
                         source_names: Vec::new(),
                         declares_new_binding: false,
-                        value_kind: Some(AssignValueKind::Literal),
+                        value_kind: Some(AssignValueKind::CallableReference),
                     },
                     call_with_args(file, "$cb", &["arg"]),
                 ],

@@ -24,7 +24,17 @@ fn workspace_multi(files: &[(&str, &str)]) -> Workspace {
 }
 
 fn pack_for(lang: &str, sinks: Vec<Rule>) -> Rulepack {
-    let mut pack = Rulepack::default();
+    let mut pack = bonsai_security::load_rulepack(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("security-patterns"),
+    )
+    .expect("bundled rulepack metadata");
+    pack.packs.clear();
+    let mut sinks = sinks;
+    for sink in &mut sinks {
+        pack.metadata.apply_rule_defaults(sink);
+    }
     pack.packs.insert(
         lang.to_string(),
         LanguagePack {
@@ -84,6 +94,7 @@ fn base_rule(lang: &str, id: &str, tag: &str, kind: MatchKind) -> Rule {
         modules: Vec::new(),
         manifests: Vec::new(),
         lockfiles: Vec::new(),
+        package_matching: Default::default(),
         payload_types: Vec::new(),
         match_spec: MatchSpec {
             kind,

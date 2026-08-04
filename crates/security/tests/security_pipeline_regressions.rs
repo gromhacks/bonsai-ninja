@@ -10,19 +10,21 @@
 use bonsai_idg::PointKind;
 use bonsai_lang_api::{FlowEvent, StaticScalarValue};
 use bonsai_security::loader::LanguagePack;
-use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
+use bonsai_security::rule::{
+    ArgTaintedSpec, CharacterEscapeSemantics, ExactStringMapping, Severity, TaintSemantics,
+};
 use bonsai_security::{
     run_taint_analysis, run_taint_analysis_with_phase_progress, AnalysisSemantics,
-    CharacterConstraintSemantics, ConfiguredArgumentReceiverGuardSemantics,
-    ConfiguredCallArgumentGuardSemantics, ConstraintKind, DynamicKeyDenylistGuardSemantics, FindingStatus,
-    FlowClass, GuardProfile, MatchKind, MatchSpec, NoSqlFilterSemantics, PathContainmentGuardSemantics,
-    ReceiverConfigurationGuardSemantics, ReceiverFactoryGuardSemantics,
-    RelativePathContainmentGuardSemantics, RequiredAggregateFieldSemantics, RequiredCallArgumentSemantics,
-    RequiredNamedArgumentSemantics, RequiredReceiverCallSemantics, Rule, RuleConstraint, RuleKind,
-    RuleTarget, Rulepack, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions, TrustClass,
-    UrlComponentSemantics, UrlDnsGuardSemantics, UrlGuardRootSemantics, UrlHostAllowlistSemantics,
-    UrlNetworkGuardSemantics, UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics,
-    UrlSchemeGuardSemantics,
+    CharacterConstraintProviderSemantics, CharacterConstraintSemantics,
+    ConfiguredArgumentReceiverGuardSemantics, ConfiguredCallArgumentGuardSemantics, ConstraintKind,
+    DynamicKeyDenylistGuardSemantics, FindingStatus, FlowClass, GuardProfile, MatchKind, MatchSpec,
+    NoSqlFilterSemantics, PathContainmentGuardSemantics, ReceiverConfigurationGuardSemantics,
+    ReceiverFactoryGuardSemantics, RelativePathContainmentGuardSemantics, RequiredAggregateFieldSemantics,
+    RequiredCallArgumentSemantics, RequiredNamedArgumentSemantics, RequiredReceiverCallSemantics, Rule,
+    RuleConstraint, RuleKind, RuleTarget, Rulepack, SourceAnalysisOptions, SourceLineageLimits,
+    TaintAnalysisOptions, TrustClass, UrlAddressParserSemantics, UrlComponentSemantics, UrlDnsGuardSemantics,
+    UrlGuardRootSemantics, UrlHostAllowlistSemantics, UrlNetworkGuardSemantics,
+    UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics, UrlSchemeGuardSemantics,
 };
 use bonsai_taint::{compose_idg_seed_nodes, ensure_idg_service, IdgSeedRequest, TokenSet};
 use bonsai_workspace::Workspace;
@@ -312,6 +314,37 @@ fn rules_root() -> PathBuf {
     repo_root().join("security-patterns")
 }
 
+fn empty_rulepack_with_bundled_metadata() -> Rulepack {
+    static METADATA: std::sync::OnceLock<bonsai_security::RulepackMetadata> = std::sync::OnceLock::new();
+    let metadata = METADATA.get_or_init(|| {
+        bonsai_security::load_rulepack(&rules_root())
+            .expect("bundled rulepack loads")
+            .metadata
+    });
+    let mut pack = Rulepack::default();
+    pack.metadata = metadata.clone();
+    pack
+}
+
+fn html_character_escape_semantics(value_arg_indices: Vec<usize>) -> CharacterEscapeSemantics {
+    CharacterEscapeSemantics {
+        value_arg_indices,
+        required_mappings: [
+            ("&", "&amp;"),
+            ("<", "&lt;"),
+            (">", "&gt;"),
+            ("\"", "&quot;"),
+            ("'", "&#39;"),
+        ]
+        .into_iter()
+        .map(|(input, output)| ExactStringMapping {
+            input: input.to_string(),
+            output: output.to_string(),
+        })
+        .collect(),
+    }
+}
+
 #[test]
 fn inferred_class_field_sources_require_receiver_field_write() {
     let ws = workspace(&[(
@@ -516,7 +549,7 @@ fn collect_event_kinds(events: &[FlowEvent], out: &mut BTreeSet<&'static str>) {
 }
 
 fn rulepack(lang: &str, source_name: &str, sink_name: &str) -> Rulepack {
-    let mut pack = Rulepack::default();
+    let mut pack = empty_rulepack_with_bundled_metadata();
     pack.packs.insert(
         lang.to_string(),
         LanguagePack {
@@ -545,7 +578,7 @@ fn rulepack(lang: &str, source_name: &str, sink_name: &str) -> Rulepack {
 }
 
 fn return_sink_rulepack(lang: &str) -> Rulepack {
-    let mut pack = Rulepack::default();
+    let mut pack = empty_rulepack_with_bundled_metadata();
     let mut source = rule(
         lang,
         RuleKind::Source,
@@ -572,6 +605,7 @@ fn return_sink_rulepack(lang: &str) -> Rulepack {
         modules: Vec::new(),
         manifests: Vec::new(),
         lockfiles: Vec::new(),
+        package_matching: Default::default(),
         payload_types: Vec::new(),
         match_spec: MatchSpec {
             kind: MatchKind::Return,
@@ -607,7 +641,7 @@ fn return_sink_rulepack(lang: &str) -> Rulepack {
 }
 
 fn constrained_call_sink_rulepack(lang: &str, source_name: &str, sink_name: &str) -> Rulepack {
-    let mut pack = Rulepack::default();
+    let mut pack = empty_rulepack_with_bundled_metadata();
     let mut sink = rule(
         lang,
         RuleKind::Sink,
@@ -643,7 +677,7 @@ fn constrained_call_sink_rulepack(lang: &str, source_name: &str, sink_name: &str
 }
 
 fn c_recv_output_rulepack() -> Rulepack {
-    let mut pack = Rulepack::default();
+    let mut pack = empty_rulepack_with_bundled_metadata();
     let mut source = rule(
         "c",
         RuleKind::Source,
@@ -720,7 +754,7 @@ fn go_bind_output_rulepack() -> Rulepack {
             kw: None,
         },
     }]);
-    let mut pack = Rulepack::default();
+    let mut pack = empty_rulepack_with_bundled_metadata();
     pack.packs.insert(
         "go".to_string(),
         LanguagePack {
@@ -760,6 +794,7 @@ fn rule(
         modules: Vec::new(),
         manifests: Vec::new(),
         lockfiles: Vec::new(),
+        package_matching: Default::default(),
         payload_types: Vec::new(),
         match_spec: MatchSpec {
             kind: MatchKind::Call,
@@ -1065,7 +1100,7 @@ fn taint_graph_disk_namespace_changes_with_semantic_idg_scope() {
     )
     .expect("write source B fixture");
 
-    let mut pack = Rulepack::default();
+    let mut pack = empty_rulepack_with_bundled_metadata();
     pack.packs.insert(
         "python".to_string(),
         LanguagePack {
@@ -2060,6 +2095,359 @@ fn kotlin_mega_flow_preserves_implicit_getter_receiver_state() {
 }
 
 #[test]
+fn swift_mega_flow_preserves_computed_getter_receiver_state() {
+    let ws = index_real_fixture("swift", "mega_flow");
+    let global = ws.db().global_index();
+    let idg = ensure_idg_service(ws.db());
+    let handle = ws
+        .lookup_function("handle_request")
+        .expect("Swift mega-flow entry");
+    let seeds = TokenSet::from_iter(["raw".to_string()]);
+    let seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::token_api(handle, &seeds),
+        global.as_ref(),
+        idg.as_ref(),
+    );
+    let closure = idg.forward_closure(&seed_nodes);
+    let (repository_run, execute_span) = ws
+        .vfs()
+        .all_files()
+        .into_iter()
+        .flat_map(|file| global.decls_in(file).iter())
+        .filter(|decl| decl.name == "run")
+        .find_map(|decl| {
+            decl.flow_events.iter().find_map(|event| match event {
+                FlowEvent::Call { span, name, .. } if name == "Executor.execute" => {
+                    Some((bonsai_common::FuncId::new(decl.symbol.raw()), *span))
+                }
+                _ => None,
+            })
+        })
+        .expect("Swift Repository.run execute call");
+    let execute_nodes = idg.nodes_at_span(repository_run, execute_span);
+    let points = closure
+        .iter()
+        .filter_map(|node| idg.resolve_point(*node))
+        .collect::<Vec<_>>();
+
+    assert!(
+        execute_nodes.iter().any(|node| {
+            closure.contains(node)
+                && idg
+                    .resolve_point(*node)
+                    .is_some_and(|point| point.kind == PointKind::CallArg && point.name == "arg0")
+        }),
+        "raw -> inherited constructor state -> computed cmd getter must reach Executor.execute(c); \
+         execute_nodes={execute_nodes:#?}; closure={points:#?}"
+    );
+}
+
+#[test]
+fn elixir_mega_flow_preserves_value_field_projection_into_pattern_binding() {
+    let ws = index_real_fixture("elixir", "mega_flow");
+    let global = ws.db().global_index();
+    let idg = ensure_idg_service(ws.db());
+    let main = ws.lookup_function("main").expect("Elixir mega-flow entry");
+    let seeds = TokenSet::from_iter(["raw".to_string()]);
+    let seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::token_api(main, &seeds),
+        global.as_ref(),
+        idg.as_ref(),
+    );
+    let closure = idg.forward_closure(&seed_nodes);
+    let (storage_run, execute_span) = ws
+        .vfs()
+        .all_files()
+        .into_iter()
+        .flat_map(|file| global.decls_in(file).iter())
+        .filter(|decl| decl.name == "run")
+        .find_map(|decl| {
+            decl.flow_events.iter().find_map(|event| match event {
+                FlowEvent::Call { span, name, .. } if name == "Mega.Executor.execute" => {
+                    Some((bonsai_common::FuncId::new(decl.symbol.raw()), *span))
+                }
+                _ => None,
+            })
+        })
+        .expect("Mega.Storage.run execute call");
+    let execute_nodes = idg.nodes_at_span(storage_run, execute_span);
+    let points = closure
+        .iter()
+        .filter_map(|node| idg.resolve_point(*node))
+        .collect::<Vec<_>>();
+    let orchestrate = ws
+        .lookup_function("orchestrate")
+        .expect("Elixir pipeline function");
+    let projection_diagnostics = [
+        "envelope",
+        "envelope.cmd",
+        "cmd",
+        "joined",
+        "routed",
+        "valid",
+        "valid.cmd",
+    ]
+    .map(|name| {
+        let nodes = idg.read_or_write_nodes_for_names(orchestrate, &[name.to_string()]);
+        let rows = nodes
+            .iter()
+            .map(|node| (*node, closure.contains(node), idg.resolve_point(*node)))
+            .collect::<Vec<_>>();
+        (name, rows)
+    });
+    assert!(
+        execute_nodes.iter().any(|node| {
+            closure.contains(node)
+                && idg
+                    .resolve_point(*node)
+                    .is_some_and(|point| point.kind == PointKind::CallArg && point.name == "arg0")
+        }),
+        "raw -> envelope.cmd -> cmd_of pattern projection must reach Mega.Executor.execute(c); \
+         execute_nodes={execute_nodes:#?}; projections={projection_diagnostics:#?}; closure={points:#?}"
+    );
+}
+
+#[test]
+fn java_mega_flow_preserves_record_and_inherited_receiver_state() {
+    let ws = index_real_fixture("java", "mega_flow");
+    let global = ws.db().global_index();
+    let idg = ensure_idg_service(ws.db());
+    let handle = ws.lookup_function("handle").expect("Java mega-flow entry");
+    let seeds = TokenSet::from_iter(["raw".to_string()]);
+    let seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::token_api(handle, &seeds),
+        global.as_ref(),
+        idg.as_ref(),
+    );
+    let closure = idg.forward_closure(&seed_nodes);
+    let (repository_run, execute_span) = ws
+        .vfs()
+        .all_files()
+        .into_iter()
+        .flat_map(|file| global.decls_in(file).iter())
+        .filter(|decl| decl.name == "run")
+        .find_map(|decl| {
+            decl.flow_events.iter().find_map(|event| match event {
+                FlowEvent::Call { span, name, .. } if name == "Executor.execute" => {
+                    Some((bonsai_common::FuncId::new(decl.symbol.raw()), *span))
+                }
+                _ => None,
+            })
+        })
+        .expect("Repository.run execute call");
+    let execute_nodes = idg.nodes_at_span(repository_run, execute_span);
+    let points = closure
+        .iter()
+        .filter_map(|node| idg.resolve_point(*node))
+        .collect::<Vec<_>>();
+    let orchestrate = ws.lookup_function("orchestrate").expect("Java pipeline function");
+    let projection_diagnostics = [
+        "envelope",
+        "envelope.cmd",
+        "cmd",
+        "joined",
+        "routed",
+        "valid",
+        "valid.cmd",
+    ]
+    .map(|name| {
+        let nodes = idg.read_or_write_nodes_for_names(orchestrate, &[name.to_string()]);
+        let rows = nodes
+            .iter()
+            .map(|node| (*node, closure.contains(node), idg.resolve_point(*node)))
+            .collect::<Vec<_>>();
+        (name, rows)
+    });
+    let cross_call_diagnostics = idg.cross_call_edges_in_reachable_nodes(&closure);
+
+    assert!(
+        execute_nodes.iter().any(|node| {
+            closure.contains(node)
+                && idg
+                    .resolve_point(*node)
+                    .is_some_and(|point| point.kind == PointKind::CallArg && point.name == "arg0")
+        }),
+        "raw -> record cmd -> inherited repository state must reach Executor.execute(c); \
+         execute_nodes={execute_nodes:#?}; projections={projection_diagnostics:#?}; \
+         calls={cross_call_diagnostics:#?}; closure={points:#?}"
+    );
+}
+
+#[test]
+fn javascript_mega_flow_preserves_constructor_and_getter_state_after_external_transforms() {
+    let ws = index_real_fixture("javascript", "mega_flow");
+    let global = ws.db().global_index();
+    let idg = ensure_idg_service(ws.db());
+    let orchestrate = ws
+        .lookup_function("orchestrate")
+        .expect("JavaScript orchestrate function");
+    let seeds = TokenSet::from_iter(["valid.cmd".to_string()]);
+    let seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::token_api(orchestrate, &seeds),
+        global.as_ref(),
+        idg.as_ref(),
+    );
+    let closure = idg.forward_closure(&seed_nodes);
+    let execute = ws
+        .lookup_function("execute")
+        .expect("JavaScript execute function");
+    let execute_span = global
+        .decl_of(bonsai_common::SymbolId::new(execute.raw()))
+        .expect("execute declaration")
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { span, name, .. } if name == "child_process.exec" => Some(*span),
+            _ => None,
+        })
+        .expect("child_process.exec call");
+    let execute_nodes = idg.nodes_at_span(execute, execute_span);
+    let points = closure
+        .iter()
+        .filter_map(|node| idg.resolve_point(*node))
+        .collect::<Vec<_>>();
+    let projection_diagnostics = ["valid", "valid.cmd"].map(|name| {
+        let nodes = idg.read_or_write_nodes_for_names(orchestrate, &[name.to_string()]);
+        let rows = nodes
+            .iter()
+            .map(|node| (*node, closure.contains(node), idg.resolve_point(*node)))
+            .collect::<Vec<_>>();
+        (name, rows)
+    });
+
+    assert!(
+        execute_nodes.iter().any(|node| {
+            closure.contains(node)
+                && idg
+                    .resolve_point(*node)
+                    .is_some_and(|point| point.kind == PointKind::CallArg && point.name == "arg0")
+        }),
+        "valid.cmd -> constructor state -> repository getter must reach child_process.exec(cmd); \
+         execute_nodes={execute_nodes:#?}; projections={projection_diagnostics:#?}; closure={points:#?}"
+    );
+}
+
+#[test]
+fn php_mega_flow_preserves_projected_state_through_a_chained_call_receiver() {
+    let ws = index_real_fixture("php", "mega_flow");
+    let global = ws.db().global_index();
+    let idg = ensure_idg_service(ws.db());
+    let orchestrate = ws
+        .lookup_function("orchestrate")
+        .expect("PHP orchestrate function");
+    let persist = ws.lookup_function("persist").expect("PHP Store::persist method");
+    let seed_nodes = idg
+        .read_or_write_nodes_for_names(orchestrate, &["$valid".to_string()])
+        .into_iter()
+        .filter(|node| {
+            idg.resolve_point(*node).is_some_and(|point| {
+                point.kind == PointKind::Write && matches!(point.span.start, 2113 | 2220)
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(seed_nodes.len(), 2, "expected the two try/catch $valid writes");
+    let closure = idg.forward_closure(&seed_nodes);
+    let persist_span = global
+        .decl_of(bonsai_common::SymbolId::new(orchestrate.raw()))
+        .expect("orchestrate declaration")
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { span, name, .. } if name == "Store::persist" => Some(*span),
+            _ => None,
+        })
+        .expect("Store::persist call");
+    let persist_nodes = idg.nodes_at_span(orchestrate, persist_span);
+    let persist_params = idg.param_nodes_of(persist);
+    let cross_calls = idg.cross_call_edges_in_reachable_nodes(&closure);
+    let points = closure
+        .iter()
+        .filter_map(|node| idg.resolve_point(*node))
+        .collect::<Vec<_>>();
+    assert!(
+        persist_nodes.iter().any(|node| {
+            closure.contains(node)
+                && idg
+                    .resolve_point(*node)
+                    .is_some_and(|point| point.kind == PointKind::CallArg && point.name == "arg0")
+        }),
+        "$valid must bind to the resolved Store::persist argument; persist_nodes={persist_nodes:#?}; closure={points:#?}"
+    );
+    assert!(
+        persist_params.iter().any(|node| closure.contains(node)),
+        "Store::persist($envelope) must receive the reached argument; params={persist_params:#?}; \
+         cross_calls={cross_calls:#?}; closure={points:#?}"
+    );
+    assert!(
+        cross_calls.iter().any(|edge| {
+            edge.caller == orchestrate
+                && edge.callee == persist
+                && edge.call_span == persist_span
+                && edge.arg_idx == 0
+                && edge.param_idx == 0
+                && edge.relation == bonsai_idg::CrossCallRelation::Argument
+        }),
+        "the exact Store::persist call must retain positional cross-call identity; \
+         cross_calls={cross_calls:#?}; closure={points:#?}"
+    );
+
+    let wrap = ws.lookup_function("wrap").expect("PHP Repository::wrap method");
+    let returned_field = idg.read_or_write_nodes_for_names(wrap, &["__bonsai_return.data.cmd".to_string()]);
+    assert!(
+        !returned_field.is_empty(),
+        "Repository::wrap must expose its returned data.cmd projection"
+    );
+    let returned_field_closure = idg.forward_closure(&returned_field);
+    let persist_decl = global
+        .decl_of(bonsai_common::SymbolId::new(persist.raw()))
+        .expect("persist declaration");
+    let chained_run_span = persist_decl
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { span, name, .. } if name.ends_with("->run") => Some(*span),
+            _ => None,
+        })
+        .expect("chained run call");
+    let chained_receiver_facts = global
+        .file_index(persist_decl.span.file)
+        .into_iter()
+        .flat_map(|index| index.call_receivers.iter())
+        .filter(|fact| fact.call_span == chained_run_span)
+        .cloned()
+        .collect::<Vec<_>>();
+    let persist_names = idg.read_or_write_names_of_func(persist);
+    let execute = ws.lookup_function("execute").expect("PHP execute function");
+    let shell_exec_span = global
+        .decl_of(bonsai_common::SymbolId::new(execute.raw()))
+        .expect("execute declaration")
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { span, name, .. } if name == "shell_exec" => Some(*span),
+            _ => None,
+        })
+        .expect("shell_exec call");
+    let shell_exec_nodes = idg.nodes_at_span(execute, shell_exec_span);
+    let returned_points = returned_field_closure
+        .iter()
+        .filter_map(|node| idg.resolve_point(*node))
+        .collect::<Vec<_>>();
+    assert!(
+        shell_exec_nodes.iter().any(|node| {
+            returned_field_closure.contains(node)
+                && idg
+                    .resolve_point(*node)
+                    .is_some_and(|point| point.kind == PointKind::CallArg && point.name == "arg0")
+        }),
+        "wrap's returned data.cmd field must cross the chained ->run() receiver and reach \
+         shell_exec($cmd); receiver_facts={chained_receiver_facts:#?}; \
+         persist_names={persist_names:#?}; shell_exec_nodes={shell_exec_nodes:#?}; \
+         closure={returned_points:#?}"
+    );
+}
+
+#[test]
 fn dart_mega_flow_stitches_repository_argument_into_execute_parameter() {
     let ws = index_real_fixture("dart", "mega_flow");
     let global = ws.db().global_index();
@@ -2194,12 +2582,9 @@ fn mega_flow_taint_output_does_not_surface_known_overclaims() {
         "C strncpy transfer is configured passthrough semantics, not sanitizer credit: {c_cmd:#?}"
     );
 
-    let python_report = run_taint_analysis(
-        &index_real_fixture("python", "mega_flow"),
-        &pack,
-        TaintAnalysisOptions::default(),
-    )
-    .expect("python taint analysis");
+    let python_ws = index_real_fixture("python", "mega_flow");
+    let python_report = run_taint_analysis(&python_ws, &pack, TaintAnalysisOptions::default())
+        .expect("python taint analysis");
     assert!(
         python_report
             .findings
@@ -2212,7 +2597,12 @@ fn mega_flow_taint_output_does_not_surface_known_overclaims() {
         .findings
         .iter()
         .find(|finding| finding.finding.sink.rule_id == "python.cmdi.os_system")
-        .expect("python command-injection flow");
+        .unwrap_or_else(|| {
+            panic!(
+                "python command-injection flow missing; findings={:#?}",
+                python_report.findings
+            )
+        });
     assert_eq!(py_cmd.finding.source.line, 29, "{py_cmd:#?}");
     assert!(
         py_cmd.additional_sources.is_empty(),
@@ -2236,12 +2626,9 @@ fn mega_flow_taint_output_does_not_surface_known_overclaims() {
         python_header_report.findings
     );
 
-    let go_report = run_taint_analysis(
-        &index_real_fixture("go", "mega_flow"),
-        &pack,
-        TaintAnalysisOptions::default(),
-    )
-    .expect("go taint analysis");
+    let go_ws = index_real_fixture("go", "mega_flow");
+    let go_report =
+        run_taint_analysis(&go_ws, &pack, TaintAnalysisOptions::default()).expect("go taint analysis");
     let go_cmd = go_report
         .findings
         .iter()
@@ -2545,13 +2932,6 @@ def unsafe_path_entry():
 
     for (safe_fn, unsafe_fn, safe_sink_rule, unsafe_sink_rule, sanitizer_rule) in [
         (
-            "safe_http",
-            "unsafe_http",
-            "python.ssrf.requests_get",
-            "python.ssrf.requests_get",
-            "engine.sanitizer.literal_map_value_allowlist",
-        ),
-        (
             "safe_xml",
             "unsafe_xml",
             "python.xxe.lxml_fromstring",
@@ -2571,13 +2951,6 @@ def unsafe_path_entry():
             "python.sqli.cursor_execute",
             "python.sqli.cursor_execute",
             "engine.sanitizer.parameterized_query_allowlisted_fragments",
-        ),
-        (
-            "safe_query_literal_map",
-            "unsafe_query",
-            "python.sqli.cursor_execute",
-            "python.sqli.cursor_execute",
-            "engine.sanitizer.literal_map_value_allowlist",
         ),
         (
             "safe_nosql",
@@ -2616,6 +2989,27 @@ def unsafe_path_entry():
             FindingStatus::Unsanitized,
             "unguarded twin must remain reportable: {unsafe_finding:#?}"
         );
+    }
+    // A finite literal-map selection can remove the dynamic key from the IDG
+    // before a source-to-sink finding exists. If the reporting path retains a
+    // lineage, it must be explicitly sanitized; a missing finding is also the
+    // correct compiler result because no untrusted value reaches the sink.
+    for (safe_fn, sink_rule) in [
+        ("safe_http", "python.ssrf.requests_get"),
+        ("safe_query_literal_map", "python.sqli.cursor_execute"),
+    ] {
+        if let Some(safe) = report.findings.iter().find(|finding| {
+            finding.finding.sink.enclosing_fn.as_deref() == Some(safe_fn)
+                && finding.finding.sink.rule_id == sink_rule
+        }) {
+            assert_eq!(safe.finding.status, FindingStatus::Sanitized, "{safe:#?}");
+            assert!(
+                safe.finding.sanitizers_seen.iter().any(|sanitizer| {
+                    sanitizer.rule_id == "engine.sanitizer.finite_literal_selection"
+                }),
+                "{safe_fn} must carry finite-literal compiler evidence when its lineage is retained: {safe:#?}"
+            );
+        }
     }
     {
         let safe_fn = "safe_xml_positional";
@@ -2827,6 +3221,7 @@ fn sanitizer_wrapping_source_attaches_to_same_function_flow() {
         modules: Vec::new(),
         manifests: Vec::new(),
         lockfiles: Vec::new(),
+        package_matching: Default::default(),
         payload_types: Vec::new(),
         match_spec: MatchSpec {
             kind: MatchKind::Call,
@@ -2898,6 +3293,7 @@ fn nested_fully_qualified_esapi_sanitizer_inside_sink_arg_attaches() {
         modules: Vec::new(),
         manifests: Vec::new(),
         lockfiles: Vec::new(),
+        package_matching: Default::default(),
         payload_types: Vec::new(),
         match_spec: MatchSpec {
             kind: MatchKind::Call,
@@ -2962,6 +3358,10 @@ fn sanitizer_in_helper_return_attaches_after_chain_display_collapse() {
     let mut pack = rulepack("java", "source", "sink");
     let java_pack = pack.packs.get_mut("java").expect("java pack");
     java_pack.sinks[0].tag = Some("xss".to_string());
+    java_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        character_escape: Some(html_character_escape_semantics(vec![0])),
+        ..AnalysisSemantics::default()
+    });
     java_pack.sanitizers.push(Rule {
         id: "java.test.esapi_html_helper_return".to_string(),
         aliases: Vec::new(),
@@ -2980,6 +3380,7 @@ fn sanitizer_in_helper_return_attaches_after_chain_display_collapse() {
         modules: Vec::new(),
         manifests: Vec::new(),
         lockfiles: Vec::new(),
+        package_matching: Default::default(),
         payload_types: Vec::new(),
         match_spec: MatchSpec {
             kind: MatchKind::Call,
@@ -3027,7 +3428,7 @@ fn sanitizer_in_helper_return_attaches_after_chain_display_collapse() {
         finding
             .sanitizers_seen
             .iter()
-            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.java_local_html_escape_helper_return"),
+            .any(|sanitizer| sanitizer.rule_id == "java.test.esapi_html_helper_return"),
         "expected helper-return ESAPI sanitizer evidence, got {:#?}",
         finding.sanitizers_seen
     );
@@ -3062,6 +3463,7 @@ fn sanitized_flows_are_hidden_by_default_and_visible_on_request() {
         modules: Vec::new(),
         manifests: Vec::new(),
         lockfiles: Vec::new(),
+        package_matching: Default::default(),
         payload_types: Vec::new(),
         match_spec: MatchSpec {
             kind: MatchKind::Call,
@@ -3125,6 +3527,23 @@ fn python_compiled_regex_guard_sanitizes_later_path_sink() {
             kw: None,
         },
     }]);
+    python_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        character_constraint: Some(CharacterConstraintSemantics {
+            required_excluded_characters: vec!["/".to_string(), "\\".to_string()],
+            required_enclosing_literal_delimiter: None,
+            accepted_providers: vec![CharacterConstraintProviderSemantics {
+                factory: RuleTarget {
+                    name: Some("re.compile".to_string()),
+                    ..RuleTarget::default()
+                },
+                operation: RuleTarget {
+                    regex: Some("^[A-Za-z_][A-Za-z0-9_]*\\.(match|fullmatch)$".to_string()),
+                    ..RuleTarget::default()
+                },
+            }],
+        }),
+        ..AnalysisSemantics::default()
+    });
 
     let ws = workspace(&[(
         "/app/app.py",
@@ -3173,7 +3592,7 @@ def handle():
         finding
             .sanitizers_seen
             .iter()
-            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.python_compiled_regex_guard"),
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.character_constraint"),
         "expected compiled regex guard evidence, got {:#?}",
         finding.sanitizers_seen
     );
@@ -3218,7 +3637,7 @@ fn python_realpath_containment_branch_sanitizes_join_sink() {
     let python_pack = pack.packs.get_mut("python").expect("python pack");
     python_pack.sinks[0].tag = Some("path-traversal".to_string());
     python_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
-        guard_profile: Some(GuardProfile::PythonPathContainment),
+        guard_profile: Some(GuardProfile::CanonicalPathContainment),
         path_containment_guard: Some(PathContainmentGuardSemantics {
             canonicalizer: RuleTarget {
                 attribute: Some(vec!["os".to_string(), "path".to_string(), "realpath".to_string()]),
@@ -3853,6 +4272,7 @@ fn comprehension_character_constraint_sanitizes_only_its_exact_lineage() {
         character_constraint: Some(CharacterConstraintSemantics {
             required_excluded_characters: vec!["'".to_string()],
             required_enclosing_literal_delimiter: Some("'".to_string()),
+            accepted_providers: Vec::new(),
         }),
         ..AnalysisSemantics::default()
     });
@@ -3954,6 +4374,16 @@ fn regex_character_constraint_summary_sanitizes_only_exact_helper_result() {
         character_constraint: Some(CharacterConstraintSemantics {
             required_excluded_characters: vec!["\r".to_string(), "\n".to_string()],
             required_enclosing_literal_delimiter: None,
+            accepted_providers: vec![CharacterConstraintProviderSemantics {
+                factory: RuleTarget {
+                    name: Some("re.compile".to_string()),
+                    ..RuleTarget::default()
+                },
+                operation: RuleTarget {
+                    regex: Some("^[A-Za-z_][A-Za-z0-9_]*\\.sub$".to_string()),
+                    ..RuleTarget::default()
+                },
+            }],
         }),
         ..AnalysisSemantics::default()
     });
@@ -4004,6 +4434,16 @@ fn direct_character_constraint_helper_result_sanitizes_sink_argument() {
         character_constraint: Some(CharacterConstraintSemantics {
             required_excluded_characters: vec!["\r".to_string(), "\n".to_string()],
             required_enclosing_literal_delimiter: None,
+            accepted_providers: vec![CharacterConstraintProviderSemantics {
+                factory: RuleTarget {
+                    name: Some("strings.Map".to_string()),
+                    ..RuleTarget::default()
+                },
+                operation: RuleTarget {
+                    name: Some("strings.Map".to_string()),
+                    ..RuleTarget::default()
+                },
+            }],
         }),
         ..AnalysisSemantics::default()
     });
@@ -4012,6 +4452,7 @@ fn direct_character_constraint_helper_result_sanitizes_sink_argument() {
         r#"
 package app
 import "strings"
+import scrub "example.invalid/scrub"
 func source() string { return "" }
 func sanitize(value string) string {
     return strings.Map(func(r rune) rune {
@@ -4019,16 +4460,27 @@ func sanitize(value string) string {
         return r
     }, value)
 }
+func lookalike(value string) string {
+    return scrub.Map(func(r rune) rune {
+        if r < 0x20 || r == 0x7f { return '_' }
+        return r
+    }, value)
+}
 func safe() { sink(sanitize(source())) }
+func untrusted_provider() { sink(lookalike(source())) }
 func unsafe() { sink(source()) }
 "#,
     )]);
     let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
-    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    let enclosing = report
+        .findings
+        .iter()
+        .filter_map(|finding| finding.finding.sink.enclosing_fn.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        report.findings[0].finding.sink.enclosing_fn.as_deref(),
-        Some("unsafe"),
-        "the direct helper result must be discharged while the bypass remains"
+        enclosing,
+        std::collections::BTreeSet::from(["unsafe".to_string(), "untrusted_provider".to_string()]),
+        "the declared provider must be discharged; an identical callback on an undeclared provider must not"
     );
 }
 
@@ -4084,6 +4536,10 @@ fn same_origin_path_summary_sanitizes_only_direct_helper_result() {
             require_authority_rejection: true,
             require_absolute_path: true,
             require_scheme_relative_rejection: true,
+            accepted_providers: vec![RuleTarget {
+                name: Some("urllib.parse.urlparse".to_string()),
+                ..RuleTarget::default()
+            }],
             sink_argument_index: None,
             static_context_argument: None,
         }),
@@ -4120,6 +4576,52 @@ def unsafe_redirect():
         "{:#?}",
         report.findings
     );
+}
+
+#[test]
+fn same_origin_path_summary_rejects_unapproved_parser_provider() {
+    let mut pack = constrained_call_sink_rulepack("python", "source", "sink");
+    let sink = pack
+        .packs
+        .get_mut("python")
+        .and_then(|pack| pack.sinks.first_mut())
+        .expect("Python sink");
+    sink.tag = Some("open-redirect".to_string());
+    sink.analysis_semantics = Some(AnalysisSemantics {
+        same_origin_path_constraint: Some(bonsai_security::SameOriginPathConstraintSemantics {
+            require_scheme_rejection: true,
+            require_authority_rejection: true,
+            require_absolute_path: true,
+            require_scheme_relative_rejection: true,
+            accepted_providers: vec![RuleTarget {
+                name: Some("urllib.parse.urlparse".to_string()),
+                ..RuleTarget::default()
+            }],
+            sink_argument_index: None,
+            static_context_argument: None,
+        }),
+        ..AnalysisSemantics::default()
+    });
+    let ws = workspace(&[(
+        "/app/redirect.py",
+        r#"
+from untrusted_url_helpers import urlparse
+
+def source():
+    return ""
+
+def looks_safe(target: str) -> str:
+    parsed = urlparse(target)
+    if parsed.scheme or parsed.netloc or not target.startswith("/") or target.startswith("//"):
+        return "/"
+    return target
+
+def redirect():
+    sink(looks_safe(source()))
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
 }
 
 #[test]
@@ -4407,6 +4909,7 @@ fn java_url_constructor_guarded_by_scheme_host_and_private_ip_is_sanitized() {
             },
             dns: UrlDnsGuardSemantics {
                 resolver: target("getByName"),
+                address_parser: None,
                 private_address_predicates: [
                     "isLoopbackAddress",
                     "isSiteLocalAddress",
@@ -4564,6 +5067,7 @@ fn go_url_client_guard_requires_exact_ast_projections_dns_and_redirect_callback(
                     regex: Some(r"^net\.LookupIP$".to_string()),
                     ..RuleTarget::default()
                 },
+                address_parser: None,
                 private_address_predicates: ["IsLoopback", "IsPrivate", "IsLinkLocalUnicast"]
                     .into_iter()
                     .map(target)
@@ -5221,6 +5725,25 @@ fn python_local_ldap_escape_helper_is_sanitized() {
             kw: None,
         },
     }]);
+    py_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        character_escape: Some(CharacterEscapeSemantics {
+            value_arg_indices: vec![1],
+            required_mappings: [
+                ("\\", r"\5c"),
+                ("*", r"\2a"),
+                ("(", r"\28"),
+                (")", r"\29"),
+                ("\0", r"\00"),
+            ]
+            .into_iter()
+            .map(|(input, output)| ExactStringMapping {
+                input: input.to_string(),
+                output: output.to_string(),
+            })
+            .collect(),
+        }),
+        ..AnalysisSemantics::default()
+    });
 
     let ws = workspace(&[(
         "/app/directory.py",
@@ -5267,7 +5790,7 @@ def find(conn):
         finding
             .sanitizers_seen
             .iter()
-            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.local_ldap_escape_helper"),
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.character_escape"),
         "expected local LDAP escape sanitizer evidence, got {:#?}",
         finding.sanitizers_seen
     );
@@ -5285,6 +5808,18 @@ fn go_same_origin_redirect_helper_guard_is_sanitized() {
             kw: None,
         },
     }]);
+    go_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        same_origin_path_constraint: Some(bonsai_security::SameOriginPathConstraintSemantics {
+            require_scheme_rejection: true,
+            require_authority_rejection: true,
+            require_absolute_path: true,
+            require_scheme_relative_rejection: true,
+            accepted_providers: Vec::new(),
+            sink_argument_index: Some(1),
+            static_context_argument: None,
+        }),
+        ..AnalysisSemantics::default()
+    });
 
     let ws = workspace(&[(
         "/app/redirect.go",
@@ -5334,7 +5869,7 @@ func startsWithSingleSlash(s string) bool {
         finding
             .sanitizers_seen
             .iter()
-            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.go_same_origin_redirect_helper_guard"),
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.same_origin_path_constraint"),
         "expected Go same-origin helper sanitizer evidence, got {:#?}",
         finding.sanitizers_seen
     );
@@ -5346,6 +5881,57 @@ fn python_ssrf_url_guard_is_sanitized() {
     let py_pack = pack.packs.get_mut("python").expect("python pack");
     py_pack.sinks[0].id = "python.ssrf.httpx_async_client_get".to_string();
     py_pack.sinks[0].tag = Some("ssrf".to_string());
+    let target = |name: &str| RuleTarget {
+        name: Some(name.to_string()),
+        ..RuleTarget::default()
+    };
+    py_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        url_network_guard: Some(UrlNetworkGuardSemantics {
+            root: UrlGuardRootSemantics::SinkArgumentParserInput {
+                sink_argument_index: 0,
+                parser_argument_index: 0,
+            },
+            parser: RuleTarget {
+                attribute: Some(vec!["urllib".into(), "parse".into(), "urlparse".into()]),
+                ..RuleTarget::default()
+            },
+            scheme: UrlSchemeGuardSemantics {
+                component: UrlComponentSemantics {
+                    field: Some("scheme".to_string()),
+                    accessor: None,
+                },
+                comparison_predicate: None,
+                allowed_values: vec!["https".to_string()],
+            },
+            host_allowlist: UrlHostAllowlistSemantics {
+                component: UrlComponentSemantics {
+                    field: Some("hostname".to_string()),
+                    accessor: None,
+                },
+                membership_predicate: None,
+                static_collection_factories: Vec::new(),
+            },
+            dns: UrlDnsGuardSemantics {
+                resolver: RuleTarget {
+                    attribute: Some(vec!["socket".into(), "getaddrinfo".into()]),
+                    ..RuleTarget::default()
+                },
+                address_parser: Some(UrlAddressParserSemantics {
+                    target: RuleTarget {
+                        attribute: Some(vec!["ipaddress".into(), "ip_address".into()]),
+                        ..RuleTarget::default()
+                    },
+                    argument_index: 0,
+                }),
+                private_address_predicates: ["is_private", "is_loopback", "is_link_local"]
+                    .into_iter()
+                    .map(target)
+                    .collect(),
+            },
+            redirect: None,
+        }),
+        ..AnalysisSemantics::default()
+    });
 
     let ws = workspace(&[(
         "/app/svc.py",
@@ -5402,9 +5988,53 @@ async def probe():
         finding
             .sanitizers_seen
             .iter()
-            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.python_url_ssrf_guard"),
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.url_network_guard"),
         "expected Python SSRF guard sanitizer evidence, got {:#?}",
         finding.sanitizers_seen
+    );
+
+    let lookalike_ws = workspace(&[(
+        "/app/svc.py",
+        r#"
+import socket
+from local_address import ip_address
+from urllib.parse import urlparse
+import httpx
+
+ALLOWED = {"api.example.com"}
+
+def source():
+    return ""
+
+async def probe():
+    url = source()
+    u = urlparse(url)
+    if u.scheme != "https" or (u.hostname or "") not in ALLOWED:
+        raise PermissionError("blocked: host")
+    for fam, *_, sa in socket.getaddrinfo(u.hostname, u.port or 443):
+        ip = ip_address(sa[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise PermissionError("blocked: ip")
+    async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as c:
+        return await c.get(url)
+"#,
+    )]);
+    let lookalike_report = run_taint_analysis(
+        &lookalike_ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert!(
+        lookalike_report.findings.iter().any(|finding| {
+            finding.finding.sink.rule_id == "python.ssrf.httpx_async_client_get"
+                && finding.finding.status == FindingStatus::Unsanitized
+        }),
+        "same-named address parser from an undeclared provider must not receive guard credit: {:#?}",
+        lookalike_report.findings
     );
 }
 
@@ -5600,7 +6230,7 @@ def unsafe_redirects():
 
 #[test]
 fn java_url_reconstruction_assignment_requires_exact_components_and_guards() {
-    let mut pack = constrained_call_sink_rulepack("java", "source", "ws.url");
+    let mut pack = constrained_call_sink_rulepack("java", "source", "url");
     let sink = pack
         .packs
         .get_mut("java")
@@ -5699,7 +6329,16 @@ fn go_jwt_parse_inline_keyfunc_with_algorithm_pin_is_sanitized() {
     go_pack.sinks[0].id = "go.jwt.golang_jwt_parse_tainted_token".to_string();
     go_pack.sinks[0].tag = Some("jwt".to_string());
     go_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
-        guard_profile: Some(GuardProfile::GoJwtInlineKeyfuncAlgorithm),
+        compiler_guard: Some(bonsai_security::CompilerGuardSemantics {
+            capability: "callback.selector-result-pinned".to_string(),
+            required_evidence: vec![
+                "callback-argument:1".to_string(),
+                "selector:Method.Alg".to_string(),
+            ],
+            forbidden_evidence: vec!["literal:none".to_string()],
+            sanitizer_tag: "jwt-verify".to_string(),
+            category: "jwt-algorithm-keyfunc-guard".to_string(),
+        }),
         ..AnalysisSemantics::default()
     });
 
@@ -5752,7 +6391,7 @@ func verify(key []byte) (*jwt.Token, error) {
         finding
             .sanitizers_seen
             .iter()
-            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.go_jwt_inline_keyfunc_algorithm_guard"),
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.compiler_guard"),
         "expected Go JWT keyfunc sanitizer evidence, got {:#?}",
         finding.sanitizers_seen
     );
@@ -5797,6 +6436,10 @@ fn typescript_local_html_escape_helper_sanitizes_xss_sink() {
     let ts_pack = pack.packs.get_mut("typescript").expect("typescript pack");
     ts_pack.sinks[0].id = "typescript.xss.html_return".to_string();
     ts_pack.sinks[0].tag = Some("xss".to_string());
+    ts_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
+        character_escape: Some(html_character_escape_semantics(vec![0])),
+        ..AnalysisSemantics::default()
+    });
 
     let ws = workspace(&[(
         "/app/render.ts",
@@ -5843,7 +6486,7 @@ function sink(html: string): void {}
         finding
             .sanitizers_seen
             .iter()
-            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.js_ts_local_html_escape_helper"),
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.character_escape"),
         "expected local HTML helper sanitizer evidence, got {:#?}",
         finding.sanitizers_seen
     );
@@ -5879,13 +6522,19 @@ function sink(html: string): void {}
 }
 
 #[test]
-fn go_xml_decoder_with_strict_and_allowlisted_charset_reader_is_sanitized() {
+fn go_xml_library_configuration_is_not_assumed_by_the_compiler() {
     let mut pack = constrained_call_sink_rulepack("go", "source", "xml.NewDecoder");
     let go_pack = pack.packs.get_mut("go").expect("go pack");
     go_pack.sinks[0].id = "go.xxe.xml_newdecoder".to_string();
     go_pack.sinks[0].tag = Some("xxe".to_string());
     go_pack.sinks[0].analysis_semantics = Some(AnalysisSemantics {
-        guard_profile: Some(GuardProfile::GoXmlDecoderHardening),
+        compiler_guard: Some(bonsai_security::CompilerGuardSemantics {
+            capability: "decoder.remote-resolution-disabled".to_string(),
+            required_evidence: Vec::new(),
+            forbidden_evidence: Vec::new(),
+            sanitizer_tag: "xxe-sanitizer".to_string(),
+            category: "xml-decoder-hardening".to_string(),
+        }),
         ..AnalysisSemantics::default()
     });
 
@@ -5919,10 +6568,11 @@ func parse() error {
     )]);
     let default_report =
         run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
-    assert!(
-        default_report.findings.is_empty(),
-        "strict decoder with allowlisted charset reader should be sanitized by default: {:#?}",
-        default_report.findings
+    assert_eq!(default_report.findings.len(), 1, "{:#?}", default_report.findings);
+    assert_eq!(
+        default_report.findings[0].finding.status,
+        FindingStatus::Unsanitized,
+        "library field names must not acquire security meaning inside the Go adapter"
     );
     let explicit_report = run_taint_analysis(
         &ws,
@@ -5940,15 +6590,8 @@ func parse() error {
         explicit_report.findings
     );
     let finding = &explicit_report.findings[0].finding;
-    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
-    assert!(
-        finding
-            .sanitizers_seen
-            .iter()
-            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.go_xml_decoder_hardening"),
-        "expected Go XML decoder sanitizer evidence, got {:#?}",
-        finding.sanitizers_seen
-    );
+    assert_eq!(finding.status, FindingStatus::Unsanitized, "{finding:#?}");
+    assert!(finding.sanitizers_seen.is_empty(), "{finding:#?}");
 
     let unsafe_ws = workspace(&[(
         "/app/parse.go",

@@ -162,7 +162,17 @@ def safe_filename(filename):
         );
     };
     assert_eq!(fact.output, CharacterConstraintOutput::Return);
-    let CharacterConstraintDomain::ExcludesExact { characters } = &fact.domain else {
+    let CharacterConstraintDomain::ProviderBound {
+        factory_call,
+        operation_call,
+        domain,
+    } = &fact.domain
+    else {
+        panic!("expected provider-bound domain: {fact:#?}");
+    };
+    assert_eq!(factory_call, "re.compile");
+    assert_eq!(operation_call, "_UNSAFE.sub");
+    let CharacterConstraintDomain::ExcludesExact { characters } = domain.as_ref() else {
         panic!("expected excluded-character domain: {fact:#?}");
     };
     assert!(characters.contains(&"\r".to_string()));
@@ -198,13 +208,82 @@ def clean(value):
             reintroduced.character_constraints
         );
     };
+    let CharacterConstraintDomain::ProviderBound { domain, .. } = &fact.domain else {
+        panic!("expected provider-bound domain: {fact:#?}");
+    };
     assert_eq!(
-        fact.domain,
-        CharacterConstraintDomain::ExcludesExact {
+        domain.as_ref(),
+        &CharacterConstraintDomain::ExcludesExact {
             characters: vec!["\r".to_string()]
         },
         "a replacement that reintroduces LF must not claim LF exclusion"
     );
+}
+
+#[test]
+fn compiled_regex_rejection_lowers_provider_bound_path_domain() {
+    let lowered = index(
+        r#"
+import re
+_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}\.(mp4|mkv|webm)$")
+
+def load(name):
+    if not _NAME.match(name):
+        return None
+    return open(name)
+"#,
+    );
+    let load = lowered
+        .defs
+        .iter()
+        .find(|decl| decl.name == "load")
+        .expect("load decl");
+    let facts = lowered
+        .character_constraints
+        .iter()
+        .filter(|fact| fact.function_span == load.span)
+        .collect::<Vec<_>>();
+    let [fact] = facts.as_slice() else {
+        panic!(
+            "expected compiled regex guard fact: {:#?}",
+            lowered.character_constraints
+        );
+    };
+    assert_eq!(fact.input_place, "name");
+    assert_eq!(fact.input_param_index, Some(0));
+    assert_eq!(
+        fact.output,
+        CharacterConstraintOutput::Assignment {
+            target: "name".to_string()
+        }
+    );
+    let CharacterConstraintDomain::ProviderBound {
+        factory_call,
+        operation_call,
+        domain,
+    } = &fact.domain
+    else {
+        panic!("provider identity missing: {fact:#?}");
+    };
+    assert_eq!(factory_call, "re.compile");
+    assert_eq!(operation_call, "_NAME.match");
+    assert_eq!(
+        domain.as_ref(),
+        &CharacterConstraintDomain::ExcludesExact {
+            characters: vec!["/".to_string(), "\\".to_string()]
+        }
+    );
+
+    let broad = index(
+        r#"
+import re
+_NAME = re.compile(r"^.*$")
+def load(name):
+    if not _NAME.match(name): return None
+    return open(name)
+"#,
+    );
+    assert!(broad.character_constraints.is_empty());
 }
 
 #[test]
@@ -230,6 +309,37 @@ def same_site(target):
     assert!(fact.rejects_authority);
     assert!(fact.requires_absolute_path);
     assert!(fact.rejects_scheme_relative_path);
+    assert_eq!(fact.provider_call.as_deref(), Some("urllib.parse.urlparse"));
+
+    let aliased = index(
+        r#"
+import urllib.parse as parsing
+def same_site(target):
+    parsed = parsing.urlparse(target)
+    if parsed.scheme or parsed.netloc or not target.startswith("/") or target.startswith("//"):
+        return "/"
+    return target
+"#,
+    );
+    assert_eq!(
+        aliased.same_origin_path_constraints[0].provider_call.as_deref(),
+        Some("urllib.parse.urlparse")
+    );
+
+    let lookalike = index(
+        r#"
+from untrusted_url_helpers import urlparse
+def same_site(target):
+    parsed = urlparse(target)
+    if parsed.scheme or parsed.netloc or not target.startswith("/") or target.startswith("//"):
+        return "/"
+    return target
+"#,
+    );
+    assert_eq!(
+        lookalike.same_origin_path_constraints[0].provider_call.as_deref(),
+        Some("untrusted_url_helpers.urlparse")
+    );
 
     for source in [
         r#"
@@ -289,6 +399,32 @@ def choose(name):
 }
 
 #[test]
+fn finite_literal_map_default_read_and_character_substitution_are_compiler_facts() {
+    let lowered = index(
+        r#"
+_ESCAPES = {"\\": r"\5c", "*": r"\2a", "(": r"\28", ")": r"\29", "\x00": r"\00"}
+
+def choose(name):
+    providers = {"a": "https://a.example/", "b": "https://b.example/"}
+    selected = providers.get(name, providers["a"])
+    return selected
+
+def escape(value):
+    return "".join(_ESCAPES.get(ch, ch) for ch in (value or ""))
+"#,
+    );
+    assert_eq!(lowered.finite_literal_selections.len(), 1);
+    let [substitution] = lowered.character_substitutions.as_slice() else {
+        panic!(
+            "expected exact static-map substitution: {:#?}",
+            lowered.character_substitutions
+        );
+    };
+    assert_eq!(substitution.input_param_index, 0);
+    assert_eq!(substitution.exact_mappings.len(), 5);
+}
+
+#[test]
 fn finite_map_selection_respects_scope_shadowing_and_mutation() {
     for source in [
         r#"
@@ -317,6 +453,53 @@ def use(name):
         assert!(
             lowered.finite_literal_selections.is_empty(),
             "out-of-scope, shadowed, or mutated maps must not produce clean-selection facts: {:#?}",
+            lowered.finite_literal_selections
+        );
+    }
+}
+
+#[test]
+fn finite_membership_conditional_is_a_compiler_fact() {
+    let lowered = index(
+        r#"
+def choose(name):
+    name = name if name in {"default", "long", "short"} else "default"
+    return name
+"#,
+    );
+    let [selection] = lowered.finite_literal_selections.as_slice() else {
+        panic!(
+            "expected one finite conditional selection: {:#?}",
+            lowered.finite_literal_selections
+        );
+    };
+    assert_eq!(selection.target.as_deref(), Some("name"));
+    assert!(selection.assignment_span.is_some());
+}
+
+#[test]
+fn finite_membership_conditional_rejects_unproven_variants() {
+    for source in [
+        r#"
+def choose(name, other):
+    name = other if name in {"default", "long"} else "default"
+    return name
+"#,
+        r#"
+def choose(name):
+    name = name if name not in {"default", "long"} else "default"
+    return name
+"#,
+        r#"
+def choose(name):
+    name = name if name in {"default", dynamic()} else "default"
+    return name
+"#,
+    ] {
+        let lowered = index(source);
+        assert!(
+            lowered.finite_literal_selections.is_empty(),
+            "unproven conditional must not emit a clean-selection fact: {:#?}",
             lowered.finite_literal_selections
         );
     }

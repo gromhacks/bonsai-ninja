@@ -37,6 +37,8 @@ const FLOW_IDS_TABLE_ID: u32 = 3;
 
 /// On-disk format version. Bump when the encoding changes so old
 /// sidecars are rejected on open.
+// v11 (2026-08-03): regenerate structural flow ids after compiler-object v50
+// canonicalized file-derived identities and callable-reference facts.
 // v10 (2026-07-31): structural flow ids hash exact compiler declaration
 // identities instead of display-name sequences, eliminating overload/module
 // collisions and duplicate navigation ids.
@@ -45,7 +47,7 @@ const FLOW_IDS_TABLE_ID: u32 = 3;
 // v7 (2026-07-16): MessagePack replaces the retired binary codec.
 // v6 (2026-05-27): downstream of IDG/adapter semantic changes,
 // enumerated chains can differ, so reject older sidecars.
-pub const FLOW_IDS_CACHE_VERSION: u32 = 10;
+pub const FLOW_IDS_CACHE_VERSION: u32 = 11;
 
 /// Pipeline-hash field in the factstore header. Folds the matcher
 /// policy fingerprint into 64 bits and mixes in the current workspace

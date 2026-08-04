@@ -20,7 +20,7 @@
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::{CallEdge, ResolvedCallGraph};
-use bonsai_common::{callable_reference_variants, FileId, FuncId};
+use bonsai_common::{FileId, FuncId};
 use bonsai_index::{CallLinkageFact, GlobalIndex};
 use bonsai_lang_api::{DeclKind, FlowEvent, ModulePath};
 use parking_lot::RwLock;
@@ -115,6 +115,10 @@ struct WorkspaceMaps {
     /// where the candidate is still a `SymbolId` rather than a
     /// `FuncId`.
     file_to_language: AHashMap<FileId, &'static str>,
+    /// Complete adapter capability declaration for syntax-sensitive compiler
+    /// candidate normalization. Values are data supplied by adapters; the IDG
+    /// core never selects them from a language id.
+    file_to_capabilities: AHashMap<FileId, bonsai_lang_api::LanguageCapabilities>,
     /// Adapter-owned source suffixes used to resolve path-like module
     /// imports. The IDG core never carries a language extension inventory.
     file_to_module_resolution_extensions: AHashMap<FileId, &'static [&'static str]>,
@@ -142,6 +146,7 @@ impl WorkspaceMaps {
         let mut funcs_by_callback_name: AHashMap<String, Vec<FuncId>> = AHashMap::new();
         let mut file_to_directory: AHashMap<FileId, String> = AHashMap::new();
         let mut file_to_language: AHashMap<FileId, &'static str> = AHashMap::new();
+        let mut file_to_capabilities = AHashMap::new();
         let mut file_to_module_resolution_extensions: AHashMap<FileId, &'static [&'static str]> =
             AHashMap::new();
         let mut file_to_module_default_export_names: AHashMap<FileId, &'static [&'static str]> =
@@ -164,6 +169,7 @@ impl WorkspaceMaps {
             if let Some(language) = language {
                 file_to_language.insert(file, language);
             }
+            file_to_capabilities.insert(file, semantics.capabilities(file));
             let module_resolution_extensions = semantics.module_resolution_extensions(file);
             if !module_resolution_extensions.is_empty() {
                 file_to_module_resolution_extensions.insert(file, module_resolution_extensions);
@@ -196,6 +202,7 @@ impl WorkspaceMaps {
             funcs_by_callback_name,
             file_to_directory,
             file_to_language,
+            file_to_capabilities,
             file_to_module_resolution_extensions,
             file_to_module_default_export_names,
             file_to_module_path_syntax,
@@ -234,7 +241,8 @@ fn symbol_scope_key(
 
 fn add_callback_name_index_entries(index: &mut AHashMap<String, Vec<FuncId>>, func: FuncId, decl_name: &str) {
     add_callback_name_index_entry(index, func, decl_name);
-    if let Some((_, tail)) = decl_name.rsplit_once(['.', ':']) {
+    let tail = bonsai_common::short_qualified_tail(decl_name);
+    if tail != decl_name {
         add_callback_name_index_entry(index, func, tail);
     }
 }
@@ -271,6 +279,7 @@ struct WorkspaceCalleeResolver<'a> {
     file_to_directory: &'a AHashMap<FileId, String>,
     included_funcs: &'a AHashMap<FuncId, SegmentId>,
     file_to_language: &'a AHashMap<FileId, &'static str>,
+    file_to_capabilities: &'a AHashMap<FileId, bonsai_lang_api::LanguageCapabilities>,
     class_symbols_by_name: &'a AHashMap<String, Vec<bonsai_common::SymbolId>>,
     class_symbols_by_name_scope: &'a AHashMap<(String, LocalScopeKey), Vec<bonsai_common::SymbolId>>,
     /// Type declarations addressed by an import's local binding in a
@@ -758,19 +767,18 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         // callgraph classifies value-typed dispatch.
         if out.is_empty() {
             if let Some(bindings) = self.local_callable_bindings.get(&caller) {
-                // Elixir/Erlang dot-call `f.(args)` reaches here as
-                // `callee_name = "f."` with no receiver; strip the trailing
-                // dot/parens (mirrors builder.rs:1056) so `f.` looks up the
-                // binding `f`. The `.`/`:` guard then only rejects genuinely
-                // qualified names (`mod.fun`, `Mod::fun`).
-                let stripped_callee = callee_name.trim().trim_end_matches(['.', '(', ')']);
+                // Some adapters preserve trailing call punctuation on a
+                // direct callable value. Remove only structural edge
+                // punctuation, then reject any genuinely qualified identity.
+                let stripped_callee = callee_name
+                    .trim()
+                    .trim_matches(bonsai_common::is_name_punctuation);
                 let binding_name = receiver
                     .map(str::trim)
                     .filter(|receiver| !receiver.is_empty())
                     .or_else(|| {
                         (!stripped_callee.is_empty()
-                            && !stripped_callee.contains(['.', ':'])
-                            && !stripped_callee.contains("->"))
+                            && bonsai_common::qualified_name_owner(stripped_callee).is_none())
                         .then_some(stripped_callee)
                     });
                 if let Some(name) = binding_name {
@@ -798,7 +806,16 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
     fn callable_arg(&self, caller: FuncId, arg_text: &str) -> Vec<ResolvedCallee> {
         let mut out = Vec::new();
         let mut seen = ahash::AHashSet::new();
-        for bound_name in callable_reference_variants(arg_text) {
+        let capabilities = self
+            .global
+            .declaring_file(bonsai_common::SymbolId::new(caller.raw()))
+            .and_then(|file| self.file_to_capabilities.get(&file).copied())
+            .unwrap_or_else(bonsai_lang_api::LanguageCapabilities::unsupported);
+        for bound_name in bonsai_lang_api::callable_reference_variants(
+            arg_text,
+            capabilities.callable_reference_syntax,
+            capabilities.quoted_callable_literals,
+        ) {
             for candidate_func in self.callback_candidate_funcs_for_bound_name(&bound_name, caller, caller) {
                 if !self.funcs_share_language(caller, candidate_func) {
                     continue;
@@ -1679,11 +1696,7 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         // constructor, `Base(args)` delegates to `Base`, not back to the
         // enclosing subclass merely because its implicit receiver is typed as
         // that subclass.
-        for segment in trimmed
-            .split(['.', ':', '\\'])
-            .map(str::trim)
-            .filter(|segment| !segment.is_empty())
-        {
+        for segment in bonsai_common::qualified_name_segments(trimmed) {
             let class_name = bare_class_name(segment);
             if !class_name.is_empty() {
                 push_unique_class_name(&mut out, class_name.to_string());
@@ -1958,7 +1971,7 @@ fn declaration_matches_import_target(
         &decl.module_path,
         module_path_syntax,
     ) || decl.qualified_name.as_deref().is_some_and(|qualified| {
-        let normalized = qualified.replace("::", ".").replace(['/', '\\'], ".");
+        let normalized = bonsai_common::normalize_qualified_name(qualified);
         normalized == target || normalized.ends_with(&format!(".{target}"))
     })
 }
@@ -2054,18 +2067,6 @@ fn is_constructor_decl(decl: &bonsai_lang_api::Decl) -> bool {
     matches!(decl.kind, bonsai_lang_api::DeclKind::Constructor)
 }
 
-/// True when `name` (a workspace func decl name) ends with `tail`
-/// after a `.` or `::` qualifier — handles `Module::executor`
-/// matching against bare-name binding `executor`.
-fn matches_qualified_tail(name: &str, tail: &str) -> bool {
-    if name == tail {
-        return true;
-    }
-    name.rsplit_once(['.', ':'])
-        .map(|(_, suffix)| suffix == tail)
-        .unwrap_or(false)
-}
-
 /// Match `decl_name` (the callee function's declared bare name)
 /// against `event_name` (the callee text recorded on the call
 /// site's flow event). Handles three forms in addition to exact
@@ -2075,28 +2076,7 @@ fn matches_qualified_tail(name: &str, tail: &str) -> bool {
 ///   * Arity suffix: erlang / elixir `foo/2` should match decl `foo`.
 ///   * Both at once: `mod:foo/2` matches decl `foo`.
 fn names_match_for_callee(decl_name: &str, event_name: &str) -> bool {
-    if decl_name == event_name {
-        return true;
-    }
-    let mut tail = event_name;
-    // Strip PHP-style instance-method-chain prefix (`Foo::wrap($x)->run`
-    // → `run`). The `->` separator doesn't fall through the
-    // `.`/`:` split below, so check it first.
-    if let Some(idx) = tail.rfind("->") {
-        tail = &tail[idx + 2..];
-    }
-    if let Some((_head, rest)) = tail.rsplit_once(['.', ':']) {
-        tail = rest;
-    }
-    if let Some(idx) = tail.find('/') {
-        if tail[idx + 1..].chars().all(|c| c.is_ascii_digit()) {
-            tail = &tail[..idx];
-        }
-    }
-    if decl_name == tail {
-        return true;
-    }
-    matches_qualified_tail(decl_name, tail)
+    bonsai_common::qualified_names_match(decl_name, event_name)
 }
 
 /// Walk `events` and collect the requested argument span only from Call
@@ -2171,6 +2151,10 @@ pub trait IdgFileSemanticsProvider {
     /// Return the opaque language identity used only to prevent cross-language
     /// fallback edges.
     fn language(&self, file: FileId) -> Option<&'static str>;
+    /// Return the active adapter's compiler capability declaration.
+    fn capabilities(&self, _file: FileId) -> bonsai_lang_api::LanguageCapabilities {
+        bonsai_lang_api::LanguageCapabilities::unsupported()
+    }
     /// Return the canonical VFS path used for directory/module scoping.
     fn path(&self, file: FileId) -> Option<String>;
     /// Return the exact source byte length for resource scheduling. This value
@@ -2908,7 +2892,7 @@ where
     if local_callable_bindings.is_empty() {
         local_callable_bindings =
             bonsai_callgraph::collect_workspace_local_callable_bindings(global, |file| {
-                semantics.module_path_syntax(file)
+                semantics.capabilities(file)
             });
     }
     for bindings in local_callable_bindings.values() {
@@ -2958,6 +2942,7 @@ where
         file_to_directory: &maps.file_to_directory,
         included_funcs: &maps.func_to_seg,
         file_to_language: &maps.file_to_language,
+        file_to_capabilities: &maps.file_to_capabilities,
         class_symbols_by_name: &class_symbols_by_name,
         class_symbols_by_name_scope: &class_symbols_by_name_scope,
         class_symbols_by_import_alias_file: &class_symbols_by_import_alias_file,
@@ -4286,12 +4271,7 @@ fn bare_class_name(name: &str) -> &str {
     if let Some(idx) = s.find('<') {
         s = &s[..idx];
     }
-    if let Some((_, tail)) = s.rsplit_once("::") {
-        s = tail;
-    }
-    if let Some((_, tail)) = s.rsplit_once('.') {
-        s = tail;
-    }
+    s = bonsai_common::short_qualified_tail(s);
     s = s.trim();
     if s.is_empty() || !s.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return "";
@@ -4672,7 +4652,7 @@ fn ws_node_for(
 /// (Ruby `@cmd` vs Python `self.cmd` vs PHP `$this->cmd`) all
 /// bucket into the same canonical key.
 fn canonical_field_name(name: &str, receiver_names: &[String]) -> String {
-    let normalized = name.trim().replace("->", ".");
+    let normalized = bonsai_common::normalize_qualified_name(name.trim());
     if let Some((root, field)) = normalized.split_once('.') {
         if receiver_name_matches(root, receiver_names) {
             return canonical_field_component(field);
@@ -4682,17 +4662,7 @@ fn canonical_field_name(name: &str, receiver_names: &[String]) -> String {
 }
 
 fn canonical_field_component(name: &str) -> String {
-    let mut s = name.trim();
-    if let Some(rest) = s.strip_prefix("@@") {
-        s = rest;
-    } else if let Some(rest) = s.strip_prefix('@') {
-        s = rest;
-    } else if let Some(rest) = s.strip_prefix('$') {
-        s = rest;
-    } else if let Some(rest) = s.strip_prefix('&') {
-        s = rest;
-    }
-    s.to_string()
+    bonsai_common::trim_leading_name_punctuation(name.trim()).to_string()
 }
 
 /// Push a new IDG edge from `from` to `to` (workspace ids). Routes

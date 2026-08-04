@@ -21,14 +21,27 @@ use tree_sitter::Node;
 
 use crate::ExpressionFlow;
 
+use super::expression_flow::expression_flow_from_node_with_handler;
+#[cfg(test)]
+use super::GENERIC_HANDLER;
 use super::{
-    expression_flow_from_node, first_identifier_descendant, first_identifier_like_child,
-    looks_like_identifier, looks_like_literal_value, node_text,
+    first_identifier_descendant, first_identifier_like_child, looks_like_identifier,
+    looks_like_literal_value, node_text, GrammarHandler,
 };
 
 /// Lower the parsed return operand into structured compiler facts.
 #[must_use]
+#[cfg(test)]
 pub fn extract_return_value_flow(node: &Node<'_>, file: FileId, src: &[u8]) -> ExpressionFlow {
+    extract_return_value_flow_with_handler(node, file, src, &GENERIC_HANDLER)
+}
+
+pub(super) fn extract_return_value_flow_with_handler(
+    node: &Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> ExpressionFlow {
     let Some(value) = return_value_node(node) else {
         return ExpressionFlow::default();
     };
@@ -45,14 +58,24 @@ pub fn extract_return_value_flow(node: &Node<'_>, file: FileId, src: &[u8]) -> E
             ..ExpressionFlow::default()
         };
     }
-    expression_flow_from_node(value, file, src)
+    expression_flow_from_node_with_handler(value, file, src, handler)
 }
 
 /// Lower the parsed yield operand into structured compiler facts.
 #[must_use]
+#[cfg(test)]
 pub fn extract_yield_value_flow(node: &Node<'_>, file: FileId, src: &[u8]) -> ExpressionFlow {
+    extract_yield_value_flow_with_handler(node, file, src, &GENERIC_HANDLER)
+}
+
+pub(super) fn extract_yield_value_flow_with_handler(
+    node: &Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> ExpressionFlow {
     yield_value_node(node)
-        .map(|value| expression_flow_from_node(value, file, src))
+        .map(|value| expression_flow_from_node_with_handler(value, file, src, handler))
         .unwrap_or_default()
 }
 
@@ -60,7 +83,16 @@ pub fn extract_yield_value_flow(node: &Node<'_>, file: FileId, src: &[u8]) -> Ex
 /// returned when the adapter can determine one precisely.
 /// `return x` and `return `${x}`` → `Some("x")`; multi-operand
 /// expressions such as `return x + y` remain `None`.
+#[cfg(test)]
 pub fn extract_return_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
+    extract_return_value_name_with_handler(node, src, &GENERIC_HANDLER)
+}
+
+pub(super) fn extract_return_value_name_with_handler(
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<String> {
     let Some(value_node) = return_value_node(node) else {
         // Without an operand node there is no compiler fact. Raw statement
         // text remains available to the renderer, but semantic lowering must
@@ -134,13 +166,13 @@ pub fn extract_return_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> 
         if looks_like_identifier(inner.kind()) {
             return Some(node_text(&inner, src).trim().to_string());
         }
-        let operands = super::extract_rhs_expr_operands(&inner, src);
+        let operands = super::extract_rhs_expr_operands(&inner, src, handler);
         if operands.len() == 1 {
             return operands.into_iter().next();
         }
         return None;
     }
-    let operands = super::extract_rhs_expr_operands(&value_node, src);
+    let operands = super::extract_rhs_expr_operands(&value_node, src, handler);
     if operands.len() == 1 {
         return operands.into_iter().next();
     }
@@ -203,10 +235,10 @@ fn catch_binding_identifier<'a>(node: Node<'a>) -> Option<Node<'a>> {
     None
 }
 
-/// Like [`extract_return_value_name`] but returns the full source
+/// Like `extract_return_value_name_with_handler` but returns the full source
 /// text of the return value (without the leading `return` keyword).
 /// This field is rendering-only; dataflow comes from
-/// [`extract_return_value_flow`].
+/// `extract_return_value_flow_with_handler`.
 pub fn extract_return_value_text(node: &Node<'_>, src: &[u8]) -> Option<String> {
     if let Some(text) = return_statement_value_text(node, src) {
         return Some(text);
@@ -283,7 +315,7 @@ fn yield_value_node<'a>(node: &'a Node<'a>) -> Option<Node<'a>> {
 }
 
 /// Extract the bare-identifier name being thrown. Mirror of
-/// [`extract_return_value_name`] for `throw` / `raise` / `panic` /
+/// `extract_return_value_name_with_handler` for `throw` / `raise` / `panic` /
 /// `die` constructs. Returns the rethrow-target's bare name when
 /// the throw is a value-rethrow; returns the constructed exception
 /// type name when the throw is a `throw new FooException(msg)`

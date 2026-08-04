@@ -97,6 +97,143 @@ fn if_expression_assignment_uses_branch_values_not_condition_call() {
 }
 
 #[test]
+fn cond_expression_assignment_preserves_branch_value_dependencies() {
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_elixir::ElixirAdapter::new());
+    let runner = bonsai_conformance::ConformanceRunner::new(
+        adapter,
+        vec![(
+            "main.ex".to_string(),
+            "defmodule Main do\n  def run(input) do\n    routed = input\n    routed = cond do\n      routed == \"\" -> routed\n      true -> routed\n    end\n    sink(routed)\n  end\nend\n"
+                .to_string(),
+        )],
+    );
+    let ws = runner.workspace();
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).expect("decl index should exist");
+    let run = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run decl should exist");
+    let routed_assignments = run
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                source_names,
+                value_kind,
+                ..
+            } if target == "routed" => Some((source_name, source_call, source_names, value_kind)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(routed_assignments.len(), 2, "{:#?}", run.flow_events);
+    let second = routed_assignments[1];
+    assert_eq!(second.0, &None, "{:#?}", run.flow_events);
+    assert_eq!(second.1, &None, "{:#?}", run.flow_events);
+    assert_eq!(second.2, &["routed".to_string()], "{:#?}", run.flow_events);
+    assert_eq!(
+        second.3,
+        &Some(AssignValueKind::Compound),
+        "{:#?}",
+        run.flow_events
+    );
+}
+
+#[test]
+fn try_expression_assignment_preserves_body_and_rescue_values() {
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_elixir::ElixirAdapter::new());
+    let runner = bonsai_conformance::ConformanceRunner::new(
+        adapter,
+        vec![(
+            "main.ex".to_string(),
+            "defmodule Main do\n  def run(primary, fallback) do\n    value = try do\n      primary\n    rescue\n      _ -> fallback\n    end\n    sink(value)\n  end\nend\n"
+                .to_string(),
+        )],
+    );
+    let ws = runner.workspace();
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).expect("decl index should exist");
+    let run = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run decl should exist");
+    let assignment = run
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_call,
+                source_names,
+                value_kind,
+                ..
+            } if target == "value" => Some((source_call, source_names, value_kind)),
+            _ => None,
+        })
+        .expect("value assignment");
+
+    assert_eq!(assignment.0, &None, "{:#?}", run.flow_events);
+    assert_eq!(
+        assignment.1,
+        &["fallback".to_string(), "primary".to_string()],
+        "{:#?}",
+        run.flow_events
+    );
+    assert_eq!(assignment.2, &Some(AssignValueKind::Compound));
+}
+
+#[test]
+fn maps_returned_from_try_join_each_field_without_callee_name_sources() {
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_elixir::ElixirAdapter::new());
+    let runner = bonsai_conformance::ConformanceRunner::new(
+        adapter,
+        vec![(
+            "main.ex".to_string(),
+            "defmodule Main do\n  def run(envelope, routed, user) do\n    valid = try do\n      %{envelope | cmd: routed, user: user, length: String.length(routed)}\n    rescue\n      _ -> %{envelope | cmd: routed, user: user, length: 0}\n    end\n    sink(valid.cmd)\n  end\nend\n"
+                .to_string(),
+        )],
+    );
+    let ws = runner.workspace();
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).expect("decl index should exist");
+    let run = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run decl should exist");
+    let field = |wanted: &str| {
+        run.flow_events
+            .iter()
+            .find(|event| matches!(event, FlowEvent::Assign { target, .. } if target == wanted))
+    };
+
+    assert!(matches!(
+        field("valid.cmd"),
+        Some(FlowEvent::Assign { source_names, .. }) if source_names == &["routed".to_string()]
+    ));
+    assert!(matches!(
+        field("valid.user"),
+        Some(FlowEvent::Assign { source_names, .. }) if source_names == &["user".to_string()]
+    ));
+    assert!(field("valid.length").is_some());
+    assert!(run.flow_events.iter().all(|event| !matches!(
+        event,
+        FlowEvent::Assign { target, source_names, .. }
+            if target.starts_with("valid.")
+                && source_names.iter().any(|source| source == "String" || source == "length")
+    )));
+}
+
+#[test]
 fn map_literal_emits_field_scoped_assignments() {
     let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
         Arc::new(bonsai_lang_elixir::ElixirAdapter::new());
@@ -166,6 +303,92 @@ fn value_dot_access_is_a_field_read_not_a_method_call() {
         .refs
         .iter()
         .any(|reference| reference.kind == bonsai_lang_api::RefKind::Read && reference.name == "capacity"));
+}
+
+#[test]
+fn exact_value_field_assignment_is_a_projection_not_a_call_result() {
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_elixir::ElixirAdapter::new());
+    let runner = bonsai_conformance::ConformanceRunner::new(
+        adapter,
+        vec![(
+            "main.ex".to_string(),
+            "defmodule Main do\n  def run(envelope) do\n    cmd = envelope.payload.cmd\n    sink(cmd)\n  end\nend\n"
+                .to_string(),
+        )],
+    );
+    let ws = runner.workspace();
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).expect("decl index should exist");
+    let run = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run decl should exist");
+
+    assert!(run.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign {
+            target,
+            source_name: Some(source),
+            source_call: None,
+            source_call_args,
+            value_kind: Some(AssignValueKind::Compound),
+            ..
+        } if target == "cmd" && source == "envelope.payload.cmd" && source_call_args.is_empty()
+    )));
+    assert!(!run.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Call { name, .. }
+            if name == "envelope.payload" || name == "envelope.payload.cmd"
+    )));
+    let fact = idx
+        .assignment_values
+        .iter()
+        .find(|fact| fact.target.as_deref() == Some("cmd"))
+        .expect("cmd assignment fact");
+    assert_eq!(fact.value_flow.place.as_deref(), Some("envelope.payload.cmd"));
+    assert!(fact.call_sites.is_empty());
+    assert_eq!(fact.direct_call_name, None);
+}
+
+#[test]
+fn value_field_argument_does_not_hide_its_real_enclosing_call() {
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_elixir::ElixirAdapter::new());
+    let runner = bonsai_conformance::ConformanceRunner::new(
+        adapter,
+        vec![(
+            "main.ex".to_string(),
+            "defmodule Main do\n  def run(envelope) do\n    cmd = normalize(envelope.cmd)\n    sink(cmd)\n  end\nend\n"
+                .to_string(),
+        )],
+    );
+    let ws = runner.workspace();
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).expect("decl index should exist");
+    let run = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run decl should exist");
+
+    assert!(run
+        .flow_events
+        .iter()
+        .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == "normalize")));
+    assert!(!run
+        .flow_events
+        .iter()
+        .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == "envelope.cmd")));
+    assert!(run.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign {
+            target,
+            source_call: Some(source_call),
+            ..
+        } if target == "cmd" && source_call == "normalize"
+    )));
 }
 
 #[test]

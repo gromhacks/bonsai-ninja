@@ -381,15 +381,7 @@ impl Locator {
             (Some(qualified), Some(decl))
                 if qualified.ends_with(decl.as_str()) && qualified.len() > decl.len() + 1 =>
             {
-                // Drop the decl tail and the separator(s) before it.
-                // `strip_suffix` + `trim_end_matches` is char-boundary-safe
-                // (unlike a raw byte slice) and also handles multi-byte
-                // separators like `::` cleanly — a fixed `len - decl - 1`
-                // slice left a stray trailing `:` on `a::b::foo`.
-                let prefix = qualified
-                    .strip_suffix(decl.as_str())
-                    .map_or(qualified.as_str(), |p| p.trim_end_matches(['.', ':']));
-                Some(prefix.to_string())
+                bonsai_common::qualified_name_owner(qualified).map(str::to_string)
             }
             _ => derive_module_from_path(&loc.file),
         };

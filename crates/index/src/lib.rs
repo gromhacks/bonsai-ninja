@@ -1032,6 +1032,11 @@ fn remap_decl_index_symbols(index: &mut DeclIndex, local_to_global: &AHashMap<Sy
             reference.resolved = local_to_global.get(&resolved).copied();
         }
     }
+    for assignment in &mut index.assignment_values {
+        if let Some(owner) = assignment.target_owner {
+            assignment.target_owner = local_to_global.get(&owner).copied();
+        }
+    }
 }
 
 fn function_linkage_facts(events: &[FlowEvent]) -> FunctionLinkageFacts {
@@ -1457,7 +1462,7 @@ fn type_name_keys(name: &str, qualified_name: Option<&str>) -> Vec<String> {
 fn type_name_key(name: &str) -> String {
     let normalized = name
         .trim()
-        .trim_start_matches(['&', '*', '$', '@', '%'])
+        .trim_start_matches(bonsai_common::is_name_punctuation)
         .trim_end_matches("()")
         .replace('\\', "::");
     short_qualified_tail(&normalized)

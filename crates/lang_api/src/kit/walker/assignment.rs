@@ -1,13 +1,13 @@
 use super::super::{
     argument_place, assignment_declared_type, assignment_is_compound, assignment_target_node,
     assignment_value_node, assignment_wrapper_has_variable_declarator, binary_operator_is_assignment,
-    binary_operator_is_pipe, call_arg_from_node, callable_reference_name, expression_flow,
+    binary_operator_is_pipe, call_arg_from_node_with_handler, callable_reference_name, expression_flow,
     extra_lhs_binding_targets, extract_dart_selector_call_info, extract_direct_call_info,
     extract_rhs_expr_operands, first_call_descendant, has_direct_large_literal_initializer_child,
     is_large_literal_initializer_node, keyed_lhs_binding_sources, looks_like_bare_identifier,
     looks_like_identifier, node_text, prepend_pipe_arg_to_call, qualified_assign_target,
     ruby_append_mutation_assignment, same_identifier_name, sanitize_assign_target, span_of,
-    subscript_place_parts, type_only_declaration_without_initializer, FlowEvent, Node, COMMON_CALL_KINDS,
+    subscript_place_parts, type_only_declaration_without_initializer, FlowEvent, Node,
 };
 use super::{walk_into, LoweringContext};
 
@@ -23,7 +23,7 @@ pub(super) fn lower_assignment(
         class_names,
     } = context;
     let kind = node.kind();
-    if ruby_append_mutation_assignment(&node, file, src, out) {
+    if ruby_append_mutation_assignment(&node, file, src, handler, out) {
         return true;
     }
 
@@ -44,7 +44,7 @@ pub(super) fn lower_assignment(
                     walk_into(left, file, src, handler, class_names, out, false);
                     let before = out.len();
                     walk_into(right, file, src, handler, class_names, out, false);
-                    prepend_pipe_arg_to_call(out, before, &right, &left, file, src);
+                    prepend_pipe_arg_to_call(out, before, &right, &left, file, src, handler);
                     return true;
                 }
             }
@@ -111,7 +111,7 @@ pub(super) fn lower_assignment(
         let rhs_is_callable_literal = rhs.is_some_and(|rhs_node| handler.is_lambda(rhs_node.kind()));
         let callable_source = rhs
             .filter(|_| !rhs_is_callable_literal)
-            .and_then(|rhs_node| callable_reference_name(&rhs_node, src));
+            .and_then(|rhs_node| callable_reference_name(&rhs_node, src, handler));
         let simple_place_source = rhs
             .filter(|rhs_node| looks_like_identifier(rhs_node.kind()))
             .and_then(|rhs_node| argument_place(&rhs_node, src));
@@ -140,16 +140,17 @@ pub(super) fn lower_assignment(
         {
             (None, Vec::new())
         } else {
-            rhs.and_then(|n| extract_direct_call_info(&n, src))
-                .or_else(|| rhs.and_then(|n| extract_dart_selector_call_info(n, file, src)))
+            rhs.and_then(|n| extract_direct_call_info(&n, src, handler))
+                .or_else(|| rhs.and_then(|n| extract_dart_selector_call_info(n, file, src, handler)))
                 .or_else(|| {
                     rhs.is_none()
                         .then(|| {
-                            first_call_descendant(node).and_then(|call| extract_direct_call_info(&call, src))
+                            first_call_descendant(node, handler)
+                                .and_then(|call| extract_direct_call_info(&call, src, handler))
                         })
                         .flatten()
                 })
-                .or_else(|| extract_dart_selector_call_info(node, file, src))
+                .or_else(|| extract_dart_selector_call_info(node, file, src, handler))
                 .unwrap_or((None, Vec::new()))
         };
         // G2: when the RHS is a compound expression (template literal,
@@ -169,7 +170,7 @@ pub(super) fn lower_assignment(
             || has_direct_large_literal_initializer_child(&node);
         if callable_source.is_none() && !rhs_is_callable_literal {
             if let Some(n) = rhs.filter(|n| !is_large_literal_initializer_node(n.kind(), n)) {
-                source_names.extend(extract_rhs_expr_operands(&n, src));
+                source_names.extend(extract_rhs_expr_operands(&n, src, handler));
                 // Retain the exact parser-proven qualified place in addition
                 // to scalar operands. This preserves language sigils on a
                 // projection (`$obj->token` -> `$obj.token`) without an
@@ -187,7 +188,7 @@ pub(super) fn lower_assignment(
         // constructor/object-literal assignments like
         // `env = Envelope(cmd: raw)` preserve the `raw` dependency.
         if rhs.is_none() {
-            source_names.extend(extract_rhs_expr_operands(&node, src));
+            source_names.extend(extract_rhs_expr_operands(&node, src, handler));
         }
         // H1: `x OP= rhs` desugars to `x = x OP rhs`, so the LHS is always
         // read. Keep it among the sources (don't strip via same_identifier)
@@ -205,9 +206,7 @@ pub(super) fn lower_assignment(
         // apply. `rhs` is `None` only for the full-node structural fallback
         // (where the LHS identifier can also appear among descendants), so a
         // missing RHS also strips.
-        let rhs_is_noncall_expr = rhs
-            .as_ref()
-            .is_some_and(|n| !COMMON_CALL_KINDS.contains(&n.kind()));
+        let rhs_is_noncall_expr = rhs.as_ref().is_some_and(|n| !handler.is_call(n.kind()));
         let target_self_read = is_compound || rhs_is_noncall_expr;
         if !target_self_read {
             source_names.retain(|name| !same_identifier_name(name, &target));
@@ -257,7 +256,8 @@ pub(super) fn lower_assignment(
             if let Some(rhs_node) = rhs
                 .filter(|rhs_node| node.kind() == "init_declarator" && rhs_node.kind() == "initializer_list")
             {
-                let value_flow = expression_flow::positional_expression_flow_from_node(rhs_node, file, src);
+                let value_flow =
+                    expression_flow::positional_expression_flow_from_node(rhs_node, file, src, handler);
                 if !value_flow.tuple_items.is_empty() && !target.is_empty() {
                     out.push(FlowEvent::AggregateAssign {
                         span: span_of(file, &node),
@@ -328,8 +328,8 @@ pub(super) fn lower_assignment(
                 if let Some((base_node, key_node)) = subscript_place_parts(target_node) {
                     let base = node_text(&base_node, src).trim();
                     if looks_like_bare_identifier(base) {
-                        let key_arg = call_arg_from_node(key_node, file, src, None);
-                        let value_arg = call_arg_from_node(value_node, file, src, None);
+                        let key_arg = call_arg_from_node_with_handler(key_node, file, src, None, handler);
+                        let value_arg = call_arg_from_node_with_handler(value_node, file, src, None, handler);
                         if let (Some(key_arg), Some(value_arg)) = (key_arg, value_arg) {
                             let span = span_of(file, &node);
                             out.push(FlowEvent::Call {

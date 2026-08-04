@@ -2135,7 +2135,7 @@ impl<'a> PreparedRule<'a> {
             // alias-chain lookup fails on a punctuation-prefixed key
             // and the package gate misses receiver-typed methods.
             let stripped: String = receiver_type
-                .trim_matches(bonsai_common::REFERENCE_SIGILS)
+                .trim_matches(bonsai_common::is_name_punctuation)
                 .to_string();
             push_unique_package_candidate(&mut candidates, &stripped);
             if let Some(target) = alias_map.get(receiver_type) {
@@ -2149,23 +2149,19 @@ impl<'a> PreparedRule<'a> {
             // Also chase the head of a qualified receiver type
             // (`gin.Context` → `gin`, `Poco::Net::Context` → `Poco`),
             // which is how adapters surface package alias bindings.
-            if let Some((head, _)) = split_call_head_tail(&stripped) {
+            if let Some(head) = call_head(&stripped) {
                 if let Some(target) = alias_map.get(head) {
                     push_target(&mut candidates, target);
                 }
             }
-            if let Some(receiver_tail) = receiver_path_tail(receiver_type).strip_prefix("new ") {
-                if let Some(target) = alias_map.get(receiver_tail) {
-                    push_target(&mut candidates, target);
-                }
-            } else if let Some(target) = alias_map.get(receiver_path_tail(receiver_type)) {
+            if let Some(target) = alias_map.get(receiver_path_tail(receiver_type)) {
                 push_target(&mut candidates, target);
             }
         }
         if let Some(target) = alias_map.get(callee) {
             push_target(&mut candidates, target);
         }
-        if let Some((head, _)) = split_call_head_tail(callee) {
+        if let Some(head) = call_head(callee) {
             if let Some(target) = alias_map.get(head) {
                 push_target(&mut candidates, target);
             }
@@ -2174,26 +2170,51 @@ impl<'a> PreparedRule<'a> {
         let component_level_package_evidence_allowed = self.component_level_package_evidence_allowed();
         let workspace_level_package_evidence_allowed = self.workspace_level_package_evidence_allowed();
         let allowed = self.package_signals.iter().any(|signal| {
-            (file_level_package_evidence_allowed && file_packages.contains(*signal))
+            (file_level_package_evidence_allowed
+                && package_set_contains_import(
+                    file_packages,
+                    signal,
+                    None,
+                    &self.rule.package_matching,
+                ))
                 || (component_level_package_evidence_allowed
-                    && file_packages.contains(&component_import_package_marker(signal)))
+                    && package_set_contains_import(
+                        file_packages,
+                        signal,
+                        Some(COMPONENT_IMPORT_PACKAGE_PREFIX),
+                        &self.rule.package_matching,
+                    ))
                 || (workspace_level_package_evidence_allowed
-                    && file_packages.contains(&workspace_import_package_marker(signal)))
+                    && package_set_contains_import(
+                        file_packages,
+                        signal,
+                        Some(WORKSPACE_IMPORT_PACKAGE_PREFIX),
+                        &self.rule.package_matching,
+                    ))
                 || candidates
                     .iter()
                     .any(|candidate| local_import_package_allows(file_packages, candidate, signal))
                 || candidates
                     .iter()
-                    .any(|candidate| crate::pkg::import_matches_package(candidate, signal))
-                // WS1 FQN-no-import: a Go-style path package (`os/exec`,
-                // `net/http`) binds its last segment as the call qualifier
-                // (`exec.Command`, `http.Get`), which the prefix matcher
-                // above misses. Credit a call CANDIDATE that equals that
-                // last segment — the fully-qualified call is itself the
-                // package evidence, no in-file import required.
+                    .any(|candidate| {
+                        crate::pkg::import_matches_package(
+                            candidate,
+                            signal,
+                            &self.rule.package_matching,
+                        )
+                    })
+                // Some adapter-declared package paths bind their final
+                // component as the local call qualifier. The exact binding
+                // and separators come from rulepack language metadata.
                 || candidates
                     .iter()
-                    .any(|candidate| crate::pkg::call_candidate_matches_package_tail(candidate, signal))
+                    .any(|candidate| {
+                        crate::pkg::call_candidate_matches_package_tail(
+                            candidate,
+                            signal,
+                            &self.rule.package_matching,
+                        )
+                    })
         });
         allowed
     }
@@ -2209,7 +2230,7 @@ impl<'a> PreparedRule<'a> {
             // they feed factory-return resolution via build_factory_returns.
             crate::rule::RuleKind::Typing => false,
             crate::rule::RuleKind::Sink => {
-                if is_lifecycle_audit_pair_sink(self.rule) {
+                if allows_file_package_evidence(self.rule) {
                     return true;
                 }
                 let target = match self.rule.match_spec.kind {
@@ -2633,11 +2654,7 @@ fn push_exact_text_anchor(out: &mut Vec<String>, value: &str) {
 }
 
 fn text_anchor_name_tail(value: &str) -> &str {
-    value
-        .rsplit(['.', ':', '/', '\\'])
-        .next()
-        .filter(|tail| !tail.is_empty())
-        .unwrap_or(value)
+    bonsai_common::short_qualified_tail(value)
 }
 
 fn looks_like_type_anchor(value: &str) -> bool {
@@ -2827,33 +2844,31 @@ fn flush_regex_anchor_token(out: &mut Vec<String>, token: &mut String) {
     token.clear();
 }
 
-fn is_lifecycle_audit_pair_sink(rule: &Rule) -> bool {
-    if rule.kind != crate::rule::RuleKind::Sink {
-        return false;
-    }
-    matches!(
-        rule.tag.as_deref(),
-        Some("race" | "memory-safety" | "resource-leak")
-    ) || rule.category.as_deref() == Some("source-independent")
-}
-
-fn is_lifecycle_state_sink(rule: &Rule) -> bool {
+fn allows_file_package_evidence(rule: &Rule) -> bool {
     rule.kind == crate::rule::RuleKind::Sink
-        && matches!(
-            rule.tag.as_deref(),
-            Some("race" | "memory-safety" | "resource-leak")
-        )
+        && rule
+            .analysis_semantics
+            .as_ref()
+            .and_then(|semantics| semantics.allow_file_package_evidence)
+            .unwrap_or(false)
 }
 
-fn split_call_head_tail(callee: &str) -> Option<(&str, &str)> {
+fn skips_call_package_gate(rule: &Rule) -> bool {
+    rule.kind == crate::rule::RuleKind::Sink
+        && rule
+            .analysis_semantics
+            .as_ref()
+            .and_then(|semantics| semantics.skip_call_package_gate)
+            .unwrap_or(false)
+}
+
+fn call_head(callee: &str) -> Option<&str> {
     let trimmed = callee.trim();
     if trimmed.is_empty() {
         return None;
     }
-    trimmed
-        .split_once("::")
-        .or_else(|| trimmed.split_once('.'))
-        .or_else(|| trimmed.split_once(':'))
+    let segments = bonsai_common::qualified_name_segments(trimmed);
+    (segments.len() > 1).then(|| segments[0])
 }
 
 fn annotation_name_matches(actual: &str, expected: &str) -> bool {
@@ -2866,7 +2881,9 @@ fn annotation_name_matches(actual: &str, expected: &str) -> bool {
 }
 
 fn normalize_annotation_name(value: &str) -> &str {
-    let value = value.trim().trim_start_matches('@');
+    let value = value
+        .trim()
+        .trim_start_matches(bonsai_common::is_name_punctuation);
     value
         .split_once('(')
         .map(|(head, _)| head)
@@ -2875,10 +2892,7 @@ fn normalize_annotation_name(value: &str) -> &str {
 }
 
 fn annotation_tail(value: &str) -> &str {
-    value
-        .rsplit(['.', ':', '\\'])
-        .find(|part| !part.is_empty())
-        .unwrap_or(value)
+    bonsai_common::short_qualified_tail(value)
 }
 
 fn push_alias_target_package_candidate(out: &mut Vec<String>, target: &AliasTarget) {
@@ -2909,10 +2923,38 @@ fn component_import_package_marker(package: &str) -> String {
     format!("{COMPONENT_IMPORT_PACKAGE_PREFIX}:{package}")
 }
 
+fn package_set_contains_import(
+    file_packages: &AHashSet<String>,
+    signal: &str,
+    scope_prefix: Option<&str>,
+    semantics: &crate::loader::PackageMatchSemantics,
+) -> bool {
+    file_packages.iter().any(|candidate| {
+        let candidate = if let Some(prefix) = scope_prefix {
+            let Some(candidate) = candidate
+                .strip_prefix(prefix)
+                .and_then(|candidate| candidate.strip_prefix(':'))
+            else {
+                return false;
+            };
+            candidate
+        } else {
+            if candidate.starts_with(LOCAL_IMPORT_PACKAGE_PREFIX)
+                || candidate.starts_with(WORKSPACE_IMPORT_PACKAGE_PREFIX)
+                || candidate.starts_with(COMPONENT_IMPORT_PACKAGE_PREFIX)
+            {
+                return false;
+            }
+            candidate.as_str()
+        };
+        crate::pkg::import_matches_package(candidate, signal, semantics)
+    })
+}
+
 fn local_import_package_allows(file_packages: &AHashSet<String>, candidate: &str, signal: &str) -> bool {
     file_packages.contains(&local_import_package_marker(candidate, signal))
-        || split_call_head_tail(candidate)
-            .is_some_and(|(head, _)| file_packages.contains(&local_import_package_marker(head, signal)))
+        || call_head(candidate)
+            .is_some_and(|head| file_packages.contains(&local_import_package_marker(head, signal)))
 }
 
 fn file_packages_have_local_import_package(file_packages: &AHashSet<String>, signal: &str) -> bool {
@@ -3350,6 +3392,13 @@ fn insert_call_rule_index<'p, 'rule>(
         inserted = true;
     }
     if let Some(attribute) = rule.attribute {
+        let declared = attribute.join(".");
+        let mut canonical_keys = Vec::new();
+        collect_call_candidate_keys(&declared, &mut canonical_keys);
+        for key in canonical_keys {
+            insert_call_rule_key(keyed_rules, &key, rule);
+            inserted = true;
+        }
         for part in attribute {
             insert_call_rule_key(keyed_rules, part, rule);
             inserted = true;
@@ -3403,7 +3452,7 @@ fn regex_terminal_call_key(pattern: &str) -> Option<String> {
     let key = trimmed
         .get(end..)?
         .trim()
-        .trim_start_matches(bonsai_common::IDENTIFIER_SIGILS);
+        .trim_start_matches(bonsai_common::is_name_punctuation);
     if key.len() < 3 {
         return None;
     }
@@ -3914,6 +3963,7 @@ fn scan_calls_batch(
                     prepared,
                     Some(decl),
                     &matched_callee,
+                    &receiver_types,
                     &facts.factory_type_aliases,
                 ) {
                     continue;
@@ -4001,6 +4051,9 @@ fn scan_calls_batch(
                 continue;
             };
             if !prepared.base_name_allows(&matched_callee) {
+                continue;
+            }
+            if !base_receiver_type_allows(prepared, None, &matched_callee, &[], &[]) {
                 continue;
             }
             if !prepared.call_context_allows(&r.name, &[], &import_aliases, file_packages.as_ref()) {
@@ -4109,9 +4162,15 @@ fn expand_callee_alias(
     callee: &str,
     alias_map: &std::collections::HashMap<String, AliasTarget>,
 ) -> Option<String> {
-    let bare = callee.split(&['.', ':'][..]).next()?;
+    let segments = bonsai_common::qualified_name_segments(callee);
+    let bare = normalize_leading_call_punctuation(segments.first().copied()?);
     let target = alias_map.get(bare)?;
-    let tail = &callee[bare.len()..];
+    let tail = segments.iter().skip(1).copied().collect::<Vec<_>>().join(".");
+    let tail = if tail.is_empty() {
+        String::new()
+    } else {
+        format!(".{tail}")
+    };
     Some(match target {
         AliasTarget::Member { module, member } => format!("{module}.{member}{tail}"),
         AliasTarget::Namespace { module } => format!("{module}{tail}"),
@@ -4119,13 +4178,26 @@ fn expand_callee_alias(
     })
 }
 
+/// Match a structured compiler call against rule-owned syntax after applying
+/// the canonical import/type alias map. Guard analyses use this instead of
+/// duplicating language-specific import spelling rules.
+pub(crate) fn rule_target_matches_call_with_aliases(
+    callee: &str,
+    receiver_types: &[String],
+    target: &RuleTarget,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+) -> bool {
+    rule_target_matches_call(callee, receiver_types, target)
+        || expand_callee_alias(callee, alias_map)
+            .as_deref()
+            .is_some_and(|expanded| rule_target_matches_call(expanded, receiver_types, target))
+}
+
 fn collect_call_candidate_keys(callee: &str, out: &mut Vec<String>) {
     let normalized = normalize_callee_for_matching(callee);
     push_unique_call_key(out, &normalized);
-    for sep in [".", "::", "->", "\\", ":", "/"] {
-        if let Some(tail) = normalized.rsplit(sep).next() {
-            push_unique_call_key(out, tail);
-        }
+    for segment in bonsai_common::qualified_name_segments(&normalized) {
+        push_unique_call_key(out, segment);
     }
     for token in normalized.split(|ch: char| !(ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())) {
         push_unique_call_key(out, token);
@@ -4133,11 +4205,27 @@ fn collect_call_candidate_keys(callee: &str, out: &mut Vec<String>) {
 }
 
 fn push_unique_call_key(out: &mut Vec<String>, key: &str) {
-    let key = key.trim().trim_start_matches(bonsai_common::IDENTIFIER_SIGILS);
+    let key = normalize_leading_call_punctuation(key);
     if key.is_empty() || out.iter().any(|existing| existing == key) {
         return;
     }
     out.push(key.to_string());
+}
+
+/// Remove a source sigil from an identifier-shaped compiler call while
+/// preserving an adapter-classified symbolic operator as its exact identity.
+///
+/// The distinction is structural: punctuation followed by a name is a sigil;
+/// a non-empty call made entirely of punctuation is an operator. No language
+/// spelling or provider API is known here.
+fn normalize_leading_call_punctuation(value: &str) -> &str {
+    let value = value.trim();
+    let stripped = value.trim_start_matches(bonsai_common::is_name_punctuation);
+    if stripped.is_empty() {
+        value
+    } else {
+        stripped
+    }
 }
 
 /// Fire each Missing rule on every function-shaped decl in `file`
@@ -5070,14 +5158,6 @@ fn insert_file_import_packages(
 ) {
     for spec in &imports.imports {
         insert_import_target_prefixes(out, &spec.module);
-        if let Some(stripped) = spec
-            .module
-            .strip_suffix(".h")
-            .or_else(|| spec.module.strip_suffix(".hpp"))
-            .or_else(|| spec.module.strip_suffix(".hxx"))
-        {
-            insert_import_target_prefixes(out, stripped);
-        }
         if let Some(imported_file) = resolve_relative_import_file(ws, file, &spec.module) {
             for package in direct_package_imports_for_file(ws, imported_file, retention, prewarmed_imports) {
                 insert_local_import_package_markers(out, spec, &package);
@@ -5398,11 +5478,11 @@ pub(crate) fn build_factory_returns(rules: &[&Rule]) -> Arc<FactoryReturns> {
 }
 
 fn factory_path_segments(text: &str) -> Vec<String> {
-    text.split(['.', ':', '>', '\\'])
-        .filter_map(|part| {
-            let trimmed = part.trim();
-            (!trimmed.is_empty() && trimmed != "-").then(|| trimmed.to_string())
-        })
+    bonsai_common::qualified_name_segments(text)
+        .into_iter()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
         .collect()
 }
 
@@ -5689,24 +5769,8 @@ fn build_decl_match_facts_bundle(
 }
 
 fn insert_import_target_prefixes(out: &mut AHashSet<String>, module: &str) {
-    if module.is_empty() {
-        return;
-    }
-    out.insert(module.to_string());
-    for sep in ['/', '.', ':', '\\'] {
-        let mut prefix = String::new();
-        let mut saw_component = false;
-        for part in module.split(sep).filter(|part| !part.is_empty()) {
-            if !prefix.is_empty() {
-                prefix.push(sep);
-            }
-            prefix.push_str(part);
-            saw_component = true;
-            out.insert(prefix.clone());
-        }
-        if saw_component && sep == ':' && module.contains("::") {
-            out.insert(module.split("::").next().unwrap_or(module).to_string());
-        }
+    for prefix in bonsai_common::qualified_name_prefixes(module) {
+        out.insert(prefix.to_string());
     }
 }
 
@@ -5719,30 +5783,9 @@ fn insert_demanded_import_target_prefixes(
     module: &str,
     demanded: &AHashSet<String>,
 ) {
-    if module.is_empty() {
-        return;
-    }
-    if demanded.contains(module) {
-        out.insert(module.to_string());
-    }
-    for sep in ['/', '.', ':', '\\'] {
-        let mut prefix = String::new();
-        let mut saw_component = false;
-        for part in module.split(sep).filter(|part| !part.is_empty()) {
-            if !prefix.is_empty() {
-                prefix.push(sep);
-            }
-            prefix.push_str(part);
-            saw_component = true;
-            if demanded.contains(prefix.as_str()) {
-                out.insert(prefix.clone());
-            }
-        }
-        if saw_component && sep == ':' && module.contains("::") {
-            let root = module.split("::").next().unwrap_or(module);
-            if demanded.contains(root) {
-                out.insert(root.to_string());
-            }
+    for prefix in bonsai_common::qualified_name_prefixes(module) {
+        if demanded.contains(prefix) {
+            out.insert(prefix.to_string());
         }
     }
 }
@@ -5762,29 +5805,11 @@ fn insert_demanded_import_target_prefixes(
 /// target, so a rule written as
 /// `callee.attribute: [child_process, exec]` fires for both forms.
 ///
-/// True when a regex target starts with a receiver-agnostic local
-/// identifier prefix such as `^[A-Za-z_$][A-Za-z0-9_$]*\.`. These
-/// rules are useful for dynamic languages, but must be gated by
-/// adapter-surfaced import/package context rather than local variable
-/// names.
-pub(crate) fn rule_regex_requires_package_signal(rule: &Rule) -> bool {
-    let target = match rule.match_spec.kind {
-        MatchKind::Call | MatchKind::New | MatchKind::Missing => rule.match_spec.callee.as_ref(),
-        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
-            rule.match_spec.target.as_ref()
-        }
-    };
-    target
-        .and_then(|target| target.regex.as_deref())
-        .is_some_and(regex_prefix_is_receiver_agnostic)
-        && (!rule.packages.is_empty() || !rule.imports.is_empty() || !rule.modules.is_empty())
-}
-
 fn rule_requires_call_package_signal(rule: &Rule) -> bool {
     if rule.packages.is_empty() && rule.imports.is_empty() && rule.modules.is_empty() {
         return false;
     }
-    if is_lifecycle_state_sink(rule) {
+    if skips_call_package_gate(rule) {
         return false;
     }
     if matches!(
@@ -5831,9 +5856,14 @@ fn callee_or_alias_matches(
     if alias_map.is_empty() {
         return None;
     }
-    let bare = callee.split(&['.', ':'][..]).next()?;
+    let segments = bonsai_common::qualified_name_segments(callee);
+    let bare = normalize_leading_call_punctuation(segments.first().copied()?);
     let target = alias_map.get(bare)?;
-    let tail = &callee[bare.len()..];
+    let mut tail = String::new();
+    for segment in segments.iter().skip(1) {
+        tail.push('.');
+        tail.push_str(segment);
+    }
     let expanded = expand_callee_alias(callee, alias_map)?;
     if callee_matches_with_receiver_types(&expanded, receiver_types, name, attribute, regex) {
         return Some(expanded);
@@ -5919,7 +5949,7 @@ fn scan_refs_batch(
             if !base_param_index_allows(prepared, enclosing_decl, &r.name) {
                 continue;
             }
-            if !base_receiver_type_allows(prepared, enclosing_decl, &r.name, &[]) {
+            if !base_receiver_type_allows(prepared, enclosing_decl, &r.name, &[], &[]) {
                 continue;
             }
             // Receiver-agnostic read regexes (`^[A-Za-z_]\w*\.body$`)
@@ -5991,7 +6021,7 @@ fn scan_flow_reads_batch(
                 if !base_param_index_allows(prepared, Some(decl), &match_text) {
                     continue;
                 }
-                if !base_receiver_type_allows(prepared, Some(decl), &match_text, &[]) {
+                if !base_receiver_type_allows(prepared, Some(decl), &match_text, &[], &[]) {
                     continue;
                 }
                 // Same package-signal gate that `scan_refs_batch`
@@ -6093,12 +6123,16 @@ fn base_receiver_type_allows(
     prepared: &PreparedRule<'_>,
     decl: Option<&bonsai_lang_api::Decl>,
     match_text: &str,
+    receiver_types: &[String],
     factory_aliases: &[TypeAliasBinding],
 ) -> bool {
     let Some(target) = rule_primary_target(prepared.rule) else {
         return true;
     };
     if target.receiver_type_in.is_empty() {
+        return true;
+    }
+    if receiver_type_matches_any(receiver_types, &target.receiver_type_in) {
         return true;
     }
     let Some(base) = match_base_name(match_text) else {
@@ -6351,7 +6385,7 @@ fn collect_expression_flow_read_names(flow: &bonsai_lang_api::ExpressionFlow, ou
 fn push_structured_read_name(out: &mut Vec<String>, value: &str) {
     let value = value
         .trim()
-        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION);
+        .trim_start_matches(bonsai_common::is_name_punctuation);
     let value = value.trim_matches('.');
     if !value.is_empty() && !out.iter().any(|existing| existing == value) {
         out.push(value.to_string());
@@ -7023,28 +7057,18 @@ fn push_receiver_type_bases(
 }
 
 fn call_receiver_text(callee: &str) -> Option<&str> {
-    let callee = callee.trim();
-    for sep in bonsai_common::QUALIFIED_NAME_SEPARATORS {
-        let Some((receiver, _)) = callee.rsplit_once(sep) else {
-            continue;
-        };
-        let receiver = receiver.trim();
-        if !receiver.is_empty() {
-            return Some(receiver);
-        }
-    }
-    None
+    bonsai_common::qualified_name_owner(callee.trim())
 }
 
 fn receiver_root_name(receiver: &str) -> Option<String> {
     let receiver = receiver
         .trim()
-        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION);
+        .trim_start_matches(bonsai_common::is_name_punctuation);
     let root = receiver
-        .split(['.', ':', '\\', '[', '(', '?'])
-        .next()
-        .unwrap_or(receiver)
-        .trim();
+        .chars()
+        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+        .collect::<String>();
+    let root = root.trim();
     if root.is_empty() || root == receiver {
         return None;
     }
@@ -7076,22 +7100,13 @@ fn receiver_method_call_counts(calls: &[CallFact]) -> AHashMap<String, u32> {
 }
 
 /// Build the `receiver\0method` key for a qualified callee, or
-/// `None` for bare unqualified names. Tries every supported
-/// qualifier separator (`.`, `::`, `->`, `:`, `\`).
+/// `None` for bare unqualified names. Source punctuation has already been
+/// classified by the adapter; this candidate key uses structural boundaries.
 fn receiver_method_key(callee: &str) -> Option<String> {
     let callee = callee.trim();
-    for sep in bonsai_common::QUALIFIED_NAME_SEPARATORS {
-        let Some((receiver, method)) = callee.rsplit_once(sep) else {
-            continue;
-        };
-        let receiver = receiver.trim();
-        let method = method.trim();
-        if receiver.is_empty() || method.is_empty() {
-            continue;
-        }
-        return Some(format!("{receiver}\0{method}"));
-    }
-    None
+    let receiver = bonsai_common::qualified_name_owner(callee)?.trim();
+    let method = bonsai_common::short_qualified_tail(callee).trim();
+    (!receiver.is_empty() && !method.is_empty()).then(|| format!("{receiver}\0{method}"))
 }
 
 fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
@@ -7264,20 +7279,17 @@ fn type_name_matches_attribute_prefix(actual: &str, expected: &[String]) -> bool
     if expected.is_empty() {
         return false;
     }
-    let actual = normalize_type_name_for_match(actual);
-    let expected_dot = expected.join(".");
-    let expected_colon = expected.join("::");
-    let expected_backslash = expected.join("\\");
-    [expected_dot, expected_colon, expected_backslash]
-        .into_iter()
-        .any(|expected| {
-            let expected = normalize_type_name_for_match(&expected);
-            actual == expected
-                || actual.ends_with(&format!(".{expected}"))
-                || actual.ends_with(&format!("::{expected}"))
-                || actual.ends_with(&format!("\\{expected}"))
-                || receiver_path_tail(&actual) == receiver_path_tail(&expected)
-        })
+    let normalized = normalize_type_name_for_match(actual);
+    let actual = bonsai_common::qualified_name_segments(&normalized);
+    (actual.len() >= expected.len()
+        && actual[actual.len() - expected.len()..]
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual == expected))
+        || actual
+            .last()
+            .zip(expected.last())
+            .is_some_and(|(actual, expected)| actual == expected)
 }
 
 fn receiver_type_matches_any(actual: &[String], expected: &[String]) -> bool {
@@ -7291,8 +7303,7 @@ fn receiver_type_matches_any(actual: &[String], expected: &[String]) -> bool {
 fn normalize_type_name_for_match(value: &str) -> String {
     let mut out = value
         .trim()
-        .trim_start_matches(bonsai_common::IDENTIFIER_SIGILS)
-        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
+        .trim_start_matches(bonsai_common::is_name_punctuation)
         .to_string();
     if let Some(stripped) = out.strip_suffix("()") {
         out = stripped.trim().to_string();
@@ -7301,12 +7312,7 @@ fn normalize_type_name_for_match(value: &str) -> String {
 }
 
 fn normalize_callee_for_matching(callee: &str) -> String {
-    let mut normalized = callee
-        .trim_start_matches(bonsai_common::IDENTIFIER_SIGILS)
-        .replace("()", "");
-    if let Some(stripped) = normalized.strip_prefix("new ") {
-        normalized = stripped.to_string();
-    }
+    let mut normalized = normalize_leading_call_punctuation(callee).replace("()", "");
     if normalized.contains('{') {
         let mut out = String::with_capacity(normalized.len());
         let mut depth: i32 = 0;
@@ -7331,12 +7337,7 @@ fn normalize_callee_for_matching(callee: &str) -> String {
 }
 
 fn callee_tail_matches(normalized: &str, method: &str) -> bool {
-    normalized == method
-        || normalized.ends_with(&format!(".{method}"))
-        || normalized.ends_with(&format!("::{method}"))
-        || normalized.ends_with(&format!("->{method}"))
-        || normalized.ends_with(&format!("\\{method}"))
-        || normalized.ends_with(&format!(":{method}"))
+    normalized == method || bonsai_common::short_qualified_tail(normalized) == method
 }
 
 #[derive(Clone, Debug)]
@@ -7571,57 +7572,26 @@ fn callee_matches(
     if let Some(re) = regex {
         return re.is_match(callee);
     }
-    // Normalise the callee text for attribute / name matching ONLY.
-    // Adapters preserve the literal source span text for the engine's
-    // resolver / call-graph (resolution depends on textual identity);
-    // the matcher applies a small set of equivalences that the rule
-    // schema considers metadata rather than the callee path:
-    //
-    //   1. Drop `()` so `Runtime.getRuntime().exec` matches rules
-    //      written as `attribute: [Runtime, getRuntime, exec]`.
-    //   2. Drop balanced `{...}` blocks (Solidity 0.6+ call options
-    //      `{value: amt, gas: g}`) so `to.call{value: amount}` matches
-    //      rules keyed on `[address, call]` / `name: call`.
-    //   3. Drop a leading `new ` so chained-construction shapes
-    //      `new BinaryFormatter().Deserialize` match attribute rules
-    //      written as `[BinaryFormatter, Deserialize]`. This belongs
-    //      in the matcher (not the kit's fact-emitter) because the
-    //      engine's resolver / alias_map depends on the literal
-    //      `new T(args)` source text — stripping at fact-emission
-    //      time breaks Java mega_flow's chained constructor → method
-    //      resolution.
+    // Normalize only representation details of the adapter-emitted callee.
+    // Source-language keywords and API spellings are never interpreted here;
+    // adapters own syntax and rule targets own provider vocabulary.
     let normalized = normalize_callee_for_matching(callee);
     if let Some(attr) = attribute {
-        let joined_dot = attr.join(".");
-        let joined_colon = attr.join("::");
-        let joined_arrow = attr.join("->");
-        let joined_backslash = attr.join("\\");
-        let mixed_colon_dot = attr
-            .split_last()
-            .and_then(|(last, prefix)| (!prefix.is_empty()).then(|| format!("{}.{last}", prefix.join("::"))));
-        let mixed_backslash_colon = attr.split_last().and_then(|(last, prefix)| {
-            (!prefix.is_empty()).then(|| format!("{}::{last}", prefix.join("\\")))
-        });
-        if normalized == joined_dot
-            || normalized == joined_colon
-            || normalized == joined_arrow
-            || normalized == joined_backslash
-            || mixed_colon_dot.as_ref().is_some_and(|mixed| normalized == *mixed)
-            || mixed_backslash_colon
-                .as_ref()
-                .is_some_and(|mixed| normalized == *mixed)
-            || normalized == format!("{joined_dot}.new")
-            || normalized == format!("{joined_colon}.new")
-            || normalized == format!("{joined_arrow}->new")
-            || normalized == format!("{joined_backslash}::__construct")
-            || normalized == attr.join(":")
-            || normalized.ends_with(&format!(".{joined_dot}"))
-            || normalized.ends_with(&format!("/{joined_dot}"))
-            || normalized.ends_with(&format!("::{joined_colon}"))
-            || normalized.ends_with(&format!("->{joined_arrow}"))
-            || normalized.ends_with(&format!("\\{joined_backslash}"))
-            || normalized.ends_with(&format!(":{}", attr.join(":")))
+        let actual = call_match_segments(&normalized);
+        // Attribute components are rulepack fields, not necessarily one CST
+        // identifier each: a receiver component may itself be qualified
+        // (`CryptoJS.DES`, `ERB::Util`, `Crypt::DES`). Canonicalize both
+        // complete identities through the vocabulary-free qualified-name
+        // helper before applying suffix/window convenience matching.
+        let declared = attr.join(".");
+        let declared = normalize_leading_call_punctuation(&declared);
+        if bonsai_common::normalize_qualified_name(&normalized)
+            == bonsai_common::normalize_qualified_name(declared)
         {
+            return true;
+        }
+        let expected = call_match_segments(declared);
+        if actual.ends_with(&expected) {
             return true;
         }
         // Method-chain fallback. Some adapters (Rust, Swift, Kotlin)
@@ -7633,67 +7603,37 @@ fn callee_matches(
         // prefix whose final segment is that head call; a callback
         // argument like `callbacks.add(Command::new("sh"))` must not
         // match a `[Command, new]` rule.
-        let inner_dot = format!("{joined_dot}(");
-        let inner_colon = format!("{joined_colon}(");
-        let inner_backslash = format!("{joined_backslash}(");
-        if starts_with_chain_head(&normalized, &inner_dot)
-            || starts_with_chain_head(&normalized, &inner_colon)
-            || starts_with_chain_head(&normalized, &inner_backslash)
+        if actual
+            .windows(expected.len())
+            .any(|candidate| candidate == expected.as_slice())
         {
             return true;
         }
         return false;
     }
     if let Some(n) = name {
+        // `name` may intentionally be a complete adapter-emitted callable
+        // identity (`pool.query`) rather than only its terminal segment.
+        // Exact identity must win before the bare-tail convenience match.
         if normalized == n {
             return true;
         }
-        for suffix in [".new", "->new", "::__construct"] {
-            if normalized.strip_suffix(suffix) == Some(n) {
-                return true;
-            }
-        }
-        if let Some(tail) = normalized.rsplit('.').next() {
-            if tail == n {
-                return true;
-            }
-        }
-        if let Some(tail) = normalized.rsplit("->").next() {
-            if tail == n {
-                return true;
-            }
-        }
-        if let Some(tail) = normalized.rsplit("::").next() {
-            if tail == n {
-                return true;
-            }
-        }
-        if let Some(tail) = normalized.rsplit('\\').next() {
-            if tail == n {
-                return true;
-            }
-        }
-        if let Some(tail) = normalized.rsplit(':').next() {
-            if tail == n {
-                return true;
-            }
-        }
-        return false;
+        return call_match_segments(&normalized)
+            .last()
+            .is_some_and(|tail| tail == n);
     }
     false
 }
 
-fn starts_with_chain_head(normalized: &str, head_call: &str) -> bool {
-    if normalized.starts_with(head_call) {
-        return true;
-    }
-    let Some(idx) = normalized.find(head_call) else {
-        return false;
-    };
-    if !matches!(normalized.as_bytes().get(idx.saturating_sub(1)), Some(b'/')) {
-        return false;
-    }
-    idx < normalized.find('(').unwrap_or(normalized.len())
+fn call_match_segments(callee: &str) -> Vec<String> {
+    bonsai_common::qualified_name_segments(callee)
+        .into_iter()
+        .filter_map(|segment| {
+            let identifier = segment.split_once('(').map_or(segment, |(head, _)| head).trim();
+            let identifier = normalize_leading_call_punctuation(identifier);
+            (!identifier.is_empty()).then(|| identifier.to_string())
+        })
+        .collect()
 }
 
 fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> Option<Vec<Option<Regex>>> {
@@ -8097,7 +8037,7 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 let Some(arg) = ctx.args.get(idx) else {
                     return false;
                 };
-                if !format_arg_is_dynamic_or_dangerous_literal(arg.value_text.trim()) {
+                if !format_arg_is_dynamic(arg.value_text.trim()) {
                     return false;
                 }
             }
@@ -8836,12 +8776,14 @@ fn expression_flow_depends_on_tainted_place(
 }
 
 fn place_depends_on_tainted_place(place: &str, tainted: &AHashSet<String>) -> bool {
-    let place = place.trim().trim_start_matches(bonsai_common::IDENTIFIER_SIGILS);
+    let place = place
+        .trim()
+        .trim_start_matches(bonsai_common::is_name_punctuation);
     !place.is_empty()
         && tainted.iter().any(|candidate| {
             let candidate = candidate
                 .trim()
-                .trim_start_matches(bonsai_common::IDENTIFIER_SIGILS);
+                .trim_start_matches(bonsai_common::is_name_punctuation);
             place == candidate
                 || place
                     .strip_prefix(candidate)
@@ -8850,7 +8792,9 @@ fn place_depends_on_tainted_place(place: &str, tainted: &AHashSet<String>) -> bo
 }
 
 fn overwrite_callback_place(tainted: &mut AHashSet<String>, target: &str, value_is_tainted: bool) {
-    let target = target.trim().trim_start_matches(bonsai_common::IDENTIFIER_SIGILS);
+    let target = target
+        .trim()
+        .trim_start_matches(bonsai_common::is_name_punctuation);
     if target.is_empty() {
         return;
     }
@@ -9000,16 +8944,13 @@ fn keyword_arg_name_matches(arg: &CallArg, name: &str) -> bool {
 /// `obj.method`, `Mod::fn`, `obj->method`, `Mod:fn`. Used by
 /// `top_level` constraint to reject non-top-level calls.
 fn has_receiver_or_namespace(callee: &str) -> bool {
-    callee.contains('.') || callee.contains("::") || callee.contains("->") || callee.contains(':')
+    bonsai_common::qualified_name_owner(callee).is_some()
 }
 
 /// Final identifier in a receiver path, with any trailing
 /// non-identifier punctuation (parentheses, brackets) stripped.
 fn receiver_path_tail(receiver: &str) -> &str {
-    receiver
-        .rsplit(['.', ':', '\\'])
-        .next()
-        .unwrap_or(receiver)
+    bonsai_common::short_qualified_tail(receiver)
         .trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
 }
 
@@ -9018,20 +8959,15 @@ fn receiver_path_tail(receiver: &str) -> &str {
 /// Used by the `Namespace` constraint.
 fn callee_in_namespace(callee: &str, namespace: &str) -> bool {
     callee == namespace
-        || callee.strip_prefix(namespace).is_some_and(|rest| {
-            rest.starts_with('.') || rest.starts_with("::") || rest.starts_with("->") || rest.starts_with(':')
-        })
+        || callee
+            .strip_prefix(namespace)
+            .is_some_and(bonsai_common::starts_at_qualified_name_boundary)
 }
 
-/// True when a format-string argument is "dangerous" — either dynamic
-/// (not a literal at all) or a literal containing the `%n` directive.
-/// Used by `FormatArgIndex` to gate rules that flag user-controlled
-/// format strings.
-fn format_arg_is_dynamic_or_dangerous_literal(value: &str) -> bool {
-    match unquote_literal(value) {
-        Some(literal) => literal.contains("%n"),
-        None => true,
-    }
+/// `FormatArgIndex` models a dynamic format operand. Static dangerous
+/// directives are API/policy values and belong in a separate rule constraint.
+fn format_arg_is_dynamic(value: &str) -> bool {
+    unquote_literal(value).is_none()
 }
 
 /// Strip matching surrounding quotes (`"`/`'`/`` ` ``) and return the
@@ -9108,13 +9044,8 @@ fn collect_constructor_names_in_compiler_files(ws: &Workspace, files: &[FileId])
 /// `MyClass(x)` form even though the AST didn't tag it as a
 /// constructor call.
 fn constructor_name_matches(callee: &str, constructor_names: &AHashSet<String>) -> bool {
-    let normalized = callee
-        .trim()
-        .strip_prefix("new ")
-        .unwrap_or_else(|| callee.trim())
-        .replace("()", "");
-    let tail = normalized.rsplit('.').next().unwrap_or(&normalized);
-    let tail = tail.rsplit("::").next().unwrap_or(tail);
+    let normalized = callee.trim().trim_end_matches("()");
+    let tail = bonsai_common::short_qualified_tail(normalized);
     constructor_names.contains(tail)
 }
 
@@ -9707,9 +9638,8 @@ fn push_unique_assignment_callable_name(out: &mut Vec<String>, name: String) {
 }
 
 fn assignment_reference_tail(name: &str) -> Option<&str> {
-    name.rsplit(['.', ':', '\\'])
-        .next()
-        .filter(|tail| !tail.is_empty())
+    let tail = bonsai_common::short_qualified_tail(name);
+    (!tail.is_empty()).then_some(tail)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -9916,7 +9846,7 @@ fn resolve_assignment_callable_reference(
         return;
     }
     stats.seen = stats.seen.saturating_add(1);
-    let local_name = trimmed.trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+    let local_name = trimmed.trim_start_matches(bonsai_common::is_name_punctuation);
     if fast_assignment_local_reference_name(local_name) {
         if let Some(symbol) = local_callable_index.unique_in_file(local_name, caller.span.file) {
             out.insert(symbol);
@@ -9928,7 +9858,8 @@ fn resolve_assignment_callable_reference(
             return;
         }
     }
-    if assignment_reference_is_unresolved_member_read(local_name, alias_map) {
+    if assignment_reference_is_unresolved_member_read(local_name, alias_map, &caller.implicit_receiver_names)
+    {
         stats.skipped_qualified = stats.skipped_qualified.saturating_add(1);
         return;
     }
@@ -9967,10 +9898,7 @@ fn resolve_assignment_callable_reference(
 fn fast_assignment_local_reference_name(name: &str) -> bool {
     let trimmed = name.trim();
     !trimmed.is_empty()
-        && !trimmed.contains('.')
-        && !trimmed.contains("::")
-        && !trimmed.contains(':')
-        && !trimmed.contains('\\')
+        && bonsai_common::qualified_name_owner(trimmed).is_none()
         && !trimmed.contains('(')
         && !trimmed.contains(')')
         && !trimmed.chars().any(char::is_whitespace)
@@ -9979,21 +9907,25 @@ fn fast_assignment_local_reference_name(name: &str) -> bool {
 fn assignment_reference_is_unresolved_member_read(
     name: &str,
     alias_map: &AHashMap<String, AliasTarget>,
+    implicit_receiver_names: &[String],
 ) -> bool {
     let Some((head, _tail)) = assignment_reference_head_tail(name) else {
         return false;
     };
-    let head = head.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+    let head = head.trim().trim_start_matches(bonsai_common::is_name_punctuation);
     if head.is_empty() {
         return false;
     }
     if alias_map.contains_key(head) {
         return false;
     }
-    if head.starts_with("require(") || head.starts_with("import(") {
+    if head.contains('(') {
         return true;
     }
-    if matches!(head, "this" | "self" | "$this" | "super") {
+    if implicit_receiver_names.iter().any(|declared| {
+        bonsai_common::trim_leading_name_punctuation(declared.trim())
+            == bonsai_common::trim_leading_name_punctuation(head)
+    }) {
         return true;
     }
     head.chars()
@@ -10002,10 +9934,7 @@ fn assignment_reference_is_unresolved_member_read(
 }
 
 fn assignment_reference_head_tail(name: &str) -> Option<(&str, &str)> {
-    name.rsplit_once("::")
-        .or_else(|| name.rsplit_once('.'))
-        .or_else(|| name.rsplit_once(':'))
-        .or_else(|| name.rsplit_once('\\'))
+    bonsai_common::split_qualified_name_owner_tail(name)
 }
 
 fn assignment_reference_needs_resolver(
@@ -10070,7 +9999,7 @@ fn collect_callee_symbols(
         for func in bonsai_resolve::resolve_callable_with_context(global, name, &ctx) {
             out.insert(SymbolId::new(func.raw()));
         }
-        let tail = name.rsplit(&['.', ':', '\\'][..]).next().unwrap_or(name);
+        let tail = bonsai_common::short_qualified_tail(name);
         for receiver_type in receiver_types {
             for receiver_class in bonsai_resolve::resolve_class(global, receiver_type, &ctx) {
                 let mut seen = ahash::AHashSet::default();
@@ -10088,11 +10017,10 @@ fn collect_callee_symbols(
                 }
             }
         }
-        if let Some(tail) = name.rsplit(&['.', ':'][..]).next() {
-            if !tail.is_empty() && tail != name {
-                for func in bonsai_resolve::resolve_callable_with_context(global, tail, &ctx) {
-                    out.insert(SymbolId::new(func.raw()));
-                }
+        let tail = bonsai_common::short_qualified_tail(name);
+        if !tail.is_empty() && tail != name {
+            for func in bonsai_resolve::resolve_callable_with_context(global, tail, &ctx) {
+                out.insert(SymbolId::new(func.raw()));
             }
         }
     };

@@ -663,9 +663,9 @@ fn exact_string_sets_equal(left: &[String], right: &[String]) -> bool {
 
 fn condition_atom_containing(expression: &ConditionExpressionFact, target: Span) -> Option<Span> {
     match expression {
-        ConditionExpressionFact::Atom { span } | ConditionExpressionFact::TypeTest { span, .. } => {
-            span_contains(*span, target).then_some(*span)
-        }
+        ConditionExpressionFact::Atom { span }
+        | ConditionExpressionFact::Truthy { span, .. }
+        | ConditionExpressionFact::TypeTest { span, .. } => span_contains(*span, target).then_some(*span),
         ConditionExpressionFact::Not { operand, .. } => condition_atom_containing(operand, target),
         ConditionExpressionFact::All { operands, .. } | ConditionExpressionFact::Any { operands, .. } => {
             operands
@@ -698,6 +698,7 @@ fn evaluate_condition(
                 TruthValue::Unknown
             }
         }
+        ConditionExpressionFact::Truthy { .. } => TruthValue::Unknown,
         ConditionExpressionFact::Not { operand, .. } => invert_truth(evaluate_condition(
             operand,
             rejected_value,

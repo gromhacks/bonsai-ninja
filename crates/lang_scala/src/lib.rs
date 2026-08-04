@@ -3,15 +3,15 @@ use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     collect_assign_targets, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_node, call_arg_from_nodes, collect_kinds, collect_receiver_field_writes,
-        first_named_child_of_kind, language_from_pack, node_at_span, node_text,
+        call_arg_from_node_with_handler, call_arg_from_nodes_with_handler, collect_kinds,
+        collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
+        looks_like_bare_identifier, node_at_span, node_text, normalize_call_name_whitespace,
         package_module_segments_with_workspace_prefix, parse_with, span_of, walk_flow_events,
-        with_fn_kinds_and_implicit_receivers,
     },
     rewrite_implicit_member_reads, AdapterContext, AdapterError, CallArg, CallKind, Decl, DeclIndex,
     DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, SyntaxSpecialForm, TypeAliasBinding,
-    TypeAliasVocabulary, Visibility,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary,
+    Visibility, EMPTY_HANDLER,
 };
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
@@ -41,9 +41,81 @@ use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("scala");
 const PACK_NAME: &str = "scala";
+
+fn extract_scala_syntax_event(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
+    if node.kind() != "throw_expression" {
+        return None;
+    }
+    let value = node.named_child(0)?;
+    let flow = bonsai_lang_api::kit::expression_flow_from_node_with_handler(value, file, src, handler);
+    let value_name = {
+        let mut sources = bonsai_lang_api::kit::expression_operand_names_with_handler(&value, src, handler);
+        sources.extend(flow.source_names);
+        sources.sort();
+        sources.dedup();
+        if sources.len() == 1 {
+            Some(sources.remove(0))
+        } else if sources.is_empty() {
+            flow.place
+        } else {
+            None
+        }
+    };
+    Some(FlowEvent::Throw {
+        span: span_of(file, &node),
+        value_name,
+        thrown_type: None,
+    })
+}
+
 const HANDLER: GrammarHandler = GrammarHandler {
+    fn_kinds: &["function_definition", "function_declaration"],
+    class_kinds: &[
+        "class_definition",
+        "object_definition",
+        "trait_definition",
+        "enum_definition",
+    ],
+    class_decl_kinds: &[
+        ("class_definition", DeclKind::Class),
+        ("object_definition", DeclKind::Class),
+        ("trait_definition", DeclKind::Trait),
+        ("enum_definition", DeclKind::Enum),
+    ],
+    method_context_kinds: &[
+        "class_definition",
+        "object_definition",
+        "trait_definition",
+        "enum_definition",
+    ],
+    if_kinds: &["if_expression", "match_expression"],
+    for_kinds: &["for_expression"],
+    while_kinds: &["while_expression"],
+    call_kinds: &["call_expression", "generic_function", "instance_expression"],
+    pseudo_call_extractor: Some(extract_scala_pseudo_call),
+    syntax_event_extractor: Some(extract_scala_syntax_event),
+    pseudo_call_receiver_extractor: Some(extract_scala_pseudo_call_receiver),
+    argument_passing_mode_extractor: None,
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
-    special_forms: &[SyntaxSpecialForm::PostfixOperatorCall],
+    call_ref_kinds: &["call_expression", "generic_function", "instance_expression"],
+    member_expression_kinds: &["field_expression"],
+    assignment_kinds: &[
+        "assignment_expression",
+        "val_definition",
+        "var_definition",
+        "var_declaration",
+    ],
+    return_kinds: &["return_expression"],
+    throw_kinds: &[],
+    lambda_kinds: &["lambda_expression"],
+    try_kinds: &["try_expression"],
+    catch_kinds: &["catch_clause"],
+    finally_kinds: &["finally_clause"],
     // Scala block-bodied `def f() = { …; tailExpr }` returns its tail
     // expression. The body node kind is `block` (never descended by
     // implicit-return synthesis), so — like Rust and Ruby — the tail
@@ -58,8 +130,84 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // Suppress the synthetic tail Return so the argument isn't tokenised
     // into an over-tainted return that leaks to the caller.
     void_return_type_names: &["Unit"],
-    ..with_fn_kinds_and_implicit_receivers(&["function_definition"], &["this", "super"], &[])
+    implicit_receiver_names: &["this", "super"],
+    ..EMPTY_HANDLER
 };
+
+fn extract_scala_pseudo_call(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
+    if node.kind() == "field_expression" && scala_postfix_operator_call(node) {
+        let receiver = node
+            .child_by_field_name("value")
+            .or_else(|| node.named_child(0))?;
+        let name = normalize_call_name_whitespace(node_text(&node, src));
+        return (!name.is_empty()).then(|| FlowEvent::Call {
+            span: span_of(file, &node),
+            receiver: Some(normalize_call_name_whitespace(node_text(&receiver, src))),
+            receiver_types: Vec::new(),
+            name,
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        });
+    }
+    if node.kind() != "infix_expression" {
+        return None;
+    }
+    let left = node.child_by_field_name("left")?;
+    let right = node.child_by_field_name("right")?;
+    let operator = node.child_by_field_name("operator")?;
+    let name = node_text(&operator, src).trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let mut args = Vec::new();
+    let (receiver, call_kind) = if looks_like_bare_identifier(&name) {
+        args.push(call_arg_from_node_with_handler(right, file, src, None, handler)?);
+        (
+            Some(normalize_call_name_whitespace(node_text(&left, src))),
+            CallKind::Method,
+        )
+    } else {
+        args.push(call_arg_from_node_with_handler(left, file, src, None, handler)?);
+        args.push(call_arg_from_node_with_handler(right, file, src, None, handler)?);
+        (None, CallKind::Operator)
+    };
+    Some(FlowEvent::Call {
+        span: span_of(file, &node),
+        receiver,
+        receiver_types: Vec::new(),
+        name,
+        call_kind,
+        args,
+    })
+}
+
+fn scala_postfix_operator_call(node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    let is_postfix = node
+        .named_children(&mut cursor)
+        .any(|child| child.kind() == "operator_identifier");
+    is_postfix
+}
+
+fn extract_scala_pseudo_call_receiver<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
+    match node.kind() {
+        "field_expression" if scala_postfix_operator_call(node) => {
+            node.child_by_field_name("value").or_else(|| node.named_child(0))
+        }
+        "infix_expression" => {
+            let operator = node.child_by_field_name("operator")?;
+            looks_like_bare_identifier(node_text(&operator, src).trim())
+                .then(|| node.child_by_field_name("left"))
+                .flatten()
+        }
+        _ => None,
+    }
+}
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct ScalaAdapter;
@@ -101,6 +249,10 @@ impl LanguageAdapter for ScalaAdapter {
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
+            receiver_type_syntax: bonsai_lang_api::ReceiverTypeSyntax {
+                wrapper_calls: &[],
+                class_object_suffixes: &[".class"],
+            },
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -565,9 +717,9 @@ fn scala_constructor_call_args(args_node: Node<'_>, file: FileId, src: &[u8]) ->
             })
             .flatten();
         let argument = if let Some((value, name)) = named_value {
-            call_arg_from_nodes(child, value, file, src, name)
+            call_arg_from_nodes_with_handler(child, value, file, src, name, &HANDLER)
         } else {
-            call_arg_from_node(child, file, src, None)
+            call_arg_from_node_with_handler(child, file, src, None, &HANDLER)
         };
         if let Some(argument) = argument {
             out.push(argument);
@@ -693,9 +845,14 @@ fn annotate_scala_named_call_args(events: &mut [FlowEvent], root: Node<'_>, file
                     if label.is_empty() {
                         continue;
                     }
-                    if let Some(ast_arg) =
-                        call_arg_from_nodes(argument_node, value_node, file, src, Some(label))
-                    {
+                    if let Some(ast_arg) = call_arg_from_nodes_with_handler(
+                        argument_node,
+                        value_node,
+                        file,
+                        src,
+                        Some(label),
+                        &HANDLER,
+                    ) {
                         *arg = ast_arg;
                     }
                 }

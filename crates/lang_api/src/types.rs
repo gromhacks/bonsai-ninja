@@ -338,11 +338,7 @@ impl ExpressionProjection {
     /// synthetic adapter facts; raw source text must not be passed here.
     #[must_use]
     pub fn from_adapter_place(place: &str) -> Option<Self> {
-        let normalized = place.replace("->", ".").replace("::", ".");
-        let mut parts = normalized
-            .split('.')
-            .map(str::trim)
-            .filter(|part| !part.is_empty());
+        let mut parts = place.split('.').map(str::trim).filter(|part| !part.is_empty());
         let base = parts.next()?.to_string();
         let path: Vec<String> = parts.map(ToString::to_string).collect();
         (!path.is_empty()).then_some(Self { base, path })
@@ -1985,7 +1981,7 @@ fn place_has_deref_shape(place: &str) -> bool {
 }
 
 fn place_has_field_shape(place: &str) -> bool {
-    place.contains('.') || place.contains("::") || place.contains("->")
+    bonsai_common::qualified_name_owner(place).is_some()
 }
 
 fn push_optional_operand(out: &mut Vec<OperationOperand>, name: Option<&str>, role: OperationOperandRole) {
@@ -2261,6 +2257,15 @@ pub enum CharacterConstraintDomain {
     },
     /// Every listed character is absent from the output.
     ExcludesExact { characters: Vec<String> },
+    /// A syntactically proven candidate whose runtime meaning depends on a
+    /// rulepack-selected factory/operation pair. Adapters record exact call
+    /// identity and the derived domain; they do not classify the provider as
+    /// a sanitizer themselves.
+    ProviderBound {
+        factory_call: String,
+        operation_call: String,
+        domain: Box<CharacterConstraintDomain>,
+    },
 }
 
 /// Where a character-constrained value is produced.
@@ -2278,7 +2283,8 @@ pub enum CharacterConstraintOutput {
 }
 
 /// A complete Tree-sitter/runtime proof that one value has a constrained
-/// output alphabet. API spellings and regex syntax stay in the adapter.
+/// output alphabet. Provider-bound facts retain exact call identity without
+/// assigning security meaning; rule semantics select accepted providers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CharacterConstraintFact {
     pub function_span: Span,
@@ -2290,6 +2296,24 @@ pub struct CharacterConstraintFact {
     pub domain: CharacterConstraintDomain,
 }
 
+/// Compiler proof that a predicate guards every dynamic element copied from
+/// one value into a clean output value.
+///
+/// This fact deliberately assigns no security meaning to the predicate. The
+/// owning language adapter proves the control/data relationship from its CST;
+/// a rule match at `predicate_call_span` decides whether that predicate is a
+/// sanitizer for a particular sink category. The invariant is strict: the
+/// output starts clean and every non-literal write in the owning function is
+/// one of the predicate-guarded copies represented by this fact.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardedValueFilterFact {
+    pub function_span: Span,
+    pub predicate_call_span: Span,
+    pub write_span: Span,
+    pub input_place: String,
+    pub output_place: String,
+}
+
 /// Compiler/runtime proof that a helper returns only a same-origin absolute
 /// path or a static fallback. The owning adapter proves each language's URL
 /// and string predicate syntax; shared analysis consumes this summary.
@@ -2297,7 +2321,16 @@ pub struct CharacterConstraintFact {
 pub struct SameOriginPathConstraintFact {
     pub function_span: Span,
     pub guard_span: Span,
-    pub input_param_index: usize,
+    /// Exact value constrained by the guard in the owning function.
+    pub input_place: String,
+    /// Parameter position when this fact summarizes a reusable helper.
+    /// Caller-local guarded assignments intentionally leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_param_index: Option<usize>,
+    /// Exact imported parser/provider call when the proof depends on runtime
+    /// library semantics. Syntax-only proofs leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_call: Option<String>,
     pub rejects_scheme: bool,
     pub rejects_authority: bool,
     pub requires_absolute_path: bool,
@@ -2316,6 +2349,12 @@ pub struct CompilerGuardFact {
     pub guarded_call_span: Span,
     pub proof_span: Span,
     pub capability: String,
+    /// Exact syntax roles carried by the proof (for example the callback
+    /// argument position and selector chain constrained by a branch).
+    /// Adapters record them without assigning security meaning; rules select
+    /// the evidence required by a particular sink.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
 }
 
 /// Exact summary of a local helper that drops a finite set of dynamic keys
@@ -2417,6 +2456,13 @@ pub enum ConditionExpressionFact {
     Atom {
         span: Span,
     },
+    /// Runtime truth test of one exact compiler value (for example a boolean
+    /// property read). The adapter owns the language syntax; consumers match
+    /// the typed value against rule-declared semantics.
+    Truthy {
+        span: Span,
+        operand: ConditionOperandFact,
+    },
     Not {
         span: Span,
         operand: Box<ConditionExpressionFact>,
@@ -2461,6 +2507,7 @@ impl ConditionExpressionFact {
     pub const fn span(&self) -> Span {
         match self {
             Self::Atom { span }
+            | Self::Truthy { span, .. }
             | Self::Not { span, .. }
             | Self::All { span, .. }
             | Self::Any { span, .. }
@@ -2773,6 +2820,11 @@ pub struct DeclIndex {
     /// Exact local alphabet constraints lowered by the owning frontend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub character_constraints: Vec<CharacterConstraintFact>,
+    /// Predicate-guarded value filters lowered by the owning frontend. Rules
+    /// provide the predicate's security meaning; this IR contains syntax and
+    /// dataflow proof only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guarded_value_filters: Vec<GuardedValueFilterFact>,
     /// Exact same-origin path summaries lowered by the owning frontend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub same_origin_path_constraints: Vec<SameOriginPathConstraintFact>,

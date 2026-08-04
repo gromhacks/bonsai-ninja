@@ -38,6 +38,11 @@ use std::sync::Arc;
 /// On-disk snapshot version for the workspace-wide taint graph.
 /// Disk format is the streaming factstore; bumping this invalidates
 /// every cached sidecar so consumers get a fresh build on next open.
+// v17 (2026-08-03): target relevance now records whether the adapter-lowered
+// field inverse is complete. Partial inverses are non-pruning, so older
+// cached negative source graphs are not semantically reusable.
+// v16 (2026-08-03): compiler-object v50, callgraph v28, and IDG semantic v71
+// alter qualified storage/callable reachability; reject prior taint graphs.
 // v15 (2026-07-31): lambda/local-function ownership, Perl package calls, and
 // implicit-class constructor resolution changed; cached reachability must use
 // the rebuilt linkage, callgraph, and IDG scope chain.
@@ -53,7 +58,7 @@ use std::sync::Arc;
 // RHS call spans for assignment-derived terminal calls.
 // v9 (2026-05-27): taint graph derives from the IDG, whose construction
 // and seeding changed enough that old graphs are no longer equivalent.
-pub const TAINT_GRAPH_CACHE_VERSION: u32 = 15;
+pub const TAINT_GRAPH_CACHE_VERSION: u32 = 17;
 
 /// Caller-defined table id stamped into the factstore header. 4 is
 /// the next slot after dataflow (2), value-flow (1), flow-ids (3).

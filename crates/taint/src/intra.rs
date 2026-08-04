@@ -97,7 +97,6 @@ impl IntraTaintResult {
 
 use crate::text::{
     is_quoted_literal, normalise_qualified_text, qualified_access_bases, text_looks_qualified,
-    value_bearing_identifier_text,
 };
 use crate::tokens::{canonical_bare_name, qualified_wildcard_seed_matches, rhs_has_descendant_shape};
 
@@ -241,7 +240,6 @@ fn transfer_events(events: &[FlowEvent], state: &mut TokenSet, _config: &TaintCo
                 target,
                 source_name,
                 source_call,
-                source_call_args,
                 source_names,
                 ..
             } => {
@@ -260,12 +258,7 @@ fn transfer_events(events: &[FlowEvent], state: &mut TokenSet, _config: &TaintCo
                     // `y = transform(tainted) → y tainted`. The full
                     // summary-driven version in the interprocedural
                     // pass narrows this for cross-function precision.
-                    if state.contains(callee)
-                        || text_is_tainted(callee, state)
-                        || source_call_args
-                            .iter()
-                            .any(|arg| !arg.is_empty() && text_is_tainted(arg, state))
-                    {
+                    if state.contains(callee) || text_is_tainted(callee, state) {
                         insert_target_taint(state, target);
                         if rhs_has_descendant_shape(source_names) {
                             insert_descendant_target_taint(state, target);
@@ -331,7 +324,7 @@ fn insert_target_taint(state: &mut TokenSet, target: &str) {
     }
     state.insert(target.clone());
     // Sigil-stripped form lets `$foo` and `foo` both be queried later.
-    let bare = target.trim_start_matches(&['$', '@', '%'][..]);
+    let bare = target.trim_start_matches(bonsai_common::is_name_punctuation);
     if bare != target && !bare.is_empty() {
         state.insert(bare.to_string());
     }
@@ -356,7 +349,7 @@ fn strict_operand_is_tainted(text: &str, state: &TokenSet) -> bool {
     if state.contains(trimmed) {
         return true;
     }
-    let sigil_stripped = trimmed.trim_start_matches(&['$', '@', '%'][..]);
+    let sigil_stripped = trimmed.trim_start_matches(bonsai_common::is_name_punctuation);
     if sigil_stripped != trimmed && state.contains(sigil_stripped) {
         return true;
     }
@@ -465,15 +458,14 @@ fn is_identifier_byteish(ch: char) -> bool {
 /// alias to the same `raw` identifier in the state.
 fn normalise_target_text(target: &str) -> String {
     normalise_qualified_text(target)
-        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
+        .trim_start_matches(bonsai_common::is_name_punctuation)
         .trim()
         .to_string()
 }
 
 /// True when `text` references any tainted identifier — by direct
 /// match, qualified-access prefix, wildcard seed (`obj.*`), receiver
-/// method projection, or any bare identifier token outside string
-/// literals.
+/// method projection, or a canonical adapter-lowered place.
 fn text_is_tainted(text: &str, state: &TokenSet) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -489,26 +481,14 @@ fn text_is_tainted(text: &str, state: &TokenSet) -> bool {
         return true;
     }
     let normalised = normalise_qualified_text(trimmed);
-    // Detect when normalisation collapsed a qualified expression down to its base
-    // — e.g. `obj[x]` → `obj`. We don't want that degenerate match to leak
-    // taint via the bare `obj` token; the caller's wildcard / qualified checks handle it.
-    let collapsed_to_base = (trimmed.contains('.') || trimmed.contains('[') || trimmed.contains("->"))
-        && !(normalised.contains('.') || normalised.contains('[') || normalised.contains("->"));
+    // A structural normalizer must never turn a qualified compiler place into
+    // a bare carrier and then use that carrier as taint evidence.
+    let collapsed_to_base = text_looks_qualified(trimmed) && !text_looks_qualified(&normalised);
     if normalised != trimmed && !collapsed_to_base && state.contains(&normalised) {
         return true;
     }
     state_qualified_token_matches_text(&normalised, state)
         || state_qualified_token_matches_text(trimmed, state)
-        || {
-            let qualified_bases = qualified_access_bases(trimmed);
-            identifier_tokens_outside_strings(&value_bearing_identifier_text(trimmed))
-                .iter()
-                .any(|token| {
-                    // Skip qualified-access bases — those are structural and
-                    // would over-match if treated as bare references.
-                    !qualified_bases.iter().any(|base| base == token) && state.contains(token.as_str())
-                })
-        }
 }
 
 /// Collect the leftmost identifier of every qualified access in
@@ -563,57 +543,6 @@ fn tainted_receiver_access(text: &str, state: &TokenSet) -> bool {
                     .strip_prefix(seed.as_str())
                     .is_some_and(|rest| rest.starts_with('.')))
     })
-}
-
-/// Lex `text` into identifier tokens, skipping content inside single,
-/// double, or backtick string literals. Lets a tainted identifier
-/// inside a quoted string not be treated as a real reference.
-fn identifier_tokens_outside_strings(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for c in text.chars() {
-        if let Some(q) = quote {
-            // Inside a string — only watch for the closing quote / escapes.
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(c, '\'' | '"' | '`') {
-            // Flush the in-progress identifier before entering string scope.
-            push_identifier_token(&mut tokens, &mut current);
-            quote = Some(c);
-            continue;
-        }
-        if c == '_' || c.is_ascii_alphanumeric() {
-            current.push(c);
-        } else {
-            push_identifier_token(&mut tokens, &mut current);
-        }
-    }
-    push_identifier_token(&mut tokens, &mut current);
-    tokens
-}
-
-/// Flush `current` as an identifier — but only when it starts with a
-/// letter or underscore. Numeric-leading runs are literal fragments,
-/// not identifiers, so they're discarded.
-fn push_identifier_token(tokens: &mut Vec<String>, current: &mut String) {
-    if current
-        .chars()
-        .next()
-        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
-    {
-        tokens.push(std::mem::take(current));
-    } else {
-        current.clear();
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -13,8 +13,8 @@ pub mod taxonomy;
 pub mod types;
 
 pub use capabilities::{
-    CallTextPrefilter, CallableDeclarationFamily, CapabilityLevel, LanguageCapabilities, ModulePathSyntax,
-    NO_CONSTRUCTOR_METHOD_NAMES,
+    callable_reference_variants, CallTextPrefilter, CallableDeclarationFamily, CallableReferenceSyntax,
+    CapabilityLevel, LanguageCapabilities, ModulePathSyntax, ReceiverTypeSyntax, NO_CONSTRUCTOR_METHOD_NAMES,
 };
 pub use kit::{
     alias_map_from_import_specs, alias_map_from_imports, apply_assign_call_result_types,
@@ -27,9 +27,9 @@ pub use kit::{
     extract_branch_condition_facts, extract_call_argument_value_facts, extract_call_receiver_facts,
     extract_imports_via, extract_runtime_type_narrowing_facts, inject_lifecycle_events,
     mark_namespace_call_receivers, module_local_binding, normalize_call_result_assignment_sources,
-    populate_decl_return_types, rewrite_implicit_member_reads, tuple_result_projection_index, with_fn_kinds,
-    AliasTarget, GrammarHandler, ImplicitMemberReadCall, LifecycleTransition, ModifierVocabulary,
-    SyntaxSpecialForm, TypeAliasVocabulary, GENERIC_HANDLER, WILDCARD_IMPORT_ALIAS_PREFIX,
+    populate_decl_return_types, rewrite_implicit_member_reads, tuple_result_projection_index, AliasTarget,
+    GrammarHandler, ImplicitMemberReadCall, LifecycleTransition, ModifierVocabulary, SyntaxSpecialForm,
+    TypeAliasVocabulary, EMPTY_HANDLER, WILDCARD_IMPORT_ALIAS_PREFIX,
 };
 pub use parse_recovery::{c_family_declaration_macro_recovery_edits, syntax_damage_score, ParseRecoveryEdit};
 pub use registry::{AdapterArc, LanguageRegistry};
@@ -46,9 +46,9 @@ pub use types::{
     CompilerCallHeader, CompilerFactoryCallAssignment, CompilerFunctionAttribution, CompilerGuardFact,
     CompilerSyntaxHeader, CompilerWriteAttribution, ConditionEquality, ConditionExpressionFact,
     ConditionOperandFact, Decl, DeclIndex, DeclKind, DynamicKeyFilterFact, ExpressionField, ExpressionFlow,
-    ExpressionProjection, FieldWrite, FiniteLiteralSelectionFact, FlowEvent, ImportIndex, ImportScope,
-    ImportSpec, LanguageId, LoopKind, MembershipConditionFact, ModulePath, Operation, OperationKind,
-    OperationOperand, OperationOperandRole, Ref, RefKind, RuntimeTypeNarrowingFact,
+    ExpressionProjection, FieldWrite, FiniteLiteralSelectionFact, FlowEvent, GuardedValueFilterFact,
+    ImportIndex, ImportScope, ImportSpec, LanguageId, LoopKind, MembershipConditionFact, ModulePath,
+    Operation, OperationKind, OperationOperand, OperationOperandRole, Ref, RefKind, RuntimeTypeNarrowingFact,
     SameOriginPathConstraintFact, StaticAggregateFieldValue, StaticScalarValue, StaticStringMapEntry,
     StaticStringMapFact, StringCategory, StringCompositionFact, StringCompositionPart, StringLiteral,
     TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
@@ -71,7 +71,8 @@ pub use tree_sitter::Tree as SyntaxTree;
 pub trait TreeProvider: Send + Sync {
     /// Return the tree for this exact immutable snapshot and grammar.
     ///
-    /// Taking the snapshot rather than only a [`FileId`] is part of the
+    /// `pack_name` is the adapter-selected grammar variant, not necessarily
+    /// the adapter's public language id. Taking the snapshot rather than only a [`FileId`] is part of the
     /// correctness contract: a concurrent VFS write must never pair an older
     /// source snapshot with a newer syntax tree.
     fn tree_for_snapshot(&self, pack_name: &str, snapshot: &FileSnapshot) -> Option<Arc<SyntaxTree>>;
@@ -142,6 +143,31 @@ pub trait LanguageAdapter: Send + Sync + 'static {
     /// The Tree-sitter `Language` used for parsing. Most adapters fetch
     /// this from `tree_sitter_language_pack::get_language`.
     fn tree_sitter_language(&self) -> Result<tree_sitter::Language, AdapterError>;
+
+    /// Select the exact Tree-sitter grammar pack for one source path.
+    /// Most languages have one grammar and inherit their language id. An
+    /// adapter that owns multiple grammar variants (TypeScript/TSX) selects
+    /// here from file syntax metadata rather than asking the parser or shared
+    /// analyzer to recognize an extension.
+    fn grammar_name_for_path(&self, _path: &std::path::Path) -> &'static str {
+        self.language_id().as_str()
+    }
+
+    /// Load the exact grammar selected for one source path. The default keeps
+    /// existing single-grammar adapters on their normal constructor and loads
+    /// a named variant only when `grammar_name_for_path` differs.
+    fn tree_sitter_language_for_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<tree_sitter::Language, AdapterError> {
+        let grammar = self.grammar_name_for_path(path);
+        if grammar == self.language_id().as_str() {
+            self.tree_sitter_language()
+        } else {
+            tree_sitter_language_pack::get_language(grammar)
+                .map_err(|error| AdapterError::GrammarUnavailable(format!("{grammar}: {error}")))
+        }
+    }
 
     /// Return same-width parser-buffer normalizations for a second,
     /// grammar-recovery parse.

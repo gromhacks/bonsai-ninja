@@ -44,7 +44,12 @@ Treat the analyzer as a compiler pipeline. Each language adapter owns its
 Tree-sitter grammar, source-syntax recognition, declaration/import lowering,
 and `FlowEvent`/capability facts. Shared analysis consumes that typed IR; do
 not add language-id branches, cross-language token inventories, or API-name
-guesses to shared crates. The production taint engine is the sparse IDG
+guesses to shared crates. Library/package/framework identities and every
+security-sensitive value belong in `security-patterns/langs/<lang>`, not in
+shared analysis or an adapter; adapters emit generic syntax/capability facts
+and rule data assigns their security meaning. Pack-wide package spelling,
+review profiles, test-path policy, dependency metadata, and taxonomy live in
+`security-patterns/metadata.yml`. The production taint engine is the sparse IDG
 fixed-point closure. It has no BFS name search, call-depth ceiling, iteration
 limit, or result cap. Paging and diagnostic path limits affect rendering only
 and must report truncation explicitly.
@@ -59,7 +64,10 @@ independently decodable from declaration/flow bodies. Broad rule planning
 filters raw source anchors, exact import/package headers, and exact syntax
 targets in that order before decoding a surviving body. Later phases stream
 those objects; they must not reparse source or invent a parallel lowering
-path. Persisted IDG construction lowers transfer facts once, spools typed
+path. Every derived semantic pipeline identity includes the compiler-object
+frontend ABI; a lowering change invalidates older callgraph/IDG sidecars even
+when source bytes are unchanged, and root-only validators reconstruct the same
+identity as a full workspace open. Persisted IDG construction lowers transfer facts once, spools typed
 stitch records/node maps, and replays them per segment. Memory scheduling may
 weight or serialize units, but must never cap semantic work. After the
 isolated workers finish, the parent validates that every sidecar describes one
@@ -78,6 +86,14 @@ relation density crosses their representation threshold. Promotion and spill
 change storage only, never admitted facts or fixed-point scope. Keep the lazy
 allocation tests and conformance invariant: eagerly reserving maximum spill
 pages per function is a large-repository performance regression.
+
+Schedule entry-rooted closures from the named non-reclaimable linkage/output
+reserve plus the bounded sparse frontier per worker. Do not use live RSS for
+this phase: clean file-backed IDG pages are reclaimable and page-cache history
+must not serialize identical work. Subject to CPU availability, the
+resource-profile tests pin maximum concurrency of ten workers at 3 GiB, two at
+2 GiB, and one at 1 GiB. These values schedule concurrency only; every entry
+and fixed point remains exact.
 
 For broad analysis, retain only workspace linkage headers (declarations,
 types, modules, imports, inheritance, and stable symbol identities) and stream
@@ -200,6 +216,9 @@ body/callgraph caches before a persisted IDG opens. A warm query batch resolves
 those spans to typed target nodes and reuses one sparse backward demand proof;
 a sidecar miss builds an exact query-scoped source/target IDG, with the
 canonical cached dataflow graph retained only as the compatibility fallback.
+Broad raw-flow reports compute every exact path before pagination, reuse
+worker-precomputed row costs, and format/cache only the requested page. Follow
+the printed page or cursor for more; page 1 never eagerly renders later pages.
 
 Record understanding as:
 
@@ -248,12 +267,14 @@ Start from externally reachable input, then prove source-to-sink paths.
 ./target/release/bonsai-ninja security <workspace> taint-analysis --profile production --context 16k --no-color --no-progress
 ```
 
-`--profile production` sets remote-trust defaults, `severity high` for
-taint findings, `context 16k`, and excludes common non-production paths:
+The bundled rulepack's `--profile production` sets remote-trust defaults,
+`severity high` for taint findings, `context 16k`, and excludes common
+non-production paths:
 tests, specs, fixtures, mocks, samples, examples, demos, e2e/integration
 harnesses, vendored deps, package caches, build outputs, generated code,
 docs, scripts, deploy files, migrations, and language-specific test
-layouts. Use `--exclude-tests` alone when you want only the narrower
+layouts. These values and test conventions come from
+`security-patterns/metadata.yml`. Use `--exclude-tests` alone when you want only the narrower
 test-path filter. Security file and profile filters are workspace-relative:
 an ancestor directory outside the selected workspace does not make the
 workspace generated, vendored, or test code.
@@ -266,6 +287,11 @@ Inventory when needed:
 ./target/release/bonsai-ninja security <workspace> sanitizers --context 8k --no-color --no-progress
 ./target/release/bonsai-ninja security <workspace> deps --severity high --context 8k --no-color --no-progress
 ```
+
+`security sanitizers` lists only matched rules that can make a
+credit-bearing sanitizer claim. Passthrough transforms and generic
+non-crediting validation markers remain available to flow analysis but do not
+appear as sanitizer inventory.
 
 Filter findings by rule class:
 

@@ -28,6 +28,11 @@ non-passthrough sanitizer/source/sink example. Those rules encode taint
 propagation semantics for otherwise safe transformations, not separate
 security boundaries. A function can legitimately be both a category-specific
 sanitizer and a taint-preserving transform for other categories.
+
+Sanitizer rules whose tag has an explicit empty `sanitizer_credits` entry in
+the pack metadata are excluded from sanitizer-inventory ownership checks.
+They remain matcher/flow models, but the public `security sanitizers` command
+intentionally lists only credit-bearing security boundaries.
 """
 
 from __future__ import annotations
@@ -157,6 +162,28 @@ def rule_tags(rules_root: Path) -> dict[str, str]:
             if isinstance(rule_id, str) and isinstance(tag, str):
                 tags[rule_id] = tag
     return tags
+
+
+def non_crediting_sanitizer_rule_ids(rules_root: Path) -> set[str]:
+    metadata = yaml.safe_load((rules_root / "metadata.yml").read_text()) or {}
+    credits = metadata.get("sanitizer_credits") or {}
+    non_crediting_tags = {
+        tag
+        for tag, sink_tags in credits.items()
+        if isinstance(tag, str) and isinstance(sink_tags, list) and not sink_tags
+    }
+    ids: set[str] = set()
+    for path in sorted((rules_root / "langs").glob("*/sanitizers/*.yml")):
+        for rule in load_yaml_rules(path):
+            rule_id = rule.get("id")
+            tag = rule.get("tag")
+            if (
+                isinstance(rule_id, str)
+                and isinstance(tag, str)
+                and tag in non_crediting_tags
+            ):
+                ids.add(rule_id)
+    return ids
 
 
 def is_passthrough_sidecar_overlap(hit: Finding, tags: dict[str, str]) -> bool:
@@ -724,6 +751,9 @@ def main() -> int:
     langs = set(args.lang) if args.lang else None
     kinds = set(args.kind) if args.kind else None
     taint_dependent_rules = taint_dependent_rule_ids(rules_root)
+    inventory_excluded_rules = (
+        taint_dependent_rules | non_crediting_sanitizer_rule_ids(rules_root)
+    )
     tags_by_rule = rule_tags(rules_root)
 
     cases_with_code = list(iter_cases(rules_root, langs, kinds, args.include_disabled))
@@ -736,7 +766,7 @@ def main() -> int:
         rules_root=rules_root,
         grouped=grouped,
         cross_kind=args.cross_kind,
-        taint_dependent_rules=taint_dependent_rules,
+        taint_dependent_rules=inventory_excluded_rules,
     )
 
     expected_by_case: dict[str, frozenset[str]] = {
@@ -744,7 +774,7 @@ def main() -> int:
     }
     collisions = collision_findings(
         run.findings,
-        taint_dependent_rules,
+        inventory_excluded_rules,
         tags_by_rule,
         expected_by_case,
     )

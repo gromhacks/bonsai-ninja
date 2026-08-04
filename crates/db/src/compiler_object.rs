@@ -30,6 +30,57 @@ use std::sync::Arc;
 /// [`CompilerSyntaxHeader`], [`CompilerBrowseHeader`], [`CompilerAttribution`],
 /// or the object validation contract changes in a way that can alter compiler
 /// facts.
+// v55: synthesized Swift computed-property declarations retain the same
+// AST-derived receiver-state sources as ordinary callable lowering.
+// v54: Ruby ERB/RHTML compiler objects retain Tree-sitter-proven instance
+// variables as implicit inputs of the synthetic template module. Cached v53
+// bodies cannot prove template-context values reaching a sink.
+// v53: C++ direct initialization (`Type value(args)`) retains the
+// Tree-sitter `init_declarator` as a constructor call. Cached v52 bodies omit
+// that call boundary and cannot preserve constructor state/return flow;
+// constructor field dependencies also use exact expression-operand facts.
+// v52: C# expression-bodied property getters retain exact receiver-field
+// return projections. Cached v51 bodies may expose only the scalar return and
+// cannot satisfy a field-specific IDG target demand.
+// v51: direct-call assignment lowering follows only the immediate operand of
+// adapter-declared transparent CST wrappers. Cached v50 bodies may otherwise
+// retain an unrelated nested helper call as the value-producing RHS.
+// v50: PHP callable literals are classified by the PHP adapter, Go nested
+// aggregate call arguments retain exact field dependencies, and file-derived
+// semantic identities use canonical dotted compiler IR. Cached v49 bodies
+// must not replay the former shared text interpretation or qualified names.
+// v49: Java non-static field initializer targets use the adapter's canonical
+// implicit-receiver place, matching later field receiver calls without a
+// shared-language alias rule.
+// v48: Ruby class/module and singleton-method ownership is lowered directly
+// from the adapter's declared Tree-sitter grammar contexts. Cached declarations
+// must not replay the earlier function taxonomy for class-owned methods.
+// v47: PHP's adapter types sigiled implicit receivers from their enclosing
+// class/base declarations so streamed bodies and persisted compiler objects
+// resolve `$this` calls from the same syntax facts.
+// v46: Perl conditional and postfix-conditional expression nodes lower to
+// explicit branch IR instead of being flattened into unconditional events.
+// v45: JavaScript `super(...)` retains constructor dispatch kind.
+// v44: Java bare call receivers proven by lexical binding to be current-class
+// instance fields are qualified to the adapter's current receiver place;
+// shadowing locals and static fields remain unqualified.
+// v43: Elixir map/struct results nested beneath control expressions merge
+// exact field dependencies across result branches, including map-update
+// syntax, without treating call target names as value sources.
+// v42: Elixir `try` assignment results lower from the body and each
+// rescue/catch/else clause's final expression; `after` remains side-effect
+// only and cannot become the expression result.
+// v41: Elixir `cond` assignment results lower from each clause body's final
+// expression rather than surviving as an unresolved macro call result.
+// v40: assignment/value lowering now carries exact adapter-owned generator,
+// aggregate, receiver projection, constructor-delegation, and Elixir
+// value-field facts introduced by the unified IDG compiler pipeline. Cached
+// v39 bodies must not replay the former pseudo-call/phantom-assignment IR.
+// v38: runtime type-guard operator/call spellings are adapter declarations;
+// compiler objects no longer inherit a cross-language builtin/operator union.
+// v37: provider-bound character/same-origin facts and compiler-guard evidence
+// carry exact adapter syntax identity for rule-selected interpretation;
+// typed branch conditions also preserve runtime-truth operands.
 // v36: Go final-pass call arguments include adapter-added if-init/range/index
 // calls plus adapter-decoded static values, and exact adapter guard facts
 // include proven relative-path boundary helpers.
@@ -54,7 +105,7 @@ use std::sync::Arc;
 // per-file factstore entry instead of the generation metadata. Opening a
 // 30k-file generation now retains only compact path/digest descriptors;
 // candidate queries hydrate headers and bodies for selected FileIds lazily.
-pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 36;
+pub const COMPILER_OBJECT_CACHE_VERSION: u32 = 55;
 const LEGACY_COMPILER_OBJECT_CACHE_VERSION: u32 = 11;
 
 const COMPILER_OBJECT_TABLE_ID: u32 = 104;

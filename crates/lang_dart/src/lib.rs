@@ -1,10 +1,10 @@
 //! Dart language adapter.
-use bonsai_common::FileId;
+use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_assign_targets, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, first_named_child, first_named_child_of_kind, language_from_pack, node_text,
-        parse_with, span_of,
+        call_arg_from_nodes_with_handler, collect_kinds, first_named_child, first_named_child_of_kind,
+        language_from_pack, node_text, parse_with, span_of,
     },
     rewrite_implicit_member_reads, AdapterContext, AdapterError, CallKind, DeclIndex, DeclKind, FieldWrite,
     FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
@@ -55,6 +55,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     do_kinds: &["do_statement"],
     loop_kinds: &[],
     call_kinds: &[],
+    nested_call_component_kinds: &[],
+    pseudo_call_extractor: None,
+    syntax_event_extractor: None,
+    pseudo_call_receiver_extractor: None,
+    argument_passing_mode_extractor: None,
     assignment_kinds: &["assignment_expression", "initialized_variable_definition"],
     return_kinds: &["return_statement"],
     throw_kinds: &["throw_expression"],
@@ -73,6 +78,31 @@ const HANDLER: GrammarHandler = GrammarHandler {
         SyntaxSpecialForm::CascadeSection,
         SyntaxSpecialForm::ObjectConstructionExpression,
     ],
+    runtime_type_guard_calls: &[],
+    runtime_type_guard_operators: &["is"],
+    runtime_typeof_operators: &[],
+    runtime_type_equality_operators: &[],
+    value_free_expression_kinds: &[],
+    value_free_call_names: &[],
+    value_free_unary_operators: &[],
+    call_ref_kinds: &[],
+    member_expression_kinds: &[
+        "qualified_identifier",
+        "assignable_expression",
+        "assignable_selector",
+        "unconditional_assignable_selector",
+        "conditional_assignable_selector",
+    ],
+    subscript_expression_kinds: &[],
+    sigil_variable_kinds: &[],
+    global_variable_kinds: &[],
+    subscript_base_call_refs: false,
+    non_call_ref_names: &[],
+    synthetic_call_ref_names: &[],
+    call_name_suffix_tokens: &[],
+    syntax_error_tolerant_call_names: &[],
+    callable_reference_kinds: &[],
+    callable_reference_extractor: None,
     method_receiver_param_index: None,
     implicit_receiver_names: &["this", "super"],
     implicit_receiver_prefixes: &[],
@@ -171,6 +201,7 @@ impl LanguageAdapter for DartAdapter {
             }
             let signature_formals_by_span = collect_dart_signature_formals(&tree, file, source_bytes);
             let expression_returns_by_span = collect_dart_expression_body_returns(&tree, file, source_bytes);
+            let switch_pattern_bindings = collect_dart_switch_pattern_bindings(&tree, file, source_bytes);
             for decl in &mut decl_index.defs {
                 if let Some((params, writes)) = dart_formals_for_decl(decl, &signature_formals_by_span) {
                     if !params.is_empty() {
@@ -193,6 +224,7 @@ impl LanguageAdapter for DartAdapter {
                         decl.has_implicit_returns = true;
                     }
                 }
+                insert_dart_switch_pattern_bindings(decl, &switch_pattern_bindings);
             }
             // The kit's generic catch-param walk picks Dart's `on Type`
             // identifier over the bound variable in `on E catch (e)`.
@@ -267,6 +299,211 @@ impl LanguageAdapter for DartAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+#[derive(Clone)]
+struct DartSwitchPatternBinding {
+    case_span: Span,
+    assignment: FlowEvent,
+}
+
+/// Lower Dart 3 switch-pattern bindings from the concrete syntax tree.
+/// `case String value:` introduces `value` from the switch subject; shared
+/// dataflow sees the ordinary typed assignment and never needs Dart tokens.
+fn collect_dart_switch_pattern_bindings(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<DartSwitchPatternBinding> {
+    let mut out = Vec::new();
+    for switch in collect_kinds(tree, &["switch_statement"]) {
+        let Some(condition) = switch.child_by_field_name("condition") else {
+            continue;
+        };
+        let Some(subject) = call_arg_from_nodes_with_handler(condition, condition, file, src, None, &HANDLER)
+        else {
+            continue;
+        };
+        let mut source_names = subject.source_names;
+        if let Some(place) = subject.place.as_ref() {
+            if !source_names.iter().any(|source| source == place) {
+                source_names.push(place.clone());
+            }
+        }
+        source_names.sort();
+        source_names.dedup();
+        let source_name = subject
+            .place
+            .or_else(|| (source_names.len() == 1).then(|| source_names[0].clone()));
+        if source_name.is_none() && source_names.is_empty() {
+            continue;
+        }
+        let Some(body) = switch.child_by_field_name("body") else {
+            continue;
+        };
+        let mut case_cursor = body.walk();
+        for case in body
+            .named_children(&mut case_cursor)
+            .filter(|node| node.kind() == "switch_statement_case")
+        {
+            for pattern in collect_named_descendants(case, "variable_pattern") {
+                let mut cursor = pattern.walk();
+                let Some(binding) = pattern
+                    .named_children(&mut cursor)
+                    .find(|child| child.kind() == "identifier")
+                else {
+                    continue;
+                };
+                let target = node_text(&binding, src).trim();
+                if target.is_empty() {
+                    continue;
+                }
+                out.push(DartSwitchPatternBinding {
+                    case_span: span_of(file, &case),
+                    assignment: FlowEvent::Assign {
+                        span: span_of(file, &pattern),
+                        target: target.to_string(),
+                        source_name: source_name.clone(),
+                        source_call: None,
+                        source_call_args: Vec::new(),
+                        source_names: source_names.clone(),
+                        declares_new_binding: true,
+                        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+                    },
+                });
+            }
+        }
+    }
+    out.sort_by_key(|binding| {
+        (
+            binding.case_span.start,
+            binding.assignment.span().start,
+            binding.assignment.span().end,
+        )
+    });
+    out
+}
+
+fn collect_named_descendants<'tree>(node: Node<'tree>, kind: &str) -> Vec<Node<'tree>> {
+    let mut out = Vec::new();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == kind {
+            out.push(current);
+            continue;
+        }
+        let mut cursor = current.walk();
+        stack.extend(current.named_children(&mut cursor));
+    }
+    out.sort_by_key(Node::start_byte);
+    out
+}
+
+fn insert_dart_switch_pattern_bindings(
+    declaration: &mut bonsai_lang_api::Decl,
+    bindings: &[DartSwitchPatternBinding],
+) {
+    let owner = declaration.body_span.unwrap_or(declaration.span);
+    for binding in bindings
+        .iter()
+        .filter(|binding| span_contains(owner, binding.case_span))
+    {
+        insert_dart_flow_event_before_case_use(
+            &mut declaration.flow_events,
+            binding.case_span,
+            binding.assignment.clone(),
+        );
+    }
+}
+
+fn insert_dart_flow_event_before_case_use(
+    events: &mut Vec<FlowEvent>,
+    case_span: Span,
+    assignment: FlowEvent,
+) -> bool {
+    let after_binding = assignment.span().end;
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                for nested in [then_events, else_events] {
+                    if dart_events_have_case_use(nested, case_span, after_binding)
+                        && insert_dart_flow_event_before_case_use(nested, case_span, assignment.clone())
+                    {
+                        return true;
+                    }
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if dart_events_have_case_use(body, case_span, after_binding)
+                    && insert_dart_flow_event_before_case_use(body, case_span, assignment.clone())
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                for nested in [body, catch_events, finally_events] {
+                    if dart_events_have_case_use(nested, case_span, after_binding)
+                        && insert_dart_flow_event_before_case_use(nested, case_span, assignment.clone())
+                    {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(index) = events.iter().position(|event| {
+        let span = event.span();
+        span.start >= after_binding && span_contains(case_span, span)
+    }) else {
+        return false;
+    };
+    events.insert(index, assignment);
+    true
+}
+
+fn dart_events_have_case_use(events: &[FlowEvent], case_span: Span, after_binding: u64) -> bool {
+    events.iter().any(|event| {
+        let span = event.span();
+        (span.start >= after_binding && span_contains(case_span, span))
+            || match event {
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    dart_events_have_case_use(then_events, case_span, after_binding)
+                        || dart_events_have_case_use(else_events, case_span, after_binding)
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => dart_events_have_case_use(body, case_span, after_binding),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    dart_events_have_case_use(body, case_span, after_binding)
+                        || dart_events_have_case_use(catch_events, case_span, after_binding)
+                        || dart_events_have_case_use(finally_events, case_span, after_binding)
+                }
+                _ => false,
+            }
+    })
+}
+
+fn span_contains(outer: Span, inner: Span) -> bool {
+    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
 }
 
 /// For each Dart Constructor decl whose `flow_events` is empty,
@@ -654,7 +891,8 @@ fn collect_dart_expression_body_returns(
         let value_name = first_named_child_of_kind(&body, "identifier")
             .map(|identifier| node_text(&identifier, src).trim().to_string())
             .filter(|name| !name.is_empty());
-        let mut value_flow = bonsai_lang_api::kit::expression_flow_from_node(body, file, src);
+        let mut value_flow =
+            bonsai_lang_api::kit::expression_flow_from_node_with_handler(body, file, src, &HANDLER);
         if let Some(projection) = dart_split_selector_projection(&body, src) {
             let place = projection.canonical_place();
             value_flow.place = Some(place.clone());

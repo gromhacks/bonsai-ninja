@@ -1,0 +1,510 @@
+# Rulepack-owned ecosystem metadata. Shared Rust crates consume these values
+# generically; package-manager names, distribution aliases, security-model
+# exceptions, and tag-level guard requirements belong here rather than in the
+# analyzer engine.
+canonical_sink_families:
+  - cmdi
+  - sqli
+  - nosql
+  - path
+  - ssrf
+  - xss
+  - eval
+  - deserialization
+  - xxe
+  - ldap
+  - jwt
+  - crypto
+  - tls
+  - template
+  - open_redirect
+  - file_upload
+  - header_injection
+
+# Compact audit-table labels are pack presentation data. Keeping them beside
+# the canonical taxonomy lets custom packs add a family without changing or
+# recompiling the CLI.
+sink_family_short_labels:
+  cmdi: cmdi
+  sqli: sqli
+  nosql: nosq
+  path: path
+  ssrf: ssrf
+  xss: xss
+  eval: eval
+  deserialization: dser
+  xxe: xxe
+  ldap: ldap
+  jwt: jwt
+  crypto: cryp
+  tls: tls
+  template: tmpl
+  open_redirect: oredr
+  file_upload: upld
+  header_injection: hdr
+
+sink_family_aliases:
+  deser: deserialization
+  ssti: template
+  code: eval
+  header: header_injection
+  host_header: header_injection
+  file: path
+  path_traversal: path
+  open: open_redirect
+  upload: file_upload
+  upload_file_write_client_filename: file_upload
+  upload_file_copy_client_filename: file_upload
+
+# Sanitizer tag -> sink tags it can sanitize. A sanitizer always credits a
+# sink with the exact same tag, so only cross-tag relationships and explicitly
+# non-crediting vocabulary need entries here. Empty lists are passthrough or
+# inventory markers: they are recognized but never clear taint.
+sanitizer_credits:
+  open-redirect-sanitize: [open-redirect]
+  url-encode: [open-redirect]
+  url-build: [ssrf, open-redirect]
+  same-origin-path: [open-redirect, header-injection]
+  nosql-sanitize: [nosql-injection]
+  nosql-parameter: [nosql-injection]
+  signed-token-verify: [code-injection, insecure-deserialization]
+  signature-verify: [code-injection, insecure-deserialization, untrusted-token]
+  signature-sanitizer: [signature-replay, untrusted-token]
+  html-encode: [xss]
+  html-sanitize: [xss]
+  js-encode: [xss]
+  css-encode: [xss]
+  path-sanitize: [path-traversal]
+  regex-validate: [path-traversal, open-redirect, sql-injection, xpath-injection]
+  allowlist-validate: [path-traversal, open-redirect, sql-injection, ssrf, xpath-injection, ssti]
+  char-allowlist: [path-traversal, open-redirect, sql-injection, command-injection, header-injection, xpath-injection]
+  csrf-protect: [csrf]
+  ssrf-sanitize: [ssrf]
+  ldap-escape: [ldap-injection]
+  shell-escape: [command-injection]
+  sql-parameter: [sql-injection]
+  sql-parameterize: [sql-injection]
+  db-bind-parameter: [sql-injection]
+  xxe-sanitizer: [xxe]
+  xpath-parameter: [xpath-injection]
+  auth-sanitizer: [weak-auth, access-control]
+  password-verify: [weak-auth]
+  deser-secure: [insecure-deserialization]
+  jwt-verify: [jwt, untrusted-token, signature-replay]
+  constant-time: [timing-attack]
+  constant-time-compare: [timing-attack]
+  bounds-check: [memory-safety]
+  crypto-bounds: [memory-safety, weak-crypto]
+  crypto-mode: [weak-crypto]
+  kdf: [weak-crypto]
+  numeric-coerce: [integer-overflow]
+  regex-escape: [redos]
+  controlled-exposure: [information-exposure]
+  lock-acquire: [race]
+  cookie-secure: [cookie-misconfig]
+  # Inventory-only until the pack defines a rate-limit-missing sink family.
+  rate-limit: []
+  passthrough-decode: []
+  passthrough-transform: []
+  validation: []
+  schema-validate: []
+  base64-encode: []
+  hash: []
+  url-decode: []
+  non-sanitizer: []
+
+# Pack-wide finding/attachment policy by sink tag. These are inherited by
+# every language; a per-language tag default or an explicit rule field wins.
+sink_tag_semantics:
+  race:
+    allow_file_package_evidence: true
+    skip_call_package_gate: true
+  memory-safety:
+    allow_file_package_evidence: true
+    skip_call_package_gate: true
+  information-exposure:
+    suppress_inferred_sources: true
+  log-injection:
+    suppress_local_source_flow_classes: [environment-input]
+  xxe:
+    sanitizer_attachment_policy: receiver-factory-lineage
+
+sink_category_semantics:
+  source-independent:
+    allow_file_package_evidence: true
+    non_taint_evaluation: pattern
+  lifecycle-audit:
+    non_taint_evaluation: lifecycle
+
+# Generic guard-call value roles by sanitizer tag. Shared analysis reads these
+# roles and exact compiler call facts; it never switches on the tag spelling.
+sanitizer_tag_semantics:
+  same-origin-path:
+    sanitizer_guard:
+      use_receiver: true
+  ssrf-sanitize:
+    sanitizer_guard:
+      all_arguments: true
+  allowlist-validate:
+    sanitizer_guard:
+      all_arguments: true
+  nosql-sanitize:
+    sanitizer_guard:
+      argument_indices: [0]
+      require_terminal_rejection: true
+
+# Named review profiles are rulepack policy, not CLI source constants. Path
+# filters use the same workspace-relative matcher as explicit --exclude-file.
+profiles:
+  production:
+    trust: remote
+    severity: high
+    context: 16k
+    exclude_tests: true
+    exclude_paths:
+      - test/
+      - __tests__
+      - __mocks__
+      - tests/
+      - spec/
+      - specs/
+      - fixture/
+      - fixtures/
+      - mock/
+      - mocks/
+      - sample/
+      - samples/
+      - ^example/
+      - examples/
+      - demo/
+      - demos/
+      - e2e/
+      - integration/
+      - acceptance/
+      - _test.
+      - .test.
+      - _spec.
+      - .spec.
+      - _mock.
+      - .mock.
+      - node_modules/
+      - bower_components/
+      - coverage/
+      - cypress/
+      - playwright/
+      - storybook/
+      - .storybook/
+      - .next/
+      - .nuxt/
+      - .svelte-kit/
+      - conftest.py
+      - .venv/
+      - venv/
+      - site-packages/
+      - _pb2.py
+      - src/test/
+      - src/it/
+      - Test.java
+      - Tests.java
+      - IT.java
+      - Test.kt
+      - Tests.kt
+      - IT.kt
+      - Test.scala
+      - Tests.scala
+      - IntegrationTest
+      - _test.go
+      - testdata/
+      - Godeps/
+      - _spec.rb
+      - _test.rb
+      - phpunit
+      - support/
+      - Tests/
+      - .Tests
+      - UITests
+      - XCTest
+      - androidTest/
+      - bin/
+      - obj/
+      - .build/
+      - target/
+      - benches/
+      - vendor/
+      - third_party/
+      - third-party/
+      - _deps/
+      - CMakeFiles/
+      - cmake-build
+      - Pods/
+      - Carthage/
+      - dist/
+      - build/
+      - out/
+      - generated/
+      - autogen/
+      - .gen.
+      - _gen.
+      - proto/gen/
+      - migrations/
+      - docs/
+      - doc/
+      - scripts/
+      - deploy/
+      - deployments/
+      - broadcast/
+      - cache/
+
+# Test classification is also data-driven. Patterns are normalized to lower
+# case and matched against a workspace-relative path with a leading slash.
+test_path_patterns:
+  - /test/
+  - /tests/
+  - /__tests__/
+  - /__mocks__/
+  - /spec/
+  - /specs/
+  - /testing/
+  - /testsuite/
+  - /fixture/
+  - /fixtures/
+  - /mock/
+  - /mocks/
+  - /e2e/
+  - /integration/
+  - /acceptance/
+  - /src/test/
+  - /src/it/
+  - /androidtest/
+  - /cypress/
+  - /playwright/
+  - /storybook/
+  - /.storybook/
+  - /conftest/
+  - conftest.py
+  - _test.go
+  - _test.py
+  - .test.ts
+  - .test.js
+  - .test.tsx
+  - .test.jsx
+  - .spec.ts
+  - .spec.js
+  - .spec.tsx
+  - .spec.jsx
+  - .spec.rb
+  - test.java
+  - tests.java
+  - it.java
+  - integrationtest.java
+  - spec.scala
+  - test.scala
+  - tests.scala
+  - test.kt
+  - tests.kt
+  - it.kt
+  - tests.cs
+  - test.cs
+  - _spec.rb
+  - _test.rb
+  - _test.exs
+  - _test.ex
+  - .t
+
+languages:
+  ruby:
+    dependency_manifest_patterns: [Gemfile, Gemfile.lock, "*.gemspec"]
+    package_matching:
+      package_separators: [".", "::", "/"]
+
+  javascript: &ecmascript_ecosystem
+    dependency_manifest_patterns:
+      - package.json
+      - package-lock.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - yarn.lock
+      - bun.lock
+      - bun.lockb
+      - deno.json
+      - deno.jsonc
+      - deno.lock
+    package_matching:
+      strip_import_prefixes: ["node:"]
+      package_separators: ["/", "."]
+  typescript: *ecmascript_ecosystem
+
+  elixir:
+    dependency_manifest_patterns: [mix.exs, mix.lock]
+    package_matching:
+      package_separators: ["."]
+  erlang:
+    dependency_manifest_patterns: [rebar.config, rebar.lock]
+    package_matching:
+      # `-include_lib("cowboy/include/cowboy.hrl")` exposes the OTP
+      # application as the first path component; ordinary module names remain
+      # dot-qualified. Package identity therefore accepts both grammar-proven
+      # separators without teaching the shared matcher Erlang spellings.
+      package_separators: ["/", "."]
+
+  go:
+    dependency_manifest_patterns: [go.mod, go.sum, go.work, go.work.sum]
+    package_matching:
+      package_separators: ["/", "."]
+      call_qualifier_from_package_tail:
+        package_separator: "/"
+        call_separators: ["."]
+    sink_tag_semantics:
+      header-injection:
+        character_constraint:
+          required_excluded_characters: ["\r", "\n"]
+          accepted_providers: &go_control_filter_providers
+            - factory: {name: strings.Map}
+              operation: {name: strings.Map}
+      log-injection:
+        character_constraint:
+          required_excluded_characters: ["\r", "\n"]
+          accepted_providers: *go_control_filter_providers
+      open-redirect:
+        same_origin_path_constraint:
+          require_scheme_rejection: true
+          require_authority_rejection: true
+          require_absolute_path: true
+          require_scheme_relative_rejection: true
+          sink_argument_index: 1
+
+  rust:
+    dependency_manifest_patterns: [Cargo.toml, Cargo.lock]
+    normalize_hyphen_to_underscore: true
+    package_matching:
+      package_separators: ["::", "/"]
+
+  php:
+    dependency_manifest_patterns: [composer.json, composer.lock]
+    package_matching:
+      package_separators: ["\\", "/", "::", "->"]
+
+  python:
+    dependency_manifest_patterns:
+      - pyproject.toml
+      - requirements*.txt
+      - setup.py
+      - Pipfile
+      - Pipfile.lock
+      - poetry.lock
+      - uv.lock
+    normalize_hyphen_to_underscore: true
+    package_aliases:
+      argon2-cffi: [argon2]
+      beautifulsoup4: [bs4]
+      cx-oracle: [cx_Oracle]
+      djangorestframework: [rest_framework]
+      flask-limiter: [flask_limiter]
+      google-cloud-storage: [google.cloud.storage]
+      msgpack-python: [msgpack]
+      mysql-connector-python: [mysql.connector]
+      pillow: [PIL]
+      psycopg2-binary: [psycopg2]
+      pycryptodome: [Crypto]
+      python-jose: [jose]
+      python-ldap: [ldap]
+      python3-saml: [onelogin.saml2]
+      pyyaml: [yaml]
+    package_matching:
+      package_separators: [".", "/"]
+    sink_tag_semantics:
+      open-redirect:
+        same_origin_path_constraint:
+          require_scheme_rejection: true
+          require_authority_rejection: true
+          require_absolute_path: true
+          require_scheme_relative_rejection: true
+          sink_argument_index: 0
+          accepted_providers:
+            - name: urllib.parse.urlparse
+      path-traversal:
+        character_constraint:
+          required_excluded_characters: ["/", "\\"]
+          accepted_providers:
+            - factory:
+                name: re.compile
+              operation:
+                regex: '^[A-Za-z_][A-Za-z0-9_]*\.(match|fullmatch)$'
+      header-injection:
+        character_constraint:
+          required_excluded_characters: ["\r", "\n"]
+          accepted_providers:
+            - factory:
+                name: re.compile
+              operation:
+                regex: '^[A-Za-z_][A-Za-z0-9_]*\.sub$'
+
+  java: &jvm_ecosystem
+    dependency_manifest_patterns:
+      - pom.xml
+      - build.gradle
+      - build.gradle.kts
+      - settings.gradle
+      - settings.gradle.kts
+      - gradle.lockfile
+      - gradle.properties
+    package_matching:
+      package_separators: ["."]
+  kotlin: *jvm_ecosystem
+  scala: *jvm_ecosystem
+
+  swift:
+    dependency_manifest_patterns:
+      - Package.swift
+      - Package.resolved
+      - Cartfile
+      - Cartfile.resolved
+      - Podfile
+      - Podfile.lock
+    package_matching:
+      package_separators: [".", "/"]
+  objc:
+    dependency_manifest_patterns: [Podfile, Podfile.lock]
+    package_matching:
+      strip_import_suffixes: [".h", ".hpp", ".hxx"]
+      package_separators: ["/", "."]
+
+  csharp:
+    dependency_manifest_patterns:
+      - packages.config
+      - "*.csproj"
+      - "*.fsproj"
+      - "*.vbproj"
+      - "*.sln"
+      - "*.slnx"
+      - "*.props"
+      - "*.targets"
+    package_matching:
+      package_separators: [".", "/"]
+
+  c:
+    not_applicable_sink_families: [deserialization]
+    package_matching: &native_header_packages
+      strip_import_suffixes: [".h", ".hpp", ".hxx"]
+      package_separators: ["/"]
+
+  cpp:
+    package_matching: *native_header_packages
+
+  dart:
+    package_matching:
+      package_separators: [".", "/"]
+
+  lua:
+    package_matching:
+      package_separators: [".", "/"]
+
+  perl:
+    package_matching:
+      package_separators: ["::", "->", "/"]
+
+  solidity:
+    security_model: smart-contract
+    canonical_sink_families_applicable: false
+    package_matching:
+      package_separators: [".", "/"]

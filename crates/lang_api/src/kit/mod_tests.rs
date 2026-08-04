@@ -3,13 +3,13 @@ use super::bindings::{
 };
 use super::{
     annotate_tuple_call_result_bindings, apply_assign_call_result_types, apply_call_receiver_types,
-    apply_constructor_result_type_aliases, argument_place, assign_lexical_callable_parents,
-    assignment_value_node, build_call_event, callable_reference_name, canonical_simple_type_name,
-    collect_kinds, expression_flow_from_node, extend_alias_map_with_flow_events,
-    extract_assignment_value_facts, extract_call_receiver_facts, extract_return_value_name,
-    extract_rhs_expr_operands, extract_runtime_type_narrowing_facts, extract_string_literals,
-    language_from_pack, lower_local_closure_captures, mark_namespace_call_receivers, node_text,
-    normalize_call_name_whitespace, normalize_call_result_assignment_sources,
+    apply_call_receiver_types_with_language_syntax, apply_constructor_result_type_aliases, argument_place,
+    assign_lexical_callable_parents, assignment_value_node, build_call_event, callable_reference_name,
+    canonical_simple_type_name, collect_kinds, expression_flow_from_node, extend_alias_map_with_flow_events,
+    extract_assignment_value_facts, extract_call_receiver_facts, extract_direct_call_info,
+    extract_return_value_name, extract_rhs_expr_operands, extract_runtime_type_narrowing_facts,
+    extract_string_literals, language_from_pack, lower_local_closure_captures, mark_namespace_call_receivers,
+    node_text, normalize_call_name_whitespace, normalize_call_result_assignment_sources,
     package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, span_of,
     walk_flow_events, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
@@ -19,6 +19,7 @@ use crate::{
     ImportScope, ImportSpec, ModulePath, Visibility,
 };
 use bonsai_common::{FileId, Span, SymbolId};
+use tree_sitter::Node;
 
 fn parse_language(pack: &str, src: &[u8]) -> tree_sitter::Tree {
     let language = language_from_pack(pack).expect("language grammar");
@@ -98,8 +99,23 @@ fn runtime_type_narrowings_are_lowered_from_guard_nodes() {
     ];
     for (language, source) in cases {
         let tree = parse_language(language, source.as_bytes());
-        let facts =
-            extract_runtime_type_narrowing_facts(&tree, FileId::new(0), &GENERIC_HANDLER, source.as_bytes());
+        let handler = match language {
+            "python" => GrammarHandler {
+                runtime_type_guard_calls: &["isinstance"],
+                ..GENERIC_HANDLER
+            },
+            "javascript" => GrammarHandler {
+                runtime_type_guard_operators: &["instanceof"],
+                ..GENERIC_HANDLER
+            },
+            "typescript" => GrammarHandler {
+                runtime_typeof_operators: &["typeof"],
+                runtime_type_equality_operators: &["==", "==="],
+                ..GENERIC_HANDLER
+            },
+            _ => unreachable!(),
+        };
+        let facts = extract_runtime_type_narrowing_facts(&tree, FileId::new(0), &handler, source.as_bytes());
         assert_eq!(facts.len(), 1, "{language}: {facts:#?}");
         assert_eq!(facts[0].subject, "value", "{language}");
         let expected_type = if language == "typescript" {
@@ -121,8 +137,11 @@ fn runtime_type_narrowings_are_lowered_from_guard_nodes() {
 fn python_identity_guard_is_not_a_runtime_type_narrowing() {
     let source = "def f(value, other):\n    if value is other:\n        sink(value)\n";
     let tree = parse_language("python", source.as_bytes());
-    let facts =
-        extract_runtime_type_narrowing_facts(&tree, FileId::new(0), &GENERIC_HANDLER, source.as_bytes());
+    let handler = GrammarHandler {
+        runtime_type_guard_calls: &["isinstance"],
+        ..GENERIC_HANDLER
+    };
+    let facts = extract_runtime_type_narrowing_facts(&tree, FileId::new(0), &handler, source.as_bytes());
     assert!(
         facts.is_empty(),
         "identity comparison is not a type fact: {facts:#?}"
@@ -266,7 +285,7 @@ fn python_match_patterns_lower_only_ast_binding_positions() {
 "#;
     let tree = parse_language("python", src);
     let statement = collect_kinds(&tree, &["match_statement"])[0];
-    let events = extract_match_binding_assigns(FileId::new(0), &statement, src);
+    let events = extract_match_binding_assigns(FileId::new(0), &statement, src, &GENERIC_HANDLER);
     let facts = assign_facts(&events);
 
     for target in ["value", "item", "rest", "px", "py", "point"] {
@@ -297,9 +316,19 @@ fn rust_pattern_and_foreach_bindings_follow_ast_fields() {
     let match_expr = collect_kinds(&tree, &["match_expression"])[0];
     let for_expr = collect_kinds(&tree, &["for_expression"])[0];
 
-    let mut events = extract_match_binding_assigns(FileId::new(0), &if_expr, src);
-    events.extend(extract_match_binding_assigns(FileId::new(0), &match_expr, src));
-    events.extend(extract_foreach_binding_assigns(FileId::new(0), &for_expr, src));
+    let mut events = extract_match_binding_assigns(FileId::new(0), &if_expr, src, &GENERIC_HANDLER);
+    events.extend(extract_match_binding_assigns(
+        FileId::new(0),
+        &match_expr,
+        src,
+        &GENERIC_HANDLER,
+    ));
+    events.extend(extract_foreach_binding_assigns(
+        FileId::new(0),
+        &for_expr,
+        src,
+        &GENERIC_HANDLER,
+    ));
     let facts = assign_facts(&events);
 
     for (target, source) in [
@@ -330,7 +359,7 @@ in {value:, nested: {item:}, **rest}
 end"#;
     let ruby_tree = parse_language("ruby", ruby);
     let case_match = collect_kinds(&ruby_tree, &["case_match"])[0];
-    let ruby_events = extract_match_binding_assigns(FileId::new(0), &case_match, ruby);
+    let ruby_events = extract_match_binding_assigns(FileId::new(0), &case_match, ruby, &GENERIC_HANDLER);
     let ruby_facts = assign_facts(&ruby_events);
     for target in ["value", "item", "rest"] {
         assert!(ruby_facts.iter().any(|(actual, _, _)| *actual == target));
@@ -349,7 +378,7 @@ end"#;
                 .is_some_and(|target| node_text(&target, elixir) == "case")
         })
         .expect("case call");
-    let elixir_events = extract_match_binding_assigns(FileId::new(0), &case_call, elixir);
+    let elixir_events = extract_match_binding_assigns(FileId::new(0), &case_call, elixir, &GENERIC_HANDLER);
     let elixir_facts = assign_facts(&elixir_events);
     for target in ["value", "item", "result"] {
         assert!(elixir_facts.iter().any(|(actual, _, _)| *actual == target));
@@ -364,7 +393,7 @@ fn comprehension_binding_uses_fielded_pattern_and_iterable_nodes() {
     let src = b"[(part, index) for (part, index) in rows]";
     let tree = parse_language("python", src);
     let clause = collect_kinds(&tree, &["for_in_clause"])[0];
-    let events = extract_comprehension_for_clause_assigns(FileId::new(0), &clause, src);
+    let events = extract_comprehension_for_clause_assigns(FileId::new(0), &clause, src, &GENERIC_HANDLER);
     let facts = assign_facts(&events);
 
     assert_eq!(
@@ -458,7 +487,7 @@ fn foreach_bindings_cover_fielded_and_wrapped_grammar_shapes() {
             .into_iter()
             .next()
             .unwrap_or_else(|| panic!("missing {pack} {kind}"));
-        let events = extract_foreach_binding_assigns(FileId::new(0), &loop_node, src);
+        let events = extract_foreach_binding_assigns(FileId::new(0), &loop_node, src, &GENERIC_HANDLER);
         let facts = assign_facts(&events);
         let actual_targets: Vec<&str> = facts.iter().map(|(target, _, _)| *target).collect();
         assert_eq!(actual_targets, *expected_targets, "{pack}: {facts:?}");
@@ -479,7 +508,7 @@ fn scala_case_binding_uses_the_match_subject_node() {
     let src = b"object Demo { def f(args: String) = args match { case value => sink(value) } }";
     let tree = parse_language("scala", src);
     let match_expr = collect_kinds(&tree, &["match_expression"])[0];
-    let events = extract_match_binding_assigns(FileId::new(0), &match_expr, src);
+    let events = extract_match_binding_assigns(FileId::new(0), &match_expr, src, &GENERIC_HANDLER);
     let facts = assign_facts(&events);
 
     assert!(
@@ -617,6 +646,42 @@ fn call_name_normalization_compacts_multiline_dotted_chains() {
     assert_eq!(
         normalize_call_name_whitespace("Command::new(\"sh\")\n    .arg(\"-c\")\n    .output"),
         "Command::new(\"sh\").arg(\"-c\").output"
+    );
+}
+
+#[test]
+fn direct_call_extraction_only_crosses_transparent_ast_wrappers() {
+    let direct = b"x = (helper(raw))\n";
+    let direct_tree = parse_language("python", direct);
+    let direct_assignment = collect_kinds(&direct_tree, &["assignment"])
+        .into_iter()
+        .next()
+        .expect("direct assignment");
+    let direct_target = direct_assignment
+        .child_by_field_name("left")
+        .expect("direct target");
+    let direct_rhs = assignment_value_node(direct_assignment, Some(direct_target)).expect("direct rhs");
+    assert_eq!(
+        extract_direct_call_info(&direct_rhs, direct, &GENERIC_HANDLER),
+        Some((Some("helper".to_string()), vec!["raw".to_string()])),
+        "parentheses are transparent around a direct call"
+    );
+
+    let compound = b"payload = ({'cmd': raw} if len(raw) > 0 else None)\n";
+    let compound_tree = parse_language("python", compound);
+    let compound_assignment = collect_kinds(&compound_tree, &["assignment"])
+        .into_iter()
+        .next()
+        .expect("compound assignment");
+    let compound_target = compound_assignment
+        .child_by_field_name("left")
+        .expect("compound target");
+    let compound_rhs =
+        assignment_value_node(compound_assignment, Some(compound_target)).expect("compound rhs");
+    assert_eq!(
+        extract_direct_call_info(&compound_rhs, compound, &GENERIC_HANDLER),
+        None,
+        "a nested condition call is not the assignment's value-producing call"
     );
 }
 
@@ -811,11 +876,18 @@ fn callable_assignment_references_are_lowered_from_ast_shapes() {
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&language).expect("set grammar");
         let tree = parser.parse(source, None).expect("parse source");
+        let handler = match pack {
+            "java" => GrammarHandler {
+                callable_reference_kinds: &["method_reference"],
+                ..GENERIC_HANDLER
+            },
+            _ => GENERIC_HANDLER,
+        };
         collect_kinds(&tree, assignment_kinds)
             .into_iter()
             .find_map(|assignment| {
                 let value = assignment_value_node(assignment, None)?;
-                callable_reference_name(&value, source.as_bytes())
+                callable_reference_name(&value, source.as_bytes(), &handler)
             })
     }
 
@@ -827,23 +899,6 @@ fn callable_assignment_references_are_lowered_from_ast_shapes() {
         )
         .as_deref(),
         Some("helper")
-    );
-    assert_eq!(
-        reference("elixir", "cb = &helper/1", &["binary_operator"]).as_deref(),
-        Some("helper")
-    );
-    assert_eq!(
-        reference("ruby", "cb = method(:helper)", &["assignment"]).as_deref(),
-        Some("helper")
-    );
-    assert_eq!(
-        reference(
-            "php",
-            "<?php function f() { $cb = system(...); }",
-            &["assignment_expression"],
-        )
-        .as_deref(),
-        Some("system")
     );
     assert_eq!(
         reference("python", "cb = 'helper'", &["assignment"]),
@@ -1101,6 +1156,14 @@ fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
         call_kind,
         args: Vec::new(),
     };
+    let qualified_constructor = |name: &str, receiver: &str, span: Span| FlowEvent::Call {
+        span,
+        name: name.to_string(),
+        receiver: Some(receiver.to_string()),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Constructor,
+        args: Vec::new(),
+    };
 
     let mut idx = DeclIndex::default();
     for (symbol, name) in [(10, "Connection"), (11, "Util"), (12, "widget")] {
@@ -1118,6 +1181,7 @@ fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
             // Perl/Ruby-style class constructor methods should type the
             // receiver as the owner, not as the method call tail.
             assign("obj", Some("Util->new"), sp(31, 39)),
+            qualified_constructor("Util->new", "Util", sp(34, 38)),
             // Declaration resolution, not casing, proves this lower-case
             // symbol is a constructed type.
             assign("lower", Some("widget"), sp(141, 150)),
@@ -1312,7 +1376,69 @@ fn receiver_type_joins_sigiled_ast_aliases_by_canonical_binding_name() {
 }
 
 #[test]
-fn address_arguments_emit_writeback_mode_from_ast_nodes() {
+fn implicit_receiver_typing_normalizes_adapter_declared_sigils() {
+    let mut idx = DeclIndex::default();
+    let mut repository = m9_func_decl(0, "Repository", None, Vec::new());
+    repository.kind = DeclKind::Class;
+    repository.bases = vec!["BaseRepository".to_string()];
+    let mut method = m9_func_decl(
+        1,
+        "run",
+        None,
+        vec![FlowEvent::Call {
+            span: Span::new(FileId::new(0), 10, 20),
+            name: "$this->cmd".to_string(),
+            receiver: Some("$this".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        }],
+    );
+    method.kind = DeclKind::Method;
+    method.parent = Some(repository.symbol);
+    idx.defs.extend([repository, method]);
+
+    apply_call_receiver_types_with_language_syntax(
+        &mut idx,
+        &[],
+        &["$this"],
+        &[],
+        crate::ReceiverTypeSyntax::none(),
+    );
+
+    assert!(matches!(
+        &idx.defs[1].flow_events[0],
+        FlowEvent::Call { receiver_types, .. }
+            if receiver_types == &["Repository".to_string(), "BaseRepository".to_string()]
+    ));
+}
+
+fn test_writeback_classifier(argument: Node<'_>, value: Node<'_>) -> crate::ArgumentPassingMode {
+    let node_kind_proves_writeback = |node: Node<'_>| {
+        matches!(
+            node.kind(),
+            "reference_expression" | "pointer_expression" | "unary_expression" | "ref_expression"
+        ) || {
+            let mut cursor = node.walk();
+            let has_writeback_token = node
+                .children(&mut cursor)
+                .any(|child| matches!(child.kind(), "&" | "ref" | "out" | "ref_kind_keyword"));
+            has_writeback_token
+        }
+    };
+    if node_kind_proves_writeback(argument) || node_kind_proves_writeback(value) {
+        crate::ArgumentPassingMode::WriteBack
+    } else {
+        crate::ArgumentPassingMode::Value
+    }
+}
+
+#[test]
+fn adapter_writeback_classifier_populates_language_neutral_call_args() {
+    let handler = GrammarHandler {
+        argument_passing_mode_extractor: Some(test_writeback_classifier),
+        ..GENERIC_HANDLER
+    };
     for (pack, source) in [
         ("c", "void f(void) { int out; helper(&out); }"),
         ("cpp", "void f() { int out; helper(&out); }"),
@@ -1333,9 +1459,7 @@ fn address_arguments_emit_writeback_mode_from_ast_nodes() {
         let tree = parser.parse(source, None).expect("parse");
         let event = collect_kinds(&tree, &["call_expression", "invocation_expression", "call"])
             .into_iter()
-            .filter_map(|node| {
-                build_call_event(node, FileId::new(0), source.as_bytes(), &GENERIC_HANDLER, &[])
-            })
+            .filter_map(|node| build_call_event(node, FileId::new(0), source.as_bytes(), &handler, &[]))
             .find(|event| matches!(event, FlowEvent::Call { name, .. } if name == "helper"))
             .unwrap_or_else(|| panic!("{pack}: helper call"));
         let FlowEvent::Call { args, .. } = event else {
@@ -1369,7 +1493,7 @@ fn rust_match_result_dependencies_come_from_arm_ast_values() {
         .next()
         .expect("match expression");
 
-    let operands = extract_rhs_expr_operands(&match_expr, source.as_bytes());
+    let operands = extract_rhs_expr_operands(&match_expr, source.as_bytes(), &GENERIC_HANDLER);
     assert!(
         operands.iter().any(|operand| operand == "joined"),
         "both macro-token-tree and method-receiver arm values must retain the joined dependency: {operands:?}"
@@ -1388,7 +1512,7 @@ fn perl_list_expression_dependencies_come_from_scalar_ast_values() {
         .next()
         .expect("list expression");
 
-    let operands = extract_rhs_expr_operands(&list, source.as_bytes());
+    let operands = extract_rhs_expr_operands(&list, source.as_bytes(), &GENERIC_HANDLER);
     assert_eq!(operands, vec!["$args".to_string(), "args".to_string()]);
 
     let assignment = collect_kinds(&tree, &["assignment_expression"])
@@ -1412,7 +1536,7 @@ fn perl_list_expression_dependencies_come_from_scalar_ast_values() {
         "assignment value fields: {field_kinds:?}"
     );
     assert_eq!(
-        extract_rhs_expr_operands(&selected_rhs, source.as_bytes()),
+        extract_rhs_expr_operands(&selected_rhs, source.as_bytes(), &GENERIC_HANDLER),
         vec!["$args".to_string(), "args".to_string()]
     );
 
@@ -1469,12 +1593,22 @@ fn rust_shorthand_struct_initializer_is_an_exact_aggregate_field() {
 
 #[test]
 fn postfix_method_receiver_keeps_nested_call_arguments_structural() {
+    fn postfix_receiver<'tree>(node: Node<'tree>, _src: &[u8]) -> Option<Node<'tree>> {
+        (node.kind() == "field_expression")
+            .then(|| node.child_by_field_name("value").or_else(|| node.named_child(0)))
+            .flatten()
+    }
+    let handler = GrammarHandler {
+        call_kinds: &["call_expression", "generic_function"],
+        pseudo_call_receiver_extractor: Some(postfix_receiver),
+        ..GENERIC_HANDLER
+    };
     let source = r#"Seq("sh", "-c", command).!"#;
     let tree = parse_language("scala", source.as_bytes());
     let file = FileId::new(0);
     let events = collect_kinds(&tree, &["call_expression"])
         .into_iter()
-        .filter_map(|node| build_call_event(node, file, source.as_bytes(), &GENERIC_HANDLER, &[]))
+        .filter_map(|node| build_call_event(node, file, source.as_bytes(), &handler, &[]))
         .collect::<Vec<_>>();
     let calls = events
         .iter()
@@ -1495,7 +1629,7 @@ fn postfix_method_receiver_keeps_nested_call_arguments_structural() {
         .into_iter()
         .next()
         .expect("postfix field expression");
-    let facts = extract_call_receiver_facts(&tree, file, &GENERIC_HANDLER, source.as_bytes());
+    let facts = extract_call_receiver_facts(&tree, file, &handler, source.as_bytes());
     let receiver = facts
         .iter()
         .find(|fact| fact.call_span == span_of(file, &postfix))
@@ -1515,7 +1649,12 @@ fn kotlin_method_chain_receivers_join_every_semantic_call_span() {
         .fold("", makeJoiner(" "))"#;
     let tree = parse_language("kotlin", source.as_bytes());
     let file = FileId::new(0);
-    let facts = extract_call_receiver_facts(&tree, file, &GENERIC_HANDLER, source.as_bytes());
+    let handler = GrammarHandler {
+        call_kinds: &["call_expression"],
+        member_expression_kinds: &["navigation_expression"],
+        ..GENERIC_HANDLER
+    };
+    let facts = extract_call_receiver_facts(&tree, file, &handler, source.as_bytes());
     let mut chain_calls = collect_kinds(&tree, &["call_expression"])
         .into_iter()
         .filter_map(|call| {

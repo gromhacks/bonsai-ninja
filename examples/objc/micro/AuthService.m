@@ -1,9 +1,4 @@
-#import <Foundation/Foundation.h>
-
-@interface AuthService : NSObject
-- (NSNumber *)verifyToken:(NSString *)token;
-- (void)runAdminCommand:(NSNumber *)userId action:(NSString *)action;
-@end
+#import "AuthService.h"
 
 @implementation AuthService
 - (NSNumber *)verifyToken:(NSString *)token {

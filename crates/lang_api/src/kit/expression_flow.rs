@@ -5,14 +5,28 @@ use tree_sitter::Node;
 
 use crate::{ExpressionField, ExpressionFlow, ExpressionProjection};
 
+#[cfg(test)]
+use super::GENERIC_HANDLER;
 use super::{
     argument_place, extract_rhs_expr_operands, looks_like_identifier, looks_like_literal_value, node_text,
-    span_of, COMMON_CALL_KINDS,
+    span_of, GrammarHandler,
 };
 
 /// Lower one parsed value expression into compiler-owned flow facts.
 #[must_use]
+#[cfg(test)]
 pub fn expression_flow_from_node(node: Node<'_>, file: FileId, src: &[u8]) -> ExpressionFlow {
+    expression_flow_from_node_with_handler(node, file, src, &GENERIC_HANDLER)
+}
+
+/// Lower an expression with the active adapter's exact grammar semantics.
+#[must_use]
+pub fn expression_flow_from_node_with_handler(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> ExpressionFlow {
     let place = argument_place(&node, src);
     let projection = place
         .as_deref()
@@ -21,15 +35,15 @@ pub fn expression_flow_from_node(node: Node<'_>, file: FileId, src: &[u8]) -> Ex
     let mut flow = ExpressionFlow {
         place,
         projection,
-        source_names: scalar_source_names(node, src),
-        call_sites: expression_call_spans(node, file),
+        source_names: scalar_source_names(node, src, handler),
+        call_sites: expression_call_spans(node, file, handler),
         ..ExpressionFlow::default()
     };
 
     if is_nested_aggregate(node.kind()) {
         let mut fields = Vec::new();
         let mut spreads = Vec::new();
-        collect_aggregate_members(node, node, file, src, &mut fields, &mut spreads);
+        collect_aggregate_members(node, node, file, src, handler, &mut fields, &mut spreads);
         if !fields.is_empty() || !spreads.is_empty() {
             flow.aggregate_fields = fields;
             flow.spreads = spreads;
@@ -49,13 +63,14 @@ pub fn expression_flow_from_node(node: Node<'_>, file: FileId, src: &[u8]) -> Ex
         for child in node.named_children(&mut cursor) {
             if is_spread_node(child.kind()) {
                 if let Some(value) = spread_value_node(child) {
-                    flow.spreads.push(expression_flow_from_node(value, file, src));
+                    flow.spreads
+                        .push(expression_flow_from_node_with_handler(value, file, src, handler));
                 }
                 continue;
             }
             let value = aggregate_value_node(child).unwrap_or(child);
             if !is_syntax_only_tuple_child(value.kind()) {
-                items.push(expression_flow_from_node(value, file, src));
+                items.push(expression_flow_from_node_with_handler(value, file, src, handler));
             }
         }
         if !items.is_empty() || !flow.spreads.is_empty() {
@@ -78,6 +93,7 @@ pub(super) fn positional_expression_flow_from_node(
     node: Node<'_>,
     file: FileId,
     src: &[u8],
+    handler: &GrammarHandler,
 ) -> ExpressionFlow {
     let mut tuple_items = Vec::new();
     let mut spreads = Vec::new();
@@ -85,10 +101,10 @@ pub(super) fn positional_expression_flow_from_node(
     for child in node.named_children(&mut cursor) {
         if is_spread_node(child.kind()) {
             if let Some(value) = spread_value_node(child) {
-                spreads.push(expression_flow_from_node(value, file, src));
+                spreads.push(expression_flow_from_node_with_handler(value, file, src, handler));
             }
         } else if !is_syntax_only_tuple_child(child.kind()) {
-            tuple_items.push(expression_flow_from_node(child, file, src));
+            tuple_items.push(expression_flow_from_node_with_handler(child, file, src, handler));
         }
     }
     ExpressionFlow {
@@ -98,23 +114,23 @@ pub(super) fn positional_expression_flow_from_node(
     }
 }
 
-fn scalar_source_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
-    fn collect(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
-        if is_call_node(node.kind()) {
+fn scalar_source_names(node: Node<'_>, src: &[u8], handler: &GrammarHandler) -> Vec<String> {
+    fn collect(node: Node<'_>, src: &[u8], handler: &GrammarHandler, out: &mut Vec<String>) {
+        if handler.is_call(node.kind()) {
             return;
         }
-        if !contains_call(node) {
-            out.extend(extract_rhs_expr_operands(&node, src));
+        if !contains_call(node, handler) {
+            out.extend(extract_rhs_expr_operands(&node, src, handler));
             return;
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            collect(child, src, out);
+            collect(child, src, handler, out);
         }
     }
 
     let mut out = Vec::new();
-    collect(node, src, &mut out);
+    collect(node, src, handler, &mut out);
     out.sort();
     out.dedup();
     // The operand extractor deliberately reports both `obj.field` and its
@@ -132,40 +148,32 @@ fn scalar_source_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
     out
 }
 
-fn contains_call(node: Node<'_>) -> bool {
-    if is_call_node(node.kind()) {
+fn contains_call(node: Node<'_>, handler: &GrammarHandler) -> bool {
+    if handler.is_call(node.kind()) {
         return true;
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if contains_call(child) {
+        if contains_call(child, handler) {
             return true;
         }
     }
     false
 }
 
-fn is_call_node(kind: &str) -> bool {
-    COMMON_CALL_KINDS.contains(&kind)
-        || matches!(
-            kind,
-            "method_call" | "message_expression" | "remote_call" | "function_call_expression"
-        )
-}
-
-pub(super) fn expression_call_spans(node: Node<'_>, file: FileId) -> Vec<Span> {
-    fn collect(node: Node<'_>, file: FileId, out: &mut Vec<Span>) {
-        if is_call_node(node.kind()) {
+pub(super) fn expression_call_spans(node: Node<'_>, file: FileId, handler: &GrammarHandler) -> Vec<Span> {
+    fn collect(node: Node<'_>, file: FileId, handler: &GrammarHandler, out: &mut Vec<Span>) {
+        if handler.is_call(node.kind()) {
             out.push(span_of(file, &node));
             return;
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            collect(child, file, out);
+            collect(child, file, handler, out);
         }
     }
     let mut out = Vec::new();
-    collect(node, file, &mut out);
+    collect(node, file, handler, &mut out);
     out.sort_by_key(|span| (span.file.raw(), span.start, span.end));
     out.dedup();
     out
@@ -176,6 +184,7 @@ fn collect_aggregate_members(
     node: Node<'_>,
     file: FileId,
     src: &[u8],
+    handler: &GrammarHandler,
     fields: &mut Vec<ExpressionField>,
     spreads: &mut Vec<ExpressionFlow>,
 ) {
@@ -184,7 +193,7 @@ fn collect_aggregate_members(
     }
     if is_spread_node(node.kind()) {
         if let Some(value) = spread_value_node(node) {
-            spreads.push(expression_flow_from_node(value, file, src));
+            spreads.push(expression_flow_from_node_with_handler(value, file, src, handler));
         }
         return;
     }
@@ -193,7 +202,7 @@ fn collect_aggregate_members(
             fields.push(ExpressionField {
                 name,
                 value_span: Some(span_of(file, &value)),
-                value: expression_flow_from_node(value, file, src),
+                value: expression_flow_from_node_with_handler(value, file, src, handler),
             });
         }
         return;
@@ -204,14 +213,14 @@ fn collect_aggregate_members(
             fields.push(ExpressionField {
                 name: name.to_string(),
                 value_span: Some(span_of(file, &node)),
-                value: expression_flow_from_node(node, file, src),
+                value: expression_flow_from_node_with_handler(node, file, src, handler),
             });
         }
         return;
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_aggregate_members(root, child, file, src, fields, spreads);
+        collect_aggregate_members(root, child, file, src, handler, fields, spreads);
     }
 }
 
@@ -331,7 +340,7 @@ fn is_nested_aggregate(kind: &str) -> bool {
 /// Decode every scalar field in a complete, spread-free aggregate.
 ///
 /// The shared walker contributes only grammar structure and static field
-/// relationships already used by [`expression_flow_from_node`]. Literal
+/// relationships already used by [`expression_flow_from_node_with_handler`]. Literal
 /// spelling remains language-owned through `decode`. Any dynamic key,
 /// spread, duplicate field, or non-scalar leaf makes the aggregate inexact.
 pub(super) fn exact_static_aggregate_fields(

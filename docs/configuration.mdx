@@ -34,7 +34,10 @@ bonsai-ninja does not require a project config file for normal scans. Workspace-
 | `security-patterns/` | directory | Auto-discovered | Rulepack root when `--rules-dir` and `BONSAI_RULES_DIR` are not set. |
 
 Sidecars are validated by source-content hashes, dependency hashes, and
-pipeline-config fingerprints. Cache diagnostics also decode sidecar headers
+pipeline-config fingerprints. Derived semantic pipeline identities also bind
+the compiler-object frontend ABI: changing AST lowering invalidates an older
+callgraph or IDG even if no source file changed. Root-only cache validation
+reconstructs that same ABI-bound identity. Cache diagnostics also decode sidecar headers
 and payload indexes for the binary caches they report, so corrupt same-size
 files are marked stale instead of treated as reusable. Stale or mismatched
 sidecars are ignored and rebuilt by the command that needs them. `cache stats` reports the same

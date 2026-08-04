@@ -4,14 +4,14 @@ use bonsai_lang_api::{
     collect_assign_targets, collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler,
     extract_imports_via,
     kit::{
-        canonical_simple_type_name, collect_kinds, collect_receiver_field_writes, first_named_child_of_kind,
-        language_from_pack, node_text, parse_with, span_of, walk_flow_events,
-        with_fn_kinds_and_implicit_receivers,
+        canonical_simple_type_name, collect_kinds, collect_receiver_field_writes,
+        collect_receiver_state_sources, first_named_child_of_kind, language_from_pack, node_text, parse_with,
+        span_of, walk_flow_events,
     },
-    rewrite_implicit_member_reads, AdapterContext, AdapterError, CallKind, Decl, DeclIndex, DeclKind,
-    FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, ModifierVocabulary, SyntaxSpecialForm, TypeAliasBinding,
-    TypeAliasVocabulary, Visibility,
+    rewrite_implicit_member_reads, AdapterContext, AdapterError, ArgumentPassingMode, CallKind, Decl,
+    DeclIndex, DeclKind, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, SyntaxSpecialForm,
+    TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 use tree_sitter::Node;
 
@@ -53,7 +53,14 @@ use tree_sitter::{Language, Tree};
 pub const LANG_ID: LanguageId = LanguageId::new("swift");
 const PACK_NAME: &str = "swift";
 const HANDLER: GrammarHandler = GrammarHandler {
+    fn_kinds: &["function_declaration"],
+    call_kinds: &["call_expression"],
+    argument_passing_mode_extractor: Some(swift_argument_passing_mode),
     constructor_names: &["init"],
+    runtime_type_guard_operators: &["is"],
+    call_ref_kinds: &["call_expression"],
+    member_expression_kinds: &["navigation_expression", "qualified_access_expression"],
+    subscript_expression_kinds: &["subscript_expression"],
     class_kinds: &[
         "class_declaration",
         "struct_declaration",
@@ -68,9 +75,42 @@ const HANDLER: GrammarHandler = GrammarHandler {
         ("enum_declaration", DeclKind::Enum),
         ("extension_declaration", DeclKind::Class),
     ],
+    method_context_kinds: &[
+        "class_declaration",
+        "struct_declaration",
+        "protocol_declaration",
+        "enum_declaration",
+        "extension_declaration",
+    ],
+    constructor_method_kinds: &["init_declaration"],
+    if_kinds: &["if_statement", "switch_statement", "guard_statement"],
+    for_kinds: &["for_statement"],
+    while_kinds: &["while_statement"],
+    do_kinds: &["do_statement", "repeat_while_statement"],
+    assignment_kinds: &["assignment", "property_declaration"],
+    return_kinds: &["control_transfer_statement"],
+    lambda_kinds: &["lambda_literal"],
+    try_kinds: &["try_expression", "do_statement"],
+    catch_kinds: &["catch_block"],
+    await_kinds: &["await_expression"],
     special_forms: &[SyntaxSpecialForm::TrailingClosureDefer],
-    ..with_fn_kinds_and_implicit_receivers(&["function_declaration"], &["self", "super"], &[])
+    implicit_receiver_names: &["self", "super"],
+    ..EMPTY_HANDLER
 };
+
+fn swift_argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> ArgumentPassingMode {
+    if [argument, value].into_iter().any(|node| {
+        node.kind() == "prefix_expression" && {
+            let mut cursor = node.walk();
+            let has_address_of = node.children(&mut cursor).any(|child| child.kind() == "&");
+            has_address_of
+        }
+    }) {
+        ArgumentPassingMode::WriteBack
+    } else {
+        ArgumentPassingMode::Value
+    }
+}
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct SwiftAdapter;
@@ -1117,6 +1157,14 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
             };
         // Name span: the simple_identifier under `name: pattern`.
         let name_span = swift_property_name_span(prop, file).unwrap_or(body_span);
+        // This declaration is synthesized after the kit's ordinary callable
+        // lowering pass, so derive the same receiver-state summary here from
+        // the exact getter events. A computed getter such as
+        // `var cmd { data.cmd }` consumes the enclosing instance's `data`
+        // field; leaving this empty loses constructor state when a caller
+        // evaluates the implicit `self.cmd` access.
+        let receiver_state_sources =
+            collect_receiver_state_sources(&flow_events, &[], HANDLER.implicit_receiver_names);
         synthesized.push(Decl {
             symbol: bonsai_common::SymbolId::new(next),
             kind: DeclKind::Method,
@@ -1137,7 +1185,7 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
             receiver_param_index: None,
             receiver_field_writes: Vec::new(),
             implicit_receiver_names: vec!["self".to_string(), "super".to_string()],
-            receiver_state_sources: Vec::new(),
+            receiver_state_sources,
             return_type: None,
             is_variadic: false,
         });

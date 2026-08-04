@@ -129,13 +129,7 @@ pub fn extract_generic_imports(tree: &tree_sitter::Tree, file: FileId, src: &[u8
             // `App\Service as S` → `Service`).
             let head_trim = head.trim();
             if original_name.is_none() {
-                let seg = head_trim
-                    .rsplit_once("::")
-                    .map(|(_, s)| s)
-                    .or_else(|| head_trim.rsplit_once('.').map(|(_, s)| s))
-                    .or_else(|| head_trim.rsplit_once('\\').map(|(_, s)| s))
-                    .map(str::trim)
-                    .unwrap_or(head_trim);
+                let seg = bonsai_common::short_qualified_tail(head_trim).trim();
                 if !seg.is_empty() && seg.chars().all(|c| c.is_alphanumeric() || c == '_') {
                     original_name = Some(seg.to_string());
                 }

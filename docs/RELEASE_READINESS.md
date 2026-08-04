@@ -25,7 +25,7 @@ The analyzer is one compiler-style pipeline:
 
 ## Current validation
 
-Validated on 2026-08-02:
+Validated on 2026-08-03 (dated measurements below retain their run date):
 
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` passed;
   this strict gate compiled the complete workspace and every test target.
@@ -46,11 +46,22 @@ Validated on 2026-08-02:
   `Missing` cell.
 - Focused regressions passed for generation-scoped IDG pipeline-hash reuse,
   fixed-width symbolic fact/transform paging, external-run merge boundaries,
-  and every symbolic transform algebra variant.
+  every symbolic transform algebra variant, incomplete target-relevance
+  fallback, C++ direct/base-constructor initialization lowered from the
+  Tree-sitter AST, Ruby template instance-variable inputs, and Swift computed
+  getter receiver state across constructor/inheritance hops. The IDG suite
+  also pins parameter-less receiver-root mapping and finite composition of a
+  resolved receiver place plus selector demand.
+- `security sanitizers` inventories only credit-bearing sanitizer matches.
+  Rulepack-compatible passthrough transfers and generic non-crediting
+  validation markers remain available to taint propagation but cannot be
+  mislabeled by that command surface.
 - Layering, public-API, hardcoded-knowledge, adapter-capability, and adapter
-  `FlowEvent` snapshot audits passed. All 21 adapters explicitly declare the
-  compiler capability fields consumed by shared analysis; the reviewed
-  hardcoded-knowledge baseline contains 187 non-adapter hits.
+  `FlowEvent` snapshot audits passed. The hardcoded-knowledge audit excludes
+  test fixtures and classifies production literals by ownership: grammar
+  syntax in adapters, API/security identities in rule data, and only typed
+  IR/protocol/product constants in shared crates. This gate is zero-tolerance:
+  it has no baseline that can normalize an existing violation.
 
 The current deep rulepack gate is clean:
 
@@ -64,11 +75,11 @@ The current deep rulepack gate is clean:
 
 | Measure | Result |
 |---|---:|
-| Rules | 7,152 |
-| Enabled rules | 5,994 |
-| Disabled rules | 1,158 |
-| Match examples | 10,503 |
-| Enabled match examples | 10,079 |
+| Rules | 7,159 |
+| Enabled rules | 5,996 |
+| Disabled rules | 1,163 |
+| Match examples | 10,519 |
+| Enabled match examples | 10,084 |
 | Taint-replay misses | 0 |
 | Errors | 0 |
 | Warnings | 0 |
@@ -113,22 +124,41 @@ seconds with 35,110,912 bytes maximum RSS.
 ## Elasticsearch scale result
 
 The current release pipeline is measured against the sibling 30,055-source
-Elasticsearch checkout. The 2026-08-02 exact large-workspace integration gate
-passed 5/5 in 235.33 seconds under a 3 GiB scheduling budget. It starts fresh
+Elasticsearch checkout. The 2026-08-03 exact large-workspace integration gate
+passed 5/5 in 221.99 seconds under a 3 GiB scheduling budget. It starts fresh
 processes and covers fresh-cache taint planning, warm semantic reuse, nine
 navigation commands, targeted inspect with taint evidence, security inventory,
 and production taint. Its enforced ceilings are 15 seconds for warm semantic
 reuse and 30 seconds for each measured query/analysis command.
 
-The generation validation/open phase completed in 12.23 seconds and the
-immediate fresh-process warm reuse completed in 2.52 seconds. The broad exact
-`inspect execute --taint-flow` regression query completed in 26.74 seconds and
-reported 3,895 declaration hits, 26,148 other syntax hits, 140,531 unique raw
-taint flows, and 12,355/12,355 warmed-IDG entry closures. It used
-3,229,761,536 bytes maximum RSS, a 2,257,724,096-byte peak physical footprint,
-and zero swaps. The scheduler budget controls live compiler phase overlap and
-spill policy; clean mapped factstore pages can make OS RSS exceed that budget
-slightly without increasing the dirty physical footprint.
+The cached generation validation/open phase completed in 5.40 seconds and the
+immediate fresh-process warm reuse completed in 2.44 seconds. The broad exact
+`inspect execute --taint-flow` regression query completed in 29.48 seconds and
+reported 3,895 declaration hits, 26,047 other syntax hits, 198,718 unique raw
+taint flows, and 12,233/12,233 scoped-IDG entry closures. A matching timed run
+used 3,420,733,440 bytes maximum RSS, a 2,775,017,280-byte peak physical
+footprint, and zero swaps. The scheduler charges the measured non-reclaimable
+linkage/output reserve plus 128 MiB per sparse rooted closure; it does not treat
+clean file-backed factstore pages as committed transient memory. Subject to
+CPU availability, 3 GiB permits up to ten workers, 2 GiB up to two, and 1 GiB
+one worker. Concurrency changes only scheduling, never entries, targets,
+closure, or output.
+
+The same current generation was also built once from an empty semantic cache.
+That explicit, opt-in `index --semantic` compiler prewarm completed in
+1,603.47 seconds (26m43s) with about 1.06 GiB maximum RSS. Normal commands do
+not force that whole-workspace prewarm: cold production taint completed in
+30.90 seconds, warm production taint in 28.56 seconds, and exact syntax
+commands hydrate only the product they request. The long explicit prewarm is
+recorded honestly because it remains a bulk cache-publication operation, not
+an interactive-command latency claim.
+
+Raw-flow pagination is presentation-only and remains exhaustive. Each closure
+worker records a conservative row-size estimate while the row is hot; the
+renderer then plans page boundaries without serializing or rescanning all
+198,718 paths. It formats and caches only the requested raw-taint page instead
+of eagerly rendering future pages. Page/cursor navigation still addresses the
+complete deterministic unit stream.
 
 The IDG query accelerator's dense compiler header is a fixed-width,
 little-endian representation with checked row counts and exact byte-length,
@@ -139,10 +169,18 @@ surviving compiler hits instead of comparing every hit with every prior row.
 Both properties are covered by the exact Elasticsearch gate; neither changes
 the admitted syntax facts, graph, closure, or rendered paging contract.
 
-Exact sanitizer inventory examined all 30,055 files, rejected
-25,673 through raw/import/syntax compiler headers, decoded 4,382 bodies, and
-emitted 11,446 matches in 28.01 seconds. These are syntax/compiler facts, not
-Elasticsearch-specific name lists.
+Symbolic projection admission is likewise compiler-driven. Exact projected
+fact keys and typed whole-aggregate consumer markers are persisted in the
+runtime accelerator. Backwards demand uses lazy sparse/spill sets and admits a
+wildcard base only for an AST-proven aggregate consumer; generic reads and
+callee-name matching cannot manufacture field flow. Regression tests pin
+scalar-to-receiver mapping, sibling-field isolation, clean output-argument
+overwrites, Java record accessors, and C# expression-bodied properties.
+
+The final gate measured source inventory at 4.13 seconds, the exhaustive
+high-severity sink inventory at 21.42 seconds, credit-bearing sanitizer
+inventory at 15.57 seconds, and dependency inventory at 9.65 seconds. These
+are syntax/compiler and rulepack facts, not Elasticsearch-specific name lists.
 
 Production security in the integration gate reports
 `analysis_complete: true`. The result is not capped: `--all` changes output
@@ -221,31 +259,19 @@ external implementations cannot be presented as resolved compiler facts.
 
 ## External benchmark snapshot
 
-The 2026-07-28 CVEBench-SAST run used isolated temporary copies of every
-vulnerable and fixed repository and did not mutate the benchmark checkout.
-All 460 scans completed successfully. Mean scan latency was 0.494 seconds and
-p95 was 1.143 seconds.
+The final 2026-08-02 CVEBench-SAST artifact used isolated copies of every
+vulnerable and fixed repository. Its verified report records 229/230 primary
+detections, 100% sanitizer recognition, 0 decoy trips, 0 duplicate findings,
+0 incomplete scans, 89.80% precision, 97.83% fix validation, and a 4.9348 mean
+score. The sole miss is the documented `XSSFWorkbook` case: the benchmark
+labels normal spreadsheet construction as an XXE sink even though that API
+does not parse attacker-controlled XML. Bonsai intentionally does not add a
+false sink to make that invalid case pass.
 
-The benchmark's published aggregation reports:
-
-- Detection recall: 99.6%.
-- Precision: 88.4%.
-- False positives per kLOC: 0.71.
-- Sanitizer recognition: 67.8%.
-- Fix-validation rate: 67.4%.
-- Decoy trip rate: 0.13%.
-- Mean final score: 4.32.
-
-The underlying artifact audit is stronger and also exposes dataset defects.
-Every one of the 230 primary source-to-sink flows was found. The sole apparent
-primary miss is an internally contradictory case whose planted sink is also
-listed as a safe decoy. Of the fixed snapshots, 141 are source-identical to
-their vulnerable snapshot and 19 more differ only by a missing `go.sum`; all
-70 snapshots with an actual source change are clean. The benchmark also labels
-safe allowlisted SQL, quoted shell arguments, strict numeric validation,
-defused/hardened XML parsing, SSRF private-IP guards, and even non-sink lines
-as secondary bugs. Those labels are not a reason to weaken compiler evidence
-or deliberately add false positives.
+Benchmark metrics are evidence about the checked corpus, not a substitute for
+the 21-language adapter/rule conformance gates. Dataset corrections must be
+versioned and rescored separately; they must never be encoded as shared-engine
+API guesses.
 
 The recorded OWASP Benchmark v1.2 Java snapshot had an overall score of
 54.04, with LDAP TPR/FPR 66.67%/0.00%, XPath 66.67%/10.00%, and SQL injection
@@ -263,7 +289,9 @@ git diff --check
 cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
-  --document-private-items --locked
+  --document-private-items --release --locked
+
+cargo build --release -p bonsai_cli --locked
 
 ./target/release/bonsai-ninja security . pack --validate --taint-replay \
   --rules-dir security-patterns \
@@ -273,11 +301,16 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
 
 cargo test -p bonsai_conformance --test architecture_invariants
 cargo test -p bonsai_security --test rulepack_conformance
+python3 scripts/sanitizer_credit_audit.py
+python3 scripts/sync_skill.py --check
 scripts/audit-layering.sh
 scripts/audit-hardcoded.sh --check
 scripts/audit-public-api.sh --check
 scripts/audit-adapter-capabilities.sh --check
 scripts/audit-adapter-flow-events.sh --check
+
+cargo test --release -p bonsai_cli --test elasticsearch_large_repo -- \
+  --nocapture
 ```
 
 Run the Elasticsearch and external benchmark gates when engine, resolver,

@@ -243,6 +243,55 @@ fn export_output_path_streams_native_json() {
     let _ = std::fs::remove_file(out_path);
 }
 
+#[test]
+fn html_output_is_a_complete_themed_report_without_extra_analysis() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = ws();
+    let out_path = temp_output_path("defs-html");
+    let out = Command::new(&bin)
+        .args([
+            "defs",
+            ws.to_str().unwrap(),
+            "--html-output",
+            out_path.to_str().unwrap(),
+            "--theme",
+            "moss",
+            "--no-progress",
+        ])
+        .env("COLUMNS", "200")
+        .env_remove("BONSAI_CONTEXT")
+        .output()
+        .expect("failed to run bonsai-ninja");
+    assert!(
+        out.status.success(),
+        "defs --html-output failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "stdout should be empty when --html-output is set, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let written = std::fs::read_to_string(&out_path).expect("read HTML output file");
+    for required in [
+        "<!doctype html>",
+        "<title>bonsai-ninja report</title>",
+        "Moss theme",
+        "verify_token",
+        "</pre></main>",
+        "</body></html>",
+    ] {
+        assert_contains(&written, required, "defs --html-output");
+    }
+    assert!(
+        !written.contains("\u{1b}["),
+        "HTML output must not contain terminal ANSI escapes"
+    );
+    let _ = std::fs::remove_file(out_path);
+}
+
 // -------- index --------
 
 #[test]

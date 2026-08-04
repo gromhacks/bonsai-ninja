@@ -146,12 +146,10 @@ fn prune_call_result_source_names(
 }
 
 fn call_result_identifier_names_match(left: &str, right: &str) -> bool {
-    let left = left
-        .trim()
-        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION);
+    let left = left.trim().trim_start_matches(bonsai_common::is_name_punctuation);
     let right = right
         .trim()
-        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION);
+        .trim_start_matches(bonsai_common::is_name_punctuation);
     !left.is_empty() && left == right
 }
 
@@ -165,23 +163,20 @@ fn call_result_names_match(left: &str, right: &str) -> bool {
 }
 
 fn call_receiver_and_tail(call: &str) -> Option<(&str, &str, bool)> {
-    [".", "::", "->"].into_iter().find_map(|separator| {
-        let (receiver, tail) = call.rsplit_once(separator)?;
-        let receiver = receiver.trim();
-        let tail = tail.trim();
-        if receiver.is_empty() || tail.is_empty() {
-            return None;
-        }
-        Some((
-            receiver,
-            tail,
-            receiver.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()),
-        ))
-    })
+    let receiver = bonsai_common::qualified_name_owner(call)?.trim();
+    let tail = bonsai_common::short_qualified_tail(call).trim();
+    if receiver.is_empty() || tail.is_empty() {
+        return None;
+    }
+    Some((
+        receiver,
+        tail,
+        receiver.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()),
+    ))
 }
 
 fn call_result_short_tail(name: &str) -> &str {
-    name.rsplit(['.', ':', '>']).next().unwrap_or(name).trim()
+    bonsai_common::short_qualified_tail(name).trim()
 }
 
 fn call_result_identifier_tokens(text: &str) -> Vec<String> {

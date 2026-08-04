@@ -3,8 +3,8 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        apply_lexical_member_qualified_names, call_arg_from_node, collect_kinds, language_from_pack,
-        node_at_span, node_text, parse_with, span_of,
+        apply_lexical_member_qualified_names, call_arg_from_node_with_handler, collect_kinds,
+        language_from_pack, node_at_span, node_text, parse_with, span_of,
     },
     AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
     FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
@@ -90,8 +90,21 @@ const HANDLER: GrammarHandler = GrammarHandler {
     while_kinds: &["while_statement"],
     do_kinds: &["do_while_statement"],
     loop_kinds: &[],
-    call_kinds: &["call_expression", "modifier_invocation"],
-    assignment_kinds: &["assignment_expression", "variable_declaration_statement"],
+    // `emit_statement` owns its payload nodes directly rather than wrapping
+    // a call expression. Lower its event constructor as an ordinary call so
+    // branch ownership is present before the adapter adds the canonical
+    // `emit` pseudo-call at the same CST span.
+    call_kinds: &["call_expression", "emit_statement", "modifier_invocation"],
+    argument_passing_mode_extractor: None,
+    call_ref_kinds: &["call_expression", "modifier_invocation"],
+    member_expression_kinds: &["member_expression"],
+    subscript_expression_kinds: &["subscript_expression"],
+    synthetic_call_ref_names: &[("emit_statement", "emit"), ("revert_statement", "revert")],
+    assignment_kinds: &[
+        "assignment_expression",
+        "augmented_assignment_expression",
+        "variable_declaration_statement",
+    ],
     return_kinds: &["return_statement"],
     throw_kinds: &["revert_statement"],
     lambda_kinds: &[],
@@ -110,6 +123,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     implicit_receiver_prefixes: &[],
     tail_expression_returns: false,
     void_return_type_names: &[],
+    ..bonsai_lang_api::EMPTY_HANDLER
 };
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -347,7 +361,9 @@ fn synthesize_yul_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Spa
                 }
                 let mut args: Vec<CallArg> = Vec::new();
                 for arg_node in children.iter().skip(1) {
-                    if let Some(argument) = call_arg_from_node(*arg_node, file, src, None) {
+                    if let Some(argument) =
+                        call_arg_from_node_with_handler(*arg_node, file, src, None, &HANDLER)
+                    {
                         args.push(argument);
                     }
                 }
@@ -390,7 +406,7 @@ fn synthesize_emit_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Sp
             }
             // Unwrap the `call_argument` to its inner expression so the value
             // text matches what shows up at non-emit call sites.
-            if let Some(argument) = call_arg_from_node(child, file, src, None) {
+            if let Some(argument) = call_arg_from_node_with_handler(child, file, src, None, &HANDLER) {
                 args.push(argument);
             }
         }

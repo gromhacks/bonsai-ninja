@@ -444,12 +444,7 @@ fn workspace_module_tails(ws: &Workspace) -> AHashSet<String> {
     ws.compiler_linkage_index()
         .all_files()
         .filter_map(|file| ws.vfs().path(file).ok())
-        .filter_map(|path| {
-            normalize_file_key(&path.to_string_lossy())
-                .rsplit('/')
-                .next()
-                .map(str::to_string)
-        })
+        .filter_map(|path| bonsai_resolve::module_path_parts(&path.to_string_lossy()).pop())
         .filter(|tail| !tail.is_empty())
         .collect()
 }
@@ -772,61 +767,22 @@ fn alias_target_is_external(target: &AliasTarget, workspace_module_tails: &AHash
 }
 
 fn module_may_target_workspace(workspace_module_tails: &AHashSet<String>, module: &str) -> bool {
-    let Some(module_key) = normalize_module_key(module) else {
+    let Some(module_tail) = bonsai_resolve::module_target_parts(module).pop() else {
         return false;
     };
-    let module_tail = module_key.rsplit('/').next().unwrap_or(module_key.as_str());
-    !module_tail.is_empty() && workspace_module_tails.contains(module_tail)
-}
-
-fn normalize_module_key(module: &str) -> Option<String> {
-    let trimmed = module
-        .trim()
-        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
-        .trim_start_matches('.')
-        .trim_end_matches(['/', '\\'])
-        .trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    // `::` first so a scope separator collapses to a single `/`, then the
-    // remaining single-char separators together.
-    let mut out = trimmed.replace("::", "/").replace(['\\', ':', '.'], "/");
-    out = strip_known_extension(&out).to_string();
-    Some(
-        out.split('/')
-            .filter(|part| !part.is_empty() && *part != ".")
-            .collect::<Vec<_>>()
-            .join("/"),
-    )
-    .filter(|key| !key.is_empty())
-}
-
-fn normalize_file_key(path: &str) -> String {
-    let path = path.replace('\\', "/");
-    let stripped = strip_known_extension(&path);
-    stripped
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn strip_known_extension(path: &str) -> &str {
-    const EXTS: &[&str] = &[
-        ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".scala", ".go", ".rs", ".c", ".h", ".cc",
-        ".cpp", ".cxx", ".hpp", ".cs", ".rb", ".php", ".swift", ".dart", ".ex", ".exs", ".erl", ".hrl",
-        ".lua", ".pl", ".pm", ".m", ".mm", ".sol",
-    ];
-    EXTS.iter().find_map(|ext| path.strip_suffix(ext)).unwrap_or(path)
+    workspace_module_tails.contains(&module_tail)
 }
 
 fn receiver_name_from_call_name(name: &str) -> Option<&str> {
-    name.rsplit_once(['.', ':']).map(|(receiver, _)| receiver.trim())
+    bonsai_common::qualified_name_owner(name)
 }
 
 fn call_alias_head(name: &str) -> Option<&str> {
-    simple_local_binding(name.split(['.', ':', '/', '\\']).next().unwrap_or(name))
+    let head = bonsai_common::qualified_name_segments(name)
+        .into_iter()
+        .next()
+        .unwrap_or(name);
+    simple_local_binding(head)
 }
 
 fn receiver_alias_head<'a>(receiver: &'a str, name: &'a str) -> Option<&'a str> {
@@ -834,14 +790,14 @@ fn receiver_alias_head<'a>(receiver: &'a str, name: &'a str) -> Option<&'a str> 
 }
 
 fn simple_local_binding(text: &str) -> Option<&str> {
-    let trimmed = text.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+    let trimmed = text.trim().trim_start_matches(bonsai_common::is_name_punctuation);
     let mut chars = trimmed.char_indices();
     let (_, first) = chars.next()?;
-    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
+    if !(first == '_' || first.is_ascii_alphabetic()) {
         return None;
     }
     for (idx, ch) in chars {
-        if !(ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()) {
+        if !(ch == '_' || ch.is_ascii_alphanumeric()) {
             return (idx > 0).then_some(&trimmed[..idx]);
         }
     }
@@ -849,7 +805,7 @@ fn simple_local_binding(text: &str) -> Option<&str> {
 }
 
 fn simple_local_target(text: &str) -> Option<&str> {
-    let trimmed = text.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+    let trimmed = text.trim().trim_start_matches(bonsai_common::is_name_punctuation);
     let binding = simple_local_binding(trimmed)?;
     (binding.len() == trimmed.len()).then_some(binding)
 }

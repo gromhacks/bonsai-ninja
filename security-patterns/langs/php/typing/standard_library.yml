@@ -1,0 +1,58 @@
+# Non-finding PHP standard-library transfer summaries. These values belong in
+# the rulepack so the compiler/IDG remains provider- and API-name agnostic.
+- id: php.typing.array_map_result
+  enabled: true
+  language: php
+  match:
+    kind: call
+    callee:
+      name: array_map
+  taint_semantics:
+    call_result_passthrough_args: [1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: array_map result derives from input arrays
+    code: |
+      <?php
+      function normalize(array $values): array {
+          return array_map(fn($value) => trim($value), $values);
+      }
+    expect_match_text: [array_map]
+  description: "array_map returns callback-derived elements from its input arrays. Typing-only transfer summary; never a finding."
+
+- id: php.typing.array_filter_result
+  enabled: true
+  language: php
+  match:
+    kind: call
+    callee:
+      name: array_filter
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: array_filter preserves selected input elements
+    code: |
+      <?php
+      function present(array $values): array {
+          return array_filter($values, fn($value) => $value !== '');
+      }
+    expect_match_text: [array_filter]
+  description: "array_filter returns a subset of its input array. Typing-only transfer summary; never a finding."
+
+- id: php.typing.array_reduce_result
+  enabled: true
+  language: php
+  match:
+    kind: call
+    callee:
+      name: array_reduce
+  taint_semantics:
+    call_result_passthrough_args: [0, 2]
+  match_examples:
+  - name: array_reduce result derives from values and initial accumulator
+    code: |
+      <?php
+      function join_values(array $values, string $initial): string {
+          return array_reduce($values, fn($acc, $value) => $acc . $value, $initial);
+      }
+    expect_match_text: [array_reduce]
+  description: "array_reduce returns callback-derived state from the input array and initial accumulator. Typing-only transfer summary; never a finding."

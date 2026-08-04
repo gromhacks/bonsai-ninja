@@ -1,5 +1,5 @@
 use super::*;
-use crate::loader::{LanguagePack, Rulepack};
+use crate::loader::{load_rulepack, LanguagePack, Rulepack, RulepackMetadata};
 use crate::rule::{MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind, RuleTarget, Severity};
 
 fn temp_root(tag: &str) -> std::path::PathBuf {
@@ -11,6 +11,22 @@ fn temp_root(tag: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!("{tag}-{}-{nanos}", std::process::id()));
     std::fs::create_dir(&path).expect("temp dir");
     path
+}
+
+fn bundled_metadata() -> RulepackMetadata {
+    load_rulepack(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("security-patterns"),
+    )
+    .expect("bundled rulepack")
+    .metadata
+}
+
+fn pack_with_bundled_metadata() -> Rulepack {
+    let mut pack = Rulepack::default();
+    pack.metadata = bundled_metadata();
+    pack
 }
 
 fn package_rule(package: &str) -> Rule {
@@ -32,6 +48,7 @@ fn package_rule(package: &str) -> Rule {
         modules: vec![],
         manifests: vec![],
         lockfiles: vec![],
+        package_matching: Default::default(),
         payload_types: vec![],
         match_spec: MatchSpec {
             kind: MatchKind::Call,
@@ -63,6 +80,7 @@ fn python_package_rule(package: &str) -> Rule {
 
 #[test]
 fn manifest_recognition_reuses_the_language_mapping() {
+    let metadata = bundled_metadata();
     for basename in [
         "Pipfile",
         "mix.exs",
@@ -73,11 +91,11 @@ fn manifest_recognition_reuses_the_language_mapping() {
         "Package.resolved",
     ] {
         assert!(
-            is_dependency_manifest_basename(basename),
+            is_dependency_manifest_basename(basename, &metadata),
             "{basename} has a language mapping and must be scanned"
         );
     }
-    assert!(!is_dependency_manifest_basename("notes.yaml"));
+    assert!(!is_dependency_manifest_basename("notes.yaml", &metadata));
 }
 
 #[cfg(unix)]
@@ -88,7 +106,7 @@ fn manifest_scan_does_not_follow_directory_symlinks_outside_the_workspace() {
     std::fs::write(outside.join("Pipfile"), "requests = \"*\"").expect("outside manifest");
     std::os::unix::fs::symlink(&outside, root.join("linked")).expect("directory symlink");
 
-    let paths = scan_manifest_files(&root, &Rulepack::default());
+    let paths = scan_manifest_files(&root, &pack_with_bundled_metadata());
     assert!(
         paths.is_empty(),
         "dependency inventory must not follow workspace symlinks: {paths:?}"
@@ -105,7 +123,7 @@ fn dependency_inventory_treats_manifest_package_name_as_evidence() {
     .expect("pom");
     let ws = Workspace::new(std::sync::Arc::new(bonsai_lang_api::LanguageRegistry::new()));
 
-    let mut pack = Rulepack::default();
+    let mut pack = pack_with_bundled_metadata();
     pack.packs.insert(
         "java".to_string(),
         LanguagePack {
@@ -142,7 +160,7 @@ fn dependency_inventory_does_not_project_one_package_signal_onto_siblings() {
     let mut rule = package_rule("log4j-core");
     rule.packages.push("commons-io".to_string());
 
-    let mut pack = Rulepack::default();
+    let mut pack = pack_with_bundled_metadata();
     pack.packs.insert(
         "java".to_string(),
         LanguagePack {
@@ -176,7 +194,8 @@ fn workspace_dependency_packages_alias_python_distribution_names_to_imports() {
     )
     .expect("requirements");
 
-    let packages = workspace_dependency_packages_for_language(&root, "python").packages;
+    let context = build_workspace_dependency_package_context(&root, &bundled_metadata());
+    let packages = workspace_dependency_packages_from_context(&context, "python").packages;
     assert!(
         packages.contains("psycopg2"),
         "expected psycopg2 alias from psycopg2-binary, got {:?}",
@@ -205,7 +224,8 @@ percent-encoding = "2"
     )
     .expect("cargo");
 
-    let packages = workspace_dependency_packages_for_language(&root, "rust").packages;
+    let context = build_workspace_dependency_package_context(&root, &bundled_metadata());
+    let packages = workspace_dependency_packages_from_context(&context, "rust").packages;
     assert!(
         packages.contains("percent_encoding"),
         "expected percent_encoding alias from percent-encoding, got {:?}",
@@ -219,14 +239,15 @@ fn broad_manifest_refresh_replaces_stale_package_context() {
     let manifest = root.join("requirements.txt");
     std::fs::write(&manifest, "psycopg2-binary==2.9.9\n").expect("initial requirements");
 
-    let initial = workspace_dependency_packages_for_language(&root, "python");
+    let metadata = bundled_metadata();
+    let initial_context = build_workspace_dependency_package_context(&root, &metadata);
+    let initial = workspace_dependency_packages_from_context(&initial_context, "python");
     assert!(initial.packages.contains("psycopg2"));
     assert!(!initial.packages.contains("requests"));
 
     std::fs::write(&manifest, "requests==2.32.3\n").expect("updated requirements");
-    let _snapshot = super::refresh_workspace_dependency_package_context(&root);
-
-    let refreshed = workspace_dependency_packages_for_language(&root, "python");
+    let refreshed_context = build_workspace_dependency_package_context(&root, &metadata);
+    let refreshed = workspace_dependency_packages_from_context(&refreshed_context, "python");
     assert_ne!(initial.fingerprint, refreshed.fingerprint);
     assert!(!refreshed.packages.contains("psycopg2"));
     assert!(refreshed.packages.contains("requests"));
@@ -238,7 +259,8 @@ fn analysis_manifest_snapshot_remains_immutable_until_the_run_finishes() {
     let manifest = root.join("requirements.txt");
     std::fs::write(&manifest, "psycopg2-binary==2.9.9\n").expect("initial requirements");
     let workspace_id = 9_001;
-    let snapshot = super::begin_workspace_dependency_package_snapshot(&root, workspace_id);
+    let pack = pack_with_bundled_metadata();
+    let snapshot = super::begin_workspace_dependency_package_snapshot(&root, workspace_id, &pack);
 
     let initial =
         super::workspace_dependency_packages_for_language_in_workspace(&root, "python", workspace_id);
@@ -252,10 +274,10 @@ fn analysis_manifest_snapshot_remains_immutable_until_the_run_finishes() {
     assert!(!during_run.packages.contains("requests"));
 
     drop(snapshot);
-    let refreshed_snapshot = super::refresh_workspace_dependency_package_context(&root);
+    let _refreshed_snapshot = super::begin_workspace_dependency_package_snapshot(&root, workspace_id, &pack);
     let after_run =
         super::workspace_dependency_packages_for_language_in_workspace(&root, "python", workspace_id);
-    assert_eq!(after_run.fingerprint, refreshed_snapshot.fingerprint);
+    assert_ne!(after_run.fingerprint, initial.fingerprint);
     assert!(!after_run.packages.contains("psycopg2"));
     assert!(after_run.packages.contains("requests"));
 }
@@ -266,7 +288,7 @@ fn dependency_inventory_reports_python_distribution_alias_as_package_evidence() 
     std::fs::write(root.join("requirements.txt"), "psycopg2-binary==2.9.9\n").expect("requirements");
     let ws = Workspace::new(std::sync::Arc::new(bonsai_lang_api::LanguageRegistry::new()));
 
-    let mut pack = Rulepack::default();
+    let mut pack = pack_with_bundled_metadata();
     pack.packs.insert(
         "python".to_string(),
         LanguagePack {

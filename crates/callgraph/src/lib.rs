@@ -13,10 +13,7 @@ pub use chains::{
 };
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{
-    callable_reference_variants, qualified_names_match, short_qualified_tail, FileId, FuncId, Precision,
-    Span, SymbolId,
-};
+use bonsai_common::{qualified_names_match, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
     AliasTarget, AssignValueKind, CallArg, CallKind, CallableDeclarationFamily, Decl, DeclKind, FlowEvent,
@@ -1683,7 +1680,7 @@ fn resolve_file_call_edges(
             &alias_targets,
             &context.alias_index,
             Some(&context.callable_index),
-            info.capabilities.module_path_syntax,
+            info.capabilities,
         );
         resolved_bindings.extend(
             local_bindings
@@ -2156,31 +2153,31 @@ fn collect_qualified_call_fallback(
         return QualifiedCallFallback::Stop;
     }
     let short = short_callee(facts.name);
-    let qualified_owner_in_workspace = facts.name.find("::").is_none_or(|idx| {
-        let qualifier = &facts.name[..idx];
-        context
-            .alias_targets
-            .get(qualifier)
-            .is_some_and(|target| match target {
-                AliasTarget::Namespace { module } => is_workspace_alias_target(
-                    context.alias_index,
-                    module,
-                    context.caller_capabilities.module_path_syntax,
-                ),
-                AliasTarget::Member { module, member } => {
-                    is_workspace_alias_target(
+    let qualified_owner_in_workspace =
+        bonsai_common::split_qualified_name_head_tail(facts.name).is_none_or(|(qualifier, _)| {
+            context
+                .alias_targets
+                .get(qualifier)
+                .is_some_and(|target| match target {
+                    AliasTarget::Namespace { module } => is_workspace_alias_target(
                         context.alias_index,
                         module,
                         context.caller_capabilities.module_path_syntax,
-                    ) || is_workspace_alias_target(
-                        context.alias_index,
-                        member,
-                        context.caller_capabilities.module_path_syntax,
-                    )
-                }
-                AliasTarget::Type { .. } => true,
-            })
-    });
+                    ),
+                    AliasTarget::Member { module, member } => {
+                        is_workspace_alias_target(
+                            context.alias_index,
+                            module,
+                            context.caller_capabilities.module_path_syntax,
+                        ) || is_workspace_alias_target(
+                            context.alias_index,
+                            member,
+                            context.caller_capabilities.module_path_syntax,
+                        )
+                    }
+                    AliasTarget::Type { .. } => true,
+                })
+        });
     let mut values = Vec::new();
     if qualified_owner_in_workspace {
         let resolved_name = context.aliases.get(short).map(String::as_str).unwrap_or(short);
@@ -2196,7 +2193,8 @@ fn collect_qualified_call_fallback(
         }
     }
     if values.is_empty()
-        && (colon_remote_call(facts.name) || qualified_module_alias_call(facts.name, context.aliases))
+        && (bonsai_common::qualified_name_owner(facts.name).is_some()
+            || qualified_module_alias_call(facts.name, context.aliases))
     {
         QualifiedCallFallback::Stop
     } else {
@@ -2673,6 +2671,7 @@ fn add_callback_arg_edges(
         caller_decl,
         caller_language,
         quoted_callable_literals: caller_capabilities.quoted_callable_literals,
+        callable_reference_syntax: caller_capabilities.callable_reference_syntax,
         same_directory_unqualified_calls: caller_capabilities.same_directory_unqualified_calls,
         module_path_syntax: caller_capabilities.module_path_syntax,
         path_for_file,
@@ -2821,10 +2820,7 @@ fn collect_assign_source_call_targets(
 }
 
 fn assign_source_call_member_like(name: &str) -> bool {
-    name.contains('.')
-        || name.contains("::")
-        || name.contains('\\')
-        || (name.contains(':') && !name.contains("::"))
+    bonsai_common::qualified_name_owner(name).is_some()
 }
 
 fn collect_nested_local_callable_targets(
@@ -3384,6 +3380,7 @@ struct CallableArgResolutionContext<'a> {
     caller_decl: &'a Decl,
     caller_language: Option<&'static str>,
     quoted_callable_literals: bool,
+    callable_reference_syntax: bonsai_lang_api::CallableReferenceSyntax,
     same_directory_unqualified_calls: bool,
     module_path_syntax: bonsai_lang_api::ModulePathSyntax,
     path_for_file: &'a dyn Fn(FileId) -> Option<String>,
@@ -3401,6 +3398,7 @@ impl CallableArgResolutionContext<'_> {
             caller_decl,
             caller_language: _,
             quoted_callable_literals,
+            callable_reference_syntax,
             same_directory_unqualified_calls,
             module_path_syntax,
             path_for_file,
@@ -3411,7 +3409,11 @@ impl CallableArgResolutionContext<'_> {
         if !call_arg_can_be_callable_reference(raw, *quoted_callable_literals) {
             return Vec::new();
         }
-        let variants = callable_reference_variants(raw);
+        let variants = bonsai_lang_api::callable_reference_variants(
+            raw,
+            *callable_reference_syntax,
+            *quoted_callable_literals,
+        );
         let Some(first) = variants.first() else {
             return Vec::new();
         };
@@ -3428,11 +3430,11 @@ impl CallableArgResolutionContext<'_> {
             module_path_syntax: *module_path_syntax,
         };
         let original_alias_qualified = variants.iter().any(|variant| {
-            let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+            let trimmed = bonsai_common::trim_leading_name_punctuation(variant.trim());
             alias_target_qualified_name(trimmed, alias_targets)
         });
         for variant in &variants {
-            let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+            let trimmed = bonsai_common::trim_leading_name_punctuation(variant.trim());
             if trimmed.is_empty() {
                 continue;
             }
@@ -3555,7 +3557,7 @@ pub fn collect_local_callable_bindings(
 /// alias-index scans.
 pub fn collect_workspace_local_callable_bindings(
     global: &GlobalIndex,
-    module_path_syntax_for_file: impl Fn(FileId) -> bonsai_lang_api::ModulePathSyntax,
+    capabilities_for_file: impl Fn(FileId) -> bonsai_lang_api::LanguageCapabilities,
 ) -> AHashMap<FuncId, AHashMap<String, FuncId>> {
     let alias_index = WorkspaceAliasIndex::build(global);
     let callable_index = WorkspaceCallableBindingIndex::build(global);
@@ -3599,7 +3601,7 @@ pub fn collect_workspace_local_callable_bindings(
                 &alias_targets,
                 &alias_index,
                 Some(&callable_index),
-                module_path_syntax_for_file(file),
+                capabilities_for_file(file),
             );
             if !bindings.is_empty() {
                 out.insert(FuncId::new(decl.symbol.raw()), bindings);
@@ -3664,7 +3666,6 @@ fn flow_events_contain_callable_reference_assignment(events: &[FlowEvent]) -> bo
     for event in events {
         match event {
             FlowEvent::Assign {
-                target,
                 source_call,
                 source_name,
                 source_names,
@@ -3673,23 +3674,6 @@ fn flow_events_contain_callable_reference_assignment(events: &[FlowEvent]) -> bo
             } => {
                 if source_call.is_none()
                     && assign_rhs_is_callable_reference(source_name.as_deref(), source_names, *value_kind)
-                {
-                    return true;
-                }
-                // PHP `$cb = 'helper';` — a quoted-string runtime callable.
-                // The inner collector (`collect_local_callable_bindings_into`
-                // → `quoted_runtime_callable_literal`) binds it, but this
-                // pre-filter must admit the decl first or the binding never
-                // reaches the resolver. Keep the pre-filter consistent with
-                // the collector it gates.
-                if source_call.is_none()
-                    && quoted_runtime_callable_literal(
-                        target,
-                        source_name.as_deref(),
-                        source_names,
-                        *value_kind,
-                    )
-                    .is_some()
                 {
                     return true;
                 }
@@ -3737,7 +3721,8 @@ pub fn collect_local_callable_bindings_with_aliases(
 ) -> AHashMap<String, FuncId> {
     let mut bindings = AHashMap::new();
     let mut callable_uses = AHashSet::new();
-    collect_local_callable_binding_uses(events, &mut callable_uses);
+    let capabilities = bonsai_lang_api::LanguageCapabilities::unsupported();
+    collect_local_callable_binding_uses(events, capabilities, &mut callable_uses);
     collect_local_callable_bindings_into(
         events,
         global,
@@ -3745,7 +3730,7 @@ pub fn collect_local_callable_bindings_with_aliases(
         alias_targets,
         None,
         None,
-        bonsai_lang_api::ModulePathSyntax::none(),
+        capabilities,
         &callable_uses,
         &mut bindings,
     );
@@ -3766,11 +3751,11 @@ fn collect_local_callable_bindings_with_alias_index(
     alias_targets: &AHashMap<String, AliasTarget>,
     alias_index: &WorkspaceAliasIndex,
     callable_index: Option<&WorkspaceCallableBindingIndex>,
-    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
+    capabilities: bonsai_lang_api::LanguageCapabilities,
 ) -> AHashMap<String, FuncId> {
     let mut bindings = AHashMap::new();
     let mut callable_uses = AHashSet::new();
-    collect_local_callable_binding_uses(events, &mut callable_uses);
+    collect_local_callable_binding_uses(events, capabilities, &mut callable_uses);
     collect_local_callable_bindings_into(
         events,
         global,
@@ -3778,29 +3763,33 @@ fn collect_local_callable_bindings_with_alias_index(
         alias_targets,
         Some(alias_index),
         callable_index,
-        module_path_syntax,
+        capabilities,
         &callable_uses,
         &mut bindings,
     );
     bindings
 }
 
-fn collect_local_callable_binding_uses(events: &[FlowEvent], out: &mut AHashSet<String>) {
+fn collect_local_callable_binding_uses(
+    events: &[FlowEvent],
+    capabilities: bonsai_lang_api::LanguageCapabilities,
+    out: &mut AHashSet<String>,
+) {
     for event in events {
         match event {
             FlowEvent::Call {
                 name, receiver, args, ..
             } => {
-                insert_local_callable_binding_use(out, name);
+                insert_local_callable_binding_use(out, name, capabilities);
                 if let Some(receiver) = receiver.as_deref() {
-                    insert_local_callable_binding_use(out, receiver);
+                    insert_local_callable_binding_use(out, receiver, capabilities);
                 }
                 for arg in args {
                     if call_arg_can_be_callable_reference(&arg.value_text, false) {
-                        insert_local_callable_binding_use(out, &arg.value_text);
+                        insert_local_callable_binding_use(out, &arg.value_text, capabilities);
                     }
                     for source_name in &arg.source_names {
-                        insert_local_callable_binding_use(out, source_name);
+                        insert_local_callable_binding_use(out, source_name, capabilities);
                     }
                 }
             }
@@ -3808,40 +3797,48 @@ fn collect_local_callable_binding_uses(events: &[FlowEvent], out: &mut AHashSet<
                 source_call: Some(source_call),
                 ..
             } => {
-                insert_local_callable_binding_use(out, source_call);
+                insert_local_callable_binding_use(out, source_call, capabilities);
             }
             FlowEvent::Branch {
                 then_events,
                 else_events,
                 ..
             } => {
-                collect_local_callable_binding_uses(then_events, out);
-                collect_local_callable_binding_uses(else_events, out);
+                collect_local_callable_binding_uses(then_events, capabilities, out);
+                collect_local_callable_binding_uses(else_events, capabilities, out);
             }
-            FlowEvent::Loop { body, .. } => collect_local_callable_binding_uses(body, out),
+            FlowEvent::Loop { body, .. } => collect_local_callable_binding_uses(body, capabilities, out),
             FlowEvent::Try {
                 body,
                 catch_events,
                 finally_events,
                 ..
             } => {
-                collect_local_callable_binding_uses(body, out);
-                collect_local_callable_binding_uses(catch_events, out);
-                collect_local_callable_binding_uses(finally_events, out);
+                collect_local_callable_binding_uses(body, capabilities, out);
+                collect_local_callable_binding_uses(catch_events, capabilities, out);
+                collect_local_callable_binding_uses(finally_events, capabilities, out);
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_local_callable_binding_uses(body, out);
+                collect_local_callable_binding_uses(body, capabilities, out);
             }
             _ => {}
         }
     }
 }
 
-fn insert_local_callable_binding_use(out: &mut AHashSet<String>, raw: &str) {
-    for variant in callable_reference_variants(raw) {
+fn insert_local_callable_binding_use(
+    out: &mut AHashSet<String>,
+    raw: &str,
+    capabilities: bonsai_lang_api::LanguageCapabilities,
+) {
+    for variant in bonsai_lang_api::callable_reference_variants(
+        raw,
+        capabilities.callable_reference_syntax,
+        capabilities.quoted_callable_literals,
+    ) {
         let trimmed = variant
             .trim()
-            .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
+            .trim_start_matches(|ch: char| !ch.is_alphanumeric() && ch != '_')
             .trim();
         if trimmed.is_empty() {
             continue;
@@ -3862,7 +3859,7 @@ fn collect_local_callable_bindings_into(
     alias_targets: &AHashMap<String, AliasTarget>,
     alias_index: Option<&WorkspaceAliasIndex>,
     callable_index: Option<&WorkspaceCallableBindingIndex>,
-    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
+    capabilities: bonsai_lang_api::LanguageCapabilities,
     callable_uses: &AHashSet<String>,
     bindings: &mut AHashMap<String, FuncId>,
 ) {
@@ -3881,7 +3878,7 @@ fn collect_local_callable_bindings_into(
                     continue;
                 }
                 if let Some(sym) = resolve_assigned_lambda_binding(global, caller_decl, target, *span) {
-                    bindings.insert(target.clone(), sym);
+                    insert_local_callable_binding(bindings, target, sym);
                     continue;
                 }
                 if let Some(factory_call) = source_call.as_deref().filter(|call| !call.trim().is_empty()) {
@@ -3896,25 +3893,9 @@ fn collect_local_callable_bindings_into(
                         alias_targets,
                         alias_index,
                         callable_index,
-                        module_path_syntax,
+                        capabilities,
                     ) {
-                        bindings.insert(target.clone(), sym);
-                        continue;
-                    }
-                }
-                if let Some(quoted_callable) =
-                    quoted_runtime_callable_literal(target, source_name.as_deref(), source_names, *value_kind)
-                {
-                    if let Some(sym) = resolve_callable_symbol_with_alias_index(
-                        global,
-                        quoted_callable,
-                        caller_decl,
-                        alias_targets,
-                        alias_index,
-                        callable_index,
-                        module_path_syntax,
-                    ) {
-                        bindings.insert(target.clone(), sym);
+                        insert_local_callable_binding(bindings, target, sym);
                         continue;
                     }
                 }
@@ -3940,7 +3921,7 @@ fn collect_local_callable_bindings_into(
                             alias_targets,
                             alias_index,
                             callable_index,
-                            module_path_syntax,
+                            capabilities,
                         )
                     })
                     .or_else(|| {
@@ -3952,12 +3933,12 @@ fn collect_local_callable_bindings_into(
                                 alias_targets,
                                 alias_index,
                                 callable_index,
-                                module_path_syntax,
+                                capabilities,
                             )
                         })
                     })
                 {
-                    bindings.insert(target.clone(), sym);
+                    insert_local_callable_binding(bindings, target, sym);
                 }
             }
             FlowEvent::Branch {
@@ -3972,7 +3953,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
-                    module_path_syntax,
+                    capabilities,
                     callable_uses,
                     bindings,
                 );
@@ -3983,7 +3964,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
-                    module_path_syntax,
+                    capabilities,
                     callable_uses,
                     bindings,
                 );
@@ -3996,7 +3977,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
-                    module_path_syntax,
+                    capabilities,
                     callable_uses,
                     bindings,
                 );
@@ -4014,7 +3995,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
-                    module_path_syntax,
+                    capabilities,
                     callable_uses,
                     bindings,
                 );
@@ -4025,7 +4006,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
-                    module_path_syntax,
+                    capabilities,
                     callable_uses,
                     bindings,
                 );
@@ -4036,7 +4017,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
-                    module_path_syntax,
+                    capabilities,
                     callable_uses,
                     bindings,
                 );
@@ -4049,7 +4030,7 @@ fn collect_local_callable_bindings_into(
                     alias_targets,
                     alias_index,
                     callable_index,
-                    module_path_syntax,
+                    capabilities,
                     callable_uses,
                     bindings,
                 );
@@ -4061,7 +4042,25 @@ fn collect_local_callable_bindings_into(
 
 fn local_callable_binding_target_is_used(target: &str, callable_uses: &AHashSet<String>) -> bool {
     let trimmed = target.trim();
-    !trimmed.is_empty() && (callable_uses.contains(trimmed) || callable_uses.contains(short_callee(trimmed)))
+    if trimmed.is_empty() {
+        return false;
+    }
+    let bare = bonsai_common::trim_leading_name_punctuation(trimmed);
+    callable_uses.contains(trimmed)
+        || callable_uses.contains(short_callee(trimmed))
+        || (!bare.is_empty() && callable_uses.contains(bare))
+}
+
+fn insert_local_callable_binding(bindings: &mut AHashMap<String, FuncId>, target: &str, symbol: FuncId) {
+    let target = target.trim();
+    if target.is_empty() {
+        return;
+    }
+    bindings.insert(target.to_string(), symbol);
+    let canonical = bonsai_common::normalize_qualified_name(target);
+    if canonical != target {
+        bindings.insert(canonical, symbol);
+    }
 }
 
 fn collect_local_callable_binding_targets(
@@ -4100,14 +4099,14 @@ fn local_callable_binding_lookup_keys(
 
     if assign_source_call_member_like(trimmed) || receiver_name_from_call_name(trimmed).is_some() {
         push_unique_string(&mut keys, trimmed.to_string());
+        push_unique_string(&mut keys, bonsai_common::normalize_qualified_name(trimmed));
     }
     let short = short_callee(trimmed).trim();
     if short.is_empty() {
         return keys;
     }
-    for sep in [".", "->", "::"] {
-        push_unique_string(&mut keys, format!("{receiver}{sep}{short}"));
-    }
+    let receiver = bonsai_common::normalize_qualified_name(receiver);
+    push_unique_string(&mut keys, format!("{receiver}.{short}"));
     keys
 }
 
@@ -4154,7 +4153,7 @@ fn resolve_returned_lambda_factory_with_alias_index(
     alias_targets: &AHashMap<String, AliasTarget>,
     alias_index: Option<&WorkspaceAliasIndex>,
     callable_index: Option<&WorkspaceCallableBindingIndex>,
-    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
+    capabilities: bonsai_lang_api::LanguageCapabilities,
 ) -> Option<FuncId> {
     let factory = resolve_callable_symbol_with_alias_index(
         global,
@@ -4163,7 +4162,7 @@ fn resolve_returned_lambda_factory_with_alias_index(
         alias_targets,
         alias_index,
         callable_index,
-        module_path_syntax,
+        capabilities,
     )?;
     let factory_decl = global.decl_of(SymbolId::new(factory.raw()))?;
     if factory_decl.kind != DeclKind::Function {
@@ -4246,27 +4245,6 @@ fn assign_rhs_is_callable_reference(
     source_names.is_empty() || source_names.iter().all(|name| name.trim() == source_name)
 }
 
-fn quoted_runtime_callable_literal<'a>(
-    target: &str,
-    source_name: Option<&'a str>,
-    source_names: &[String],
-    value_kind: Option<AssignValueKind>,
-) -> Option<&'a str> {
-    if !target.trim_start().starts_with('$')
-        || !source_names.is_empty()
-        || !matches!(value_kind, Some(AssignValueKind::Literal))
-    {
-        return None;
-    }
-    let source = source_name?.trim();
-    let quote = source.as_bytes().first().copied()?;
-    if !matches!(quote, b'\'' | b'"') || source.as_bytes().last().copied() != Some(quote) {
-        return None;
-    }
-    let inner = source.get(1..source.len().saturating_sub(1))?.trim();
-    (!inner.is_empty() && !inner.chars().any(char::is_whitespace)).then_some(inner)
-}
-
 /// Resolve a local-binding RHS like `let f = some_func;` to a
 /// callable [`FuncId`] in the caller's scope.
 ///
@@ -4292,21 +4270,25 @@ fn resolve_callable_symbol_with_alias_index(
     alias_targets: &AHashMap<String, AliasTarget>,
     alias_index: Option<&WorkspaceAliasIndex>,
     callable_index: Option<&WorkspaceCallableBindingIndex>,
-    module_path_syntax: bonsai_lang_api::ModulePathSyntax,
+    capabilities: bonsai_lang_api::LanguageCapabilities,
 ) -> Option<FuncId> {
-    let variants = callable_reference_variants(raw);
+    let variants = bonsai_lang_api::callable_reference_variants(
+        raw,
+        capabilities.callable_reference_syntax,
+        capabilities.quoted_callable_literals,
+    );
     if variants.is_empty() {
         return None;
     }
     let original_alias_qualified = variants.iter().any(|variant| {
-        let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+        let trimmed = bonsai_common::trim_leading_name_punctuation(variant.trim());
         alias_target_qualified_name(trimmed, alias_targets)
     });
     let caller_file = caller_decl_file(global, caller_decl)?;
     let caller_module = caller_decl.module_path.clone();
     if let Some(index) = callable_index {
         for variant in &variants {
-            let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+            let trimmed = bonsai_common::trim_leading_name_punctuation(variant.trim());
             if fast_local_callable_reference_name(trimmed)
                 && !alias_target_qualified_name(trimmed, alias_targets)
                 && !original_alias_qualified
@@ -4319,7 +4301,7 @@ fn resolve_callable_symbol_with_alias_index(
     }
     let ctx = ResolveContext::new(caller_file, &caller_module)
         .with_alias_map(alias_targets)
-        .with_module_path_syntax(module_path_syntax);
+        .with_module_path_syntax(capabilities.module_path_syntax);
     let owned_index;
     let alias_index = match alias_index {
         Some(index) => index,
@@ -4329,7 +4311,7 @@ fn resolve_callable_symbol_with_alias_index(
         }
     };
     for variant in variants {
-        let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+        let trimmed = bonsai_common::trim_leading_name_punctuation(variant.trim());
         if trimmed.is_empty() {
             continue;
         }
@@ -4353,11 +4335,11 @@ fn resolve_callable_symbol_with_alias_index(
                 .get(qualifier)
                 .map(|t| match t {
                     AliasTarget::Namespace { module } => {
-                        is_workspace_alias_target(alias_index, module, module_path_syntax)
+                        is_workspace_alias_target(alias_index, module, capabilities.module_path_syntax)
                     }
                     AliasTarget::Member { module, member } => {
-                        is_workspace_alias_target(alias_index, module, module_path_syntax)
-                            || is_workspace_alias_target(alias_index, member, module_path_syntax)
+                        is_workspace_alias_target(alias_index, module, capabilities.module_path_syntax)
+                            || is_workspace_alias_target(alias_index, member, capabilities.module_path_syntax)
                     }
                     AliasTarget::Type { .. } => true,
                 })
@@ -4399,10 +4381,7 @@ fn module_alias_target_qualified_name(name: &str, alias_targets: &AHashMap<Strin
 fn fast_local_callable_reference_name(name: &str) -> bool {
     let trimmed = name.trim();
     !trimmed.is_empty()
-        && !trimmed.contains('.')
-        && !trimmed.contains("::")
-        && !trimmed.contains(':')
-        && !trimmed.contains('\\')
+        && bonsai_common::qualified_name_owner(trimmed).is_none()
         && !trimmed.contains('(')
         && !trimmed.contains(')')
 }
@@ -4769,9 +4748,7 @@ fn declared_constructor_targets(
 }
 
 fn type_qualified_method_tail(call_name: &str) -> Option<(&str, &str)> {
-    let (head, tail) = call_name
-        .rsplit_once("::")
-        .or_else(|| call_name.rsplit_once('.'))?;
+    let (head, tail) = bonsai_common::split_qualified_name_owner_tail(call_name)?;
     let head = head.trim();
     let tail = callee_without_call_args(tail).trim();
     if head.is_empty() || tail.is_empty() {
@@ -4975,12 +4952,7 @@ fn collect_call_events_within<'a>(events: &'a [FlowEvent], outer: Span, out: &mu
 }
 
 fn receiver_name_from_call_name(call_name: &str) -> Option<&str> {
-    call_name
-        .rsplit_once('.')
-        .or_else(|| call_name.rsplit_once("::"))
-        .or_else(|| call_name.rsplit_once("->"))
-        .map(|(receiver, _)| receiver.trim())
-        .filter(|receiver| !receiver.is_empty())
+    bonsai_common::qualified_name_owner(call_name)
 }
 
 fn folded_call_name_receiver_is_instance(
@@ -5785,8 +5757,7 @@ fn normalize_receiver_alias_text(receiver: &str) -> String {
     while text.starts_with('(') && text.ends_with(')') && text.len() > 1 {
         text = text[1..text.len() - 1].trim();
     }
-    text.trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION)
-        .replace("->", ".")
+    bonsai_common::normalize_qualified_name(text.trim_start_matches(bonsai_common::is_name_punctuation))
         .trim()
         .trim_matches('.')
         .to_string()
@@ -5800,22 +5771,18 @@ fn normalize_receiver_alias_text(receiver: &str) -> String {
 /// visit every flow event in the enclosing function, so normalizing each
 /// assignment target into a fresh `String` is an O(calls × assignments)
 /// allocation storm on large functions. This mirrors the normalizer's
-/// trim/paren/sigil steps over borrowed slices and only falls back to the
-/// owning path for the rare `->` (arrow-receiver) case that actually needs
-/// a substitution.
+/// trim/paren/punctuation steps over borrowed slices and only falls back to
+/// structural qualified-name normalization when the borrowed form differs.
 fn normalized_receiver_alias_matches(candidate: &str, expected: &str) -> bool {
-    if candidate.contains("->") {
-        return normalize_receiver_alias_text(candidate) == expected;
-    }
     let mut text = candidate.trim();
     while text.starts_with('(') && text.ends_with(')') && text.len() > 1 {
         text = text[1..text.len() - 1].trim();
     }
     let normalized = text
-        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION)
+        .trim_start_matches(bonsai_common::is_name_punctuation)
         .trim()
         .trim_matches('.');
-    normalized == expected
+    normalized == expected || bonsai_common::normalize_qualified_name(normalized) == expected
 }
 
 fn caller_decl_file(global: &GlobalIndex, caller_decl: &Decl) -> Option<FileId> {
@@ -5942,10 +5909,6 @@ fn parent_dir_key(path: &str) -> Option<String> {
     Some(rendered.into_owned())
 }
 
-fn colon_remote_call(name: &str) -> bool {
-    name.contains(':') && !name.contains("::")
-}
-
 fn qualified_alias_target_tail<'a>(
     name: &'a str,
     aliases: &'a AHashMap<String, String>,
@@ -5966,31 +5929,7 @@ fn qualified_alias_target_entry_tail<'a>(
 }
 
 fn qualified_workspace_target_tail(name: &str) -> Option<(&str, &str)> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some((head, tail)) = trimmed.rsplit_once("::") {
-        if !head.is_empty() && !tail.is_empty() {
-            return Some((head, tail));
-        }
-    }
-    if let Some((head, tail)) = trimmed.rsplit_once('.') {
-        if !head.is_empty() && !tail.is_empty() {
-            return Some((head, tail));
-        }
-    }
-    if let Some((head, tail)) = trimmed.rsplit_once(':') {
-        if !head.is_empty() && !tail.is_empty() {
-            return Some((head, tail));
-        }
-    }
-    if let Some((head, tail)) = trimmed.rsplit_once('\\') {
-        if !head.is_empty() && !tail.is_empty() {
-            return Some((head, tail));
-        }
-    }
-    None
+    bonsai_common::split_qualified_name_owner_tail(name)
 }
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
@@ -6488,11 +6427,7 @@ fn collect_implicit_receiver_method_targets(
 
 fn implicit_receiver_call_name(name: &str) -> bool {
     let trimmed = name.trim();
-    !trimmed.is_empty()
-        && !trimmed.contains('.')
-        && !trimmed.contains("::")
-        && !trimmed.contains(':')
-        && !trimmed.contains('\\')
+    !trimmed.is_empty() && bonsai_common::qualified_name_owner(trimmed).is_none()
 }
 
 #[allow(clippy::too_many_arguments)] // Public resolver hook mirrors FlowEvent::Call plus workspace callbacks.
@@ -6810,7 +6745,6 @@ impl WorkspaceAliasIndex {
                     let segs = &decl.module_path.segments;
                     for start in 0..segs.len() {
                         let suffix = &segs[start..];
-                        module_names.insert(suffix.join("::"));
                         module_names.insert(suffix.join("."));
                     }
                 }
@@ -6831,7 +6765,9 @@ impl WorkspaceAliasIndex {
             return true;
         }
         let stripped = strip_module_path_prefix(trimmed, syntax);
-        self.module_names.contains(trimmed) || self.module_names.contains(stripped)
+        let normalized = bonsai_common::normalize_qualified_name(trimmed);
+        let normalized_stripped = bonsai_common::normalize_qualified_name(stripped);
+        self.module_names.contains(&normalized) || self.module_names.contains(&normalized_stripped)
     }
 }
 

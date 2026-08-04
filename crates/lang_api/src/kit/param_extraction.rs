@@ -26,7 +26,7 @@ use tree_sitter::Node;
 
 use super::{
     extract_direct_call_info, first_identifier_descendant, first_identifier_like_child,
-    first_named_child_of_kind, looks_like_identifier, node_text, short_name_of, COMMON_CALL_KINDS,
+    first_named_child_of_kind, looks_like_identifier, node_text, short_name_of, GrammarHandler,
     SYNTHETIC_VARARGS_PARAM,
 };
 
@@ -42,7 +42,11 @@ use super::{
 /// marker_annotation / annotation`. ObjC selector pieces
 /// (`openURL:options:`) are surfaced as pseudo-annotations so rules can
 /// match by selector piece. Adapters that need custom shapes override.
-pub fn extract_param_annotations(fn_node: &Node<'_>, src: &[u8]) -> Vec<Vec<String>> {
+pub fn extract_param_annotations(
+    fn_node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<Vec<String>> {
     let mut per_param_annotations: Vec<Vec<String>> = Vec::new();
     // Reusable per-param visitor: collects every annotation name into a
     // fresh inner vec, sorts/dedups, and appends.
@@ -63,7 +67,7 @@ pub fn extract_param_annotations(fn_node: &Node<'_>, src: &[u8]) -> Vec<Vec<Stri
             annotation_search_roots.push(param);
         }
         for root in annotation_search_roots {
-            collect_param_annotation_names(root, src, &mut annotation_names);
+            collect_param_annotation_names(root, src, handler, &mut annotation_names);
         }
         annotation_names.sort();
         annotation_names.dedup();
@@ -100,7 +104,7 @@ pub fn extract_param_annotations(fn_node: &Node<'_>, src: &[u8]) -> Vec<Vec<Stri
         let mut pending_annotations: Vec<String> = Vec::new();
         for param in parameters_container.named_children(&mut cursor) {
             if is_parameter_modifier_container(param.kind()) {
-                collect_param_annotation_names(param, src, &mut pending_annotations);
+                collect_param_annotation_names(param, src, handler, &mut pending_annotations);
                 continue;
             }
             visit_param(param, &mut per_param_annotations);
@@ -190,7 +194,12 @@ fn child_in(child: Node<'_>, container: Node<'_>) -> bool {
 /// Walk `root` collecting annotation/decorator/attribute names. Stops
 /// recursing into a matched annotation node so we don't double-count nested
 /// arguments (e.g. `@MyAnn(@Other)`).
-fn collect_param_annotation_names(root: Node<'_>, src: &[u8], collected_names: &mut Vec<String>) {
+fn collect_param_annotation_names(
+    root: Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+    collected_names: &mut Vec<String>,
+) {
     let mut work_stack = vec![root];
     while let Some(node) = work_stack.pop() {
         // Recognized annotation node — pull out its name and stop recursing.
@@ -211,8 +220,8 @@ fn collect_param_annotation_names(root: Node<'_>, src: &[u8], collected_names: &
         }
         // Some grammars (Python decorators) emit annotations as call expressions
         // like `@RequestParam(...)`. Pull the leading callee name.
-        if COMMON_CALL_KINDS.contains(&node.kind()) {
-            if let Some((Some(callee_path), _)) = extract_direct_call_info(&node, src) {
+        if handler.is_call(node.kind()) {
+            if let Some((Some(callee_path), _)) = extract_direct_call_info(&node, src, handler) {
                 let bare_callee = short_name_of(&callee_path).trim_start_matches('@').to_string();
                 if !bare_callee.is_empty() {
                     collected_names.push(bare_callee);

@@ -42,10 +42,19 @@ receivers, constructors, calls, branches, assignments, fields, and other
 source syntax into typed cross-language facts. Shared resolver, callgraph,
 IDG, taint, security, and export passes consume those facts; they do not
 guess language behavior from source strings or a hardcoded union of API
-names. Taint reachability is a sparse monotone IDG fixed point, not a BFS:
+names. Security provider identities, dependency manifests, package spelling,
+profile/test-path policy, package aliases, taxonomy and sanitizer-credit
+relationships, trust/severity/CWE values, and safe or unsafe configuration
+values live in rulepack YAML. Taint reachability
+is a sparse monotone IDG fixed point, not a BFS:
 there is no semantic call-depth ceiling, iteration limit, or result cap.
 Pagination and diagnostic path previews are separate presentation layers
 and report any truncation explicitly.
+
+`security sanitizers` is intentionally narrower than the sanitizer rule
+directory: it lists only matched rules that can make a credit-bearing
+sanitizer claim. Passthrough declarations remain part of exact propagation and
+are rendered as taint transforms, never as sanitizer evidence.
 
 For semantic prewarm, each immutable source snapshot is lowered once into a
 content-addressed compiler object containing declarations, imports, flow
@@ -53,10 +62,12 @@ events, syntax facts, and diagnostics. Objects are keyed by workspace-relative
 path, selected adapter, frontend ABI, and a full SHA-256 source digest, then
 published as one atomic generation. Callgraph, retrieval, linkage, IDG,
 security, inspect, and export stream that same typed generation. The persisted
-IDG path also lowers transfer facts once: it spools the compact typed stitch
-record and canonical node map, then replays them one file segment at a time
-without reparsing or a second transfer pass. `index --semantic` derives and
-publishes the default semantic contextual CSR plus compact function/node
+IDG identity includes the compiler-object frontend ABI, so any lowering change
+invalidates every graph derived from the older facts even when source bytes are
+unchanged. The IDG path lowers transfer facts once: it spools the compact typed
+stitch record and canonical node map, then replays them one file segment at a
+time without reparsing or a second transfer pass. `index --semantic` derives
+and publishes the default semantic contextual CSR plus compact function/node
 directories from that same immutable graph. Warm queries validate and install
 that query accelerator directly; it changes startup representation only, and
 removing it causes the exact fixed point to be recomputed.
@@ -159,13 +170,14 @@ coverage is remembered for every exact source snapshot, including clean files,
 so the final `analysis_complete` audit parses only unchecked files and never
 materializes declaration/flow bodies just for diagnostics.
 
-The 2026-08-02 release gate completed a fresh-cache exact Elasticsearch taint
-scan in 16.09 seconds under `BONSAI_MEMORY_BUDGET_MB=3072`; semantic generation
-and warm validation completed in 5.37 seconds and 2.43 seconds. An exhaustive
-8,125-row high-severity sink inventory completed in 21.90 seconds with
-byte-identical serial/parallel planner output. The integration gate protects
-cold planning, warm production taint, navigation, inspect, and security
-inventories without terminating, skipping, or capping semantic work.
+The 2026-08-03 release gate completed a fresh-cache exact Elasticsearch taint
+scan in 30.90 seconds under `BONSAI_MEMORY_BUDGET_MB=3072`; cached semantic
+generation validation and warm reuse completed in 5.40 seconds and 2.44
+seconds. Broad exact `inspect execute --taint-flow` completed in 29.48 seconds
+for 198,718 pageable paths, and exhaustive high-severity sink inventory
+completed in 21.42 seconds. The integration gate protects cold planning, warm
+production taint, navigation, inspect, and security inventories without
+terminating, skipping, or capping semantic work.
 
 ## Human-First And LLM-First
 
@@ -263,6 +275,10 @@ language features the engine does not follow yet.
 Good places to help:
 
 - Improve source, sanitizer, and sink rules in `security-patterns/`.
+- Improve typing/runtime models and pack-wide ecosystem metadata in
+  `security-patterns/langs/<language>/typing/` and
+  `security-patterns/metadata.yml` instead of adding API, package syntax,
+  profile path, or security-taxonomy inventories to Rust.
 - Add or tighten language fixtures under `examples/` and crate tests.
 - Build LLM skills, agent workflows, API wrappers, and local-model
   integrations around the JSON and paged text output.

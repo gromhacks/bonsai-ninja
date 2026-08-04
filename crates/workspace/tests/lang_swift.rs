@@ -112,8 +112,8 @@ fn attribute_is_decorator() {
 fn do_catch_is_try_catch() {
     // Swift uses `do { ... } catch { ... }` for exception handling.
     let w = make("func f() { do { try g() } catch { h(error) } }\nfunc g() throws {}\nfunc h(_ e: Error) {}");
-    // tree-sitter-swift models this as a do_statement with catch_block — we
-    // treat it under try_kinds via the generic handler.
+    // tree-sitter-swift models this as a do_statement with catch_block; the
+    // Swift adapter declares that exact shape in its try inventory.
     assert!(has_try(&w, "f"));
     assert!(has_catch(&w, "f"));
 }

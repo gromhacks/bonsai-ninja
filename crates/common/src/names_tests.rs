@@ -1,8 +1,10 @@
 use std::path::Path;
 
 use super::{
-    callable_reference_variants, default_workspace_bonsai_dir, is_bonsai_case_probe_path,
-    qualified_names_match, short_qualified_tail,
+    default_workspace_bonsai_dir, ends_at_qualified_name_boundary, is_bonsai_case_probe_path,
+    normalize_qualified_name, qualified_name_owner, qualified_name_prefixes, qualified_names_match,
+    short_qualified_tail, split_qualified_name_head_tail, split_qualified_name_owner_tail,
+    starts_at_qualified_name_boundary, trim_leading_name_punctuation,
 };
 
 #[test]
@@ -34,6 +36,8 @@ fn qualified_tail_uses_rightmost_supported_separator() {
     assert_eq!(short_qualified_tail("Module:function"), "function");
     assert_eq!(short_qualified_tail("App\\Service\\run"), "run");
     assert_eq!(short_qualified_tail("plain"), "plain");
+    assert_eq!(short_qualified_tail("Map<Key, Value>"), "Map<Key, Value>");
+    assert_eq!(short_qualified_tail("Map<Key, Value>::read"), "read");
 }
 
 #[test]
@@ -51,13 +55,38 @@ fn qualified_name_matching_uses_the_canonical_non_empty_tail() {
 }
 
 #[test]
-fn callable_reference_variants_normalize_common_forms() {
-    assert!(callable_reference_variants("&executor/1").contains(&"executor".to_string()));
-    assert!(callable_reference_variants("fun executor/1").contains(&"executor".to_string()));
-    assert!(callable_reference_variants("\\&executor").contains(&"executor".to_string()));
-    assert!(callable_reference_variants("'executor'").contains(&"executor".to_string()));
-    assert!(callable_reference_variants("method(:executor)").contains(&"executor".to_string()));
-    assert!(callable_reference_variants("App::executor").contains(&"executor".to_string()));
+fn vocabulary_free_name_boundaries_cover_compiler_name_shapes() {
+    assert!(ends_at_qualified_name_boundary("Owner::"));
+    assert!(starts_at_qualified_name_boundary("->member"));
+    assert_eq!(qualified_name_owner("Owner::member"), Some("Owner"));
+    assert_eq!(
+        qualified_name_owner("Map<Key, Value>::read"),
+        Some("Map<Key, Value>")
+    );
+    assert_eq!(trim_leading_name_punctuation("&$value"), "value");
+    assert_eq!(normalize_qualified_name("Owner::member"), "Owner.member");
+    assert_eq!(normalize_qualified_name("ptr->member"), "ptr.member");
+}
+
+#[test]
+fn qualified_prefixes_preserve_adapter_punctuation() {
+    assert_eq!(
+        qualified_name_prefixes("org.example.Service"),
+        ["org", "org.example", "org.example.Service"]
+    );
+    assert_eq!(
+        qualified_name_prefixes("crate::storage::Repository"),
+        ["crate", "crate::storage", "crate::storage::Repository"]
+    );
+    assert_eq!(qualified_name_prefixes(":zip.extract"), [":zip", ":zip.extract"]);
+    assert_eq!(
+        split_qualified_name_head_tail("crate::storage::Repository"),
+        Some(("crate", "storage::Repository"))
+    );
+    assert_eq!(
+        split_qualified_name_owner_tail("crate::storage::Repository"),
+        Some(("crate::storage", "Repository"))
+    );
 }
 
 #[test]

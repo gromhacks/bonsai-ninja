@@ -29,10 +29,17 @@ fn symbol_key_subscript_drops_colon() {
 fn matches_shared_projection_canonicalization_spec() {
     // This is one of THREE independent copies of the projection
     // canonicalization; the shared vectors pin them together so they
-    // can't drift. See `bonsai_common::PROJECTION_CANONICALIZATION_VECTORS`.
-    for (input, expected) in bonsai_common::PROJECTION_CANONICALIZATION_VECTORS {
+    let vectors = [
+        ("obj.cmd", "obj.cmd"),
+        ("obj['cmd']", "obj.cmd"),
+        ("obj[\"cmd\"]", "obj.cmd"),
+        ("conn->host", "conn.host"),
+        ("params[:token]", "params.token"),
+        ("args[:cmd]", "args.cmd"),
+    ];
+    for (input, expected) in vectors {
         assert_eq!(
-            &normalise_qualified_text(input),
+            normalise_qualified_text(input),
             expected,
             "adapter-side normaliser drifted on `{input}`"
         );

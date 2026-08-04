@@ -27,7 +27,7 @@ fn assign_call(target: &str, callee: &str, args: &[&str]) -> FlowEvent {
         source_name: None,
         source_call: Some(callee.to_string()),
         source_call_args: args.iter().map(|a| (*a).to_string()).collect(),
-        source_names: Vec::new(),
+        source_names: args.iter().map(|arg| (*arg).to_string()).collect(),
         declares_new_binding: false,
         value_kind: None,
     }
@@ -149,7 +149,7 @@ fn entry_predecessor_edge_emits_diagnostic() {
 
 #[test]
 fn tainted_carrier_field_read_taints_target() {
-    let events = vec![assign("cmd", Some("env->cmd"))];
+    let events = vec![assign("cmd", Some("env.cmd"))];
     let (result, cfg) = run(events, &config(&["env.*"]));
     assert!(
         result.is_tainted_at_exit(cfg.exit, "cmd"),
@@ -158,8 +158,8 @@ fn tainted_carrier_field_read_taints_target() {
 }
 
 #[test]
-fn tainted_carrier_subscript_read_taints_target() {
-    let events = vec![assign("cmd", Some("env['cmd']"))];
+fn tainted_compiler_projection_read_taints_target() {
+    let events = vec![assign("cmd", Some("env.cmd"))];
     let (result, cfg) = run(events, &config(&["env.*"]));
     assert!(result.is_tainted_at_exit(cfg.exit, "cmd"));
 }

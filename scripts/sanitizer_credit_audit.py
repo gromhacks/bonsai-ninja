@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""Audit sanitizer YAML rules for tag-credit-table alignment.
+"""Audit sanitizer YAML rules against rulepack-owned credit metadata.
 
 Walks `security-patterns/langs/<lang>/sanitizers/*.yml`, extracts every
-rule's `tag:` value, and reports rules whose tag is not recognised by
-the engine's credit table at
-`crates/security/src/sanitizer_credit.rs`.
+rule's `tag:` value, and reports rules whose tag is not recognized by
+`security-patterns/metadata.yml` or the sink-tag vocabulary.
 
 A sanitizer with an unrecognised tag still loads and still appears in
 `sanitizers_seen` for review, but it cannot credit any sink — so the
 finding stays unsanitized. That's almost always a typo or a forgotten
 table entry.
 
-The canonical list below mirrors the engine's `MAPPING` plus the
-"same-tag-credits-same-tag" implicit set (any sink tag the engine
-matches against is automatically a valid sanitizer tag for itself).
-Updating the engine table requires updating this list and vice-versa
-— if they diverge, the audit reports the gap.
+The runtime and this audit read the same metadata. There is no mirrored
+taxonomy in Python or Rust.
 
 Usage:
   python3 scripts/sanitizer_credit_audit.py
@@ -35,90 +31,23 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 PACK = REPO / "security-patterns" / "langs"
 
-# Cross-tag credit map. Source of truth for the same vocabulary lives
-# at crates/security/src/sanitizer_credit.rs::MAPPING. Keep in sync.
-CROSS_TAG_CREDITS: dict[str, list[str]] = {
-    "open-redirect-sanitize": ["open-redirect"],
-    "url-encode": ["open-redirect"],
-    "url-build": ["ssrf", "open-redirect"],
-    "same-origin-path": ["open-redirect", "header-injection"],
-    "nosql-sanitize": ["nosql-injection"],
-    "nosql-parameter": ["nosql-injection"],
-    "signed-token-verify": ["code-injection", "insecure-deserialization"],
-    "signature-verify": [
-        "code-injection",
-        "insecure-deserialization",
-        "untrusted-token",
-    ],
-    "signature-sanitizer": ["signature-replay", "untrusted-token"],
-    "html-encode": ["xss"],
-    "html-sanitize": ["xss"],
-    "js-encode": ["xss"],
-    "css-encode": ["xss"],
-    "xss-sanitize": ["xss"],
-    "path-sanitize": ["path-traversal"],
-    "zip-slip-guard": ["path-traversal"],
-    "regex-validate": [
-        "path-traversal",
-        "open-redirect",
-        "sql-injection",
-        "xpath-injection",
-    ],
-    "allowlist-validate": [
-        "path-traversal",
-        "open-redirect",
-        "sql-injection",
-        "ssrf",
-        "xpath-injection",
-    ],
-    "char-allowlist": [
-        "path-traversal",
-        "open-redirect",
-        "sql-injection",
-        "command-injection",
-        "header-injection",
-        "xpath-injection",
-    ],
-    "csrf-protect": ["csrf"],
-    "ssrf-sanitize": ["ssrf"],
-    "ldap-escape": ["ldap-injection"],
-    "shell-escape": ["command-injection"],
-    "sql-escape": ["sql-injection"],
-    "sql-parameter": ["sql-injection"],
-    "sql-parameterize": ["sql-injection"],
-    "db-bind-parameter": ["sql-injection"],
-    "header-sanitize": ["header-injection"],
-    "xxe-sanitizer": ["xxe"],
-    "xpath-parameter": ["xpath-injection"],
-    "auth-sanitizer": ["weak-auth", "access-control"],
-    "password-verify": ["weak-auth"],
-    "deser-secure": ["insecure-deserialization"],
-    "jwt-verify": ["jwt", "untrusted-token", "signature-replay"],
-    "constant-time": ["timing-attack"],
-    "constant-time-compare": ["timing-attack"],
-    "bounds-check": ["memory-safety"],
-    "crypto-bounds": ["memory-safety", "weak-crypto"],
-    "crypto-mode": ["weak-crypto"],
-    "kdf": ["weak-crypto"],
-    "numeric-coerce": ["integer-overflow"],
-    "regex-escape": ["redos"],
-    "controlled-exposure": ["information-exposure"],
-    "lock-acquire": ["race"],
-    "cookie-secure": ["cookie-misconfig"],
-    "rate-limit": ["rate-limit-missing"],
-    # Passthrough: recognized but credits nothing (T104 — engine
-    # treats these as identity edges instead of clears).
-    "passthrough-decode": [],
-    "passthrough-encode": [],
-    "passthrough-transform": [],
-    # Recognized but intentionally non-crediting.
-    "validation": [],
-    "schema-validate": [],
-    "base64-encode": [],
-    "hash": [],
-    "url-decode": [],
-    "non-sanitizer": [],
-}
+
+def load_cross_tag_credits() -> dict[str, list[str]]:
+    metadata_path = REPO / "security-patterns" / "metadata.yml"
+    data = yaml.safe_load(metadata_path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"{metadata_path.relative_to(REPO)} must contain a mapping")
+    credits = data.get("sanitizer_credits")
+    if not isinstance(credits, dict):
+        raise ValueError("metadata.yml must define sanitizer_credits")
+    out: dict[str, list[str]] = {}
+    for tag, sinks in credits.items():
+        if not isinstance(tag, str) or not isinstance(sinks, list):
+            raise ValueError("sanitizer_credits entries must map strings to lists")
+        if not all(isinstance(sink, str) for sink in sinks):
+            raise ValueError(f"sanitizer_credits.{tag} contains a non-string sink tag")
+        out[tag] = sinks
+    return out
 
 
 # Sink-side tag vocabulary (same-tag credits its own family). Pulled
@@ -161,8 +90,9 @@ def collect_sanitizer_rules() -> list[tuple[str, Path]]:
 
 
 def build_report() -> dict:
+    cross_tag_credits = load_cross_tag_credits()
     sink_tags = collect_sink_tags()
-    valid_san_tags = set(sink_tags) | set(CROSS_TAG_CREDITS.keys())
+    valid_san_tags = set(sink_tags) | set(cross_tag_credits)
     rules = collect_sanitizer_rules()
     unknown: list[dict] = []
     by_tag: dict[str, int] = defaultdict(int)
@@ -197,7 +127,7 @@ def build_report() -> dict:
         "tag_distribution": dict(sorted(by_tag.items(), key=lambda x: -x[1])),
         "no_tag": no_tag,
         "unknown_tag": unknown,
-        "credit_table_size": len(CROSS_TAG_CREDITS),
+        "credit_table_size": len(cross_tag_credits),
         "sink_tag_count": len(sink_tags),
         "valid_sanitizer_tag_count": len(valid_san_tags),
     }
@@ -231,14 +161,13 @@ def print_unknown_tag_warning(unknown: list[dict]) -> None:
     print()
     print("Either:")
     print("  1. Fix the typo in the rule's `tag:` field, or")
-    print("  2. Add the tag to crates/security/src/sanitizer_credit.rs::MAPPING")
-    print("     (and mirror in scripts/sanitizer_credit_audit.py CROSS_TAG_CREDITS).")
+    print("  2. Add the tag to security-patterns/metadata.yml sanitizer_credits.")
 
 
 def render_text(report: dict) -> None:
     print(f"sanitizer rules examined: {report['rule_count']}")
     print(f"sink tag vocabulary: {report['sink_tag_count']} unique values")
-    print(f"cross-tag credits: {len(CROSS_TAG_CREDITS)} entries")
+    print(f"cross-tag credits: {report['credit_table_size']} entries")
     print(
         "valid sanitizer tags (cross + same-tag): "
         f"{report['valid_sanitizer_tag_count']}"

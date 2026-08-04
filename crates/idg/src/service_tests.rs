@@ -215,6 +215,65 @@ fn packed_symbolic_strings_preserve_exact_sorted_utf8_identity() {
 }
 
 #[test]
+fn packed_symbolic_strings_find_joined_paths_without_allocation() {
+    let table = PackedStringTable::from_sorted(vec![
+        "_data".to_string(),
+        "_data.cmd".to_string(),
+        "cmd".to_string(),
+        "user".to_string(),
+    ]);
+    assert_eq!(table.find_joined("_data", "cmd"), table.find("_data.cmd"));
+    assert_eq!(table.find_joined("_data", "user"), None);
+    assert_eq!(table.find_joined("", "cmd"), None);
+}
+
+#[test]
+fn symbolic_base_rebases_preserve_nested_path_identity_both_directions() {
+    let segment = SegmentId(3);
+    let func = FuncId::new(9);
+    let mut symbolic = SymbolicFieldGraph::new();
+    let root = symbolic.intern_base(segment, func, "self");
+    let nested = symbolic.intern_base(segment, func, "self._data");
+    let fields = PackedStringTable::from_sorted(vec![
+        "_data".to_string(),
+        "_data.cmd".to_string(),
+        "cmd".to_string(),
+        "user".to_string(),
+    ]);
+    let rebases = SymbolicBaseRebaseIndex::from_specs(SymbolicBaseRebaseIndex::specs(&symbolic), &fields);
+    let runtime = SymbolicRuntimeIndex {
+        fields,
+        base_rebases: rebases,
+        ..SymbolicRuntimeIndex::default()
+    };
+
+    let cmd = runtime.field_id("cmd").expect("cmd field");
+    let nested_cmd = runtime.field_id("_data.cmd").expect("nested cmd field");
+    let to_root = runtime
+        .base_rebases
+        .outgoing(nested)
+        .iter()
+        .find(|row| row.target == root)
+        .copied()
+        .expect("nested-to-root rebase");
+    assert_eq!(runtime.rebased_field(to_root, cmd), Some(nested_cmd));
+
+    let to_nested = runtime
+        .base_rebases
+        .outgoing(root)
+        .iter()
+        .find(|row| row.target == nested)
+        .copied()
+        .expect("root-to-nested rebase");
+    assert_eq!(runtime.rebased_field(to_nested, nested_cmd), Some(cmd));
+    assert_eq!(
+        runtime.rebased_field(to_nested, runtime.field_id("user").expect("user field")),
+        None,
+        "an unrelated sibling cannot be projected into the nested base"
+    );
+}
+
+#[test]
 fn symbolic_fact_pager_round_trips_sparse_fixed_width_pages() {
     let mut pager = SymbolicFactPager::new(3);
     let page = SymbolicFactPage {
@@ -289,7 +348,13 @@ fn symbolic_local_provenance_is_retained_only_for_order_sensitive_bases() {
 
 #[test]
 fn symbolic_worklist_spills_exact_fact_states_and_preserves_every_context() {
-    let mut worklist = SymbolicClosureWorklist::new(1, 0, None, None, None);
+    let mut demanded = closure_fact_store();
+    demanded.insert(u128::from(symbolic_fact_key(7, 11)));
+    let demand = SymbolicFieldDemand {
+        facts: demanded,
+        wildcard_bases: closure_fact_store(),
+    };
+    let mut worklist = SymbolicClosureWorklist::new(1, 0, None, None, None, &demand);
     let first = SymbolicNodeFact::new(7, 11, Some(13), false, 3);
     let second_context = SymbolicNodeFact::new(7, 11, Some(13), false, 5);
     assert_eq!(SymbolicNodeFact::from_state_key(first.state_key()), first);
@@ -926,6 +991,8 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
     let caller = FuncId::new(1);
     let middle = FuncId::new(2);
     let callee = FuncId::new(3);
+    let scalar_middle = FuncId::new(4);
+    let scalar_sink = FuncId::new(5);
     let mut caller_segment = crate::segment::IdgSegment::new();
     let box_name = caller_segment.strings.intern("box");
     let live_name = caller_segment.strings.intern("live");
@@ -970,14 +1037,27 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
     callee_segment.add_edge(IdgEdge::intra_assign(field_read, return_node, span(1, 30, 31)));
     callee_segment.record_func(callee);
 
+    // These owners deliberately contain no projected storage.  A generic
+    // suffix-preserving transform relation may pass a scalar through them,
+    // but it must not invent `scalar.live` merely because `box.live` exists
+    // elsewhere in the program.
+    let mut scalar_middle_segment = crate::segment::IdgSegment::new();
+    scalar_middle_segment.record_func(scalar_middle);
+    let mut scalar_sink_segment = crate::segment::IdgSegment::new();
+    scalar_sink_segment.record_func(scalar_sink);
+
     let mut workspace = IdgWorkspace::new();
     let caller_segment_id = workspace.register_segment(caller_segment);
     let middle_segment_id = workspace.register_segment(middle_segment);
     let callee_segment_id = workspace.register_segment(callee_segment);
+    let scalar_middle_segment_id = workspace.register_segment(scalar_middle_segment);
+    let scalar_sink_segment_id = workspace.register_segment(scalar_sink_segment);
     let mut symbolic = SymbolicFieldGraph::new();
     let source = symbolic.intern_base(caller_segment_id, caller, "box");
     let middle_input = symbolic.intern_base(middle_segment_id, middle, "arg");
     let target = symbolic.intern_base(callee_segment_id, callee, "arg");
+    let scalar_input = symbolic.intern_base(scalar_middle_segment_id, scalar_middle, "value");
+    let scalar_output = symbolic.intern_base(scalar_sink_segment_id, scalar_sink, "value");
     symbolic.push_transform(SymbolicFieldTransform {
         source,
         target: middle_input,
@@ -997,6 +1077,32 @@ fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges
         exact_field: NO_SYMBOLIC_STRING,
         call_span: span(0, 26, 29),
         write_span: span(0, 26, 29),
+        precision: Precision::Exact,
+        call_kind: EdgeKind::Direct,
+        kind: SymbolicFieldTransformKind::Argument,
+        arg_idx: 0,
+        param_idx: 0,
+        allow_out_of_order_source: false,
+    });
+    symbolic.push_transform(SymbolicFieldTransform {
+        source,
+        target: scalar_input,
+        exact_field: NO_SYMBOLIC_STRING,
+        call_span: span(0, 32, 35),
+        write_span: span(0, 32, 35),
+        precision: Precision::Exact,
+        call_kind: EdgeKind::Direct,
+        kind: SymbolicFieldTransformKind::Argument,
+        arg_idx: 0,
+        param_idx: 0,
+        allow_out_of_order_source: false,
+    });
+    symbolic.push_transform(SymbolicFieldTransform {
+        source: scalar_input,
+        target: scalar_output,
+        exact_field: NO_SYMBOLIC_STRING,
+        call_span: span(0, 36, 39),
+        write_span: span(0, 36, 39),
         precision: Precision::Exact,
         call_kind: EdgeKind::Direct,
         kind: SymbolicFieldTransformKind::Argument,
@@ -1280,6 +1386,40 @@ fn target_relevance_reverses_exact_scalar_field_returns() {
     assert!(evidence.nodes.contains(&target));
     assert_eq!(evidence.cross_calls.len(), 1);
     assert_eq!(evidence.cross_calls[0].relation, CrossCallRelation::Return);
+}
+
+#[test]
+fn target_relevance_keeps_scalar_seeds_for_unmodeled_projected_places() {
+    let func = FuncId::new(18);
+    let mut segment = crate::segment::IdgSegment::new();
+    let object = segment.strings.intern("object");
+    let field = segment.strings.intern("field");
+    let param_place = segment.intern_place(Place::Param { idx: 0 });
+    let projected_place = segment.intern_place(Place::Read {
+        name: object,
+        path: smallvec::smallvec![field],
+    });
+    let param = segment.intern_node(func, param_place);
+    let projected = segment.intern_node(func, projected_place);
+    segment.record_func(func);
+
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+    let relevance = service.target_relevance_with_max_precision(
+        &[WsNodeId(projected.0)],
+        None,
+        Some(Precision::Narrowed),
+    );
+
+    assert!(
+        !relevance.pruning_complete,
+        "a projected place without symbolic access-path facts must mark the backward relation incomplete"
+    );
+    assert!(
+        relevance.admits_any(&[WsNodeId(param.0)]),
+        "a projected place without an exact symbolic fact must not let the backward pruning proof reject a scalar receiver seed"
+    );
 }
 
 #[test]
@@ -3131,6 +3271,69 @@ fn module_path_method_call_forwards_field_precise_argument() {
 }
 
 #[test]
+fn aggregate_yield_field_forwards_to_exact_loop_binding_field() {
+    let generator_call = span(0, 40, 52);
+    let sink_call = span(0, 70, 82);
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["raw".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: generator_call,
+            target: "item".to_string(),
+            source_name: None,
+            source_call: Some("generate".to_string()),
+            source_call_args: vec!["raw".to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::YieldResult),
+        },
+        FlowEvent::Call {
+            span: sink_call,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
+                span: span(0, 75, 81),
+                name: None,
+                value_text: "item.value".to_string(),
+                place: Some("item.value".to_string()),
+                source_names: vec!["item.value".to_string()],
+            }],
+        },
+    ];
+
+    let mut generate = empty_decl(2, 1, "generate");
+    generate.params = vec!["input".to_string()];
+    generate.flow_events = vec![FlowEvent::Yield {
+        span: span(1, 20, 38),
+        value_text: Some("{'value': input}".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow {
+            aggregate_fields: vec![bonsai_lang_api::ExpressionField {
+                name: "value".to_string(),
+                value_span: Some(span(1, 30, 35)),
+                value: bonsai_lang_api::ExpressionFlow::from_place("input"),
+            }],
+            ..Default::default()
+        },
+    }];
+
+    let (idx, ws) = build_with_edges(vec![entry, generate], |idx| {
+        vec![(func_id(idx, "entry"), func_id(idx, "generate"), generator_call)]
+    });
+    let service = IdgQueryService::new(ws, Arc::clone(&idx));
+    let seeds = service.param_nodes_for_names(func_id(&idx, "entry"), &["raw".to_string()], idx.as_ref());
+    let calls = service.tainted_call_args_in_closure(&seeds);
+    assert!(
+        calls
+            .iter()
+            .any(|(_, span, index)| *span == sink_call && *index == 0),
+        "exact yielded field must reach the matching loop-binding field: {calls:?}"
+    );
+}
+
+#[test]
 fn returned_container_field_forwards_to_assigned_object_argument() {
     let mut entry = empty_decl(1, 0, "entry");
     entry.params = vec!["raw".to_string(), "user".to_string()];
@@ -3449,6 +3652,133 @@ fn returned_container_field_forwards_through_constructor_receiver_state() {
             .iter()
             .any(|(_, call_span, idx)| *call_span == span(3, 240, 255) && *idx == 0),
         "returned user sibling field must not reach constructor-backed command sink: {user_calls:?}"
+    );
+}
+
+#[test]
+fn constructor_scalar_arguments_project_to_returned_object_fields() {
+    let constructor_site = span(0, 40, 48);
+    let sink_site = span(2, 210, 225);
+
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["raw".to_string(), "user".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(0, 30, 70),
+            target: "envelope".to_string(),
+            source_name: None,
+            source_call: Some("Envelope".to_string()),
+            source_call_args: vec!["raw".to_string(), "user".to_string()],
+            source_names: vec!["raw".to_string(), "user".to_string()],
+            declares_new_binding: true,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: constructor_site,
+            name: "Envelope".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Constructor,
+            args: vec![
+                bonsai_lang_api::CallArg {
+                    passing_mode: Default::default(),
+                    span: span(0, 49, 52),
+                    name: None,
+                    value_text: "raw".to_string(),
+                    place: Some("raw".to_string()),
+                    source_names: vec!["raw".to_string()],
+                },
+                bonsai_lang_api::CallArg {
+                    passing_mode: Default::default(),
+                    span: span(0, 54, 58),
+                    name: None,
+                    value_text: "user".to_string(),
+                    place: Some("user".to_string()),
+                    source_names: vec!["user".to_string()],
+                },
+            ],
+        },
+        FlowEvent::Call {
+            span: span(0, 80, 95),
+            name: "consume".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
+                span: span(0, 88, 96),
+                name: None,
+                value_text: "envelope".to_string(),
+                place: Some("envelope".to_string()),
+                source_names: vec!["envelope".to_string()],
+            }],
+        },
+    ];
+
+    let mut envelope_class = empty_decl(2, 1, "Envelope");
+    envelope_class.kind = DeclKind::Class;
+
+    let mut envelope_ctor = empty_decl(3, 1, "Envelope");
+    envelope_ctor.kind = DeclKind::Constructor;
+    envelope_ctor.parent = Some(envelope_class.symbol);
+    envelope_ctor.params = vec!["cmd".to_string(), "user".to_string()];
+    envelope_ctor.implicit_receiver_names = vec!["this".to_string()];
+    envelope_ctor.receiver_field_writes = vec![
+        FieldWrite {
+            span: span(1, 100, 103),
+            target: "this.cmd".to_string(),
+            source_param_indices: vec![0],
+        },
+        FieldWrite {
+            span: span(1, 105, 109),
+            target: "this.user".to_string(),
+            source_param_indices: vec![1],
+        },
+    ];
+
+    let mut consume = empty_decl(4, 2, "consume");
+    consume.params = vec!["envelope".to_string()];
+    consume.flow_events = vec![FlowEvent::Call {
+        span: sink_site,
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
+            span: span(2, 218, 222),
+            name: None,
+            value_text: "envelope.cmd".to_string(),
+            place: Some("envelope.cmd".to_string()),
+            source_names: vec!["envelope.cmd".to_string()],
+        }],
+    }];
+
+    let (idx, ws) = build_with_edges(vec![entry, envelope_class, envelope_ctor, consume], |idx| {
+        vec![
+            (func_id(idx, "entry"), func_id(idx, "Envelope"), constructor_site),
+            (func_id(idx, "entry"), func_id(idx, "consume"), span(0, 80, 95)),
+        ]
+    });
+    let svc = IdgQueryService::new(ws, Arc::clone(&idx));
+    let entry_id = func_id(&idx, "entry");
+
+    let raw_seed = svc.param_nodes_for_names(entry_id, &["raw".to_string()], &idx);
+    let raw_calls = svc.tainted_call_args_in_closure(&raw_seed);
+    assert!(
+        raw_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == sink_site && *idx == 0),
+        "constructor cmd argument must project to the returned object's cmd field: {raw_calls:?}"
+    );
+
+    let user_seed = svc.param_nodes_for_names(entry_id, &["user".to_string()], &idx);
+    let user_calls = svc.tainted_call_args_in_closure(&user_seed);
+    assert!(
+        !user_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == sink_site && *idx == 0),
+        "constructor sibling fields must remain isolated: {user_calls:?}"
     );
 }
 

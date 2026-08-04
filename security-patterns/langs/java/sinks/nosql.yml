@@ -84,7 +84,7 @@
           return mt.find(q, Object.class, "users");
         }
       }
-    expect_match_text: [mt.find]
+    expect_match_text: [this.mt.find]
   - name: spring mongo template find literal negative
     code: |
       import org.springframework.data.mongodb.core.MongoTemplate;

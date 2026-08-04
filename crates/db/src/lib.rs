@@ -55,7 +55,8 @@ impl bonsai_lang_api::TreeProvider for AnalyzerDb {
         snapshot: &bonsai_vfs::FileSnapshot,
     ) -> Option<Arc<bonsai_lang_api::SyntaxTree>> {
         let adapter = self.adapter_for(snapshot.file_id)?;
-        if adapter.language_id().as_str() != pack_name {
+        let path = self.inner.vfs.path(snapshot.file_id).ok()?;
+        if adapter.grammar_name_for_path(&path) != pack_name {
             return None;
         }
         self.inner
@@ -563,7 +564,9 @@ impl AnalyzerDb {
             bonsai_lang_api::apply_call_receiver_types_with_language_syntax(
                 &mut index,
                 capabilities.effective_super_receiver_tokens(),
+                capabilities.effective_implicit_receiver_tokens(),
                 capabilities.effective_constructor_method_names(),
+                capabilities.receiver_type_syntax,
             );
             index.compact_storage();
             index

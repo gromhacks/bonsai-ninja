@@ -680,10 +680,15 @@ pub struct CallSiteRef {
 /// every [`CallSiteRef`] materially inflates large workspaces. Transfer keeps
 /// only the adapter-proven bindings that exist; Phase 3 merge-joins this
 /// sorted relation with the sorted call-site stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct YieldResultRef {
     pub(crate) site: CallSiteId,
     pub(crate) target_node: NodeId,
+    /// Exact adapter-lowered loop/block binding base. Phase 3 uses it to
+    /// project aggregate yield fields without recovering names from nodes.
+    pub(crate) target_base: String,
+    /// Source span of the binding write in the caller.
+    pub(crate) write_span: Span,
 }
 
 /// One throw event recorded by the transfer pass for Phase 3 to
@@ -1283,7 +1288,7 @@ fn same_return_binding(param: &str, returned: &str) -> bool {
 }
 
 fn normalize_return_binding(name: &str) -> &str {
-    name.trim().trim_start_matches(['$', '@', '%'])
+    name.trim().trim_start_matches(bonsai_common::is_name_punctuation)
 }
 
 fn collect_return_field_projections(
@@ -1486,14 +1491,12 @@ fn push_implicit_receiver_base(out: &mut Vec<String>, text: &str, receiver_names
 }
 
 fn implicit_receiver_storage_prefixes(text: &str, receiver_names: &[String]) -> Vec<String> {
-    let normalized = text
-        .trim()
-        .trim_start_matches('&')
-        .trim_start_matches('*')
-        .replace("->", ".");
+    let normalized = bonsai_common::normalize_qualified_name(
+        text.trim().trim_start_matches(bonsai_common::is_name_punctuation),
+    );
     let mut parts = Vec::new();
-    for part in normalized.split(['.', '[', ']']) {
-        let part = part.trim().trim_start_matches(['$', '@', '%']);
+    for part in normalized.split('.') {
+        let part = part.trim().trim_start_matches(bonsai_common::is_name_punctuation);
         if part.is_empty() {
             continue;
         }
@@ -1530,9 +1533,7 @@ pub(crate) fn receiver_tokens_equal(left: &str, right: &str) -> bool {
 fn canonical_receiver_token(token: &str) -> &str {
     token
         .trim()
-        .trim_start_matches('&')
-        .trim_start_matches('*')
-        .trim_start_matches(['$', '@', '%'])
+        .trim_start_matches(bonsai_common::is_name_punctuation)
         .trim_end_matches("()")
         .trim()
 }
@@ -1812,7 +1813,7 @@ impl<'a> TransferCtx<'a> {
         let mut writers: smallvec::SmallVec<[NodeId; 4]> =
             self.last_writer.get(&sid).cloned().unwrap_or_default();
         if writers.is_empty() {
-            let stripped = name.trim_start_matches(['$', '@', '%', '&']);
+            let stripped = name.trim_start_matches(bonsai_common::is_name_punctuation);
             if !stripped.is_empty() && stripped != name {
                 let alias_sid = self.intern_name(stripped);
                 writers = self.last_writer.get(&alias_sid).cloned().unwrap_or_default();
@@ -1899,7 +1900,7 @@ impl<'a> TransferCtx<'a> {
     /// inverse is intentionally not true: consuming `record.header` never pulls
     /// in sibling fields.
     fn bridge_descendant_reads(&mut self, base: &str, consumer: NodeId, meta: crate::edge::EdgeMeta) {
-        let base = base.trim().trim_start_matches(['$', '@', '%', '&']);
+        let base = base.trim().trim_start_matches(bonsai_common::is_name_punctuation);
         if !is_bare_identifier(base) {
             return;
         }
@@ -1920,6 +1921,19 @@ impl<'a> TransferCtx<'a> {
             kind: IdgEdgeKind::IntraAggregateConsume,
             ..meta
         };
+        // Record the AST fact that this argument evaluates the whole
+        // aggregate even when no concrete descendant writer exists yet.
+        // Interprocedural stitching can introduce projected parameter fields
+        // later, so deriving this intent from currently-known writers would
+        // lose `helper(record) -> sink(record)` flows. The marker remains
+        // non-traversable in the scalar graph; symbolic closure consumes it
+        // only for exact field facts on this compiler base.
+        let marker = self.read_node(base);
+        self.emit(IdgEdge {
+            from: marker,
+            to: consumer,
+            meta,
+        });
         for writer in writers {
             self.emit(IdgEdge {
                 from: writer,
@@ -1954,7 +1968,7 @@ impl<'a> TransferCtx<'a> {
         // `record = {}` from reviving stale `record.header` taint when the whole
         // object is passed to a call, while preserving sibling fields for a
         // narrower `record.header = value` write.
-        let canonical = name.trim().trim_start_matches(['$', '@', '%', '&']);
+        let canonical = name.trim().trim_start_matches(bonsai_common::is_name_punctuation);
         if !canonical.is_empty() {
             if let Some(stale) = self.descendant_writer_ids_by_base.get(canonical) {
                 for name_id in stale {
@@ -1965,7 +1979,7 @@ impl<'a> TransferCtx<'a> {
         let sid = self.intern_name(name);
         self.last_writer.insert(sid, smallvec::smallvec![node]);
         self.index_descendant_writer(canonical, sid);
-        let stripped = name.trim_start_matches(['$', '@', '%', '&']);
+        let stripped = name.trim_start_matches(bonsai_common::is_name_punctuation);
         if !stripped.is_empty() && stripped != name {
             let alias_sid = self.intern_name(stripped);
             self.last_writer.insert(alias_sid, smallvec::smallvec![node]);
@@ -1990,14 +2004,14 @@ impl<'a> TransferCtx<'a> {
     /// whose read semantics can observe any previously written value
     /// rather than a scalar overwrite.
     fn append_writer(&mut self, name: &str, node: NodeId) {
-        let canonical = name.trim().trim_start_matches(['$', '@', '%', '&']);
+        let canonical = name.trim().trim_start_matches(bonsai_common::is_name_punctuation);
         let sid = self.intern_name(name);
         let writers = self.last_writer.entry(sid).or_default();
         if !writers.contains(&node) {
             writers.push(node);
         }
         self.index_descendant_writer(canonical, sid);
-        let stripped = name.trim_start_matches(['$', '@', '%', '&']);
+        let stripped = name.trim_start_matches(bonsai_common::is_name_punctuation);
         if !stripped.is_empty() && stripped != name {
             let alias_sid = self.intern_name(stripped);
             let alias_writers = self.last_writer.entry(alias_sid).or_default();
@@ -2075,7 +2089,7 @@ fn collect_field_precise_container_assigns_into(
 
 fn field_base_name(target: &str) -> Option<&str> {
     let trimmed = target.trim();
-    let split = trimmed.find(['.', '['])?;
+    let split = trimmed.find('.')?;
     let base = trimmed[..split].trim();
     (!base.is_empty()).then_some(base)
 }
@@ -2435,7 +2449,7 @@ impl SemanticSourceFilter {
 
     fn is_structural_base_token(&self, source: &str) -> bool {
         let trimmed = source.trim();
-        !trimmed.is_empty() && !trimmed.contains(['.', '[']) && self.structural_bases.contains(trimmed)
+        !trimmed.is_empty() && !trimmed.contains('.') && self.structural_bases.contains(trimmed)
     }
 }
 
@@ -2463,15 +2477,10 @@ fn source_uses_index_projection(source: &str, base: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix(base.trim()) else {
         return false;
     };
-    let Some(tail) = rest.strip_prefix('.').or_else(|| rest.strip_prefix('[')) else {
+    let Some(tail) = rest.strip_prefix('.') else {
         return false;
     };
-    let first = tail
-        .trim_start_matches(['"', '\'', '`'])
-        .split(['.', '[', ']', '"', '\'', '`'])
-        .next()
-        .unwrap_or("")
-        .trim();
+    let first = tail.split('.').next().unwrap_or("").trim();
     !first.is_empty() && first.chars().all(|ch| ch.is_ascii_digit())
 }
 
@@ -2653,8 +2662,15 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
                 call_kind: bonsai_callgraph::EdgeKind::Direct,
                 via_span: *span,
             };
+            // A yielded aggregate can have no scalar input at all while still
+            // exposing exact descendant fields. Keep a boundary endpoint for
+            // every syntactic `yield` so Phase 3 can prove that a resolved
+            // callee is generator-shaped and activate its sparse
+            // `YieldResult` field transforms. Do not connect aggregate fields
+            // to this scalar endpoint: doing so would collapse field
+            // precision and taint the whole caller binding.
+            let to = ctx.intern_node(Place::Yield);
             if !emit_expression_aggregate(YIELD_FIELD_BASE, value_flow, *span, ctx) {
-                let to = ctx.intern_node(Place::Yield);
                 emit_expression_scalar_to_node(value_flow, to, yield_meta, ctx);
                 copy_expression_descendants_to_special_base(YIELD_FIELD_BASE, value_flow, *span, ctx);
             }
@@ -3159,16 +3175,18 @@ fn walk_assign(
             .is_some();
     let indexed_call_sites = assignment_call_sites_for_span(ctx.assignment_values, span);
     let indexed_value_flow = bonsai_lang_api::assignment_value_fact_for_span(ctx.assignment_values, span)
+        // Adapter-emitted exact field writes may deliberately share the
+        // enclosing aggregate statement span. The syntax fact belongs only
+        // to its parsed target; replaying the complete aggregate below each
+        // synthetic field would manufacture paths such as `env.cmd.user` and
+        // cross-contaminate siblings.
+        .filter(|fact| fact.target.as_deref().map(str::trim) == Some(target.trim()))
         .and_then(|fact| {
             (!fact.value_flow.aggregate_fields.is_empty() || !fact.value_flow.spreads.is_empty())
                 .then(|| fact.value_flow.clone())
         });
     let has_indexed_named_aggregate = indexed_value_flow.is_some();
     let rhs_is_literal = matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::Literal));
-    if is_structural_index_metadata_target(target) {
-        return;
-    }
-
     // Field-write detection: targets like `obj.field` or `obj["k"]`.
     // Tuple destructuring keeps a synthetic result-position suffix on
     // the storage node while `last_writer` remains keyed by the user's
@@ -3357,6 +3375,8 @@ fn walk_assign(
                 ctx.out.yield_results.push(YieldResultRef {
                     site,
                     target_node: write_node,
+                    target_base: target.to_string(),
+                    write_span: span,
                 });
             } else if !rhs_is_finite_literal_selection {
                 // Only a root binding owns the complete returned value.
@@ -3446,11 +3466,6 @@ fn walk_assign(
     ctx.commit_writer(target, write_node);
 }
 
-fn is_structural_index_metadata_target(target: &str) -> bool {
-    let trimmed = target.trim();
-    trimmed == "sizeof" || trimmed.contains("sizeof(")
-}
-
 fn is_structural_index_base_write(
     target: &str,
     source_name: Option<&str>,
@@ -3482,7 +3497,7 @@ fn is_structural_index_base_write(
 fn source_is_projected_from_target(target: &str, source: &str) -> bool {
     source
         .strip_prefix(target)
-        .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('['))
+        .is_some_and(|rest| rest.starts_with('.'))
 }
 
 fn direct_rhs_source_is_call_internals(
@@ -3500,9 +3515,8 @@ fn direct_rhs_source_is_call_internals(
     if src == callee || src == bare_function_name(callee) {
         return true;
     }
-    if callee
-        .split(['.', ':'])
-        .filter(|part| !part.is_empty())
+    if bonsai_common::qualified_name_segments(callee)
+        .into_iter()
         .any(|part| part == src)
     {
         return true;
@@ -4113,7 +4127,7 @@ fn bridge_projection_receiver_to_node(
         if emitted.insert(sid) {
             ctx.bridge_read(&receiver, node, meta);
         }
-        let stripped = receiver.trim_start_matches(['$', '@', '%', '&']);
+        let stripped = receiver.trim_start_matches(bonsai_common::is_name_punctuation);
         if !stripped.is_empty()
             && stripped != receiver
             && arg_sources_mention_projection_receiver(arg, stripped)
@@ -4135,7 +4149,7 @@ fn catch_projection_receiver_matches(ctx: &mut TransferCtx<'_>, receiver: &str) 
     if ctx.catch_projection_receivers.contains(&sid) {
         return true;
     }
-    let stripped = receiver.trim_start_matches(['$', '@', '%', '&']);
+    let stripped = receiver.trim_start_matches(bonsai_common::is_name_punctuation);
     if stripped.is_empty() || stripped == receiver {
         return false;
     }
@@ -4179,7 +4193,7 @@ fn projection_receiver_from_text(text: &str) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    let normalised = text.replace("->", ".").replace("::", ".");
+    let normalised = bonsai_common::normalize_qualified_name(text);
     let before_call = normalised
         .find('(')
         .map_or(normalised.as_str(), |idx| &normalised[..idx])
@@ -4212,10 +4226,10 @@ fn arg_sources_mention_projection_receiver(arg: &CallArg, receiver: &str) -> boo
     if receiver.is_empty() {
         return false;
     }
-    let receiver_bare = receiver.trim_start_matches(['$', '@', '%', '&']);
+    let receiver_bare = receiver.trim_start_matches(bonsai_common::is_name_punctuation);
     let source_matches = |source: &str| {
         let source = source.trim();
-        let source_bare = source.trim_start_matches(['$', '@', '%', '&']);
+        let source_bare = source.trim_start_matches(bonsai_common::is_name_punctuation);
         source == receiver
             || (!receiver_bare.is_empty() && source == receiver_bare)
             || source_bare == receiver
@@ -4238,15 +4252,11 @@ fn push_unique_string(out: &mut Vec<String>, value: String) {
 }
 
 fn normalise_callee_text(text: &str) -> String {
-    text.trim()
-        .trim_matches(|c| matches!(c, '"' | '\'' | '`'))
-        .replace("::", ".")
-        .replace("->", ".")
-        .replace(':', ".")
+    bonsai_common::normalize_qualified_name(text.trim().trim_matches(|c| matches!(c, '"' | '\'' | '`')))
 }
 
 fn short_tail(text: &str) -> &str {
-    text.rsplit('.').find(|part| !part.is_empty()).unwrap_or(text)
+    bonsai_common::short_qualified_tail(text)
 }
 
 fn quoted_literal_text(text: &str) -> bool {

@@ -42,6 +42,41 @@ fn required_named_parameter_uses_binding_name() {
 }
 
 #[test]
+fn switch_variable_pattern_binds_from_the_ast_subject() {
+    let db = db_for("void entry(Object args) { switch (args) { case String value: sink(value); } }\n");
+    let index = db.global_index();
+    let entry = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .expect("entry declaration should index");
+
+    let assignment = entry.flow_events.iter().find(|event| {
+        matches!(
+            event,
+            FlowEvent::Assign { target, source_name: Some(source), .. }
+                if target == "value" && source == "args"
+        )
+    });
+    assert!(
+        assignment.is_some(),
+        "pattern binding must be an ordinary compiler assignment before its case body: {:?}",
+        entry.flow_events
+    );
+    let assign_index = entry
+        .flow_events
+        .iter()
+        .position(|event| matches!(event, FlowEvent::Assign { target, .. } if target == "value"))
+        .unwrap();
+    let sink_index = entry
+        .flow_events
+        .iter()
+        .position(|event| matches!(event, FlowEvent::Call { name, .. } if name == "sink"))
+        .unwrap();
+    assert!(assign_index < sink_index);
+}
+
+#[test]
 fn initialized_variable_definition_records_source_call() {
     let db = db_for(
         r#"

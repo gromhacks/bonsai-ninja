@@ -35,6 +35,8 @@ use std::{
 /// Monotonic bump. Increment every time the on-disk format changes
 /// (shape of `KindedTokens`, serialisation layout, propagation
 /// semantics) so old sidecars are rejected on open.
+// v36 (2026-08-03): compiler-object v50 and the structural qualified-place
+// contract change exact assignment/call carriers; reject v35 derived graphs.
 // v35 (2026-07-30): invalidate derived facts after compiler-object v13
 // changed nested lexical identities and downstream resolver endpoints.
 // v33 (2026-07-16): MessagePack replaces the retired binary codec.
@@ -48,7 +50,7 @@ use std::{
 // method-receiver-base source exemption + container-input span
 // containment, service.rs return-position source-seeding fallback) and
 // adapter member synthesis alter propagated taint facts.
-pub const DATAFLOW_CACHE_VERSION: u32 = 35;
+pub const DATAFLOW_CACHE_VERSION: u32 = 36;
 
 type DataFlowMemoryEntry = (FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>, AHashSet<FileId>);
 

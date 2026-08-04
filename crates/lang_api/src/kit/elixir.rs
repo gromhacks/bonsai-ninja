@@ -98,7 +98,12 @@ fn elixir_binary_operator_is(node: &Node<'_>, src: &[u8], op: &str) -> bool {
 /// Each clause is a `binary_operator` arg whose operator is `<-`.
 /// Synthesize an Assign per binding target so taint flows into the
 /// comprehension body / with-chain. Filters and the do-block are ignored.
-fn extract_elixir_generator_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+fn extract_elixir_generator_binding_assigns(
+    file: FileId,
+    node: &Node<'_>,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Vec<FlowEvent> {
     let Some(args) = node
         .child_by_field_name("arguments")
         .or_else(|| first_named_child_of_kind(node, "arguments"))
@@ -117,7 +122,7 @@ fn extract_elixir_generator_binding_assigns(file: FileId, node: &Node<'_>, src: 
             continue;
         };
         for target in binding_targets_from_pattern_node(&pattern, src) {
-            if let Some(assign) = pattern_binding_assign(file, &pattern, &target, rhs, src) {
+            if let Some(assign) = pattern_binding_assign(file, &pattern, &target, rhs, src, handler) {
                 out.push(assign);
             }
         }
@@ -161,7 +166,7 @@ pub(super) fn emit_elixir_control_flow_call(
                 );
             }
             if name == "case" {
-                let match_bindings = extract_elixir_case_stab_clause_bindings(file, node, src);
+                let match_bindings = extract_elixir_case_stab_clause_bindings(file, node, src, handler);
                 if !match_bindings.is_empty() {
                     let mut prefixed = match_bindings.clone();
                     prefixed.extend(then_events);
@@ -174,7 +179,7 @@ pub(super) fn emit_elixir_control_flow_call(
                 }
             }
             if name == "with" {
-                let with_bindings = extract_elixir_generator_binding_assigns(file, node, src);
+                let with_bindings = extract_elixir_generator_binding_assigns(file, node, src, handler);
                 if !with_bindings.is_empty() {
                     let mut prefixed = with_bindings.clone();
                     prefixed.extend(then_events);
@@ -244,8 +249,8 @@ fn emit_elixir_loop_call(
     // H20: a plain `for x <- enum, do: ...` comprehension binds `x` to the
     // enumerable; the closure-param path below only covers Enum.each/map
     // closures, so synthesize the generator bindings up front.
-    body.extend(extract_elixir_generator_binding_assigns(file, node, src));
-    let sources = non_closure_arg_source_names(node, src, &["arguments"]);
+    body.extend(extract_elixir_generator_binding_assigns(file, node, src, handler));
+    let sources = non_closure_arg_source_names(node, src, &["arguments"], handler);
     if let Some(args) = first_named_child_of_kind(node, "arguments") {
         let mut cursor = args.walk();
         for arg in args.named_children(&mut cursor) {
@@ -306,7 +311,7 @@ pub(super) fn emit_erlang_functional_loop_call(
     else {
         return false;
     };
-    let sources = non_closure_arg_source_names_from_container(args, src);
+    let sources = non_closure_arg_source_names_from_container(args, src, handler);
     let mut body = Vec::new();
     let mut cursor = args.walk();
     for arg in args.named_children(&mut cursor) {

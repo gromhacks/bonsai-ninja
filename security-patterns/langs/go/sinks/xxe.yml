@@ -10,8 +10,6 @@
   severity: medium
   packages: ["encoding/xml"]
   cwe: [CWE-611]
-  analysis_semantics:
-    guard_profile: go-xml-decoder-hardening
   match:
     kind: call
     callee:

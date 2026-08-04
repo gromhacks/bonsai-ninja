@@ -3,13 +3,13 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_assign_targets, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_node, canonical_simple_type_name, collect_kinds, collect_receiver_field_writes,
-        language_from_pack, node_text, package_module_segments_with_workspace_prefix, parse_with, span_of,
-        with_fn_kinds_and_implicit_receivers,
+        call_arg_from_node_with_handler, canonical_simple_type_name, collect_kinds,
+        collect_receiver_field_writes, language_from_pack, node_text,
+        package_module_segments_with_workspace_prefix, parse_with, span_of,
     },
-    AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
-    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
-    LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility,
+    AdapterContext, AdapterError, ArgumentPassingMode, AssignValueKind, CallArg, CallKind, DeclIndex,
+    DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
+    LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility, EMPTY_HANDLER,
 };
 
 const CSHARP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -46,7 +46,7 @@ const CSHARP_DECL_KINDS: &[&str] = &[
 // until real module_path coverage (namespace declarations) lands;
 // tighten then.
 const CSHARP_DEFAULT_VISIBILITY: Visibility = Visibility::Public;
-use tree_sitter::{Language, Tree};
+use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("csharp");
 const PACK_NAME: &str = "csharp";
@@ -58,7 +58,22 @@ const PACK_NAME: &str = "csharp";
 // events disappear (audit task #131). `constructor_declaration` and
 // `destructor_declaration` join the set so RAII / dtor flows surface.
 const HANDLER: GrammarHandler = GrammarHandler {
+    fn_kinds: &[
+        "method_declaration",
+        "local_function_statement",
+        "accessor_declaration",
+        "constructor_declaration",
+        "destructor_declaration",
+    ],
+    call_kinds: &["invocation_expression", "object_creation_expression"],
+    argument_passing_mode_extractor: Some(csharp_argument_passing_mode),
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    runtime_type_guard_operators: &["is"],
+    value_free_expression_kinds: &["sizeof_expression", "typeof_expression"],
+    value_free_call_names: &["nameof"],
+    call_ref_kinds: &["invocation_expression", "object_creation_expression"],
+    member_expression_kinds: &["member_access_expression", "property_access_expression"],
+    subscript_expression_kinds: &["element_access_expression"],
     class_kinds: &[
         "class_declaration",
         "struct_declaration",
@@ -73,18 +88,61 @@ const HANDLER: GrammarHandler = GrammarHandler {
         ("interface_declaration", DeclKind::Interface),
         ("enum_declaration", DeclKind::Enum),
     ],
-    ..with_fn_kinds_and_implicit_receivers(
-        &[
-            "method_declaration",
-            "local_function_statement",
-            "accessor_declaration",
-            "constructor_declaration",
-            "destructor_declaration",
-        ],
-        &["this", "base"],
-        &[],
-    )
+    method_kinds: &["method_declaration", "accessor_declaration"],
+    method_context_kinds: &[
+        "class_declaration",
+        "struct_declaration",
+        "interface_declaration",
+        "record_declaration",
+    ],
+    constructor_method_kinds: &["constructor_declaration"],
+    if_kinds: &[
+        "if_statement",
+        "conditional_expression",
+        "switch_statement",
+        "switch_expression",
+    ],
+    for_kinds: &["for_statement"],
+    foreach_kinds: &["foreach_statement"],
+    while_kinds: &["while_statement"],
+    do_kinds: &["do_statement"],
+    assignment_kinds: &[
+        "assignment_expression",
+        "variable_declarator",
+        "property_declaration",
+        "variable_declaration",
+        "local_declaration_statement",
+    ],
+    return_kinds: &["return_statement"],
+    throw_kinds: &["throw_statement", "throw_expression"],
+    lambda_kinds: &["lambda_expression"],
+    try_kinds: &["try_statement"],
+    catch_kinds: &["catch_clause"],
+    finally_kinds: &["finally_clause"],
+    break_kinds: &["break_statement"],
+    continue_kinds: &["continue_statement"],
+    yield_kinds: &["yield_statement"],
+    await_kinds: &["await_expression"],
+    using_kinds: &["using_statement"],
+    implicit_receiver_names: &["this", "base"],
+    ..EMPTY_HANDLER
 };
+
+fn csharp_argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> ArgumentPassingMode {
+    if [argument, value].into_iter().any(|node| {
+        matches!(node.kind(), "argument" | "ref_expression") && {
+            let mut cursor = node.walk();
+            let has_writeback_marker = node
+                .children(&mut cursor)
+                .any(|child| matches!(child.kind(), "ref" | "out" | "in" | "ref_kind_keyword"));
+            has_writeback_marker
+        }
+    }) {
+        ArgumentPassingMode::WriteBack
+    } else {
+        ArgumentPassingMode::Value
+    }
+}
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct CSharpAdapter;
@@ -410,6 +468,8 @@ fn synthesize_csharp_expression_bodied_properties(
                 let receiver_types = csharp_lookup_member_type(prop, lookup_member, src)
                     .into_iter()
                     .collect();
+                let mut return_flow = bonsai_lang_api::ExpressionFlow::from_place(qualified.clone());
+                return_flow.call_sites.push(body_span);
                 vec![
                     FlowEvent::Call {
                         span: body_span,
@@ -423,10 +483,13 @@ fn synthesize_csharp_expression_bodied_properties(
                         span: body_span,
                         value_text: Some(call_name.clone()),
                         value_name: Some(call_name),
-                        value_flow: bonsai_lang_api::ExpressionFlow {
-                            call_sites: vec![body_span],
-                            ..Default::default()
-                        },
+                        // Preserve both compiler facts: this is a resolved
+                        // nested member call and an exact projected value.
+                        // The call-site fact composes accessor summaries;
+                        // the projection lets field-sensitive lowering
+                        // consume only the selected member (`Data.Cmd`) and
+                        // never a sibling (`Data.User`).
+                        value_flow: return_flow,
                     },
                 ]
             } else {
@@ -598,7 +661,7 @@ fn csharp_constructor_initializer_call(
             .child_by_field_name("name")
             .map(|name| node_text(&name, src).trim().to_string())
             .filter(|name| !name.is_empty());
-        if let Some(argument) = call_arg_from_node(argument, file, src, name) {
+        if let Some(argument) = call_arg_from_node_with_handler(argument, file, src, name, &HANDLER) {
             args.push(argument);
         }
     }

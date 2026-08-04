@@ -27,13 +27,75 @@
 use bonsai_common::FileId;
 use bonsai_lang_api::kit::{
     alias_map_from_imports, extract_call_refs, extract_generic_imports, extract_read_write_refs,
-    language_from_pack,
+    language_from_pack, GrammarHandler, SyntaxSpecialForm, EMPTY_HANDLER,
 };
 use bonsai_lang_api::{AliasTarget, ImportIndex, ImportScope, ImportSpec, RefKind};
 
 // ---------------------------------------------------------------------------
 // Builders
 // ---------------------------------------------------------------------------
+
+// Cross-grammar coverage fixture only. Production always passes the active
+// adapter's closed reference syntax declaration.
+const REF_TEST_HANDLER: GrammarHandler = GrammarHandler {
+    assignment_kinds: &["assignment_expression", "augmented_assignment_expression"],
+    call_ref_kinds: &[
+        "call",
+        "call_expression",
+        "function_call_expression",
+        "method_call",
+        "method_call_expression",
+        "method_invocation",
+        "invocation_expression",
+        "member_call_expression",
+        "nullsafe_member_call_expression",
+        "scoped_call_expression",
+        "object_creation_expression",
+        "new_expression",
+        "macro_invocation",
+        "remote",
+    ],
+    member_expression_kinds: &[
+        "member_expression",
+        "nullsafe_member_access_expression",
+        "member_access_expression",
+        "field_access",
+        "field_expression",
+        "selector_expression",
+        "navigation_expression",
+        "attribute",
+        "dot_index_expression",
+        "qualified_access_expression",
+        "qualified_identifier",
+        "scoped_identifier",
+        "property_access_expression",
+        "assignable_expression",
+        "assignable_selector",
+        "unconditional_assignable_selector",
+        "conditional_assignable_selector",
+    ],
+    subscript_expression_kinds: &[
+        "subscript_expression",
+        "subscript",
+        "element_reference",
+        "array_access",
+        "element_access_expression",
+        "bracket_index_expression",
+        "index_expression",
+        "indexing_expression",
+        "indexing_suffix",
+    ],
+    sigil_variable_kinds: &["variable_name"],
+    global_variable_kinds: &["global_variable"],
+    subscript_base_call_refs: true,
+    synthetic_call_ref_names: &[("emit_statement", "emit"), ("revert_statement", "revert")],
+    call_name_suffix_tokens: &["!"],
+    special_forms: &[
+        SyntaxSpecialForm::SplitSelectorCall,
+        SyntaxSpecialForm::RemoteCallExpression,
+    ],
+    ..EMPTY_HANDLER
+};
 
 fn parse(pack: &str, src: &str) -> tree_sitter::Tree {
     let language = language_from_pack(pack).expect("language pack available");
@@ -44,7 +106,7 @@ fn parse(pack: &str, src: &str) -> tree_sitter::Tree {
 
 fn refs(pack: &str, src: &str) -> Vec<(RefKind, String)> {
     let tree = parse(pack, src);
-    extract_read_write_refs(&tree, FileId::INVALID, src.as_bytes())
+    extract_read_write_refs(&tree, FileId::INVALID, src.as_bytes(), &REF_TEST_HANDLER)
         .into_iter()
         .map(|r| (r.kind, r.name))
         .collect()
@@ -52,7 +114,7 @@ fn refs(pack: &str, src: &str) -> Vec<(RefKind, String)> {
 
 fn call_refs(pack: &str, src: &str) -> Vec<String> {
     let tree = parse(pack, src);
-    extract_call_refs(&tree, FileId::INVALID, src.as_bytes())
+    extract_call_refs(&tree, FileId::INVALID, src.as_bytes(), &REF_TEST_HANDLER)
         .into_iter()
         .filter(|r| r.kind == RefKind::Call)
         .map(|r| r.name)

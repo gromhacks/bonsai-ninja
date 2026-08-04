@@ -116,7 +116,7 @@
           return parser.parseExpression(input);
         }
       }
-    expect_match_text: [parser.parseExpression]
+    expect_match_text: [this.parser.parseExpression]
   - name: spring spel parse literal negative
     code: |
       import org.springframework.expression.ExpressionParser;

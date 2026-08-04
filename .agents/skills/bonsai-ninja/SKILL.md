@@ -87,10 +87,20 @@ query. Semantic prewarm publishes a validated query-ready IDG representation;
 warm semantic commands reuse it instead of rebuilding the default fixed point
 from every source segment.
 
+Warm sidecars are accelerators, never authority. Their identity includes the
+source snapshot, adapter/compiler frontend ABI, dependency metadata, transfer
+semantics, and rule-selected graph options; a mismatch is rejected and rebuilt
+without narrowing semantic work.
+
 Persisted analysis artifacts live in a canonical-path-keyed OS cache, not in
 the repository. `cache stats <workspace>` prints the exact directory;
 `BONSAI_WORKSPACE_DIR` supplies an explicit override. The repository-local
 `<workspace>/.bonsai/rules/` path is only a rule overlay.
+
+When this skill is used to modify bonsai-ninja itself, preserve the compiler
+boundary: adapters own Tree-sitter syntax lowering; rulepack YAML owns
+library/package/framework identities and security-sensitive values; shared
+crates consume typed facts without language-id or API-name branches.
 
 ## Choose The Smallest Command
 
@@ -180,6 +190,9 @@ Choose scope deliberately:
   broad `--taint-flow` queries. Inspect still starts from the exact matching
   syntax spans and pages only after all requested semantic work completes;
   `--all` is never a performance or accuracy switch.
+- Broad raw-flow reports compute the complete exact result before paging, but
+  format and cache only the requested page. Continue with the printed page or
+  cursor; requesting page 1 does not eagerly render unrelated future pages.
 - Use `--compact` with graph flows when you need path steps without inlined
   source bodies.
 - Reopen a structural `F:` or `G:` with `show` in the same workspace. Fresh
@@ -247,8 +260,10 @@ Start from reachable input and then prove source-to-sink paths:
   --profile production --context 16k --no-color --no-progress
 ```
 
-`--profile production` applies remote-input defaults, a high-severity taint
-threshold, a 16k context window, and common non-production path exclusions.
+The bundled rulepack's `--profile production` applies remote-input defaults, a
+high-severity taint threshold, a 16k context window, and common non-production
+path exclusions. Profile values and test-path conventions come from
+`security-patterns/metadata.yml`; explicit CLI flags override them.
 Use `--exclude-tests` when you only want the narrower test-path exclusion.
 
 Inventory the model when a finding or gap needs explanation:
@@ -263,6 +278,12 @@ Inventory the model when a finding or gap needs explanation:
 ./target/release/bonsai-ninja security <workspace> deps \
   --severity high --context 8k --no-color --no-progress
 ```
+
+`security sanitizers` lists only matched rules that can make a
+credit-bearing sanitizer claim. Rulepack declarations that preserve taint or
+carry a generic non-crediting validation marker remain available to the flow
+engine, but appear as `TAINT TRANSFORM` evidence in findings rather than as
+sanitizer inventory rows.
 
 Narrow findings:
 

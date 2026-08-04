@@ -15,7 +15,7 @@ fn conformance_traced() {
 /// (`docs/contributing/design-patterns.mdx::Semantic Resolution Always`). The C++
 /// adapter must:
 ///
-/// - emit `Decl.qualified_name = Some("<file_stem>::<name>")` for
+/// - emit `Decl.qualified_name = Some("<file_stem>.<name>")` for
 ///   every function — never `None`;
 /// - emit `Decl.module_path = ["<file_stem>"]`;
 /// - mark `static` free functions AND functions inside an anonymous
@@ -55,7 +55,7 @@ fn cpp_adapter_marks_static_and_anonymous_ns_private() {
     let error_decl = by_name("error");
     assert_eq!(
         error_decl.qualified_name.as_deref(),
-        Some("vendor::error"),
+        Some("vendor.error"),
         "qualified_name must be file-stem-prefixed"
     );
     assert_eq!(
@@ -133,6 +133,92 @@ fn cpp_adapter_uses_ast_class_identity_for_constructors_and_return_fields() {
                 if value_flow.place.as_deref() == Some("this.value_")
         )),
         "field return must be lowered from the return-expression CST: {accessor:#?}"
+    );
+}
+
+#[test]
+fn cpp_adapter_lowers_direct_initialization_as_a_constructor_call() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, CallKind, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_cpp::CppAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("direct.cpp"),
+        "struct Model { explicit Model(int value) {} };\n\
+         int build(int value) { Model model(std::move(value)); return 0; }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let build = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "build")
+        .expect("build declaration");
+    assert!(
+        build.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                call_kind: CallKind::Constructor,
+                args,
+                ..
+            } if name == "Model"
+                && args.len() == 1
+                && args[0].place.as_deref() == Some("value")
+        )),
+        "direct initialization must retain its grammar-owned constructor boundary: {build:#?}"
+    );
+}
+
+#[test]
+fn cpp_adapter_lowers_base_initializer_as_a_constructor_call() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, CallKind, DeclKind, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_cpp::CppAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("base.cpp"),
+        "struct Base { explicit Base(int value) {} };\n\
+         struct Model : Base { explicit Model(int value) : Base(value) {} };\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let model = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Model" && decl.kind == DeclKind::Constructor)
+        .expect("Model constructor");
+    assert!(
+        model.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                call_kind: CallKind::Constructor,
+                args,
+                ..
+            } if name == "Base"
+                && args.len() == 1
+                && args[0].place.as_deref() == Some("value")
+        )),
+        "base initializer must retain its grammar-owned constructor boundary: {model:#?}"
     );
 }
 

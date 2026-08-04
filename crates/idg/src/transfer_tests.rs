@@ -202,7 +202,12 @@ fn c_variadic_runtime_builtins_bridge_pack_to_extracted_value() {
             value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
         },
     ];
-    bonsai_lang_api::kit::normalize_c_variadic_builtin_flow(&mut decl.flow_events, true);
+    bonsai_lang_api::kit::normalize_variadic_builtin_flow(
+        &mut decl.flow_events,
+        true,
+        &["va_start", "__builtin_va_start"],
+        &["va_arg", "__builtin_va_arg"],
+    );
 
     let out = transfer_function_for(&decl);
     assert!(out.edges.iter().any(|edge| {
@@ -328,6 +333,34 @@ fn indexed_literal_element_write_does_not_overwrite_whole_buffer() {
 fn field_precise_container_assignment_does_not_bridge_sources_to_base_write() {
     let mut decl = empty_decl(1, "f");
     let s = span(20, 80);
+    let assignment_values = vec![bonsai_lang_api::AssignmentValueFact {
+        assignment_span: s,
+        target: Some("env".to_string()),
+        target_is_immutable: false,
+        target_owner: None,
+        target_span: Some(span(20, 23)),
+        value_span: span(26, 80),
+        call_sites: Vec::new(),
+        value_flow: bonsai_lang_api::ExpressionFlow {
+            aggregate_fields: vec![
+                bonsai_lang_api::ExpressionField {
+                    name: "Cmd".to_string(),
+                    value_span: Some(span(40, 43)),
+                    value: bonsai_lang_api::ExpressionFlow::from_place("raw"),
+                },
+                bonsai_lang_api::ExpressionField {
+                    name: "User".to_string(),
+                    value_span: Some(span(50, 54)),
+                    value: bonsai_lang_api::ExpressionFlow::from_place("user"),
+                },
+            ],
+            ..Default::default()
+        },
+        exact_callable_return: None,
+        exact_static_call_args: None,
+        direct_call_name: None,
+        direct_call_receiver: None,
+    }];
     decl.flow_events = vec![
         FlowEvent::Assign {
             span: s,
@@ -366,7 +399,11 @@ fn field_precise_container_assignment_does_not_bridge_sources_to_base_write() {
             value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
         },
     ];
-    let out = transfer_function_for(&decl);
+    let out = transfer_function_for_with_options_and_assignment_values(
+        &decl,
+        &TransferOptions::default(),
+        &assignment_values,
+    );
     let place_for = |node_id: NodeId| {
         let node = out.nodes.get(node_id).expect("node exists");
         out.places.get(node.place).expect("place exists")
@@ -403,6 +440,14 @@ fn field_precise_container_assignment_does_not_bridge_sources_to_base_write() {
                 && rendered_place_name(&out, edge.to) == "env"
         }),
         "field-expanded container literals must not bind nested helper-call returns to the whole base: {:#?}",
+        out.edges
+    );
+    assert!(
+        out.nodes.nodes.iter().all(|node| {
+            let name = place_name(out.places.get(node.place).expect("place exists"));
+            name != "env.Cmd.User" && name != "env.User.Cmd"
+        }),
+        "the owning aggregate syntax fact must not be replayed beneath sibling field writes: {:#?}",
         out.edges
     );
 }
@@ -1765,7 +1810,7 @@ fn indexed_object_initializer_is_field_precise_without_duplicate_flow_event() {
     }];
     let facts = [AssignmentValueFact {
         assignment_span: assign_span,
-        target: Some("cmd".to_string()),
+        target: Some("cfg".to_string()),
         target_is_immutable: false,
         target_owner: None,
         target_span: Some(span(20, 23)),
@@ -3215,6 +3260,34 @@ fn yield_with_compound_expression_uses_structured_operands() {
     }];
     let out = transfer_function_for(&decl);
     assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraYield), 1);
+}
+
+#[test]
+fn aggregate_yield_keeps_boundary_without_collapsing_field_precision() {
+    let mut decl = empty_decl(1, "f");
+    decl.flow_events = vec![FlowEvent::Yield {
+        span: span(20, 40),
+        value_text: Some("{'value': raw}".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow {
+            aggregate_fields: vec![bonsai_lang_api::ExpressionField {
+                name: "value".to_string(),
+                value_span: Some(span(30, 33)),
+                value: bonsai_lang_api::ExpressionFlow::from_place("raw"),
+            }],
+            ..Default::default()
+        },
+    }];
+
+    let out = transfer_function_for(&decl);
+    assert!(out
+        .nodes
+        .lookup(out.func, out.places.lookup(&Place::Yield).expect("yield place"))
+        .is_some());
+    assert_eq!(
+        count_edges_of(&out, IdgEdgeKind::IntraYield),
+        0,
+        "an exact yielded field must not taint the whole aggregate"
+    );
 }
 
 #[test]

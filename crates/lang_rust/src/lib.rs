@@ -4,9 +4,9 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, CallKind, CapabilityLevel, DeclIndex, DeclKind, FieldWrite, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    TypeAliasVocabulary, Visibility, NO_CONSTRUCTOR_METHOD_NAMES,
+    AdapterContext, AdapterError, ArgumentPassingMode, CallKind, CapabilityLevel, DeclIndex, DeclKind,
+    FieldWrite, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
+    LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility, NO_CONSTRUCTOR_METHOD_NAMES,
 };
 
 const RUST_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -117,6 +117,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // map to `LoopKind::Loop` rather than misclassifying as DoWhile.
     loop_kinds: &["loop_expression"],
     call_kinds: &["call_expression", "macro_invocation"],
+    argument_passing_mode_extractor: Some(rust_argument_passing_mode),
+    call_ref_kinds: &["call_expression", "macro_invocation"],
+    member_expression_kinds: &["field_expression", "scoped_identifier"],
+    subscript_expression_kinds: &["subscript_expression", "index_expression"],
+    call_name_suffix_tokens: &["!"],
     assignment_kinds: &[
         "assignment_expression",
         "compound_assignment_expr",
@@ -126,14 +131,14 @@ const HANDLER: GrammarHandler = GrammarHandler {
     throw_kinds: &[],
     lambda_kinds: &["closure_expression"],
     // Constructs beyond the core-flow set: Rust try expressions use `?`
-    // postfix rather than a named kind, so the try set is empty. Break /
-    // continue / await / yield rely on the grammar's default node names
-    // (`break_expression`, etc.) already in the generic handler.
+    // postfix rather than a named kind, so the try set is empty. Control and
+    // suspension syntax is declared exactly here; shared lowering supplies no
+    // cross-language node-kind fallback.
     try_kinds: &[],
     catch_kinds: &[],
     finally_kinds: &[],
-    break_kinds: &[],
-    continue_kinds: &[],
+    break_kinds: &["break_expression"],
+    continue_kinds: &["continue_expression"],
     yield_kinds: &["yield_expression"],
     await_kinds: &["await_expression"],
     defer_kinds: &[],
@@ -144,7 +149,16 @@ const HANDLER: GrammarHandler = GrammarHandler {
     implicit_receiver_prefixes: &[],
     tail_expression_returns: true,
     void_return_type_names: &[],
+    ..bonsai_lang_api::EMPTY_HANDLER
 };
+
+fn rust_argument_passing_mode(_argument: Node<'_>, value: Node<'_>) -> ArgumentPassingMode {
+    if value.kind() == "reference_expression" {
+        ArgumentPassingMode::WriteBack
+    } else {
+        ArgumentPassingMode::Value
+    }
+}
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct RustAdapter;
@@ -210,10 +224,12 @@ impl LanguageAdapter for RustAdapter {
             // `self` is an explicit `self_parameter` grammar node and is
             // carried by receiver_param_index rather than synthesized.
             implicit_receiver_tokens: &[],
+            receiver_type_syntax: bonsai_lang_api::ReceiverTypeSyntax::none(),
             same_directory_unqualified_calls: false,
             build_target_linkage: false,
             callable_declaration_family: bonsai_lang_api::CallableDeclarationFamily::None,
             quoted_callable_literals: false,
+            callable_reference_syntax: bonsai_lang_api::CallableReferenceSyntax::none(),
             call_text_prefilter: bonsai_lang_api::CallTextPrefilter::Disabled,
             module_resolution_extensions: &[],
             workspace_manifest_context_extensions: &[],
@@ -453,6 +469,18 @@ fn enrich_rust_tail_return_sources(events: &mut [FlowEvent], params: &[String]) 
                             rust_self_field_place(place) || params.iter().any(|param| param == *place)
                         })
                         .cloned()
+                        // A Rust reference expression (`&self.data.cmd`) is
+                        // not itself a storage place. Its CST-lowered scalar
+                        // operands still carry the exact referent, so select
+                        // that adapter-owned field projection instead of
+                        // teaching shared place lowering about Rust's `&`.
+                        .or_else(|| {
+                            value_flow
+                                .source_names
+                                .iter()
+                                .find(|source| rust_self_field_place(source))
+                                .cloned()
+                        })
                         .or_else(|| rust_single_param_aggregate_source(value_flow, params));
                 }
             }

@@ -62,8 +62,7 @@ source-to-sink evidence, so run the deep gate before merge:
   --format json --no-color --no-progress
 ```
 
-The 2026-07-25 deep gate covers 7,152 rules and 10,499 examples with zero
-errors, warnings, or taint-replay misses. Current counts belong in
+Current counts and the latest zero-error result belong in
 [Release Readiness](RELEASE_READINESS.md); the command remains authoritative.
 
 A `match-example-taint-miss` usually means the rule is broken, its package or
@@ -89,8 +88,17 @@ sanitizer, lifecycle, resolver, and field-sensitive behavior.
 
 Adapter syntax changes must be tested at the Tree-sitter/IR boundary and at
 the public behavior boundary. A language-specific node kind, receiver,
-constructor, module root, or type spelling belongs in that adapter and its
-fixtures, never in a shared hardcoded source-token union.
+constructor, module root, or grammar-declared type spelling belongs in that
+adapter and its fixtures, never in a shared hardcoded source-token union.
+This includes pseudo calls and caller-visible write-back syntax: test the
+adapter's positive form and its closest ordinary-expression negative, then
+assert the language-neutral `CallKind` / `ArgumentPassingMode` fact.
+Library/package/framework identities and security values belong in rule YAML;
+provider-bound adapter facts must have a negative test proving that an
+undeclared provider receives no sanitizer or source/sink credit.
+For same-origin helpers, test the approved imported parser and a same-named
+lookalike module. The adapter should emit both syntax facts with different
+provider identities; only the rule-declared provider may clear taint.
 
 ## Deployment Readiness Checks
 
@@ -100,7 +108,9 @@ git diff --check
 cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
-  --document-private-items --locked
+  --document-private-items --release --locked
+
+cargo build --release -p bonsai_cli --locked
 
 ./target/release/bonsai-ninja security . pack --validate --taint-replay \
   --rules-dir security-patterns \
@@ -116,6 +126,8 @@ cargo test -p bonsai_cli --test sanitizer_fixtures
 cargo test -p bonsai_cli --test per_lang_cli_matrix
 cargo test -p bonsai_conformance --test architecture_invariants
 
+python3 scripts/sanitizer_credit_audit.py
+python3 scripts/sync_skill.py --check
 scripts/audit-adapter-capabilities.sh --check
 python3 scripts/validate-mega-cli.py \
   --bin ./target/release/bonsai-ninja \
@@ -158,11 +170,10 @@ no workspace file-count ceiling.
 
 The current Elasticsearch references are the dated 30,055-file runs in
 [Release Readiness](RELEASE_READINESS.md). The exact large-workspace suite
-passed 4/4 in 210.39 seconds: warm semantic reuse took 4.34 seconds, default
-inspect took 17.33 seconds, and exact sanitizer inventory decoded only the
-4,382 AST bodies surviving compiler-header planning and completed in
-28.01 seconds. The gate requires production security to finish complete and
-keeps every measured warm query/analysis command below 30 seconds. Older
+covers fresh-cache planning, warm reuse, navigation, inspect, inventory, and
+production taint under a 3 GiB scheduling budget. The gate requires production
+security to finish complete and keeps every measured warm query/analysis
+command below its reviewed SLO. Older
 synthetic and superseded whole-body timings remain in
 [the archived goal benchmark](goal-benchmark-2026-05-15.md).
 

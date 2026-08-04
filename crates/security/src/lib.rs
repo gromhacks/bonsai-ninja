@@ -32,12 +32,11 @@ pub mod rule;
 pub(crate) mod sanitizer_credit;
 
 pub use analysis::{
-    canonical_sink_audit_applies, dependency_inventory, filter_rules_to_workspace_languages,
-    normalise_family, pack_audit, pack_inventory, pack_tree, pack_tree_for_rules, rule_family,
-    run_source_analysis, run_source_analysis_with_phase_progress, run_source_analysis_with_progress,
-    run_taint_analysis, run_taint_analysis_with_phase_progress, run_taint_analysis_with_progress,
-    sanitizer_inventory, sanitizer_inventory_with_progress, security_match_rows, security_model_for_lang,
-    seed_idg_service_for_rulepack, select_pack_rules, select_rules, sink_inventory,
+    dependency_inventory, filter_rules_to_workspace_languages, pack_audit, pack_inventory, pack_tree,
+    pack_tree_for_rules, rule_family, run_source_analysis, run_source_analysis_with_phase_progress,
+    run_source_analysis_with_progress, run_taint_analysis, run_taint_analysis_with_phase_progress,
+    run_taint_analysis_with_progress, sanitizer_inventory, sanitizer_inventory_with_progress,
+    security_match_rows, seed_idg_service_for_rulepack, select_pack_rules, select_rules, sink_inventory,
     sink_inventory_with_progress, source_inventory, source_inventory_with_progress,
     source_rule_matches_filters, taint_transfers_from_rulepack, tree_file_rel, validate_pack,
     workspace_languages, AnalysisProgress, CombinedFindingWithChain, CombinedSourceAnalysisCandidate,
@@ -46,8 +45,7 @@ pub use analysis::{
     PackTreeRule, PackValidationIssue, PackValidationReport, RulepackTaintTransfers,
     SecurityInventoryOptions, SecurityMatchRow, SourceAnalysisCandidate, SourceAnalysisOptions,
     SourceAnalysisReport, SourceLineageLimits, SourceLineageStatus, SourceLineageSummary,
-    TaintAnalysisOptions, TaintAnalysisReport, CANONICAL_SINK_FAMILIES, ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS,
-    FAMILY_NOT_APPLICABLE,
+    TaintAnalysisOptions, TaintAnalysisReport,
 };
 pub use compile::{compile_rule_to_inspect_args, CompiledRule};
 pub use deps::{build_inventory, DependencyInventory, DependencyRow};
@@ -56,7 +54,10 @@ pub use finding::{
     TaintPropagationArg, TaintPropagationStep, TaintedArgInfo,
 };
 pub use flow_evidence::{build_flow_bodies, FlowFunctionBody, FlowRole, FlowSourceLine};
-pub use loader::{load_rulepack, load_workspace_local_rules, parse_severity, LoadError, Rulepack};
+pub use loader::{
+    load_rulepack, load_workspace_local_rules, parse_severity, LanguageRuleMetadata, LoadError,
+    PackageMatchSemantics, PackageTailBindingSemantics, Rulepack, RulepackMetadata, SecurityProfileMetadata,
+};
 pub use matcher::{
     drain_runtime_disabled_rules, infer_entry_point_sources, match_rule_against_facts,
     match_rules_against_facts, match_rules_against_facts_with_progress, InterTaintView, RuleMatch,
@@ -67,7 +68,8 @@ pub use report::{
     SecurityReport,
 };
 pub use rule::{
-    AnalysisSemantics, ArgTaintedSpec, CharacterConstraintSemantics, ConfiguredArgumentFactoryGuardSemantics,
+    AnalysisSemantics, ArgTaintedSpec, CharacterConstraintProviderSemantics, CharacterConstraintSemantics,
+    CompilerGuardSemantics, ConfiguredArgumentFactoryGuardSemantics,
     ConfiguredArgumentReceiverGuardSemantics, ConfiguredCallArgumentGuardSemantics, ConstraintKind,
     ContextFlowRole, ContextFlowSemantics, DynamicKeyDenylistGuardSemantics, FlowClass, GuardProfile,
     MatchKind, MatchOrigin, MatchSpec, MustAliasSpec, NoSqlFilterSemantics, ParameterizedQuerySemantics,
@@ -75,9 +77,8 @@ pub use rule::{
     ReceiverConfigurationGuardSemantics, ReceiverFactoryGuardSemantics,
     RelativePathContainmentGuardSemantics, RequiredAggregateFieldSemantics, RequiredCallArgumentSemantics,
     RequiredNamedArgumentSemantics, RequiredReceiverCallSemantics, RequiresStateSpec, Rule, RuleConstraint,
-    RuleKind, RuleTarget, RuntimeTypeSpec, SameOriginPathConstraintSemantics, Severity, TrustClass,
-    UrlComponentSemantics, UrlDnsGuardSemantics, UrlGuardRootSemantics, UrlHostAllowlistSemantics,
-    UrlNetworkGuardSemantics, UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics,
-    UrlSchemeGuardSemantics,
+    RuleKind, RuleTarget, RuntimeTypeSpec, SameOriginPathConstraintSemantics, SanitizerAttachmentPolicy,
+    SanitizerGuardSemantics, Severity, TrustClass, UrlAddressParserSemantics, UrlComponentSemantics,
+    UrlDnsGuardSemantics, UrlGuardRootSemantics, UrlHostAllowlistSemantics, UrlNetworkGuardSemantics,
+    UrlReconstructionGuardSemantics, UrlRedirectGuardSemantics, UrlSchemeGuardSemantics,
 };
-pub use sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};

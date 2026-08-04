@@ -5,7 +5,7 @@
 //! adapters can reuse.
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{short_qualified_tail, FileId, SymbolId};
+use bonsai_common::{qualified_name_segments, short_qualified_tail, FileId, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
     module_local_binding, AliasTarget, DeclKind, ImportSpec, ModulePath, ModulePathSyntax, Visibility,
@@ -245,10 +245,10 @@ pub fn resolve_callable_with_context(
                 // live in that module. Type aliases such as
                 // `value -> String` must not turn `value.equals` into a
                 // workspace-wide `equals` lookup.
-                if let (Some(target_module), Some((_, tail))) = (
-                    rewrite.target_module.as_deref(),
-                    rewrite.rewritten.rsplit_once(['.', ':']),
-                ) {
+                let tail = bonsai_common::short_qualified_tail(&rewrite.rewritten);
+                if let (Some(target_module), true) =
+                    (rewrite.target_module.as_deref(), tail != rewrite.rewritten)
+                {
                     out = collect(tail);
                     out.retain(|func| candidate_in_alias_target(global, *func, target_module, ctx));
                 }
@@ -299,11 +299,7 @@ pub fn resolve_callable_with_context(
 
 fn unqualified_lookup_name(name: &str) -> bool {
     let trimmed = name.trim();
-    !trimmed.is_empty()
-        && !trimmed.contains('.')
-        && !trimmed.contains("::")
-        && !trimmed.contains(':')
-        && !trimmed.contains('\\')
+    !trimmed.is_empty() && bonsai_common::qualified_name_owner(trimmed).is_none()
 }
 
 fn wildcard_import_modules<'a>(ctx: &'a ResolveContext<'_>) -> Vec<&'a str> {
@@ -497,21 +493,10 @@ pub fn strip_module_path_prefix(name: &str, syntax: ModulePathSyntax) -> &str {
         .unwrap_or(trimmed)
 }
 
-/// Split `<module_path>::<fn_name>` into its parts using the
-/// rightmost separator from the supported set.
+/// Split a compiler-qualified callable into its module owner and terminal
+/// name without interpreting source-language punctuation.
 fn split_module_call_tail(name: &str) -> Option<(&str, &str)> {
-    if let Some((head, tail)) = name.rsplit_once("::") {
-        return Some((head, tail));
-    }
-    if let Some((head, tail)) = name.rsplit_once('\\') {
-        return Some((head, tail));
-    }
-    if let Some((head, tail)) = name.rsplit_once('.') {
-        if !head.is_empty() && !tail.is_empty() {
-            return Some((head, tail));
-        }
-    }
-    None
+    bonsai_common::split_qualified_name_owner_tail(name)
 }
 
 fn resolve_callable_member_with_context(
@@ -556,11 +541,7 @@ fn resolve_callable_member_with_context(
 }
 
 fn split_member_head_tail(name: &str) -> Option<(&str, &str)> {
-    let name = name.trim();
-    name.rsplit_once("::")
-        .or_else(|| name.rsplit_once('.'))
-        .or_else(|| name.rsplit_once(':'))
-        .or_else(|| name.rsplit_once('\\'))
+    bonsai_common::split_qualified_name_owner_tail(name)
 }
 
 fn method_parent_matches_receiver_type(
@@ -810,24 +791,12 @@ fn module_target_matches_decl_module_path_impl(
     if target_module.is_empty() || decl_module.is_empty() {
         return false;
     }
-    // Split on every common module-separator: `.` (dotted modules
-    // — Java, Python, Elixir), `/` (path-style URIs — Dart pub
-    // packages, JS specifiers), `\` (PHP namespaces), `::` (Rust /
-    // C++ qualified-id, handled below by collapsing the literal
-    // `::` bytes before splitting). The decl's `module_path`
-    // is already canonical-segment-form so the only normalization
-    // needed here is on the alias text.
+    // Import targets are adapter-classified names. Split their top-level
+    // identifier runs structurally; the resolver must not carry a union of
+    // source-language namespace separators.
     let target_module = strip_module_path_prefix(target_module, syntax);
-    let normalized: Cow<'_, str> = if target_module.contains("::") {
-        Cow::Owned(target_module.replace("::", "."))
-    } else {
-        Cow::Borrowed(target_module)
-    };
-    let target_segments: Vec<&str> = normalized
-        .split(['.', '/', '\\'])
-        .map(str::trim)
-        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != ".." && *seg != "*")
-        .collect();
+    let target_module = target_module.trim_matches(bonsai_common::is_name_punctuation);
+    let target_segments = bonsai_common::qualified_name_segments(target_module);
     if target_segments.is_empty() {
         return false;
     }
@@ -971,36 +940,24 @@ pub fn push_unique_string(out: &mut Vec<String>, value: String) {
     }
 }
 
-/// Strip qualified prefix and any of `IDENTIFIER_SIGILS` /
-/// `REFERENCE_SIGILS`, then drop a trailing `()`. Produces the bare
+/// Strip a qualified prefix and adapter-emitted leading punctuation, then
+/// drop a trailing `()`. Produces the bare
 /// type-identifier form used for cross-class dispatch comparison.
 /// Mirrors what callgraph and taint both used to compute inline.
 #[must_use]
 pub fn canonical_dispatch_type_name(name: &str) -> String {
     short_tail(name)
-        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION)
+        .trim_start_matches(bonsai_common::is_name_punctuation)
         .trim_end_matches("()")
         .trim()
         .to_string()
 }
 
-/// Split a dotted/scoped qualified name on the *first* separator
-/// (`::`, `.`, or `:` in priority order). Returns `(head, tail)`
-/// where `head` is everything before the separator. Used by alias-
-/// target lookups to decide whether `head` names a known import
-/// alias.
+/// Split a compiler-qualified name on its first structural boundary. Used by
+/// alias-target lookups to decide whether the head names a known import alias.
 #[must_use]
 pub fn split_qualified_head_tail(name: &str) -> Option<(&str, &str)> {
-    if let Some((head, tail)) = name.split_once("::") {
-        return Some((head, tail));
-    }
-    if let Some((head, tail)) = name.split_once('.') {
-        return Some((head, tail));
-    }
-    if let Some((head, tail)) = name.split_once(':') {
-        return Some((head, tail));
-    }
-    None
+    bonsai_common::split_qualified_name_head_tail(name)
 }
 
 /// When `name`'s head segment names a `Namespace` alias, return
@@ -1067,7 +1024,7 @@ pub fn is_super_receiver(receiver: &str) -> bool {
 pub fn is_super_receiver_with_tokens(receiver: &str, tokens: &[&str]) -> bool {
     let receiver = receiver
         .trim()
-        .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+        .trim_start_matches(bonsai_common::is_name_punctuation);
     tokens.contains(&receiver)
 }
 
@@ -1838,11 +1795,7 @@ fn path_parts_contains_workspace_suffix(path_parts: &[String], suffix: &[String]
 /// Trailing extensions and `.` / `..` segments are dropped.
 #[must_use]
 pub fn module_import_parts(text: &str) -> Vec<String> {
-    let normalized: Cow<'_, str> = if text.contains("::") {
-        Cow::Owned(text.replace("::", "."))
-    } else {
-        Cow::Borrowed(text)
-    };
+    let normalized = bonsai_common::normalize_qualified_name(text);
     let parts: Vec<&str> = if normalized.contains('/') {
         normalized.split('/').collect()
     } else {
@@ -1948,9 +1901,33 @@ pub fn resolve_class(
             .map(|decl| decl.symbol)
             .collect::<Vec<_>>()
     };
+    let collect_relative_qualified_scope = |lookup: &str| {
+        let wanted = qualified_name_segments(lookup);
+        let Some(tail) = wanted.last().copied().filter(|_| wanted.len() > 1) else {
+            return Vec::new();
+        };
+        let mut candidates = collect_caller_lexical_scope(tail);
+        candidates.retain(|symbol| {
+            global
+                .decl_of(*symbol)
+                .and_then(|decl| decl.qualified_name.as_deref())
+                .is_some_and(|qualified| {
+                    let observed = qualified_name_segments(qualified);
+                    observed.len() >= wanted.len() && observed[observed.len() - wanted.len()..] == wanted[..]
+                })
+        });
+        candidates
+    };
     let mut out = Vec::new();
     for lookup in type_lookup_variants(name) {
         out.extend(collect_caller_file_scope(&lookup));
+        if !out.is_empty() {
+            dedup_symbols(&mut out);
+            return out;
+        }
+    }
+    for lookup in type_lookup_variants(name) {
+        out.extend(collect_relative_qualified_scope(&lookup));
         if !out.is_empty() {
             dedup_symbols(&mut out);
             return out;
@@ -1988,7 +1965,8 @@ pub fn resolve_class(
                     return out;
                 }
             }
-            if let Some((_, tail)) = lookup.rsplit_once(['.', ':']) {
+            let tail = bonsai_common::short_qualified_tail(&lookup);
+            if tail != lookup {
                 // Bare-name fallback: workspace-wide lookup of
                 // the leaf identifier. Constrain to the alias
                 // target's module so an unrelated class with
@@ -2054,20 +2032,16 @@ fn alias_target_qualified_class_lookup_names(
     if target_segments.is_empty() {
         return Vec::new();
     }
-    let module_prefix = target_segments.join("::");
+    let module_prefix = target_segments.join(".");
     let mut out = Vec::new();
     for alias_lookup in alias_bound_class_lookup_names(local_name, rewritten) {
-        if let Some(tail) = alias_lookup
-            .rsplit(['.', ':', '\\', '/'])
-            .next()
-            .map(str::trim)
-            .filter(|tail| !tail.is_empty())
-        {
-            push_unique(&mut out, format!("{module_prefix}::{tail}"));
+        let tail = bonsai_common::short_qualified_tail(&alias_lookup).trim();
+        if !tail.is_empty() {
+            push_unique(&mut out, format!("{module_prefix}.{tail}"));
         }
     }
     if let Some(module_leaf) = target_segments.last() {
-        push_unique(&mut out, format!("{module_prefix}::{module_leaf}"));
+        push_unique(&mut out, format!("{module_prefix}.{module_leaf}"));
     }
     out
 }
@@ -2076,7 +2050,8 @@ fn alias_bound_class_lookup_names(local_name: &str, rewritten: &str) -> Vec<Stri
     let mut out = Vec::new();
     for value in [local_name.trim(), rewritten.trim()] {
         push_unique(&mut out, value.to_string());
-        if let Some((_, tail)) = value.rsplit_once(['.', ':', '\\', '/']) {
+        let tail = bonsai_common::short_qualified_tail(value);
+        if tail != value {
             push_unique(&mut out, tail.trim().to_string());
         }
     }

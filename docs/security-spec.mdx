@@ -316,8 +316,10 @@ tainted just because a GraphQL package is imported.
 Crediting sanitizer matches do not erase IDG reachability. After the engine
 emits a complete source-to-sink path, the security layer relates matched
 sanitizers and compiler-proven guard summaries to the exact lineage. The
-credit table maps compatible security contexts and downgrades or suppresses
-the finding according to the rule's declared coverage.
+`security-patterns/metadata.yml` maps compatible security contexts and
+downgrades or suppresses the finding according to the rule's declared
+coverage. Same-tag credit is implicit; cross-tag and explicitly non-crediting
+vocabulary live only in `sanitizer_credits`, never in Rust.
 
 This keeps sanitizer attribution conservative: false positives over false
 negatives. A sanitizer rule that doesn't match a real call doesn't credit
@@ -338,15 +340,38 @@ adapter IR without hardcoding an API or a language in the engine:
 | `configured_call_argument_guard` | A complete spread-free aggregate argument whose frontend-decoded scalar fields equal the rule's required values. |
 | `receiver_configuration_guard` / `configured_argument_receiver_guard` | Unconditional calls configure the exact receiver. `identity_argument_indices` selects the configuration facet, so the latest write to that facet wins without confusing another call to the same setter. |
 | `character_constraint` | A constrained alphabet reaches the selected sink value; SQL rules may also require that value to be enclosed by a particular literal delimiter. |
-| `same_origin_path_constraint` | A unique helper rejects URL schemes and authorities, requires `/`, and rejects `//` before returning the path. |
+| `compiler_guard` | An adapter-proven, API-neutral capability reaches the exact matched call. `required_evidence` selects syntax roles such as a callback slot or selector chain; `forbidden_evidence` rejects unsafe static choices. |
+| `same_origin_path_constraint` | A unique helper rejects URL schemes and authorities, requires `/`, and rejects `//` before returning the path. Provider-backed parsing is credited only when `accepted_providers` authorizes the adapter-recorded import identity. |
 | `dynamic_key_denylist_guard` | A unique helper drops the rule-owned static key set and, when required, recursively rebuilds nested values. |
 | `url_reconstruction_guard` | A unique helper parses a URL, restricts scheme and host against static facts, and rebuilds the outbound URL from the declared components. |
+| `url_network_guard` | Exact parser, scheme/host, DNS resolver, optional address-parser, and private-address predicate roles are rule data. `sink-argument-parser-input` proves the sink consumes the same compiler value that the parser validated. |
 | `context_flow.sanitized_rewrite_clears_channel` | A sanitized producer rewrites an implicit channel before its consumer. Straight-line order or a typed non-null branch must prove the replacement, and a later unsanitized write cancels it. |
 | `sink_terminal_priority` | Presentation-only collapse of a lower-priority downstream transport sink in the same vulnerability class when an exact resolved call/assignment chain proves both sites belong to one flow. |
 
 The adapter owns Tree-sitter syntax recognition; the rulepack owns API roles
-and security values; shared analysis only joins those typed facts. Missing,
-ambiguous, mutable, or partially decoded evidence never grants credit.
+and security values; shared analysis only joins those typed facts. A
+provider-bound character fact is ignored unless its recorded factory and
+operation match `accepted_providers`. A compiler capability is ignored unless
+all required evidence is present and all forbidden evidence is absent.
+The same fail-closed rule applies to same-origin facts: a fact that depends on
+a runtime parser must match `same_origin_path_constraint.accepted_providers`,
+while a syntax-only fact is accepted only when that provider list is empty.
+Missing, ambiguous, mutable, or partially decoded evidence never grants
+credit. Pack-wide dependency/taxonomy/default policy lives in
+`security-patterns/metadata.yml`, not in analyzer source.
+
+`ConditionExpressionFact::Truthy` represents an exact compiler value tested
+for runtime truth, including boolean property reads used by network-address
+guards. Falsey fallback expressions retain the dynamic projection selected by
+the AST instead of collapsing the expression to a clean literal. Shared guard
+analysis consumes this typed tree; it never parses a rendered condition.
+
+Package gates follow the same ownership rule. Every adapter emits canonical
+`ImportSpec` and call identities. `metadata.yml` declares that language's
+prefix/suffix normalization, component separators, and optional package-tail
+binding. Shared package matching applies those declarations generically and
+does not know runtime schemes, header extensions, namespace syntax, or a
+language id.
 
 Call constraints can also require exact positional aggregate values with
 `arg_sequence_items_equal`. The adapter decodes array/list initializer

@@ -1,7 +1,7 @@
 use super::super::{
-    emit_using_as_pattern_assigns, extract_catch_param, extract_return_value_flow, extract_return_value_name,
-    extract_return_value_text, extract_throw_value_name, extract_yield_value_flow,
-    looks_like_bare_identifier, node_text, span_of, FlowEvent, Node,
+    emit_using_as_pattern_assigns, extract_catch_param, extract_return_value_flow_with_handler,
+    extract_return_value_name_with_handler, extract_return_value_text, extract_throw_value_name,
+    extract_yield_value_flow_with_handler, looks_like_bare_identifier, node_text, span_of, FlowEvent, Node,
 };
 use super::{walk_into, LoweringContext};
 
@@ -69,7 +69,7 @@ pub(super) fn lower_control_and_scope(
         out.push(FlowEvent::Yield {
             span: span_of(file, &node),
             value_text,
-            value_flow: extract_yield_value_flow(&node, file, src),
+            value_flow: extract_yield_value_flow_with_handler(&node, file, src, handler),
         });
         // Descend so calls inside `yield f()` still surface.
         let mut cursor = node.walk();
@@ -340,8 +340,8 @@ pub(super) fn lower_function_exit(
             out.push(FlowEvent::Return {
                 span: span_of(file, &node),
                 value_text: extract_return_value_text(&node, src),
-                value_name: extract_return_value_name(&node, src),
-                value_flow: extract_return_value_flow(&node, file, src),
+                value_name: extract_return_value_name_with_handler(&node, src, handler),
+                value_flow: extract_return_value_flow_with_handler(&node, file, src, handler),
             });
         }
         return true;

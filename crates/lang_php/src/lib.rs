@@ -1,17 +1,17 @@
 //! PHP language adapter.
 use bonsai_common::{FileId, Span};
-use bonsai_lang_api::kit::with_fn_kinds_and_implicit_receivers;
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        call_arg_from_node, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
-        parse_with, span_of,
+        call_arg_from_node_with_handler, collect_kinds, first_named_child_of_kind, language_from_pack,
+        named_child_call_args_with_handler, node_text, parse_with, span_of,
     },
     AdapterContext, AdapterError, AssignValueKind, AssignmentValueIndex, CallArg, CallKind, DeclIndex,
     DeclKind, FieldWrite, FlowEvent, FragmentParseContext, GrammarHandler, ImportIndex, ImportScope,
     ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasVocabulary,
-    Visibility,
+    Visibility, EMPTY_HANDLER,
 };
+use std::collections::BTreeSet;
 
 const PHP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     fn_kinds: &["function_definition", "method_declaration"],
@@ -38,12 +38,63 @@ const PHP_VOCAB: ModifierVocabulary = ModifierVocabulary {
     // PHP's default visibility for class members is `public`.
     default_visibility: Visibility::Public,
 };
-use tree_sitter::{Language, Tree};
+use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("php");
 const PACK_NAME: &str = "php";
+
+fn extract_php_callable_reference(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if !matches!(
+        node.kind(),
+        "function_call_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "scoped_call_expression"
+    ) {
+        return None;
+    }
+    let callee = node
+        .child_by_field_name("function")
+        .or_else(|| node.child_by_field_name("name"))
+        .or_else(|| node.child_by_field_name("target"))?;
+    let arguments = node
+        .child_by_field_name("arguments")
+        .or_else(|| node.child_by_field_name("argument_list"))?;
+    if arguments.named_child_count() != 1 || arguments.named_child(0)?.kind() != "variadic_placeholder" {
+        return None;
+    }
+    let name = node_text(&callee, src).trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
 const HANDLER: GrammarHandler = GrammarHandler {
+    fn_kinds: &["function_definition", "method_declaration"],
+    call_kinds: &[
+        "function_call_expression",
+        "member_call_expression",
+        "nullsafe_member_call_expression",
+        "scoped_call_expression",
+        "object_creation_expression",
+    ],
+    pseudo_call_extractor: Some(extract_php_pseudo_call),
+    syntax_event_extractor: None,
+    argument_passing_mode_extractor: None,
+    call_ref_kinds: &[
+        "function_call_expression",
+        "member_call_expression",
+        "nullsafe_member_call_expression",
+        "scoped_call_expression",
+        "object_creation_expression",
+    ],
+    member_expression_kinds: &[
+        "member_access_expression",
+        "member_expression",
+        "nullsafe_member_access_expression",
+    ],
+    subscript_expression_kinds: &["subscript_expression"],
+    sigil_variable_kinds: &["variable_name"],
+    callable_reference_extractor: Some(extract_php_callable_reference),
     constructor_names: &["__construct"],
+    runtime_type_guard_operators: &["instanceof"],
     class_kinds: &[
         "class_declaration",
         "interface_declaration",
@@ -56,12 +107,60 @@ const HANDLER: GrammarHandler = GrammarHandler {
         ("trait_declaration", DeclKind::Trait),
         ("enum_declaration", DeclKind::Enum),
     ],
-    ..with_fn_kinds_and_implicit_receivers(
-        &["function_definition", "method_declaration"],
-        &["$this", "this"],
-        &[],
-    )
+    method_kinds: &["method_declaration"],
+    method_context_kinds: &[
+        "class_declaration",
+        "interface_declaration",
+        "trait_declaration",
+        "enum_declaration",
+    ],
+    if_kinds: &[
+        "if_statement",
+        "conditional_expression",
+        "switch_statement",
+        "match_expression",
+    ],
+    for_kinds: &["for_statement"],
+    foreach_kinds: &["foreach_statement"],
+    while_kinds: &["while_statement"],
+    do_kinds: &["do_statement"],
+    assignment_kinds: &[
+        "assignment_expression",
+        "augmented_assignment_expression",
+        "reference_assignment_expression",
+        "property_declaration",
+    ],
+    return_kinds: &["return_statement"],
+    throw_kinds: &["throw_expression"],
+    lambda_kinds: &["anonymous_function", "arrow_function"],
+    try_kinds: &["try_statement"],
+    catch_kinds: &["catch_clause"],
+    finally_kinds: &["finally_clause"],
+    break_kinds: &["break_statement"],
+    continue_kinds: &["continue_statement"],
+    yield_kinds: &["yield_expression"],
+    implicit_receiver_names: &["$this", "this"],
+    ..EMPTY_HANDLER
 };
+
+fn extract_php_pseudo_call(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
+    if node.kind() != "echo_statement" {
+        return None;
+    }
+    Some(FlowEvent::Call {
+        span: span_of(file, &node),
+        receiver: None,
+        receiver_types: Vec::new(),
+        name: "echo".to_string(),
+        call_kind: CallKind::Function,
+        args: named_child_call_args_with_handler(&node, file, src, handler),
+    })
+}
 
 /// Tree-sitter adapter for PHP.
 #[derive(Debug, Default, Copy, Clone)]
@@ -111,6 +210,10 @@ impl LanguageAdapter for PhpAdapter {
             // class dispatch (`self` / late-bound `static`). None denotes a
             // parent type; that role belongs exclusively to `parent` above.
             implicit_receiver_tokens: &["$this", "self", "static"],
+            receiver_type_syntax: bonsai_lang_api::ReceiverTypeSyntax {
+                wrapper_calls: &[],
+                class_object_suffixes: &["::class"],
+            },
             quoted_callable_literals: true,
             ..LanguageCapabilities::partial_baseline()
         }
@@ -239,7 +342,13 @@ impl LanguageAdapter for PhpAdapter {
         ];
         let assignment_values = AssignmentValueIndex::new(&idx.assignment_values);
         for decl in &mut idx.defs {
-            augment_php_quoted_callable_literals(&mut decl.flow_events, &source, &assignment_values);
+            let invoked_variables = php_invoked_variables(&decl.flow_events);
+            augment_php_quoted_callable_literals(
+                &mut decl.flow_events,
+                &source,
+                &assignment_values,
+                &invoked_variables,
+            );
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, PHP_LIFECYCLE_TRANSITIONS);
         }
@@ -251,11 +360,18 @@ impl LanguageAdapter for PhpAdapter {
         // Local constructor-result receiver typing
         // (`$x = new Foo()` → `$x: Foo`) so `$x->method(...)` carries a
         // resolved receiver type for `receiver_type_in` / `[Type, method]`
-        // rules. PHP class names are conventionally PascalCase while
-        // functions are snake_case, so the constructor heuristic is
-        // reliable here.
+        // rules. The constructor identity comes from the adapter-lowered
+        // object-creation node, never from identifier casing or spelling.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
+        let capabilities = self.capabilities();
+        bonsai_lang_api::apply_call_receiver_types_with_language_syntax(
+            &mut idx,
+            capabilities.super_receiver_tokens,
+            capabilities.implicit_receiver_tokens,
+            capabilities.constructor_method_names,
+            capabilities.receiver_type_syntax,
+        );
         idx
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
@@ -272,6 +388,7 @@ fn augment_php_quoted_callable_literals(
     events: &mut [FlowEvent],
     source: &str,
     assignment_values: &AssignmentValueIndex,
+    invoked_variables: &BTreeSet<String>,
 ) {
     for event in events {
         match event {
@@ -285,11 +402,17 @@ fn augment_php_quoted_callable_literals(
                 if matches!(value_kind, Some(AssignValueKind::Destructure)) {
                     continue;
                 }
-                if let Some(rhs) = assignment_values.rendering(*span, source) {
-                    if target.trim_start().starts_with('$') && php_quoted_bare_callable_literal(rhs).is_some()
-                    {
-                        *source_name = Some(rhs.to_string());
-                        *value_kind = Some(AssignValueKind::Literal);
+                if invoked_variables.contains(target) {
+                    if let Some(rhs) = assignment_values.rendering(*span, source) {
+                        if let Some(callable) = target
+                            .trim_start()
+                            .starts_with('$')
+                            .then(|| php_quoted_bare_callable_literal(rhs))
+                            .flatten()
+                        {
+                            *source_name = Some(callable.to_string());
+                            *value_kind = Some(AssignValueKind::CallableReference);
+                        }
                     }
                 }
             }
@@ -298,11 +421,21 @@ fn augment_php_quoted_callable_literals(
                 else_events,
                 ..
             } => {
-                augment_php_quoted_callable_literals(then_events, source, assignment_values);
-                augment_php_quoted_callable_literals(else_events, source, assignment_values);
+                augment_php_quoted_callable_literals(
+                    then_events,
+                    source,
+                    assignment_values,
+                    invoked_variables,
+                );
+                augment_php_quoted_callable_literals(
+                    else_events,
+                    source,
+                    assignment_values,
+                    invoked_variables,
+                );
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                augment_php_quoted_callable_literals(body, source, assignment_values);
+                augment_php_quoted_callable_literals(body, source, assignment_values, invoked_variables);
             }
             FlowEvent::Try {
                 body,
@@ -310,13 +443,68 @@ fn augment_php_quoted_callable_literals(
                 finally_events,
                 ..
             } => {
-                augment_php_quoted_callable_literals(body, source, assignment_values);
-                augment_php_quoted_callable_literals(catch_events, source, assignment_values);
-                augment_php_quoted_callable_literals(finally_events, source, assignment_values);
+                augment_php_quoted_callable_literals(body, source, assignment_values, invoked_variables);
+                augment_php_quoted_callable_literals(
+                    catch_events,
+                    source,
+                    assignment_values,
+                    invoked_variables,
+                );
+                augment_php_quoted_callable_literals(
+                    finally_events,
+                    source,
+                    assignment_values,
+                    invoked_variables,
+                );
             }
             _ => {}
         }
     }
+}
+
+/// Return variables that the parsed PHP function actually invokes as
+/// callables. A quoted string is a normal literal unless the CST-derived call
+/// event proves that the assigned variable is used in callable position.
+fn php_invoked_variables(events: &[FlowEvent]) -> BTreeSet<String> {
+    fn collect(events: &[FlowEvent], out: &mut BTreeSet<String>) {
+        for event in events {
+            match event {
+                FlowEvent::Call {
+                    name,
+                    call_kind: CallKind::Function | CallKind::Indirect,
+                    ..
+                } if name.starts_with('$') => {
+                    out.insert(name.clone());
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect(then_events, out);
+                    collect(else_events, out);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => collect(body, out),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    collect(body, out);
+                    collect(catch_events, out);
+                    collect(finally_events, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut invoked = BTreeSet::new();
+    collect(events, &mut invoked);
+    invoked
 }
 
 fn php_quoted_bare_callable_literal(value: &str) -> Option<&str> {
@@ -523,7 +711,9 @@ fn synthesize_php_construct_events(tree: &Tree, src: &[u8], file: FileId) -> Vec
                         current.kind(),
                         "variable_name" | "subscript_expression" | "member_access_expression"
                     ) {
-                        if let Some(argument) = call_arg_from_node(current, file, src, None) {
+                        if let Some(argument) =
+                            call_arg_from_node_with_handler(current, file, src, None, &HANDLER)
+                        {
                             args.push(argument);
                         }
                         continue;
@@ -536,7 +726,8 @@ fn synthesize_php_construct_events(tree: &Tree, src: &[u8], file: FileId) -> Vec
             } else {
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
-                    if let Some(argument) = call_arg_from_node(child, file, src, None) {
+                    if let Some(argument) = call_arg_from_node_with_handler(child, file, src, None, &HANDLER)
+                    {
                         args.push(argument);
                         // include/require has exactly one argument.
                         break;
@@ -772,4 +963,31 @@ fn extract_php_namespace(root: tree_sitter::Node<'_>, src: &[u8]) -> Option<Vec<
         }
     }
     None
+}
+
+#[cfg(test)]
+mod callable_reference_tests {
+    use super::*;
+
+    #[test]
+    fn first_class_callable_placeholder_is_adapter_owned() {
+        let language = language_from_pack(PACK_NAME).expect("php grammar");
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set php grammar");
+        let src = "<?php function f() { $cb = system(...); $value = system($x); }";
+        let tree = parser.parse(src, None).expect("parse php source");
+        let refs = collect_kinds(
+            &tree,
+            &[
+                "function_call_expression",
+                "member_call_expression",
+                "nullsafe_member_call_expression",
+                "scoped_call_expression",
+            ],
+        )
+        .into_iter()
+        .filter_map(|node| extract_php_callable_reference(node, src.as_bytes()))
+        .collect::<Vec<_>>();
+        assert_eq!(refs, vec!["system"]);
+    }
 }

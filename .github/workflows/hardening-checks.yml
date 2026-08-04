@@ -77,6 +77,16 @@ jobs:
       - name: Run hardcoded audit
         run: bash scripts/audit-hardcoded.sh --check /tmp/hardcoded-audit
 
+  agent-skill-sync:
+    name: Agent skill copies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Verify generated skill copies
+        run: python3 scripts/sync_skill.py --check
+
   capabilities:
     name: Adapter capability matrix drift
     runs-on: ubuntu-latest

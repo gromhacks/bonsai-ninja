@@ -43,6 +43,41 @@ fn solidity_adapter_populates_parameter_type_aliases() {
 }
 
 #[test]
+fn solidity_augmented_assignment_is_lowered_as_value_flow() {
+    let adapter = bonsai_lang_solidity::SolidityAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("Demo.sol"),
+        "contract Demo { function entry(uint args) public { uint x = 0; x += args; sink(x); } }",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let index = adapter.extract_declarations(file, &ctx);
+    let entry = index
+        .defs
+        .iter()
+        .find(|declaration| declaration.name == "entry")
+        .expect("entry declaration");
+    assert!(
+        entry.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_names,
+                ..
+            } if target == "x" && source_names.iter().any(|source| source == "args")
+        )),
+        "augmented assignment must be an AST-lowered assignment: {:?}",
+        entry.flow_events
+    );
+}
+
+#[test]
 fn solidity_library_is_a_type_owner_for_class_side_dispatch() {
     let adapter = bonsai_lang_solidity::SolidityAdapter::new();
     let vfs = Vfs::new();

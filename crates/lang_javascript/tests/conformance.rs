@@ -70,6 +70,53 @@ fn arrow_expression_records_implicit_return() {
 }
 
 #[test]
+fn super_invocation_is_lowered_as_direct_parent_constructor_dispatch() {
+    use bonsai_lang_api::{CallKind, FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "classes.js",
+            r#"
+class Base {
+  constructor(value) { this.value = value; }
+}
+class Child extends Base {
+  constructor(value) { super(value); }
+}
+"#,
+        )],
+    );
+    let file = ws.db().vfs().all_files()[0];
+    let index = ws.db().decl_index(file).expect("JavaScript declaration index");
+    let child = index
+        .defs
+        .iter()
+        .find(|decl| {
+            decl.name == "constructor"
+                && decl
+                    .parent
+                    .and_then(|parent| index.defs.iter().find(|owner| owner.symbol == parent))
+                    .is_some_and(|owner| owner.name == "Child")
+        })
+        .expect("Child constructor");
+    assert!(
+        child.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                receiver: Some(receiver),
+                call_kind: CallKind::Constructor,
+                ..
+            } if name == "Base" && receiver == "super"
+        )),
+        "super(value) must retain constructor semantics and the direct parent identity: {:#?}",
+        child.flow_events
+    );
+}
+
+#[test]
 fn chained_global_replacements_emit_exact_escape_summary() {
     use bonsai_lang_api::LanguageAdapter;
 

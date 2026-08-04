@@ -1,19 +1,76 @@
 //! Ruby language adapter.
 use bonsai_common::{FileId, Span};
-use bonsai_lang_api::kit::with_fn_kinds_and_implicit_receivers;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
+    kit::{
+        collect_kinds, first_named_child_of_kind, language_from_pack, named_child_call_args_with_handler,
+        node_text, parse_with, span_of,
+    },
     AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
     ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref,
-    RefKind, SyntaxSpecialForm,
+    RefKind, SyntaxSpecialForm, EMPTY_HANDLER,
 };
-use tree_sitter::{Language, Tree};
+use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("ruby");
 const PACK_NAME: &str = "ruby";
-const BASE_HANDLER: GrammarHandler =
-    with_fn_kinds_and_implicit_receivers(&["method", "singleton_method"], &["self", "super"], &["@"]);
+
+fn extract_ruby_callable_reference(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if !matches!(node.kind(), "call" | "method_call") {
+        return None;
+    }
+    let callee = node
+        .child_by_field_name("method")
+        .or_else(|| node.child_by_field_name("function"))
+        .or_else(|| node.child_by_field_name("name"))
+        .or_else(|| node.child_by_field_name("target"))?;
+    if node_text(&callee, src).trim() != "method" {
+        return None;
+    }
+    let arguments = node
+        .child_by_field_name("arguments")
+        .or_else(|| node.child_by_field_name("argument_list"))?;
+    if arguments.named_child_count() != 1 {
+        return None;
+    }
+    let symbol = arguments.named_child(0)?;
+    if !matches!(symbol.kind(), "simple_symbol" | "symbol" | "symbol_literal") {
+        return None;
+    }
+    let name = node_text(&symbol, src).trim().trim_start_matches(':');
+    (!name.is_empty()
+        && name
+            .chars()
+            .enumerate()
+            .all(|(index, ch)| ch == '_' || ch.is_alphanumeric() && (index > 0 || !ch.is_numeric())))
+    .then(|| name.to_string())
+}
+const BASE_HANDLER: GrammarHandler = GrammarHandler {
+    fn_kinds: &["method", "singleton_method"],
+    class_kinds: &["class", "module"],
+    class_decl_kinds: &[("class", DeclKind::Class), ("module", DeclKind::Module)],
+    method_context_kinds: &["class", "module"],
+    if_kinds: &[
+        "if",
+        "if_modifier",
+        "unless",
+        "unless_modifier",
+        "case",
+        "case_match",
+    ],
+    for_kinds: &["for"],
+    while_kinds: &["while", "until"],
+    return_kinds: &["return"],
+    lambda_kinds: &["lambda", "do_block"],
+    try_kinds: &["begin", "begin_block"],
+    catch_kinds: &["rescue"],
+    finally_kinds: &["ensure"],
+    break_kinds: &["break", "next", "redo", "retry"],
+    yield_kinds: &["yield"],
+    implicit_receiver_names: &["self", "super"],
+    implicit_receiver_prefixes: &["@"],
+    ..EMPTY_HANDLER
+};
 const HANDLER: GrammarHandler = GrammarHandler {
     // Ruby methods return their final expression when there is no
     // explicit `return`. Surface that terminal expression as a normal
@@ -23,18 +80,41 @@ const HANDLER: GrammarHandler = GrammarHandler {
     tail_expression_returns: true,
     void_return_type_names: &[],
     // tree-sitter-ruby parses `buf += data`, `x ||= y`, `arr <<= e`
-    // as `operator_assignment`, which is absent from the generic
-    // assignment_kinds list (audit H24). Without it `is_assignment`
-    // never matches and no Assign{target, source} is emitted, so the
-    // RHS taint never binds to the target. `is_assignment` ORs with
-    // GENERIC_HANDLER.assignment_kinds, so the plain `x = y`
-    // (`assignment`) kind still matches via that fallback; the
-    // compound arm in the kit then re-adds the LHS as a source
-    // operand (read-modify-write).
-    assignment_kinds: &["operator_assignment"],
+    // as `operator_assignment`. Both assignment forms are declared here;
+    // shared lowering has no cross-language fallback. The compound arm in
+    // the kit then re-adds the LHS as a source operand (read-modify-write).
+    assignment_kinds: &["assignment", "operator_assignment"],
+    call_kinds: &["call", "method_call"],
+    pseudo_call_extractor: Some(extract_ruby_pseudo_call),
+    syntax_event_extractor: None,
+    argument_passing_mode_extractor: None,
+    call_ref_kinds: &["call", "method_call"],
+    subscript_expression_kinds: &["element_reference"],
+    global_variable_kinds: &["global_variable"],
+    subscript_base_call_refs: true,
+    callable_reference_extractor: Some(extract_ruby_callable_reference),
     special_forms: &[SyntaxSpecialForm::BlockLoopCall],
     ..BASE_HANDLER
 };
+
+fn extract_ruby_pseudo_call(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+) -> Option<FlowEvent> {
+    if node.kind() != "subshell" {
+        return None;
+    }
+    Some(FlowEvent::Call {
+        span: span_of(file, &node),
+        receiver: None,
+        receiver_types: Vec::new(),
+        name: "`".to_string(),
+        call_kind: CallKind::Operator,
+        args: named_child_call_args_with_handler(&node, file, src, handler),
+    })
+}
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct RubyAdapter;
@@ -73,6 +153,16 @@ impl LanguageAdapter for RubyAdapter {
             constructor_method_names: &["initialize", "new"],
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["self"],
+            receiver_type_syntax: bonsai_lang_api::ReceiverTypeSyntax {
+                wrapper_calls: &[],
+                class_object_suffixes: &[".class"],
+            },
+            callable_reference_syntax: bonsai_lang_api::CallableReferenceSyntax {
+                prefixes: &[],
+                numeric_arity_suffix: false,
+                symbol_wrapper: Some("method"),
+                trailing_invocation_punctuation: false,
+            },
             workspace_manifest_context_extensions: &["erb", "rhtml", "haml", "slim"],
             ..LanguageCapabilities::partial_baseline()
         }
@@ -225,6 +315,13 @@ impl LanguageAdapter for RubyAdapter {
         let mut root_events = bonsai_lang_api::kit::walk_flow_events(root, file, src, &HANDLER, &[]);
         inject_ruby_raise_throw_events(&mut root_events);
         normalize_ruby_subshell_events(&mut root_events, src);
+        // Rails/ERB instance variables are values supplied to the template's
+        // execution context. Model the exact Tree-sitter instance-variable
+        // nodes as implicit inputs of the synthetic module declaration so
+        // ordinary compiler dataflow can prove `@value -> helper(@value)`.
+        // Assignments inside the template remain normal FlowEvents and can
+        // still overwrite an input before a sink.
+        let erb_implicit_inputs = collect_ruby_erb_implicit_inputs(&tree, src);
         let has_actionable_event = root_events.iter().any(|event| {
             matches!(
                 event,
@@ -260,6 +357,7 @@ impl LanguageAdapter for RubyAdapter {
         ];
         let mut defs = if has_actionable_event {
             let module_span = span_of(file, &root);
+            let param_annotations = vec![Vec::new(); erb_implicit_inputs.len()];
             // Synthesized container for ERB module-level code (the
             // body of `<% %>` / `<%= %>` blocks). Module-level Ruby
             // code is implicitly public — the template renderer
@@ -280,8 +378,8 @@ impl LanguageAdapter for RubyAdapter {
                 body_span: Some(module_span),
                 flow_events: root_events,
                 has_implicit_returns: true,
-                params: Vec::new(),
-                param_annotations: Vec::new(),
+                params: erb_implicit_inputs,
+                param_annotations,
                 type_aliases: Vec::new(),
                 bases: Vec::new(),
                 receiver_param_index: None,
@@ -296,14 +394,17 @@ impl LanguageAdapter for RubyAdapter {
         };
         let block_param_names = collect_ruby_block_param_names(&tree, src);
         for decl in &mut defs {
+            normalize_ruby_instance_variable_events(decl);
             rewrite_ruby_bareword_call_result_assigns(decl, &block_param_names);
             inject_ruby_bare_tail_return_calls(decl, &block_param_names);
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
         }
-        let mut refs = bonsai_lang_api::kit::extract_call_refs(&tree, file, src);
+        let mut refs = bonsai_lang_api::kit::extract_call_refs(&tree, file, src, &HANDLER);
         refs.extend(bonsai_lang_api::kit::extract_decorators(&tree, file, src));
-        refs.extend(bonsai_lang_api::kit::extract_read_write_refs(&tree, file, src));
+        refs.extend(bonsai_lang_api::kit::extract_read_write_refs(
+            &tree, file, src, &HANDLER,
+        ));
         refs.extend(extract_ruby_static_element_key_refs(&tree, src, file));
         let strings = bonsai_lang_api::kit::extract_string_literals(&tree, file, src);
         let comments = bonsai_lang_api::kit::extract_comments(&tree, file, src);
@@ -311,7 +412,7 @@ impl LanguageAdapter for RubyAdapter {
             bonsai_lang_api::kit::extract_assignment_value_facts(&tree, file, &HANDLER, src);
         let call_receivers = bonsai_lang_api::kit::extract_call_receiver_facts(&tree, file, &HANDLER, src);
         let call_argument_values =
-            bonsai_lang_api::kit::extract_call_argument_value_facts(&tree, file, &defs, src);
+            bonsai_lang_api::kit::extract_call_argument_value_facts(&tree, file, &defs, src, &HANDLER);
         let runtime_type_narrowings =
             bonsai_lang_api::kit::extract_runtime_type_narrowing_facts(&tree, file, &HANDLER, src);
         let branch_conditions =
@@ -328,6 +429,7 @@ impl LanguageAdapter for RubyAdapter {
             finite_literal_selections: Vec::new(),
             character_substitutions: Vec::new(),
             character_constraints: Vec::new(),
+            guarded_value_filters: Vec::new(),
             same_origin_path_constraints: Vec::new(),
             dynamic_key_filters: Vec::new(),
             runtime_type_narrowings,
@@ -1806,6 +1908,17 @@ fn ruby_element_reference_is_write(node: &tree_sitter::Node<'_>) -> bool {
     parent
         .child_by_field_name("left")
         .is_some_and(|left| left.id() == node.id())
+}
+
+fn collect_ruby_erb_implicit_inputs(tree: &Tree, src: &[u8]) -> Vec<String> {
+    let mut inputs = collect_kinds(tree, &["instance_variable"])
+        .into_iter()
+        .map(|node| normalize_ruby_instance_variable_text(node_text(&node, src).trim()))
+        .filter(|input| ruby_normalized_instance_variable_place(input).is_some())
+        .collect::<Vec<_>>();
+    inputs.sort();
+    inputs.dedup();
+    inputs
 }
 
 /// Pre-process an ERB / RHTML template source: replace HTML wrapping
